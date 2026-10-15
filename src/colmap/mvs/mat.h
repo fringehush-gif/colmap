@@ -3,11 +3,72 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <limits>
+#include <memory>
 #include <vector>
+
+#include <Eigen/Core>
 
 namespace colmap {
 namespace mvs {
+
+// Validated immutable FP32 backing shared by row-window owners. The caller
+// budgets its open file separately from each owner's mapped VMAs.
+class ImmutableMapSource {
+ public:
+  explicit ImmutableMapSource(const std::filesystem::path& path);
+  ~ImmutableMapSource();
+  ImmutableMapSource(const ImmutableMapSource&) = delete;
+  ImmutableMapSource& operator=(const ImmutableMapSource&) = delete;
+  size_t GetWindowReservationBytes(size_t row_begin, size_t row_count) const;
+  size_t GetMappingReservationBytes() const;
+
+ private:
+  friend class ImmutableMapRegion;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+// Read-only, page-rounded owner for an immutable FP32 depth/normal map. A
+// caller must budget the mapped file independently from decoded-cache bytes.
+class ImmutableMapRegion {
+ public:
+  static bool Supported();
+  static size_t GetMappingReservationBytes(const std::filesystem::path& path);
+  static size_t GetWindowReservationBytes(const std::filesystem::path& path,
+                                          size_t row_begin,
+                                          size_t row_count);
+  explicit ImmutableMapRegion(const std::filesystem::path& path);
+  ImmutableMapRegion(const std::filesystem::path& path,
+                     size_t row_begin,
+                     size_t row_count);
+  explicit ImmutableMapRegion(std::shared_ptr<const ImmutableMapSource> source);
+  ImmutableMapRegion(std::shared_ptr<const ImmutableMapSource> source,
+                     size_t row_begin,
+                     size_t row_count);
+  ~ImmutableMapRegion();
+  ImmutableMapRegion(const ImmutableMapRegion&) = delete;
+  ImmutableMapRegion& operator=(const ImmutableMapRegion&) = delete;
+  size_t GetMappingBytes() const;
+  size_t GetMappingRegionCount() const;
+  // Allocation-free sample from a validated original single-channel FP32 map.
+  // Copies bits safely even when the file's text header leaves it unaligned.
+  float ReadFloat1Sample(size_t row,
+                         size_t col,
+                         size_t expected_width,
+                         size_t expected_height) const;
+  // Exact planar FP32 sample from an immutable, possibly unaligned mapping.
+  Eigen::Vector3f ReadFloat3(size_t row, size_t col) const;
+
+ private:
+  template <typename T>
+  friend class Mat;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
 
 template <typename T>
 class Mat {
@@ -34,6 +95,12 @@ class Mat {
   void Fill(T value);
 
   void Read(const std::filesystem::path& path);
+  // Exact planar FP32 window; receiver changes only after a complete copy.
+  void ReadRegion(const ImmutableMapRegion& source,
+                  size_t x,
+                  size_t y,
+                  size_t width,
+                  size_t height);
   void Write(const std::filesystem::path& path) const;
 
  protected:
@@ -53,7 +120,7 @@ Mat<T>::Mat() : Mat(0, 0, 0) {}
 template <typename T>
 Mat<T>::Mat(const size_t width, const size_t height, const size_t depth)
     : width_(width), height_(height), depth_(depth) {
-  data_.resize(width_ * height_ * depth_, 0);
+  data_.resize(width_ * height_ * depth_, T(0));
 }
 
 template <typename T>
