@@ -84,6 +84,12 @@ class EssentialMatrixEightPointEstimator {
 // Camera::CamFromImgThreshold. See ComputeSquaredTangentSampsonError.
 class EssentialMatrixTangentSampsonEstimator {
  public:
+  explicit EssentialMatrixTangentSampsonEstimator(
+      const bool use_optimistic_scoring = false)
+      : use_optimistic_scoring_(use_optimistic_scoring) {}
+
+  bool UseOptimisticScoring() const { return use_optimistic_scoring_; }
+
   using X_t = CamRayWithJac;
   using Y_t = CamRayWithJac;
   using M_t = Eigen::Matrix3d;
@@ -107,6 +113,16 @@ class EssentialMatrixTangentSampsonEstimator {
                      const std::vector<Y_t>& cam_rays2_with_jac,
                      M_t* E);
 
+  // Ungated pixel-space residuals provide a nonnegative lower MSAC bound on
+  // Residuals below. Only explicit opt-in LO-RANSAC sample scoring uses this.
+  static void OptimisticResiduals(const std::vector<X_t>& cam_rays1_with_jac,
+                                  const std::vector<Y_t>& cam_rays2_with_jac,
+                                  const M_t& E,
+                                  std::vector<double>* residuals) {
+    ComputeSquaredTangentSampsonError(
+        cam_rays1_with_jac, cam_rays2_with_jac, E, residuals);
+  }
+
   // Calculate the residuals of a set of corresponding rays and a given
   // essential matrix, as the squared tangent Sampson error in squared pixels,
   // additionally enforcing the cheirality constraint.
@@ -114,6 +130,9 @@ class EssentialMatrixTangentSampsonEstimator {
                         const std::vector<Y_t>& cam_rays2_with_jac,
                         const M_t& E,
                         std::vector<double>* residuals);
+
+ private:
+  bool use_optimistic_scoring_ = false;
 };
 
 }  // namespace colmap

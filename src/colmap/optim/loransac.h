@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cfloat>
+#include <cmath>
 #include <mutex>
 #include <optional>
 #include <type_traits>
@@ -22,6 +23,37 @@
 namespace colmap {
 
 namespace internal {
+
+// Cheirality may only increase these nonnegative residuals. Use native MSAC
+// accumulation order and strict score ties; invalid bounds must score fully.
+inline bool CannotImproveOptimisticMSAC(const std::vector<double>& residuals,
+                                        const double threshold,
+                                        const double incumbent) {
+  if (!std::isfinite(threshold) || threshold < 0 || !std::isfinite(incumbent) ||
+      incumbent < 0 || incumbent >= std::numeric_limits<double>::max())
+    return false;
+  for (const double residual : residuals) {
+    if (!std::isfinite(residual) || residual < 0) return false;
+  }
+  MEstimatorSupportMeasurer measurer;
+  const auto lower = measurer.Evaluate(residuals, threshold);
+  return std::isfinite(lower.score) && lower.score >= incumbent;
+}
+
+template <typename Estimator, typename = void>
+struct SupportsOptimisticResiduals : std::false_type {};
+
+template <typename Estimator>
+struct SupportsOptimisticResiduals<
+    Estimator,
+    std::void_t<
+        decltype(std::declval<Estimator&>().OptimisticResiduals(
+            std::declval<const std::vector<typename Estimator::X_t>&>(),
+            std::declval<const std::vector<typename Estimator::Y_t>&>(),
+            std::declval<const typename Estimator::M_t&>(),
+            std::declval<std::vector<double>*>())),
+        decltype(std::declval<const Estimator&>().UseOptimisticScoring())>>
+    : std::true_type {};
 
 // Detects whether a local estimator provides a Refine method that takes an
 // initial model: `Refine(X, Y, initial_model, models)`. If so, LO-RANSAC passes
@@ -203,6 +235,36 @@ LORANSAC<Estimator, LocalEstimator, SupportMeasurer, Sampler>::Estimate(
 
       // Iterate through all estimated models.
       for (const auto& sample_model : sample_models) {
+        if constexpr (std::is_same_v<SupportMeasurer,
+                                     MEstimatorSupportMeasurer> &&
+                      internal::SupportsOptimisticResiduals<Estimator>::value) {
+          if (thread_estimator.UseOptimisticScoring()) {
+            double incumbent_score;
+            {
+              std::unique_lock<std::mutex> lock(best_mutex, std::defer_lock);
+              if (num_threads > 1) lock.lock();
+              incumbent_score = best_support.score;
+            }
+            if (incumbent_score < std::numeric_limits<double>::max() &&
+                std::isfinite(incumbent_score) && std::isfinite(max_residual) &&
+                max_residual >= 0) {
+              thread_estimator.OptimisticResiduals(
+                  X, Y, sample_model, &residuals);
+              THROW_CHECK_EQ(residuals.size(), num_samples);
+              if (internal::CannotImproveOptimisticMSAC(
+                      residuals, max_residual, incumbent_score)) {
+                // Preserve the original per-model dynamic termination check.
+                if (curr_thread_trial >=
+                        dyn_max_num_trials.load(std::memory_order_relaxed) &&
+                    curr_thread_trial >= min_num_trials) {
+                  abort_flag.store(true, std::memory_order_relaxed);
+                  break;
+                }
+                continue;
+              }
+            }
+          }
+        }
         thread_estimator.Residuals(X, Y, sample_model, &residuals);
         THROW_CHECK_EQ(residuals.size(), num_samples);
 

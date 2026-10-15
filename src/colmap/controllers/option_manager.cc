@@ -468,6 +468,8 @@ void OptionManager::AddTwoViewGeometryOptions() {
                    &two_view_geometry->use_degensac);
   AddDefaultOption("TwoViewGeometry.use_sampson_refinement",
                    &two_view_geometry->use_sampson_refinement);
+  AddDefaultOption("TwoViewGeometry.use_optimistic_essential_scoring",
+                   &two_view_geometry->use_optimistic_essential_scoring);
   AddDefaultOption("TwoViewGeometry.max_error",
                    &two_view_geometry->ransac_options.max_error);
   AddDefaultOption("TwoViewGeometry.confidence",
