@@ -12,9 +12,12 @@
 #include "colmap/util/ply.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cfloat>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -78,7 +81,8 @@ struct StereoFusionOptions {
   // FP32 maps, without decoded normal tiles. All defaults retain prior paths.
   // Mapped-owner limits are
   // independent virtual/file-backed byte and handle budgets, not decoded RSS.
-  // The tile/neighborhood composition awaits a separate headroom policy.
+  // Tile/neighborhood composition uses joint depth/RGB pin admission while
+  // reserving a normal tile ring and component load for each fusion worker.
   int bounded_cache_normal_tile_size = 0;
   int bounded_cache_normal_tile_slots = 4;
   bool bounded_cache_normal_tile_hints = true;
@@ -176,6 +180,17 @@ class MappedNormalRingIndex {
   NodeHashMap<Key, size_t, boost::hash<Key>> index_;
   std::vector<Hint> hints_;
 };
+
+struct FusionPinIndices {
+  std::vector<size_t> depth;
+  std::vector<size_t> bitmap;
+};
+// Protect root depth and eventual RGB; prioritize other depths before RGB.
+// The caller excludes per-worker tile and component-load headroom.
+FusionPinIndices DepthPriorityFusionPins(
+    const std::vector<size_t>& depth_bytes,
+    const std::vector<size_t>& bitmap_bytes,
+    size_t budget);
 }  // namespace internal
 
 // Fuses per-view depth and normal maps into a consistent 3D point cloud.
@@ -211,6 +226,8 @@ class StereoFusion : public BaseController {
   void PrepareBoundedNeighborhood(int image_idx,
                                   int num_threads,
                                   ThreadPool& thread_pool);
+  const BoundedWorkspace::ImageData* AcquireNeighborhoodBitmap(int thread_id,
+                                                               int image_idx);
   bool PrepareDirectComponentPins();
   void ClearDirectComponentPins();
   void ClearNormalTileRings();
@@ -235,6 +252,23 @@ class StereoFusion : public BaseController {
   BoundedWorkspace* bounded_workspace_ = nullptr;
   std::vector<const BoundedWorkspace::ImageData*> neighborhood_data_;
   std::vector<BoundedWorkspace::ImageLease> neighborhood_leases_;
+  struct alignas(64) NeighborhoodReads {
+    size_t pointer_reads = 0;
+    size_t demand_acquires = 0;
+    size_t rgb_pointer_reads = 0;
+    size_t rgb_demand_acquires = 0;
+    size_t rgb_init_loads = 0;
+  };
+  std::vector<NeighborhoodReads> task_neighborhood_reads_;
+  struct LazyBitmapPin {
+    bool admitted = false;
+    std::once_flag once;
+    BoundedWorkspace::ImageLease lease;
+    std::atomic<const BoundedWorkspace::ImageData*> data{nullptr};
+  };
+  std::unique_ptr<LazyBitmapPin[]> neighborhood_bitmap_pins_;
+  size_t neighborhood_bitmap_admitted_views_ = 0;
+  size_t neighborhood_bitmap_carried_views_ = 0;
   // Direct mapped normals remain separate owners. Only decoded depth and RGB
   // components are borrowed here, and only through a joined serial Run.
   std::vector<const BoundedWorkspace::ImageData*> direct_depth_data_;

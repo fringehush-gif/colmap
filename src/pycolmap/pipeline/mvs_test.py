@@ -32,7 +32,7 @@ def test_stereo_fusion_fp32_normal_tile_policy() -> None:
     options.bounded_cache_normal_mapped_files = 2
     assert options.check()
     options.bounded_cache_neighborhood = True
-    assert not options.check()
+    assert options.check()
 
 
 def test_stereo_fusion_signed_normal_guard_policy() -> None:
