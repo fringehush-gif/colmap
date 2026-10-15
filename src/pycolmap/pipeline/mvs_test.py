@@ -20,6 +20,21 @@ def test_stereo_fusion_options_init() -> None:
     assert options is not None
 
 
+def test_stereo_fusion_fp32_normal_tile_policy() -> None:
+    options = pycolmap.StereoFusionOptions()
+    assert options.bounded_cache_normal_tile_size == 0
+    assert options.bounded_cache_normal_mapped_bytes == 0
+    assert options.bounded_cache_normal_mapped_files == 0
+    options.bounded_cache = True
+    options.bounded_cache_components = True
+    options.bounded_cache_normal_tile_size = 4
+    options.bounded_cache_normal_mapped_bytes = 1 << 20
+    options.bounded_cache_normal_mapped_files = 2
+    assert options.check()
+    options.bounded_cache_neighborhood = True
+    assert not options.check()
+
+
 @pytest.mark.parametrize(
     "name",
     [

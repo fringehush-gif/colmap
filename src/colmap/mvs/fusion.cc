@@ -15,6 +15,7 @@
 #include <exception>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <tuple>
 
 #include <Eigen/Geometry>
@@ -95,6 +96,11 @@ void StereoFusionOptions::Print() const {
   PrintOption(use_cache);
   PrintOption(bounded_cache);
   PrintOption(bounded_cache_components);
+  PrintOption(bounded_cache_normal_tile_size);
+  PrintOption(bounded_cache_normal_tile_slots);
+  PrintOption(bounded_cache_normal_tile_hints);
+  PrintOption(bounded_cache_normal_mapped_bytes);
+  PrintOption(bounded_cache_normal_mapped_files);
   PrintOption(bounded_cache_neighborhood);
   PrintOption(bounded_cache_prefill_threads);
   PrintOption(bounded_cache_compact_rgb);
@@ -117,6 +123,21 @@ bool StereoFusionOptions::Check() const {
   CHECK_OPTION_GT(cache_size, 0);
   CHECK_OPTION_EQ((bounded_cache_compact_rgb && !bounded_cache), false);
   CHECK_OPTION_EQ((bounded_cache_components && !bounded_cache), false);
+  CHECK_OPTION_GE(bounded_cache_normal_tile_size, 0);
+  CHECK_OPTION_GT(bounded_cache_normal_tile_slots, 0);
+  CHECK_OPTION_GE(bounded_cache_normal_mapped_bytes, 0);
+  CHECK_OPTION_GE(bounded_cache_normal_mapped_files, 0);
+  CHECK_OPTION_LE(static_cast<uint64_t>(bounded_cache_normal_mapped_bytes),
+                  std::numeric_limits<size_t>::max());
+  CHECK_OPTION_EQ((bounded_cache_normal_mapped_bytes == 0),
+                  (bounded_cache_normal_mapped_files == 0));
+  CHECK_OPTION_EQ((bounded_cache_normal_tile_size > 0 &&
+                   (!bounded_cache_components || bounded_cache_neighborhood ||
+                    bounded_cache_normal_mapped_bytes == 0)),
+                  false);
+  CHECK_OPTION_EQ((bounded_cache_normal_tile_size == 0 &&
+                   bounded_cache_normal_mapped_bytes > 0),
+                  false);
   CHECK_OPTION_EQ((bounded_cache_neighborhood && !bounded_cache), false);
   CHECK_OPTION_GE(bounded_cache_prefill_threads, -1);
   CHECK_OPTION_NE(bounded_cache_prefill_threads, 0);
@@ -165,6 +186,20 @@ size_t StereoFusion::GetMaxBoundedPrefillLanesScheduled() const {
   return max_bounded_prefill_lanes_scheduled_;
 }
 
+BoundedWorkspace::MappedNormalStats StereoFusion::GetMappedNormalStats() const {
+  return bounded_workspace_ ? bounded_workspace_->GetMappedNormalStats()
+                            : BoundedWorkspace::MappedNormalStats{};
+}
+
+StereoFusion::NormalTileRingStats StereoFusion::GetNormalTileRingStats() const {
+  NormalTileRingStats stats;
+  for (const auto& ring : normal_tile_rings_) {
+    stats.indexed_lookups += ring.indexed_lookups;
+    stats.hint_checks += ring.hint_checks;
+  }
+  return stats;
+}
+
 void StereoFusion::Run() {
   Timer run_timer;
   run_timer.Start();
@@ -172,6 +207,8 @@ void StereoFusion::Run() {
   fused_points_.clear();
   fused_points_visibility_.clear();
   max_bounded_prefill_lanes_scheduled_ = 0;
+  normal_tile_rings_.clear();
+  normal_tile_worker_headroom_ = 0;
 
   options_.Print();
 
@@ -191,6 +228,10 @@ void StereoFusion::Run() {
   workspace_options.image_as_rgb = true;
   workspace_options.compact_rgb_to_depth_grid =
       options_.bounded_cache_compact_rgb;
+  workspace_options.mapped_normal_bytes_limit =
+      static_cast<size_t>(options_.bounded_cache_normal_mapped_bytes);
+  workspace_options.mapped_normal_files_limit =
+      static_cast<size_t>(options_.bounded_cache_normal_mapped_files);
   workspace_options.cache_size = options_.cache_size;
   workspace_options.workspace_path = workspace_path_;
   workspace_options.workspace_format = workspace_format_;
@@ -313,6 +354,44 @@ void StereoFusion::Run() {
             .transpose();
   }
 
+  if (options_.bounded_cache_normal_tile_size > 0) {
+    size_t largest_component = 0, largest_tile = 0;
+    using Component = BoundedWorkspace::Component;
+    for (size_t index = 0; index < used_images_.size(); ++index) {
+      if (!used_images_[index]) continue;
+      const int view = static_cast<int>(index);
+      largest_tile =
+          std::max(largest_tile,
+                   bounded_workspace_->GetNormalTileResidentBytes(
+                       view, options_.bounded_cache_normal_tile_size));
+      largest_component = std::max(
+          {largest_component,
+           bounded_workspace_->GetNormalTileReservationBytes(
+               view, options_.bounded_cache_normal_tile_size),
+           bounded_workspace_->GetLoadReservationBytes(view, Component::kDepth),
+           bounded_workspace_->GetLoadReservationBytes(view,
+                                                       Component::kBitmap)});
+    }
+    const size_t per_worker =
+        bounded_workspace_->GetCacheStats().capacity_bytes /
+        static_cast<size_t>(num_threads);
+    const size_t slots =
+        static_cast<size_t>(options_.bounded_cache_normal_tile_slots);
+    THROW_CHECK_LE(largest_component, per_worker);
+    THROW_CHECK_LE(largest_tile, (per_worker - largest_component) / slots)
+        << "Normal tile rings need retained pins and component headroom";
+    normal_tile_worker_headroom_ = largest_component + slots * largest_tile;
+    normal_tile_rings_.resize(num_threads);
+    for (auto& ring : normal_tile_rings_) {
+      ring.tiles.resize(slots);
+      ring.indexed = slots > 4;
+      if (ring.indexed) ring.index.reserve(slots);
+      if (ring.indexed && options_.bounded_cache_normal_tile_hints) {
+        ring.last_slot_by_image.assign(model.images.size(), slots);
+      }
+    }
+  }
+
   LOG(INFO) << StringPrintf("Starting fusion with %d threads", num_threads);
   ThreadPool thread_pool(num_threads);
   // Only an explicit larger prefill count needs another pool. It is created
@@ -391,6 +470,7 @@ void StereoFusion::Run() {
                           fused_pixel_mask);
     }
     thread_pool.Wait();
+    ClearNormalTileRings();
 
     num_fused_images += 1;
     fused_images_.at(image_idx) = true;
@@ -433,6 +513,93 @@ void StereoFusion::Run() {
 
   LOG(INFO) << "Number of fused points: " << fused_points_.size();
   run_timer.PrintMinutes();
+}
+
+void StereoFusion::ClearNormalTileRings() {
+  // All row tasks have joined before retained decoded pins are released.
+  for (auto& ring : normal_tile_rings_) {
+    std::fill(ring.last_slot_by_image.begin(),
+              ring.last_slot_by_image.end(),
+              ring.tiles.size());
+    ring.index.clear();
+    for (auto& slot : ring.tiles) {
+      slot.lease.reset();
+      slot.image_idx = -1;
+    }
+  }
+}
+
+const BoundedWorkspace::ImageData* StereoFusion::AcquireWorkerNormalTile(
+    const int thread_id, const int image_idx, const int row, const int col) {
+  auto& ring = normal_tile_rings_.at(thread_id);
+  const auto contains = [row, col](const BoundedWorkspace::ImageData* data) {
+    return data && static_cast<size_t>(col) >= data->normal_origin_x &&
+           static_cast<size_t>(row) >= data->normal_origin_y &&
+           static_cast<size_t>(col) - data->normal_origin_x <
+               data->normal_map.GetWidth() &&
+           static_cast<size_t>(row) - data->normal_origin_y <
+               data->normal_map.GetHeight();
+  };
+  if (!ring.last_slot_by_image.empty()) {
+    ++ring.hint_checks;
+    const size_t hinted = ring.last_slot_by_image.at(image_idx);
+    if (hinted < ring.tiles.size()) {
+      const auto& slot = ring.tiles[hinted];
+      if (slot.image_idx == image_idx && contains(slot.lease.get())) {
+        ++ring.hits;
+        return slot.lease.get();
+      }
+    }
+  }
+  NormalTileKey key{};
+  if (ring.indexed) {
+    ++ring.indexed_lookups;
+    const size_t size = options_.bounded_cache_normal_tile_size;
+    key = {image_idx,
+           static_cast<size_t>(col) / size,
+           static_cast<size_t>(row) / size};
+    const auto found = ring.index.find(key);
+    if (found != ring.index.end()) {
+      ++ring.hits;
+      if (!ring.last_slot_by_image.empty())
+        ring.last_slot_by_image[image_idx] = found->second;
+      return ring.tiles[found->second].lease.get();
+    }
+  } else {
+    for (const auto& slot : ring.tiles) {
+      if (slot.image_idx == image_idx && contains(slot.lease.get())) {
+        ++ring.hits;
+        return slot.lease.get();
+      }
+    }
+  }
+  ++ring.misses;
+  const size_t slot_index = ring.next;
+  ring.next = (ring.next + 1) % ring.tiles.size();
+  auto& slot = ring.tiles[slot_index];
+  if (!ring.last_slot_by_image.empty() && slot.image_idx >= 0 &&
+      ring.last_slot_by_image[slot.image_idx] == slot_index) {
+    ring.last_slot_by_image[slot.image_idx] = ring.tiles.size();
+  }
+  if (ring.indexed && slot.lease) ring.index.erase(slot.key);
+  slot.lease.reset();  // Never wait for capacity while holding this slot's pin.
+  slot.image_idx = -1;
+  slot.lease = bounded_workspace_->AcquireNormalTile(
+      image_idx, row, col, options_.bounded_cache_normal_tile_size);
+  slot.image_idx = image_idx;
+  slot.key = key;
+  if (ring.indexed) {
+    try {
+      ring.index.emplace(key, slot_index);
+    } catch (...) {
+      slot.lease.reset();
+      slot.image_idx = -1;
+      throw;
+    }
+  }
+  if (!ring.last_slot_by_image.empty())
+    ring.last_slot_by_image[image_idx] = slot_index;
+  return slot.lease.get();
 }
 
 void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
@@ -698,22 +865,29 @@ void StereoFusion::Fuse(const int thread_id,
     }
 
     // Determine normal direction in global reference frame.
+    const auto* tile_image =
+        options_.bounded_cache_normal_tile_size > 0
+            ? AcquireWorkerNormalTile(thread_id, image_idx, row, col)
+            : nullptr;
     auto normal_lease =
         bounded_workspace_ && options_.bounded_cache_components &&
+                !tile_image &&
                 (!image_data || image_data->normal_map.GetWidth() == 0)
             ? bounded_workspace_->AcquireComponent(
                   image_idx, BoundedWorkspace::Component::kNormal)
             : BoundedWorkspace::ImageLease();
-    const auto* normal_image = normal_lease ? normal_lease.get() : image_data;
+    const auto* normal_image = tile_image     ? tile_image
+                               : normal_lease ? normal_lease.get()
+                                              : image_data;
     const auto normal_map = normal_image
                                 ? std::shared_ptr<const NormalMap>()
                                 : workspace_->GetNormalMapLease(image_idx);
-    const NormalMap& normal_data =
-        normal_image ? normal_image->normal_map : *normal_map;
-    const Eigen::Vector3f normal =
-        inv_R_.at(image_idx) * Eigen::Vector3f(normal_data.Get(row, col, 0),
-                                               normal_data.Get(row, col, 1),
-                                               normal_data.Get(row, col, 2));
+    const Eigen::Vector3f local_normal =
+        normal_image ? normal_image->GetNormal(row, col)
+                     : Eigen::Vector3f(normal_map->Get(row, col, 0),
+                                       normal_map->Get(row, col, 1),
+                                       normal_map->Get(row, col, 2));
+    const Eigen::Vector3f normal = inv_R_.at(image_idx) * local_normal;
     normal_lease.reset();
 
     // Check for consistent normal direction with reference normal.

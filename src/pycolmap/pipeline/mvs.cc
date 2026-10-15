@@ -267,6 +267,16 @@ void BindMVS(py::module& m) {
               "Neighborhood prefill workers: -1 follows fusion "
               "workers, 1 is serial, positive values cap concurrency. "
               "Non-default values require neighborhood pinning.")
+          .def_readwrite("bounded_cache_normal_tile_size",
+                         &SFOpts::bounded_cache_normal_tile_size)
+          .def_readwrite("bounded_cache_normal_tile_slots",
+                         &SFOpts::bounded_cache_normal_tile_slots)
+          .def_readwrite("bounded_cache_normal_tile_hints",
+                         &SFOpts::bounded_cache_normal_tile_hints)
+          .def_readwrite("bounded_cache_normal_mapped_bytes",
+                         &SFOpts::bounded_cache_normal_mapped_bytes)
+          .def_readwrite("bounded_cache_normal_mapped_files",
+                         &SFOpts::bounded_cache_normal_mapped_files)
           .def_readwrite("bounding_box",
                          &SFOpts::bounding_box,
                          "Bounding box Tuple[min, max]")

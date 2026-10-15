@@ -7,14 +7,18 @@
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/base_controller.h"
 #include "colmap/util/eigen_alignment.h"
+#include "colmap/util/hash_containers.h"
 #include "colmap/util/ply.h"
 
 #include <cfloat>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <tuple>
 #include <vector>
 
 #include <Eigen/Core>
+#include <boost/container_hash/hash.hpp>
 
 namespace colmap {
 class ThreadPool;
@@ -65,6 +69,15 @@ struct StereoFusionOptions {
   // not decode the other components. All components share the byte budget.
   bool bounded_cache_components = false;
 
+  // FP32 normal-map tiles in bounded component mode. Mapped-owner limits are
+  // independent virtual/file-backed byte and handle budgets, not decoded RSS.
+  // The tile/neighborhood composition awaits a separate headroom policy.
+  int bounded_cache_normal_tile_size = 0;
+  int bounded_cache_normal_tile_slots = 4;
+  bool bounded_cache_normal_tile_hints = true;
+  int64_t bounded_cache_normal_mapped_bytes = 0;
+  int bounded_cache_normal_mapped_files = 0;
+
   // Pin an admitted overlap set for the duration of each fused root. Row tasks
   // may borrow its immutable arrays only until the root's worker join.
   bool bounded_cache_neighborhood = false;
@@ -109,6 +122,12 @@ class StereoFusion : public BaseController {
   const std::vector<std::vector<int>>& GetFusedPointsVisibility() const;
   std::optional<BoundedWorkspace::CacheStats> GetBoundedCacheStats() const;
   size_t GetMaxBoundedPrefillLanesScheduled() const;
+  BoundedWorkspace::MappedNormalStats GetMappedNormalStats() const;
+  struct NormalTileRingStats {
+    size_t indexed_lookups = 0;
+    size_t hint_checks = 0;
+  };
+  NormalTileRingStats GetNormalTileRingStats() const;
 
   // Execute the depth map fusion pipeline.
   void Run();
@@ -117,6 +136,11 @@ class StereoFusion : public BaseController {
   void PrepareBoundedNeighborhood(int image_idx,
                                   int num_threads,
                                   ThreadPool& thread_pool);
+  void ClearNormalTileRings();
+  const BoundedWorkspace::ImageData* AcquireWorkerNormalTile(int thread_id,
+                                                             int image_idx,
+                                                             int row,
+                                                             int col);
   void InitFusedPixelMask(int image_idx, size_t width, size_t height);
   void Fuse(int thread_id, int image_idx, int row, int col);
 
@@ -133,6 +157,22 @@ class StereoFusion : public BaseController {
   std::vector<const BoundedWorkspace::ImageData*> neighborhood_data_;
   std::vector<BoundedWorkspace::ImageLease> neighborhood_leases_;
   size_t max_bounded_prefill_lanes_scheduled_ = 0;
+  using NormalTileKey = std::tuple<int, size_t, size_t>;
+  struct NormalTileSlot {
+    int image_idx = -1;
+    NormalTileKey key{};
+    BoundedWorkspace::ImageLease lease;
+  };
+  struct alignas(64) NormalTileRing {
+    std::vector<NormalTileSlot> tiles;
+    NodeHashMap<NormalTileKey, size_t, boost::hash<NormalTileKey>> index;
+    std::vector<size_t> last_slot_by_image;
+    bool indexed = false;
+    size_t next = 0, hits = 0, misses = 0;
+    size_t indexed_lookups = 0, hint_checks = 0;
+  };
+  std::vector<NormalTileRing> normal_tile_rings_;
+  size_t normal_tile_worker_headroom_ = 0;
   std::vector<char> used_images_;
   std::vector<char> fused_images_;
   std::vector<std::vector<int>> overlapping_images_;

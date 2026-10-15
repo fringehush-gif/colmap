@@ -452,6 +452,42 @@ TEST(StereoFusion, Integration) {
                 BoundedWorkspace::Component::kBitmap)],
             0);
 
+  if (ImmutableMapRegion::Supported()) {
+    options.bounded_cache_neighborhood = false;
+    options.bounded_cache_normal_tile_size = 7;
+    options.bounded_cache_normal_tile_slots = 2;
+    options.bounded_cache_normal_mapped_bytes = 1 << 20;
+    options.bounded_cache_normal_mapped_files = 2;
+    ASSERT_TRUE(options.Check());
+    StereoFusion tiled(options, temp_dir, "COLMAP", "", "geometric");
+    tiled.Run();
+    expect_same_fusion(tiled);
+    ASSERT_TRUE(tiled.GetBoundedCacheStats());
+    EXPECT_GT(tiled.GetBoundedCacheStats()->normal_tile_loads, 0);
+    EXPECT_EQ(tiled.GetBoundedCacheStats()->reserved_bytes, 0);
+    EXPECT_GT(tiled.GetMappedNormalStats().loads, 0);
+    EXPECT_EQ(tiled.GetMappedNormalStats().active_copies, 0);
+    EXPECT_LE(tiled.GetMappedNormalStats().peak_charged_bytes,
+              static_cast<size_t>(options.bounded_cache_normal_mapped_bytes));
+    options.bounded_cache_normal_tile_slots = 64;
+    options.bounded_cache_normal_tile_hints = true;
+    options.cache_size = 50000.0 / (1024.0 * 1024.0 * 1024.0);
+    StereoFusion indexed_tiles(options, temp_dir, "COLMAP", "", "geometric");
+    indexed_tiles.Run();
+    expect_same_fusion(indexed_tiles);
+    EXPECT_GT(indexed_tiles.GetNormalTileRingStats().indexed_lookups, 0);
+    EXPECT_GT(indexed_tiles.GetNormalTileRingStats().hint_checks, 0);
+    options.bounded_cache_neighborhood = true;
+    EXPECT_FALSE(options.Check());
+    options.bounded_cache_neighborhood = false;
+    options.bounded_cache_normal_mapped_files = 0;
+    EXPECT_FALSE(options.Check());
+    options.bounded_cache_normal_mapped_files = 2;
+    options.bounded_cache_normal_tile_size = 0;
+    options.bounded_cache_normal_mapped_bytes = 0;
+    options.bounded_cache_normal_mapped_files = 0;
+  }
+
   options.bounded_cache_components = false;
   options.bounded_cache_neighborhood = false;
 

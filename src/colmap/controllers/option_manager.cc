@@ -1156,6 +1156,16 @@ void OptionManager::AddStereoFusionOptions() {
   AddDefaultOption("StereoFusion.bounded_cache", &stereo_fusion->bounded_cache);
   AddDefaultOption("StereoFusion.bounded_cache_components",
                    &stereo_fusion->bounded_cache_components);
+  AddDefaultOption("StereoFusion.bounded_cache_normal_tile_size",
+                   &stereo_fusion->bounded_cache_normal_tile_size);
+  AddDefaultOption("StereoFusion.bounded_cache_normal_tile_slots",
+                   &stereo_fusion->bounded_cache_normal_tile_slots);
+  AddDefaultOption("StereoFusion.bounded_cache_normal_tile_hints",
+                   &stereo_fusion->bounded_cache_normal_tile_hints);
+  AddDefaultOption("StereoFusion.bounded_cache_normal_mapped_bytes",
+                   &stereo_fusion->bounded_cache_normal_mapped_bytes);
+  AddDefaultOption("StereoFusion.bounded_cache_normal_mapped_files",
+                   &stereo_fusion->bounded_cache_normal_mapped_files);
   AddDefaultOption("StereoFusion.bounded_cache_neighborhood",
                    &stereo_fusion->bounded_cache_neighborhood);
   AddDefaultOption("StereoFusion.bounded_cache_prefill_threads",
