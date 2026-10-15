@@ -5,6 +5,7 @@
 #include "colmap/math/math.h"
 #include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/patch_match_cuda.h"
+#include "colmap/mvs/patch_match_io.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/file.h"
@@ -12,6 +13,7 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
 
+#include <algorithm>
 #include <numeric>
 #include <set>
 
@@ -471,24 +473,23 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
     }
 
     // Read images in parallel using the shared I/O thread pool.
-    std::vector<std::shared_future<void>> futures;
-    futures.reserve(valid_image_idxs.size());
-    for (const auto image_idx : valid_image_idxs) {
-      futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
-        images.at(image_idx).SetBitmap(workspace_->GetBitmap(image_idx));
-        if (options.geom_consistency) {
-          depth_maps.at(image_idx) = workspace_->GetDepthMap(image_idx);
-          if (!options.reference_only_normal_materialization ||
-              image_idx == problem.ref_image_idx ||
-              !workspace_->ValidateSourceNormalWithoutMaterialization(image_idx)) {
-            normal_maps.at(image_idx) = workspace_->GetNormalMap(image_idx);
+    RunPatchMatchInputReads(*io_thread_pool_, [&](auto& futures) {
+      futures.reserve(valid_image_idxs.size());
+      for (const auto image_idx : valid_image_idxs) {
+        futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
+          images.at(image_idx).SetBitmap(workspace_->GetBitmap(image_idx));
+          if (options.geom_consistency) {
+            depth_maps.at(image_idx) = workspace_->GetDepthMap(image_idx);
+            if (!options.reference_only_normal_materialization ||
+                image_idx == problem.ref_image_idx ||
+                !workspace_->ValidateSourceNormalWithoutMaterialization(
+                    image_idx)) {
+              normal_maps.at(image_idx) = workspace_->GetNormalMap(image_idx);
+            }
           }
-        }
-      }));
-    }
-    for (auto& future : futures) {
-      future.get();
-    }
+        }));
+      }
+    });
 
     problem.src_image_idxs = src_image_idxs;
   }
