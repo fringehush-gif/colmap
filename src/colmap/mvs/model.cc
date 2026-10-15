@@ -11,6 +11,7 @@
 #include "colmap/util/string.h"
 
 #include <fstream>
+#include <utility>
 
 namespace colmap {
 namespace mvs {
@@ -66,7 +67,7 @@ void Model::ReadFromCOLMAP(const std::filesystem::path& path,
     for (const auto& track_el : point3D.track.Elements()) {
       point.track.push_back(image_id_to_idx.at(track_el.image_id));
     }
-    points.push_back(point);
+    points.push_back(std::move(point));
   }
 }
 

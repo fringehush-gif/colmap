@@ -5,7 +5,9 @@
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -31,6 +33,28 @@ TEST(Model, ReadCOLMAP) {
   model.ReadFromCOLMAP(test_dir);
   EXPECT_EQ(model.images.size(), reconstruction.NumRegImages());
   EXPECT_EQ(model.points.size(), reconstruction.NumPoints3D());
+
+  // Check every coordinate and the complete ordered image-index track,
+  // rather than only the point count. Track ownership must survive insertion.
+  for (const auto& [point_id, expected] : reconstruction.Points3D()) {
+    const auto matches = [&expected](const Model::Point& actual) {
+      return actual.x == static_cast<float>(expected.xyz(0)) &&
+             actual.y == static_cast<float>(expected.xyz(1)) &&
+             actual.z == static_cast<float>(expected.xyz(2));
+    };
+    ASSERT_EQ(std::count_if(model.points.begin(), model.points.end(), matches),
+              1)
+        << point_id;
+    const auto point =
+        std::find_if(model.points.begin(), model.points.end(), matches);
+    ASSERT_NE(point, model.points.end());
+    std::vector<int> expected_track;
+    for (const auto& element : expected.track.Elements()) {
+      expected_track.push_back(
+          model.GetImageIdx(reconstruction.Image(element.image_id).Name()));
+    }
+    EXPECT_EQ(point->track, expected_track) << point_id;
+  }
 
   Model model_lower;
   model_lower.Read(test_dir, "colmap");
