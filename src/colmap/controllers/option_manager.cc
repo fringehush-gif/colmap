@@ -1151,6 +1151,7 @@ void OptionManager::AddStereoFusionOptions() {
                    &stereo_fusion->check_num_images);
   AddDefaultOption("StereoFusion.cache_size", &stereo_fusion->cache_size);
   AddDefaultOption("StereoFusion.use_cache", &stereo_fusion->use_cache);
+  AddDefaultOption("StereoFusion.bounded_cache", &stereo_fusion->bounded_cache);
 }
 
 void OptionManager::AddPoissonMeshingOptions() {

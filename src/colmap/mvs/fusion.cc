@@ -13,6 +13,7 @@
 
 #include <fstream>
 #include <iterator>
+#include <tuple>
 
 #include <Eigen/Geometry>
 
@@ -61,6 +62,7 @@ void StereoFusionOptions::Print() const {
   PrintOption(max_normal_error);
   PrintOption(check_num_images);
   PrintOption(use_cache);
+  PrintOption(bounded_cache);
   PrintOption(cache_size);
   const auto& bbox_min = bounding_box.first.transpose().eval();
   const auto& bbox_max = bounding_box.second.transpose().eval();
@@ -70,6 +72,7 @@ void StereoFusionOptions::Print() const {
 }
 
 bool StereoFusionOptions::Check() const {
+  CHECK_OPTION_EQ((use_cache && bounded_cache), false);
   CHECK_OPTION_IN(min_num_pixels, 0, max_num_pixels);
   CHECK_OPTION_GT(max_traversal_depth, 0);
   CHECK_OPTION_GE(max_reproj_error, 0);
@@ -136,7 +139,13 @@ void StereoFusion::Run() {
   const auto image_names = ReadTextFileLines(
       workspace_path_ / workspace_options.stereo_folder / "fusion.cfg");
   int num_threads = 1;
-  if (options_.use_cache) {
+  bounded_workspace_ = nullptr;
+  if (options_.bounded_cache) {
+    auto workspace = std::make_unique<BoundedWorkspace>(workspace_options);
+    bounded_workspace_ = workspace.get();
+    workspace_ = std::move(workspace);
+    num_threads = GetEffectiveNumThreads(options_.num_threads);
+  } else if (options_.use_cache) {
     workspace_ = std::make_unique<CachedWorkspace>(workspace_options);
   } else {
     workspace_ = std::make_unique<Workspace>(workspace_options);
@@ -186,19 +195,25 @@ void StereoFusion::Run() {
     }
 
     const auto& image = model.images.at(image_idx);
-    const auto depth_map = workspace_->GetDepthMapLease(image_idx);
+    size_t depth_width, depth_height;
+    if (bounded_workspace_) {
+      std::tie(depth_width, depth_height) =
+          bounded_workspace_->GetDepthMapDimensions(image_idx);
+    } else {
+      const auto depth_map = workspace_->GetDepthMapLease(image_idx);
+      depth_width = depth_map->GetWidth();
+      depth_height = depth_map->GetHeight();
+    }
 
     used_images_.at(image_idx) = true;
 
-    InitFusedPixelMask(
-        image_idx, depth_map->GetWidth(), depth_map->GetHeight());
+    InitFusedPixelMask(image_idx, depth_width, depth_height);
 
-    depth_map_sizes_.at(image_idx) =
-        std::make_pair(depth_map->GetWidth(), depth_map->GetHeight());
+    depth_map_sizes_.at(image_idx) = {depth_width, depth_height};
 
-    bitmap_scales_.at(image_idx) = std::make_pair(
-        static_cast<float>(depth_map->GetWidth()) / image.GetWidth(),
-        static_cast<float>(depth_map->GetHeight()) / image.GetHeight());
+    bitmap_scales_.at(image_idx) =
+        std::make_pair(static_cast<float>(depth_width) / image.GetWidth(),
+                       static_cast<float>(depth_height) / image.GetHeight());
 
     Eigen::Matrix<float, 3, 3, Eigen::RowMajor> K =
         Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>>(
@@ -383,8 +398,15 @@ void StereoFusion::Fuse(const int thread_id,
       continue;
     }
 
-    const auto depth_map = workspace_->GetDepthMapLease(image_idx);
-    const float depth = depth_map->Get(row, col);
+    // Only one whole-image pin is held at a time, including early exits.
+    auto image_lease = bounded_workspace_
+                           ? bounded_workspace_->AcquireImage(image_idx)
+                           : BoundedWorkspace::ImageLease();
+    const auto depth_map = image_lease
+                               ? std::shared_ptr<const DepthMap>()
+                               : workspace_->GetDepthMapLease(image_idx);
+    const float depth = image_lease ? image_lease->depth_map.Get(row, col)
+                                    : depth_map->Get(row, col);
 
     // Pixels with negative depth are filtered.
     if (depth <= 0.0f) {
@@ -414,11 +436,15 @@ void StereoFusion::Fuse(const int thread_id,
     }
 
     // Determine normal direction in global reference frame.
-    const auto normal_map = workspace_->GetNormalMapLease(image_idx);
+    const auto normal_map = image_lease
+                                ? std::shared_ptr<const NormalMap>()
+                                : workspace_->GetNormalMapLease(image_idx);
+    const NormalMap& normal_data =
+        image_lease ? image_lease->normal_map : *normal_map;
     const Eigen::Vector3f normal =
-        inv_R_.at(image_idx) * Eigen::Vector3f(normal_map->Get(row, col, 0),
-                                               normal_map->Get(row, col, 1),
-                                               normal_map->Get(row, col, 2));
+        inv_R_.at(image_idx) * Eigen::Vector3f(normal_data.Get(row, col, 0),
+                                               normal_data.Get(row, col, 1),
+                                               normal_data.Get(row, col, 2));
 
     // Check for consistent normal direction with reference normal.
     if (traversal_depth > 0) {
@@ -435,11 +461,13 @@ void StereoFusion::Fuse(const int thread_id,
 
     // Read the color of the pixel.
     const auto& bitmap_scale = bitmap_scales_.at(image_idx);
-    const auto bitmap = workspace_->GetBitmapLease(image_idx);
+    const auto bitmap = image_lease ? std::shared_ptr<const Bitmap>()
+                                    : workspace_->GetBitmapLease(image_idx);
+    const Bitmap& bitmap_data = image_lease ? image_lease->bitmap : *bitmap;
     const auto color =
-        bitmap
-            ->InterpolateNearestNeighbor(col / bitmap_scale.first,
-                                         row / bitmap_scale.second)
+        bitmap_data
+            .InterpolateNearestNeighbor(col / bitmap_scale.first,
+                                        row / bitmap_scale.second)
             .value_or(BitmapColor<uint8_t>(0));
 
     // Set the current pixel as visited.

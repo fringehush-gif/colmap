@@ -6,6 +6,7 @@ COLMAP_ADD_LIBRARY(
     NAME colmap_mvs
     SRCS
         advancing_front_meshing.h advancing_front_meshing.cc
+        bounded_workspace.h bounded_workspace.cc
         consistency_graph.h consistency_graph.cc
         delaunay_meshing.h delaunay_meshing.cc
         depth_map.h depth_map.cc
@@ -26,6 +27,7 @@ COLMAP_ADD_LIBRARY(
         colmap_math
         colmap_sensor
         colmap_image
+        OpenImageIO::OpenImageIO
         colmap_poisson_recon
         Eigen3::Eigen
 )
