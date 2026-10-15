@@ -264,6 +264,24 @@ TEST(StereoFusion, MappedNormalRingIndexReplacementAndClear) {
   EXPECT_EQ(index.Find(0, 1), 0);
 }
 
+TEST(StereoFusion, DepthPriorityFusionPinsBudgetBoundaries) {
+  using internal::DepthPriorityFusionPins;
+  EXPECT_TRUE(DepthPriorityFusionPins({}, {}, 10).depth.empty());
+  EXPECT_TRUE(DepthPriorityFusionPins({8}, {3}, 10).bitmap.empty());
+  const auto exact = DepthPriorityFusionPins({8, 2}, {3, 1}, 11);
+  EXPECT_EQ(exact.depth, std::vector<size_t>({0}));
+  EXPECT_EQ(exact.bitmap, std::vector<size_t>({0}));
+  const auto priority = DepthPriorityFusionPins({4, 9, 3, 2}, {2, 5, 1, 2}, 12);
+  EXPECT_EQ(priority.depth, std::vector<size_t>({0, 2, 3}));
+  EXPECT_EQ(priority.bitmap, std::vector<size_t>({0, 2}));
+  const auto overflow =
+      DepthPriorityFusionPins({std::numeric_limits<size_t>::max(), 1},
+                              {1, 1},
+                              std::numeric_limits<size_t>::max());
+  EXPECT_TRUE(overflow.depth.empty());
+  EXPECT_TRUE(overflow.bitmap.empty());
+}
+
 TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
   const auto root = CreateTestDir();
   for (const auto& sub : {"sparse",
@@ -551,7 +569,9 @@ TEST(StereoFusion, Integration) {
     EXPECT_EQ(a.b, b.b);
   }
 
-  const auto expect_same_fusion = [&](const StereoFusion& candidate) {
+  const auto expect_same_fusion = [&](const StereoFusion& candidate,
+                                      const char* arm) {
+    SCOPED_TRACE(arm);
     const auto& actual = candidate.GetFusedPoints();
     ASSERT_EQ(actual.size(), fused_points.size());
     EXPECT_EQ(candidate.GetFusedPointsVisibility(), visibility);
@@ -582,7 +602,9 @@ TEST(StereoFusion, Integration) {
   guarded_options.bounded_cache_normal_snorm16_guard = true;
   StereoFusion guarded(guarded_options, temp_dir, "COLMAP", "", "geometric");
   guarded.Run();
-  expect_same_fusion(guarded);
+  expect_same_fusion(guarded, "guarded");
+  guarded.Run();
+  expect_same_fusion(guarded, "guarded repeated successful run");
   ASSERT_TRUE(guarded.GetBoundedCacheStats());
   EXPECT_GT(guarded.GetBoundedCacheStats()->normal_tile_loads, 0);
 
@@ -590,7 +612,7 @@ TEST(StereoFusion, Integration) {
   options.cache_size = 50000.0 / (1024.0 * 1024.0 * 1024.0);
   StereoFusion borrowed_whole(options, temp_dir, "COLMAP", "", "geometric");
   borrowed_whole.Run();
-  expect_same_fusion(borrowed_whole);
+  expect_same_fusion(borrowed_whole, "borrowed_whole");
   ASSERT_TRUE(borrowed_whole.GetBoundedCacheStats());
   EXPECT_GT(borrowed_whole.GetBoundedCacheStats()
                 ->component_loads[static_cast<size_t>(
@@ -603,7 +625,7 @@ TEST(StereoFusion, Integration) {
   options.bounded_cache_prefill_threads = 2;
   StereoFusion parallel_prefill(options, temp_dir, "COLMAP", "", "geometric");
   parallel_prefill.Run();
-  expect_same_fusion(parallel_prefill);
+  expect_same_fusion(parallel_prefill, "parallel_prefill");
   EXPECT_EQ(parallel_prefill.GetMaxBoundedPrefillLanesScheduled(), 2);
 
   // A worker failure must join the admitted prefill tasks and release their
@@ -630,7 +652,7 @@ TEST(StereoFusion, Integration) {
   // same object and compare complete ordered points and visibility.
   failed_scope->Close();
   failed_prefill.Run();
-  expect_same_fusion(failed_prefill);
+  expect_same_fusion(failed_prefill, "failed_prefill");
 
   StereoFusion cancelled_prefill(options, temp_dir, "COLMAP", "", "geometric");
   cancelled_prefill.SetCheckIfStoppedFunc([&cancelled_prefill]() {
@@ -651,7 +673,7 @@ TEST(StereoFusion, Integration) {
   options.cache_size = 12000.0 / (1024.0 * 1024.0 * 1024.0);
   StereoFusion borrowed_depth(options, temp_dir, "COLMAP", "", "geometric");
   borrowed_depth.Run();
-  expect_same_fusion(borrowed_depth);
+  expect_same_fusion(borrowed_depth, "borrowed_depth");
   ASSERT_TRUE(borrowed_depth.GetBoundedCacheStats());
   const auto component_loads =
       borrowed_depth.GetBoundedCacheStats()->component_loads;
@@ -675,7 +697,7 @@ TEST(StereoFusion, Integration) {
     ASSERT_TRUE(options.Check());
     StereoFusion tiled(options, temp_dir, "COLMAP", "", "geometric");
     tiled.Run();
-    expect_same_fusion(tiled);
+    expect_same_fusion(tiled, "tiled");
     ASSERT_TRUE(tiled.GetBoundedCacheStats());
     EXPECT_GT(tiled.GetBoundedCacheStats()->normal_tile_loads, 0);
     EXPECT_EQ(tiled.GetBoundedCacheStats()->reserved_bytes, 0);
@@ -701,7 +723,7 @@ TEST(StereoFusion, Integration) {
     options.cache_size = 50000.0 / (1024.0 * 1024.0 * 1024.0);
     StereoFusion indexed_tiles(options, temp_dir, "COLMAP", "", "geometric");
     indexed_tiles.Run();
-    expect_same_fusion(indexed_tiles);
+    expect_same_fusion(indexed_tiles, "indexed_tiles");
     EXPECT_GT(indexed_tiles.GetNormalTileRingStats().indexed_lookups, 0);
     EXPECT_GT(indexed_tiles.GetNormalTileRingStats().hint_checks, 0);
     const auto indexed_row = indexed_tiles.GetBoundedCacheDiagnosticRow();
@@ -712,7 +734,70 @@ TEST(StereoFusion, Integration) {
                       indexed_tiles.GetNormalTileRingStats().indexed_lookups)),
               std::string::npos);
     options.bounded_cache_neighborhood = true;
-    EXPECT_FALSE(options.Check());
+    options.cache_size = 1.0 / 1024.0;
+    ASSERT_TRUE(options.Check());
+    StereoFusion tile_neighborhood(
+        options, temp_dir, "COLMAP", "", "geometric");
+    tile_neighborhood.Run();
+    expect_same_fusion(tile_neighborhood, "tile_neighborhood");
+    const auto neighborhood_row =
+        tile_neighborhood.GetBoundedCacheDiagnosticRow();
+    ASSERT_TRUE(neighborhood_row);
+    const auto diagnostic_count = [&](const std::string& diagnostic,
+                                      const std::string& key) {
+      const auto pos = diagnostic.find(key + "=");
+      EXPECT_NE(pos, std::string::npos);
+      return pos == std::string::npos
+                 ? size_t{0}
+                 : static_cast<size_t>(
+                       std::stoull(diagnostic.substr(pos + key.size() + 1)));
+    };
+    EXPECT_GE(
+        diagnostic_count(*neighborhood_row, "neighborhood_bitmap_admitted"), 2);
+    EXPECT_GT(
+        diagnostic_count(*neighborhood_row, "neighborhood_bitmap_carried"), 0);
+    EXPECT_GT(
+        diagnostic_count(*neighborhood_row, "neighborhood_bitmap_borrows"), 0);
+    EXPECT_GT(diagnostic_count(*neighborhood_row, "neighborhood_bitmap_init"),
+              0);
+    EXPECT_GT(diagnostic_count(*neighborhood_row, "neighborhood_depth_borrows"),
+              0);
+    ASSERT_TRUE(tile_neighborhood.GetBoundedCacheStats());
+    EXPECT_EQ(tile_neighborhood.GetBoundedCacheStats()->reserved_bytes, 0);
+    std::atomic<int> lazy_bitmap_failures{0};
+    auto failed_lazy_scope = ScopedBitmapReader::Create(
+        {temp_dir / "images" / image_names.front()},
+        [&lazy_bitmap_failures](
+            const std::filesystem::path&, bool, bool, Bitmap*) {
+          ++lazy_bitmap_failures;
+          return false;
+        },
+        {{30, 20}});
+    StereoFusion failed_lazy(options, temp_dir, "COLMAP", "", "geometric");
+    EXPECT_THROW(failed_lazy.Run(), std::exception);
+    EXPECT_GT(lazy_bitmap_failures.load(), 0);
+    ASSERT_TRUE(failed_lazy.GetBoundedCacheStats());
+    EXPECT_EQ(failed_lazy.GetBoundedCacheStats()->reserved_bytes, 0);
+    failed_lazy_scope->Close();
+    failed_lazy.Run();
+    expect_same_fusion(failed_lazy, "failed_lazy");
+    options.num_threads = 2;
+    StereoFusion parallel_tile_neighborhood(
+        options, temp_dir, "COLMAP", "", "geometric");
+    parallel_tile_neighborhood.Run();
+    EXPECT_GT(parallel_tile_neighborhood.GetFusedPoints().size(), 0);
+    EXPECT_EQ(parallel_tile_neighborhood.GetFusedPoints().size(),
+              parallel_tile_neighborhood.GetFusedPointsVisibility().size());
+    ASSERT_TRUE(parallel_tile_neighborhood.GetBoundedCacheStats());
+    EXPECT_EQ(parallel_tile_neighborhood.GetBoundedCacheStats()->reserved_bytes,
+              0);
+    const auto parallel_row =
+        parallel_tile_neighborhood.GetBoundedCacheDiagnosticRow();
+    ASSERT_TRUE(parallel_row);
+    EXPECT_GT(diagnostic_count(*parallel_row, "neighborhood_bitmap_borrows"),
+              0);
+    EXPECT_GT(diagnostic_count(*parallel_row, "neighborhood_bitmap_init"), 0);
+    options.num_threads = 1;
     options.bounded_cache_neighborhood = false;
     // tile_size=0 with an owned mapped pool is a distinct, serial FP32 route.
     options.bounded_cache_normal_tile_size = 0;
@@ -729,7 +814,7 @@ TEST(StereoFusion, Integration) {
     options.bounded_cache_normal_mapped_bytes = 1 << 20;
     StereoFusion direct(options, temp_dir, "COLMAP", "", "geometric");
     direct.Run();
-    expect_same_fusion(direct);
+    expect_same_fusion(direct, "direct");
     ASSERT_TRUE(direct.GetBoundedCacheStats());
     EXPECT_EQ(direct.GetBoundedCacheStats()->normal_tile_loads, 0);
     EXPECT_EQ(
@@ -777,7 +862,7 @@ TEST(StereoFusion, Integration) {
     options.cache_size = 5000.0 / (1024.0 * 1024.0 * 1024.0);
     StereoFusion direct_demand(options, temp_dir, "COLMAP", "", "geometric");
     direct_demand.Run();
-    expect_same_fusion(direct_demand);
+    expect_same_fusion(direct_demand, "direct_demand");
     const auto demand_row = direct_demand.GetBoundedCacheDiagnosticRow();
     ASSERT_TRUE(demand_row);
     EXPECT_NE(demand_row->find("direct_component_pins_admitted=0"),
@@ -810,7 +895,7 @@ TEST(StereoFusion, Integration) {
     EXPECT_EQ(direct_failed.GetBoundedCacheStats()->reserved_bytes, 0);
     direct_failed_scope->Close();
     direct_failed.Run();
-    expect_same_fusion(direct_failed);
+    expect_same_fusion(direct_failed, "direct_failed");
 
     StereoFusion direct_cancelled(options, temp_dir, "COLMAP", "", "geometric");
     direct_cancelled.SetCheckIfStoppedFunc([&direct_cancelled]() {
@@ -823,7 +908,7 @@ TEST(StereoFusion, Integration) {
     EXPECT_EQ(direct_cancelled.GetBoundedCacheStats()->reserved_bytes, 0);
     direct_cancelled.SetCheckIfStoppedFunc([]() { return false; });
     direct_cancelled.Run();
-    expect_same_fusion(direct_cancelled);
+    expect_same_fusion(direct_cancelled, "direct_cancelled");
 
     options.num_threads = 2;
     EXPECT_FALSE(options.Check());
