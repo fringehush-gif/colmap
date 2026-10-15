@@ -53,3 +53,26 @@ def test_stereo_fusion_full_ram_load_threads_api() -> None:
     assert not options.check()
     options.full_ram_load_threads = -1
     assert options.check()
+
+
+def test_stereo_fusion_bounded_prefill_threads_api() -> None:
+    options = pycolmap.StereoFusionOptions()
+    assert options.bounded_cache_prefill_threads == -1
+    assert options.todict()["bounded_cache_prefill_threads"] == -1
+    assert options.check()
+    options.bounded_cache_prefill_threads = 2
+    assert not options.check()
+    options.bounded_cache = True
+    assert not options.check()
+    options.bounded_cache_neighborhood = True
+    for workers in (1, 4):
+        options.bounded_cache_prefill_threads = workers
+        assert options.check()
+        copied = pycolmap.StereoFusionOptions(options.todict())
+        assert copied.bounded_cache_prefill_threads == workers
+        assert copied.check()
+    for invalid in (-2, 0):
+        options.bounded_cache_prefill_threads = invalid
+        assert not options.check()
+    options.bounded_cache_prefill_threads = -1
+    assert options.check()

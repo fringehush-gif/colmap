@@ -57,6 +57,15 @@ TEST(StereoFusionOptions, BoundedComponentPolicy) {
   EXPECT_TRUE(options.Check());
   options.bounded_cache_components = true;
   EXPECT_TRUE(options.Check());
+
+  options.bounded_cache_prefill_threads = 0;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache_prefill_threads = -2;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache_prefill_threads = 2;
+  EXPECT_TRUE(options.Check());
+  options.bounded_cache_neighborhood = false;
+  EXPECT_FALSE(options.Check());
 }
 
 TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
@@ -192,6 +201,9 @@ TEST(StereoFusion, Integration) {
   synthetic_dataset_options.num_frames_per_rig = 2;
   synthetic_dataset_options.camera_width = 30;
   synthetic_dataset_options.camera_height = 20;
+  // Center the principal point in this small image so both frames observe
+  // the synthetic points and form a real two-view fusion neighborhood.
+  synthetic_dataset_options.camera_params = {30.0, 15.0, 10.0, 0.0};
   Reconstruction reconstruction;
   SynthesizeDataset(synthetic_dataset_options, &reconstruction);
   reconstruction.Write(temp_dir / "sparse");
@@ -236,6 +248,16 @@ TEST(StereoFusion, Integration) {
     fusion_cfg << name << "\n";
   }
   fusion_cfg.close();
+
+  // The prefill gate below requires two actual neighboring views. Keep the
+  // sparse model, rather than just fusion.cfg, responsible for that graph.
+  Model model;
+  model.Read(temp_dir, "COLMAP");
+  ASSERT_EQ(model.images.size(), 2);
+  const auto overlapping = model.GetMaxOverlappingImages(10, 0.0);
+  ASSERT_EQ(overlapping.size(), 2);
+  ASSERT_EQ(overlapping[0], std::vector<int>{1});
+  ASSERT_EQ(overlapping[1], std::vector<int>{0});
 
   // Run fusion
   StereoFusionOptions options;
@@ -361,6 +383,56 @@ TEST(StereoFusion, Integration) {
                 ->component_loads[static_cast<size_t>(
                     BoundedWorkspace::Component::kImage)],
             0);
+
+  // Fusion stays serial while two prefill lanes borrow the same admitted
+  // neighborhood. The scheduled-lane count verifies activation, and the
+  // complete ordered point/visibility oracle verifies its output.
+  options.bounded_cache_prefill_threads = 2;
+  StereoFusion parallel_prefill(options, temp_dir, "COLMAP", "", "geometric");
+  parallel_prefill.Run();
+  expect_same_fusion(parallel_prefill);
+  EXPECT_EQ(parallel_prefill.GetMaxBoundedPrefillLanesScheduled(), 2);
+
+  // A worker failure must join the admitted prefill tasks and release their
+  // reservations before the resident reader scope can close.
+  std::atomic<int> failed_callback_calls{0};
+  auto failed_scope = ScopedBitmapReader::Create(
+      {temp_dir / "images" / image_names.front()},
+      [&failed_callback_calls](
+          const std::filesystem::path&, bool, bool, Bitmap*) {
+        ++failed_callback_calls;
+        return false;
+      },
+      {{30, 20}});
+  StereoFusion failed_prefill(options, temp_dir, "COLMAP", "", "geometric");
+  EXPECT_THROW(failed_prefill.Run(), std::exception);
+  EXPECT_GT(failed_callback_calls.load(), 0);
+  EXPECT_TRUE(failed_prefill.GetFusedPoints().empty());
+  EXPECT_TRUE(failed_prefill.GetFusedPointsVisibility().empty());
+  ASSERT_TRUE(failed_prefill.GetBoundedCacheStats());
+  EXPECT_EQ(failed_prefill.GetBoundedCacheStats()->reserved_bytes, 0);
+  EXPECT_LE(failed_prefill.GetBoundedCacheStats()->resident_bytes,
+            failed_prefill.GetBoundedCacheStats()->capacity_bytes);
+  // Removing the injected read failure repairs the input source. Retry the
+  // same object and compare complete ordered points and visibility.
+  failed_scope->Close();
+  failed_prefill.Run();
+  expect_same_fusion(failed_prefill);
+
+  StereoFusion cancelled_prefill(options, temp_dir, "COLMAP", "", "geometric");
+  cancelled_prefill.SetCheckIfStoppedFunc([&cancelled_prefill]() {
+    const auto stats = cancelled_prefill.GetBoundedCacheStats();
+    return stats && stats->loads > 0;
+  });
+  cancelled_prefill.Run();
+  EXPECT_TRUE(cancelled_prefill.GetFusedPoints().empty());
+  EXPECT_TRUE(cancelled_prefill.GetFusedPointsVisibility().empty());
+  ASSERT_TRUE(cancelled_prefill.GetBoundedCacheStats());
+  EXPECT_GT(cancelled_prefill.GetBoundedCacheStats()->loads, 0);
+  EXPECT_EQ(cancelled_prefill.GetBoundedCacheStats()->reserved_bytes, 0);
+  EXPECT_LE(cancelled_prefill.GetBoundedCacheStats()->resident_bytes,
+            cancelled_prefill.GetBoundedCacheStats()->capacity_bytes);
+  options.bounded_cache_prefill_threads = -1;
 
   options.bounded_cache_components = true;
   options.cache_size = 12000.0 / (1024.0 * 1024.0 * 1024.0);
