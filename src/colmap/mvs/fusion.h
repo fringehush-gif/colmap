@@ -25,6 +25,10 @@ struct StereoFusionOptions {
   // The number of threads to use during fusion.
   int num_threads = -1;
 
+  // Full-RAM workspace loading can use a separate positive thread count.
+  // -1 retains the existing num_threads behavior.
+  int full_ram_load_threads = -1;
+
   // Maximum image size in either dimension.
   int max_image_size = -1;
 

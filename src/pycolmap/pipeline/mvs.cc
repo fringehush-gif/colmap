@@ -210,6 +210,12 @@ void BindMVS(py::module& m) {
           .def_readwrite("num_threads",
                          &SFOpts::num_threads,
                          "The number of threads to use during fusion.")
+          .def_readwrite(
+              "full_ram_load_threads",
+              &SFOpts::full_ram_load_threads,
+              "Full-RAM workspace preload workers; -1 follows num_threads. "
+              "Positive values require use_cache and bounded_cache to be "
+              "false.")
           .def_readwrite("max_image_size",
                          &SFOpts::max_image_size,
                          "Maximum image size in either dimension.")

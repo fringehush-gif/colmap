@@ -29,6 +29,23 @@ namespace colmap {
 namespace mvs {
 namespace {
 
+TEST(StereoFusionOptions, FullRamLoadThreadPolicy) {
+  StereoFusionOptions options;
+  EXPECT_TRUE(options.Check());
+  options.full_ram_load_threads = 0;
+  EXPECT_FALSE(options.Check());
+  options.full_ram_load_threads = 2;
+  EXPECT_TRUE(options.Check());
+  options.bounded_cache = true;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache = false;
+  options.use_cache = true;
+  EXPECT_FALSE(options.Check());
+  options.use_cache = false;
+  options.full_ram_load_threads = -2;
+  EXPECT_FALSE(options.Check());
+}
+
 TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
   const auto root = CreateTestDir();
   for (const auto& sub : {"sparse",
@@ -244,6 +261,39 @@ TEST(StereoFusion, Integration) {
   for (const auto& vis : visibility) {
     EXPECT_GT(vis.size(), 0);
   }
+
+  // Exercise the actual opt-in loader with a duplicate cfg row. Fusion still
+  // sees the original roster; loading the same model slot twice would race.
+  {
+    std::ofstream duplicate_cfg(temp_dir / "stereo" / "fusion.cfg",
+                                std::ios::app);
+    duplicate_cfg << image_names.front() << '\n';
+  }
+  options.full_ram_load_threads = 2;
+  StereoFusion parallel_load(options, temp_dir, "COLMAP", "", "geometric");
+  parallel_load.Run();
+  const auto& parallel_points = parallel_load.GetFusedPoints();
+  ASSERT_EQ(parallel_points.size(), fused_points.size());
+  EXPECT_EQ(parallel_load.GetFusedPointsVisibility(), visibility);
+  for (size_t i = 0; i < fused_points.size(); ++i) {
+    const auto& a = fused_points[i];
+    const auto& b = parallel_points[i];
+    EXPECT_FLOAT_EQ(a.x, b.x);
+    EXPECT_FLOAT_EQ(a.y, b.y);
+    EXPECT_FLOAT_EQ(a.z, b.z);
+    EXPECT_FLOAT_EQ(a.nx, b.nx);
+    EXPECT_FLOAT_EQ(a.ny, b.ny);
+    EXPECT_FLOAT_EQ(a.nz, b.nz);
+    EXPECT_EQ(a.r, b.r);
+    EXPECT_EQ(a.g, b.g);
+    EXPECT_EQ(a.b, b.b);
+  }
+  {
+    std::ofstream original_cfg(temp_dir / "stereo" / "fusion.cfg",
+                               std::ios::trunc);
+    for (const auto& name : image_names) original_cfg << name << '\n';
+  }
+  options.full_ram_load_threads = -1;
 
   // The opt-in whole-image cache must preserve the eager path's XYZ,
   // normals, RGB, visibility, and point order on this deterministic fixture.

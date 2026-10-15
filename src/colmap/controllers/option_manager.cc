@@ -1151,6 +1151,8 @@ void OptionManager::AddStereoFusionOptions() {
                    &stereo_fusion->check_num_images);
   AddDefaultOption("StereoFusion.cache_size", &stereo_fusion->cache_size);
   AddDefaultOption("StereoFusion.use_cache", &stereo_fusion->use_cache);
+  AddDefaultOption("StereoFusion.full_ram_load_threads",
+                   &stereo_fusion->full_ram_load_threads);
   AddDefaultOption("StereoFusion.bounded_cache", &stereo_fusion->bounded_cache);
   AddDefaultOption("StereoFusion.bounded_cache_compact_rgb",
                    &stereo_fusion->bounded_cache_compact_rgb);

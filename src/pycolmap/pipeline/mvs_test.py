@@ -29,3 +29,27 @@ def test_stereo_fusion_options_init() -> None:
 )
 def test_public_api_callable(name: str) -> None:
     assert callable(getattr(pycolmap, name))
+
+
+def test_stereo_fusion_full_ram_load_threads_api() -> None:
+    options = pycolmap.StereoFusionOptions()
+    assert options.full_ram_load_threads == -1
+    assert options.todict()["full_ram_load_threads"] == -1
+    assert options.check()
+    for workers in (1, 4):
+        options.full_ram_load_threads = workers
+        assert options.check()
+        copied = pycolmap.StereoFusionOptions(options.todict())
+        assert copied.full_ram_load_threads == workers
+        assert copied.check()
+    for invalid in (-2, 0):
+        options.full_ram_load_threads = invalid
+        assert not options.check()
+    options.full_ram_load_threads = 2
+    options.use_cache = True
+    assert not options.check()
+    options.use_cache = False
+    options.bounded_cache = True
+    assert not options.check()
+    options.full_ram_load_threads = -1
+    assert options.check()
