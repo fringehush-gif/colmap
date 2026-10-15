@@ -420,6 +420,15 @@ __device__ inline float SampleLayeredBilinear(const cudaTextureObject_t texture,
 template <int kWindowSize, int kWindowStep>
 struct PhotoConsistencyCostComputer {
   const static int kWindowRadius = kWindowSize / 2;
+  static constexpr int kNumTapsPerAxis = (kWindowSize - 1) / kWindowStep + 1;
+  static constexpr int kNumTaps = kNumTapsPerAxis * kNumTapsPerAxis;
+  static constexpr int kMaxCachedNumTaps = 121;
+  // At 32 threads, the 121-tap cache uses 15,488 shared bytes per block.
+  static constexpr bool kCacheWeights =
+      kWindowStep == 1 && kNumTaps <= kMaxCachedNumTaps;
+  static constexpr int kWeightCacheSize =
+      kCacheWeights ? kNumTaps * THREADS_PER_BLOCK : 1;
+  float* local_weights = nullptr;
 
   __device__ PhotoConsistencyCostComputer(
       const cudaTextureObject_t ref_image_texture,
@@ -457,6 +466,26 @@ struct PhotoConsistencyCostComputer {
   __device__ inline void Read(const int row) {
     local_ref_image.Read(row);
     __syncthreads();
+    if constexpr (kCacheWeights) {
+      const int thread_id = threadIdx.x;
+      int ref_image_idx = THREADS_PER_BLOCK - kWindowRadius + thread_id;
+      const float ref_center_color =
+          local_ref_image
+              .data[ref_image_idx + kWindowRadius * 3 * THREADS_PER_BLOCK +
+                    kWindowRadius];
+      int tap = 0;
+      for (int dy = -kWindowRadius; dy <= kWindowRadius; dy += kWindowStep) {
+        int idx = ref_image_idx;
+        for (int dx = -kWindowRadius; dx <= kWindowRadius; dx += kWindowStep) {
+          local_weights[tap * THREADS_PER_BLOCK + thread_id] =
+              bilateral_weight_computer_.Compute(
+                  dy, dx, ref_center_color, local_ref_image.data[idx]);
+          ++tap;
+          idx += kWindowStep;
+        }
+        ref_image_idx += kWindowStep * 3 * THREADS_PER_BLOCK;
+      }
+    }
   }
 
   __device__ inline float Compute() const {
@@ -493,6 +522,7 @@ struct PhotoConsistencyCostComputer {
     float src_color_squared_sum = 0.0f;
     float src_ref_color_sum = 0.0f;
     float bilateral_weight_sum = 0.0f;
+    int weight_tap = 0;
 
     for (int row = -kWindowRadius; row <= kWindowRadius; row += kWindowStep) {
       for (int col = -kWindowRadius; col <= kWindowRadius; col += kWindowStep) {
@@ -508,8 +538,15 @@ struct PhotoConsistencyCostComputer {
             src_images_texture_, norm_col_src, norm_row_src, src_image_idx);
 #endif
 
-        const float bilateral_weight = bilateral_weight_computer_.Compute(
-            row, col, ref_center_color, ref_color);
+        float bilateral_weight;
+        if constexpr (kCacheWeights) {
+          bilateral_weight =
+              local_weights[weight_tap * THREADS_PER_BLOCK + thread_id];
+          ++weight_tap;
+        } else {
+          bilateral_weight = bilateral_weight_computer_.Compute(
+              row, col, ref_center_color, ref_color);
+        }
 
         const float bilateral_weight_src = bilateral_weight * src_color;
 
@@ -861,6 +898,9 @@ __global__ void ComputeInitialCost(
   __shared__ float local_ref_image_data
       [PhotoConsistencyCostComputerType::LocalRefImageType::kDataSize];
   pcc_computer.local_ref_image.data = &local_ref_image_data[0];
+  __shared__ float
+      local_weight_data[PhotoConsistencyCostComputerType::kWeightCacheSize];
+  pcc_computer.local_weights = &local_weight_data[0];
 
   float normal[3] = {0};
   pcc_computer.normal = normal;
@@ -982,6 +1022,9 @@ __global__ void SweepFromTopToBottom(
   __shared__ float local_ref_image_data
       [PhotoConsistencyCostComputerType::LocalRefImageType::kDataSize];
   pcc_computer.local_ref_image.data = &local_ref_image_data[0];
+  __shared__ float
+      local_weight_data[PhotoConsistencyCostComputerType::kWeightCacheSize];
+  pcc_computer.local_weights = &local_weight_data[0];
 
   struct ParamState {
     float depth = 0.0f;
