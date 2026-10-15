@@ -11,11 +11,13 @@
 
 #include <cfloat>
 #include <filesystem>
+#include <optional>
 #include <vector>
 
 #include <Eigen/Core>
 
 namespace colmap {
+class ThreadPool;
 namespace mvs {
 
 struct StereoFusionOptions {
@@ -59,6 +61,14 @@ struct StereoFusionOptions {
   // Opt-in byte-bounded, pinned whole-image fusion cache.
   bool bounded_cache = false;
 
+  // Load depth, normal and bitmap independently so rejected depth samples do
+  // not decode the other components. All components share the byte budget.
+  bool bounded_cache_components = false;
+
+  // Pin an admitted overlap set for the duration of each fused root. Row tasks
+  // may borrow its immutable arrays only until the root's worker join.
+  bool bounded_cache_neighborhood = false;
+
   // Opt-in bounded-cache RGB compaction to the depth grid.
   bool bounded_cache_compact_rgb = false;
 
@@ -93,11 +103,15 @@ class StereoFusion : public BaseController {
   const std::vector<PlyPoint>& GetFusedPoints() const;
   // Get per-point visibility lists (indices of images that observe each point).
   const std::vector<std::vector<int>>& GetFusedPointsVisibility() const;
+  std::optional<BoundedWorkspace::CacheStats> GetBoundedCacheStats() const;
 
   // Execute the depth map fusion pipeline.
   void Run();
 
  private:
+  void PrepareBoundedNeighborhood(int image_idx,
+                                  int num_threads,
+                                  ThreadPool& thread_pool);
   void InitFusedPixelMask(int image_idx, size_t width, size_t height);
   void Fuse(int thread_id, int image_idx, int row, int col);
 
@@ -111,6 +125,8 @@ class StereoFusion : public BaseController {
 
   std::unique_ptr<Workspace> workspace_;
   BoundedWorkspace* bounded_workspace_ = nullptr;
+  std::vector<const BoundedWorkspace::ImageData*> neighborhood_data_;
+  std::vector<BoundedWorkspace::ImageLease> neighborhood_leases_;
   std::vector<char> used_images_;
   std::vector<char> fused_images_;
   std::vector<std::vector<int>> overlapping_images_;

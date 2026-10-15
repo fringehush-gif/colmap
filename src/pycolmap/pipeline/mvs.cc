@@ -253,6 +253,10 @@ void BindMVS(py::module& m) {
                          &SFOpts::cache_size,
                          "Cache size in gigabytes for fusion.")
           .def_readwrite("bounded_cache", &SFOpts::bounded_cache)
+          .def_readwrite("bounded_cache_components",
+                         &SFOpts::bounded_cache_components)
+          .def_readwrite("bounded_cache_neighborhood",
+                         &SFOpts::bounded_cache_neighborhood)
           .def_readwrite(
               "bounded_cache_compact_rgb",
               &SFOpts::bounded_cache_compact_rgb,

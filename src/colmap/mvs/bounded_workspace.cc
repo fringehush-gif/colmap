@@ -221,16 +221,37 @@ BoundedWorkspace::BoundedWorkspace(const Options& options)
   THROW_CHECK_LT(bytes,
                  static_cast<double>(std::numeric_limits<size_t>::max()));
   THROW_CHECK_LE(model_.images.size(),
-                 static_cast<size_t>(std::numeric_limits<int>::max()));
+                 static_cast<size_t>(std::numeric_limits<int>::max() / 4));
   cache_state_ = std::make_shared<CacheState>(static_cast<size_t>(bytes),
-                                              model_.images.size());
+                                              model_.images.size() * 4);
 }
 
-size_t BoundedWorkspace::RequiredLoadBytes(const int image_idx) const {
+int BoundedWorkspace::ComponentKey(const int image_idx,
+                                   const Component component) const {
+  model_.images.at(image_idx);
+  const int part = static_cast<int>(component);
+  THROW_CHECK_GE(part, 0);
+  THROW_CHECK_LT(part, 4);
+  return image_idx * 4 + part;
+}
+
+size_t BoundedWorkspace::RequiredLoadBytes(const int image_idx,
+                                           const Component component) const {
   // Header-only planning. Fusion inputs must remain immutable while loading.
+  const bool read_bitmap =
+      component == Component::kImage || component == Component::kBitmap;
+  const bool read_depth =
+      component == Component::kImage || component == Component::kDepth;
+  const bool read_normal =
+      component == Component::kImage || component == Component::kNormal;
   const auto bitmap_path = GetBitmapPath(image_idx);
   OIIO::ImageSpec spec;
-  if (const auto reader = ScopedBitmapReader::Find(bitmap_path)) {
+  if (!read_bitmap) {
+    const auto& image = model_.images.at(image_idx);
+    spec.width = image.GetWidth();
+    spec.height = image.GetHeight();
+    spec.nchannels = 3;
+  } else if (const auto reader = ScopedBitmapReader::Find(bitmap_path)) {
     const auto dimensions = reader->ImageSize(bitmap_path);
     if (!dimensions) {
       throw std::invalid_argument(
@@ -257,24 +278,34 @@ size_t BoundedWorkspace::RequiredLoadBytes(const int image_idx) const {
   THROW_CHECK_GE(spec.nchannels, 1);
   THROW_CHECK_LE(spec.nchannels, 4);
 
-  const auto depth = ReadMapShape(GetDepthMapPath(image_idx), 1);
-  const auto normal = ReadMapShape(GetNormalMapPath(image_idx), 3);
-  THROW_CHECK_EQ(depth.width, normal.width);
-  THROW_CHECK_EQ(depth.height, normal.height);
+  const bool need_depth_shape =
+      read_depth || read_normal ||
+      (read_bitmap && options_.compact_rgb_to_depth_grid);
+  RasterShape depth = need_depth_shape
+                          ? ReadMapShape(GetDepthMapPath(image_idx), 1)
+                          : RasterShape{0, 0, 0};
+  RasterShape normal = read_normal
+                           ? ReadMapShape(GetNormalMapPath(image_idx), 3)
+                           : RasterShape{0, 0, 0};
+  if (read_normal) {
+    THROW_CHECK_EQ(depth.width, normal.width);
+    THROW_CHECK_EQ(depth.height, normal.height);
+  }
+  if (!read_depth) depth.bytes = 0;
   const auto& image = model_.images.at(image_idx);
   const size_t width = image.GetWidth();
   const size_t height = image.GetHeight();
   const size_t channels = options_.image_as_rgb ? 3 : 1;
   const size_t source_bitmap_bytes =
       CheckedRasterBytes(spec.width, spec.height, 3);
-  size_t bytes = CheckedAddBytes(source_bitmap_bytes,
+  size_t bytes = CheckedAddBytes(read_bitmap ? source_bitmap_bytes : 0,
                                  CheckedAddBytes(depth.bytes, normal.bytes));
   const int decoded_channels = spec.nchannels <= 2 ? 1 : 3;
-  if (decoded_channels != static_cast<int>(channels)) {
+  if (read_bitmap && decoded_channels != static_cast<int>(channels)) {
     bytes = CheckedAddBytes(bytes, source_bitmap_bytes);
   }
-  if (spec.width != static_cast<int>(width) ||
-      spec.height != static_cast<int>(height)) {
+  if (read_bitmap && (spec.width != static_cast<int>(width) ||
+                      spec.height != static_cast<int>(height))) {
     bytes = CheckedAddBytes(bytes, CheckedRasterBytes(width, height, channels));
   }
   for (const auto& shape : {depth, normal}) {
@@ -283,7 +314,7 @@ size_t BoundedWorkspace::RequiredLoadBytes(const int image_idx) const {
       bytes = CheckedAddBytes(bytes, CheckedAddBytes(scratch, scratch));
     }
   }
-  if (options_.compact_rgb_to_depth_grid) {
+  if (read_bitmap && options_.compact_rgb_to_depth_grid) {
     const auto grid = GetDepthMapDimensions(image_idx);
     if (grid.first != width || grid.second != height) {
       // Source pixels remain live until the compact buffer is filled.
@@ -294,16 +325,17 @@ size_t BoundedWorkspace::RequiredLoadBytes(const int image_idx) const {
   return bytes;
 }
 
-size_t BoundedWorkspace::GetLoadReservationBytes(const int image_idx) const {
-  model_.images.at(image_idx);
+size_t BoundedWorkspace::GetLoadReservationBytes(
+    const int image_idx, const Component component) const {
+  const int key = ComponentKey(image_idx, component);
   const auto state = cache_state_;
   std::unique_lock<std::mutex> lock(state->mutex);
-  const size_t cached = state->load_bytes.at(image_idx);
+  const size_t cached = state->load_bytes.at(key);
   if (cached != 0) return cached;
   lock.unlock();
-  const size_t bytes = RequiredLoadBytes(image_idx);
+  const size_t bytes = RequiredLoadBytes(image_idx, component);
   lock.lock();
-  state->load_bytes[image_idx] = bytes;
+  state->load_bytes[key] = bytes;
   return bytes;
 }
 
@@ -324,28 +356,42 @@ std::pair<size_t, size_t> BoundedWorkspace::GetDepthMapDimensions(
   return {width, height};
 }
 
-size_t BoundedWorkspace::GetResidentBytesEstimate(const int image_idx) const {
-  const auto grid = GetDepthMapDimensions(image_idx);
+size_t BoundedWorkspace::GetResidentBytesEstimate(
+    const int image_idx, const Component component) const {
   const auto& image = model_.images.at(image_idx);
+  const auto grid =
+      component == Component::kBitmap && !options_.compact_rgb_to_depth_grid
+          ? std::pair<size_t, size_t>{image.GetWidth(), image.GetHeight()}
+          : GetDepthMapDimensions(image_idx);
   const size_t rgb_bytes =
       options_.compact_rgb_to_depth_grid
           ? CheckedRasterBytes(grid.first, grid.second, 3)
           : CheckedRasterBytes(image.GetWidth(),
                                image.GetHeight(),
                                options_.image_as_rgb ? 3 : 1);
-  return CheckedAddBytes(rgb_bytes,
-                         CheckedRasterBytes(grid.first, grid.second, 16));
+  const size_t depth_bytes = CheckedRasterBytes(grid.first, grid.second, 4);
+  const size_t normal_bytes = CheckedRasterBytes(grid.first, grid.second, 12);
+  if (component == Component::kBitmap) return rgb_bytes;
+  if (component == Component::kDepth) return depth_bytes;
+  if (component == Component::kNormal) return normal_bytes;
+  return CheckedAddBytes(rgb_bytes, CheckedAddBytes(depth_bytes, normal_bytes));
 }
 
 BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImage(
     const int image_idx) {
+  return AcquireComponent(image_idx, Component::kImage);
+}
+
+BoundedWorkspace::ImageLease BoundedWorkspace::AcquireComponent(
+    const int image_idx, const Component component) {
+  const int key = ComponentKey(image_idx, component);
   model_.images.at(image_idx);
   const auto state = cache_state_;
   std::unique_lock<std::mutex> lock(state->mutex);
   size_t required_bytes = 0;
   std::shared_ptr<CacheEntry> entry;
   for (;;) {
-    entry = state->entries[image_idx];
+    entry = state->entries[key];
     if (entry) {
       ++entry->pins;
       ++state->stats.hits;
@@ -362,10 +408,10 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImage(
       return state->MakeLease(entry);
     }
     if (required_bytes == 0) {
-      required_bytes = state->load_bytes[image_idx];
+      required_bytes = state->load_bytes[key];
       if (required_bytes == 0) {
         lock.unlock();
-        required_bytes = GetLoadReservationBytes(image_idx);
+        required_bytes = GetLoadReservationBytes(image_idx, component);
         lock.lock();
       }
       continue;
@@ -385,8 +431,8 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImage(
     }
     entry = std::make_shared<CacheEntry>();
     entry->active_index = state->active_keys.size();
-    state->active_keys.push_back(image_idx);
-    state->entries[image_idx] = entry;
+    state->active_keys.push_back(key);
+    state->entries[key] = entry;
     entry->pins = 1;
     entry->last_access = ++state->clock;
     state->stats.reserved_bytes += required_bytes;
@@ -394,6 +440,7 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImage(
         std::max(state->stats.peak_charged_bytes,
                  state->stats.resident_bytes + state->stats.reserved_bytes);
     ++state->stats.loads;
+    ++state->stats.component_loads[static_cast<size_t>(component)];
     break;
   }
 
@@ -404,19 +451,31 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImage(
     const auto& image = model_.images.at(image_idx);
     const size_t width = image.GetWidth();
     const size_t height = image.GetHeight();
-    THROW_CHECK(
-        data->bitmap.Read(GetBitmapPath(image_idx), options_.image_as_rgb));
-    if (data->bitmap.Width() != static_cast<int>(width) ||
-        data->bitmap.Height() != static_cast<int>(height)) {
-      data->bitmap.Rescale(static_cast<int>(width), static_cast<int>(height));
+    if (component == Component::kImage || component == Component::kBitmap) {
+      THROW_CHECK(
+          data->bitmap.Read(GetBitmapPath(image_idx), options_.image_as_rgb));
+      if (data->bitmap.Width() != static_cast<int>(width) ||
+          data->bitmap.Height() != static_cast<int>(height)) {
+        data->bitmap.Rescale(static_cast<int>(width), static_cast<int>(height));
+      }
     }
-    data->depth_map.Read(GetDepthMapPath(image_idx));
-    data->normal_map.Read(GetNormalMapPath(image_idx));
-    data->depth_map.Downsize(width, height);
-    data->normal_map.Downsize(width, height);
-    THROW_CHECK_EQ(data->depth_map.GetWidth(), data->normal_map.GetWidth());
-    THROW_CHECK_EQ(data->depth_map.GetHeight(), data->normal_map.GetHeight());
-    if (options_.compact_rgb_to_depth_grid) {
+    if (component == Component::kImage || component == Component::kDepth) {
+      data->depth_map.Read(GetDepthMapPath(image_idx));
+      data->depth_map.Downsize(width, height);
+    }
+    if (component == Component::kImage || component == Component::kNormal) {
+      data->normal_map.Read(GetNormalMapPath(image_idx));
+      data->normal_map.Downsize(width, height);
+      const auto grid = GetDepthMapDimensions(image_idx);
+      THROW_CHECK_EQ(data->normal_map.GetWidth(), grid.first);
+      THROW_CHECK_EQ(data->normal_map.GetHeight(), grid.second);
+    }
+    if (component == Component::kImage) {
+      THROW_CHECK_EQ(data->depth_map.GetWidth(), data->normal_map.GetWidth());
+      THROW_CHECK_EQ(data->depth_map.GetHeight(), data->normal_map.GetHeight());
+    }
+    if (options_.compact_rgb_to_depth_grid &&
+        (component == Component::kImage || component == Component::kBitmap)) {
       const auto grid = GetDepthMapDimensions(image_idx);
       if (grid.first != width || grid.second != height) {
         Bitmap compact(
@@ -440,7 +499,8 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImage(
       }
     }
     THROW_CHECK_LE(data->NumBytes(), required_bytes);
-    THROW_CHECK_LE(data->NumBytes(), GetResidentBytesEstimate(image_idx));
+    THROW_CHECK_LE(data->NumBytes(),
+                   GetResidentBytesEstimate(image_idx, component));
   } catch (...) {
     data.reset();
     lock.lock();
@@ -448,7 +508,7 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImage(
     entry->loading = false;
     --entry->pins;
     state->stats.reserved_bytes -= required_bytes;
-    state->Retire(image_idx);
+    state->Retire(key);
     state->changed.notify_all();
     throw;
   }

@@ -1154,6 +1154,10 @@ void OptionManager::AddStereoFusionOptions() {
   AddDefaultOption("StereoFusion.full_ram_load_threads",
                    &stereo_fusion->full_ram_load_threads);
   AddDefaultOption("StereoFusion.bounded_cache", &stereo_fusion->bounded_cache);
+  AddDefaultOption("StereoFusion.bounded_cache_components",
+                   &stereo_fusion->bounded_cache_components);
+  AddDefaultOption("StereoFusion.bounded_cache_neighborhood",
+                   &stereo_fusion->bounded_cache_neighborhood);
   AddDefaultOption("StereoFusion.bounded_cache_compact_rgb",
                    &stereo_fusion->bounded_cache_compact_rgb);
 }
