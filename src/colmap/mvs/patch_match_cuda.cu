@@ -653,18 +653,20 @@ __device__ inline int FindMinCost(const float costs[kNumCosts]) {
   return min_cost_idx;
 }
 
-__device__ inline void TransformPDFToCDF(float* probs, const int num_probs) {
+__device__ inline void TransformPDFToCDF(float* probs,
+                                         const int num_probs,
+                                         const int source_stride) {
   float prob_sum = 0.0f;
   for (int i = 0; i < num_probs; ++i) {
-    prob_sum += probs[i];
+    prob_sum += probs[i * source_stride];
   }
   const float inv_prob_sum = 1.0f / prob_sum;
 
   float cum_prob = 0.0f;
   for (int i = 0; i < num_probs; ++i) {
-    const float prob = probs[i] * inv_prob_sum;
+    const float prob = probs[i * source_stride] * inv_prob_sum;
     cum_prob += prob;
-    probs[i] = cum_prob;
+    probs[i * source_stride] = cum_prob;
   }
 }
 
@@ -933,12 +935,15 @@ __global__ void SweepFromTopToBottom(
                                          options.min_triangulation_angle,
                                          options.incident_angle_sigma);
 
-  float* forward_message =
-      &global_workspace.GetPtr()[col * global_workspace.GetHeight()];
-  float* sampling_probs =
-      &global_workspace.GetPtr()[global_workspace.GetWidth() *
-                                     global_workspace.GetHeight() +
-                                 col * global_workspace.GetHeight()];
+  const int source_stride = global_workspace.GetWidth();
+  float* forward_message = nullptr;
+  float* sampling_probs = nullptr;
+  if (col < cost_map.GetWidth()) {
+    forward_message = &global_workspace.GetPtr()[col];
+    sampling_probs =
+        &global_workspace
+             .GetPtr()[source_stride * global_workspace.GetHeight() + col];
+  }
 
   //////////////////////////////////////////////////////////////////////////////
   // Compute backward message for all rows. Note that the backward messages are
@@ -957,7 +962,7 @@ __global__ void SweepFromTopToBottom(
       }
 
       // Initialize forward message.
-      forward_message[image_idx] = kUniformProb;
+      forward_message[image_idx * source_stride] = kUniformProb;
     }
   }
 
@@ -1043,7 +1048,7 @@ __global__ void SweepFromTopToBottom(
     for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
       const float cost = cost_map.Get(row, col, image_idx);
       const float alpha = likelihood_computer.ComputeForwardMessage(
-          cost, forward_message[image_idx]);
+          cost, forward_message[image_idx * source_stride]);
       const float beta = sel_prob_map.Get(row, col, image_idx);
       const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
       const float sel_prob = likelihood_computer.ComputeSelProb(
@@ -1073,10 +1078,11 @@ __global__ void SweepFromTopToBottom(
       const float res_prob =
           likelihood_computer.ComputeResolutionProb<kWindowSize>(H, row, col);
 
-      sampling_probs[image_idx] = sel_prob * tri_prob * inc_prob * res_prob;
+      sampling_probs[image_idx * source_stride] =
+          sel_prob * tri_prob * inc_prob * res_prob;
     }
 
-    TransformPDFToCDF(sampling_probs, cost_map.GetDepth());
+    TransformPDFToCDF(sampling_probs, cost_map.GetDepth(), source_stride);
 
     // Compute matching cost using Monte Carlo sampling of source images. Images
     // with higher selection probability are more likely to be sampled. Hence,
@@ -1103,7 +1109,7 @@ __global__ void SweepFromTopToBottom(
 
       pcc_computer.src_image_idx = -1;
       for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
-        const float prob = sampling_probs[image_idx];
+        const float prob = sampling_probs[image_idx * source_stride];
         if (prob > rand_prob) {
           pcc_computer.src_image_idx = image_idx;
           break;
@@ -1170,12 +1176,12 @@ __global__ void SweepFromTopToBottom(
       }
 
       const float alpha = likelihood_computer.ComputeForwardMessage(
-          cost, forward_message[image_idx]);
+          cost, forward_message[image_idx * source_stride]);
       const float beta = sel_prob_map.Get(row, col, image_idx);
       const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
       const float prob = likelihood_computer.ComputeSelProb(
           alpha, beta, prev_prob, options.prev_sel_prob_weight);
-      forward_message[image_idx] = alpha;
+      forward_message[image_idx * source_stride] = alpha;
       sel_prob_map.Set(row, col, image_idx, prob);
     }
 
