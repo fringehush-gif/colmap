@@ -1095,6 +1095,64 @@ TEST(BoundedWorkspaceBase, MappedNormalStripeKeysPinAcrossBands) {
       2.0f);
 }
 
+TEST(BoundedWorkspaceBase, SignedNormalTileValidationAndExactFallback) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  const auto root = CreateTestDir();
+  CreateDirIfNotExists(root / "sparse");
+  CreateDirIfNotExists(root / "stereo");
+  CreateDirIfNotExists(root / "stereo" / "depth_maps");
+  CreateDirIfNotExists(root / "stereo" / "normal_maps");
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 1;
+  dataset.camera_width = 8;
+  dataset.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  reconstruction.Write(root / "sparse");
+  const auto name = reconstruction.Image(1).Name();
+  Mat<float> depth(8, 5, 1);
+  depth.Fill(2.0f);
+  depth.Write(root / "stereo" / "depth_maps" / (name + ".geometric.bin"));
+  Mat<float> normal(8, 5, 3);
+  normal.Fill(0.5f);
+  const auto normal_path =
+      root / "stereo" / "normal_maps" / (name + ".geometric.bin");
+  normal.Write(normal_path);
+  Workspace::Options options;
+  options.workspace_path = root;
+  options.workspace_format = "COLMAP";
+  options.input_type = "geometric";
+  options.cache_size = 4096.0 / (1024.0 * 1024.0 * 1024.0);
+  options.normal_tiles_snorm16 = true;
+  options.mapped_normal_bytes_limit = 1 << 20;
+  options.mapped_normal_files_limit = 2;
+  {
+    BoundedWorkspace workspace(options);
+    const int image = workspace.GetModel().GetImageIdx(name);
+    EXPECT_EQ(workspace.GetNormalTileReservationBytes(image, 4), 288);
+    EXPECT_EQ(workspace.GetNormalTileResidentBytes(image, 4), 96);
+    auto tile = workspace.AcquireNormalTile(image, 1, 1, 4);
+    ASSERT_TRUE(tile);
+    EXPECT_TRUE(tile->normal_map.GetData().empty());
+    EXPECT_EQ(tile->snorm_normals.size(), 4u * 4u * 3u);
+    EXPECT_NE(tile->GetNormal(1, 1).x(), 0.5f);
+    EXPECT_EQ(workspace.ReadOriginalNormal(image, 1, 1).x(), 0.5f);
+    tile.reset();
+    EXPECT_EQ(workspace.GetMappedNormalStats().active_copies, 0);
+  }
+  // Mutate only after all leases from the first immutable Workspace end.
+  normal.Set(0, 0, 0, 2.0f);
+  normal.Write(normal_path);
+  BoundedWorkspace invalid(options);
+  const int image = invalid.GetModel().GetImageIdx(name);
+  EXPECT_THROW(invalid.AcquireNormalTile(image, 0, 0, 4), std::exception);
+  EXPECT_EQ(invalid.GetCacheStats().reserved_bytes, 0);
+  EXPECT_THROW(invalid.AcquireNormalTile(image, 0, 0, 4), std::exception);
+  EXPECT_EQ(invalid.GetCacheStats().reserved_bytes, 0);
+}
+
 // Full-RAM normal-storage contracts.
 
 }  // namespace

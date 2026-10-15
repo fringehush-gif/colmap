@@ -4,6 +4,7 @@
 
 #include "colmap/math/math.h"
 #include "colmap/mvs/model.h"
+#include "colmap/mvs/normal_precision_guard.h"
 #include "colmap/scene/frame.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/bitmap.h"
@@ -27,7 +28,163 @@
 
 namespace colmap {
 namespace mvs {
+// Inspect ring ownership through the Fusion test peer.
+struct StereoFusionExactDepthTestPeer {
+  static void PrepareRing(StereoFusion& fusion,
+                          const Workspace::Options& options,
+                          size_t slots,
+                          bool hints) {
+    fusion.workspace_ = std::make_unique<BoundedWorkspace>(options);
+    fusion.bounded_workspace_ =
+        static_cast<BoundedWorkspace*>(fusion.workspace_.get());
+    fusion.normal_tile_rings_.resize(1);
+    auto& ring = fusion.normal_tile_rings_.front();
+    ring.tiles.resize(slots);
+    ring.indexed = slots > 4;
+    if (ring.indexed) ring.index.reserve(slots);
+    if (ring.indexed && hints) ring.last_slot_by_image.assign(1, slots);
+  }
+  static const BoundedWorkspace::ImageData* Acquire(StereoFusion& fusion,
+                                                    int row,
+                                                    int col) {
+    return fusion.AcquireWorkerNormalTile(0, 0, row, col);
+  }
+};
+
 namespace {
+
+TEST(StereoFusion, NormalTileRingReusesSnormAndFp32CroppedTiles) {
+  if (!ImmutableMapRegion::Supported())
+    GTEST_SKIP() << "Immutable FP32 map owners are unsupported on this host";
+  const auto root = CreateTestDir();
+  for (const auto& sub : {"sparse",
+                          "images",
+                          "stereo",
+                          "stereo/depth_maps",
+                          "stereo/normal_maps"}) {
+    CreateDirIfNotExists(root / sub);
+  }
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 1;
+  dataset.camera_width = 17;
+  dataset.camera_height = 11;
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  reconstruction.Write(root / "sparse");
+  Workspace::Options base;
+  base.workspace_path = root;
+  base.workspace_format = "COLMAP";
+  base.input_type = "geometric";
+  base.cache_size = 65536.0 / (1024.0 * 1024.0 * 1024.0);
+  base.mapped_normal_bytes_limit = 1 << 20;
+  base.mapped_normal_files_limit = 1;
+  Workspace descriptor(base);
+  Mat<float> depth(17, 11, 1);
+  depth.Fill(5.0f);
+  depth.Write(descriptor.GetDepthMapPath(0));
+  Mat<float> normal(17, 11, 3);
+  normal.Fill(0.0f);
+  for (int row = 0; row < 11; ++row) {
+    for (int col = 0; col < 17; ++col) normal.Set(row, col, 2, 1.0f);
+  }
+  normal.Write(descriptor.GetNormalMapPath(0));
+  Bitmap bitmap(17, 11, true);
+  bitmap.Fill(BitmapColor<uint8_t>(0, 64, 128));
+  ASSERT_TRUE(bitmap.Write(descriptor.GetBitmapPath(0)));
+  // A/B alternate while resident; C and D cross both interior boundaries and
+  // the cropped right/bottom edges. A is revisited after ring replacement.
+  const std::vector<std::pair<int, int>> samples = {{0, 0},
+                                                    {7, 7},
+                                                    {8, 16},
+                                                    {10, 16},
+                                                    {1, 1},
+                                                    {9, 16},
+                                                    {8, 15},
+                                                    {8, 16},
+                                                    {7, 16},
+                                                    {10, 15},
+                                                    {7, 16},
+                                                    {0, 0}};
+  for (bool snorm : {false, true}) {
+    for (int slots : {2, 4, 8}) {
+      for (bool hints : {false, true}) {
+        if (slots <= 4 && !hints) continue;  // No hint array in linear rings.
+        SCOPED_TRACE(::testing::Message() << "snorm=" << snorm << " slots="
+                                          << slots << " hints=" << hints);
+        auto workspace_options = base;
+        workspace_options.normal_tiles_snorm16 = snorm;
+        StereoFusionOptions options;
+        options.num_threads = 1;
+        options.cache_size = base.cache_size;
+        options.bounded_cache = true;
+        options.bounded_cache_components = true;
+        options.bounded_cache_normal_tile_size = 8;
+        options.bounded_cache_normal_tile_slots = slots;
+        options.bounded_cache_normal_tile_hints = hints;
+        options.bounded_cache_normal_snorm16 = snorm;
+        options.bounded_cache_normal_snorm16_guard = false;
+        options.bounded_cache_normal_mapped_bytes = 1 << 20;
+        options.bounded_cache_normal_mapped_files = 1;
+        ASSERT_TRUE(options.Check());
+        StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+        StereoFusionExactDepthTestPeer::PrepareRing(
+            fusion, workspace_options, slots, hints);
+        for (const auto& [row, col] : samples) {
+          const auto* tile =
+              StereoFusionExactDepthTestPeer::Acquire(fusion, row, col);
+          ASSERT_NE(tile, nullptr);
+          const size_t x = static_cast<size_t>(col) / 8 * 8;
+          const size_t y = static_cast<size_t>(row) / 8 * 8;
+          EXPECT_EQ(tile->normal_origin_x, x);
+          EXPECT_EQ(tile->normal_origin_y, y);
+          const size_t width = std::min(size_t{8}, 17 - x);
+          const size_t height = std::min(size_t{8}, 11 - y);
+          EXPECT_EQ(tile->snorm_normals.empty(), !snorm);
+          if (snorm) {
+            EXPECT_EQ(tile->snorm_width, width);
+            EXPECT_EQ(tile->snorm_height, height);
+            EXPECT_EQ(tile->normal_map.GetWidth(), 0);
+          } else {
+            EXPECT_EQ(tile->normal_map.GetWidth(), width);
+            EXPECT_EQ(tile->normal_map.GetHeight(), height);
+          }
+          EXPECT_EQ(tile->GetNormal(row, col), Eigen::Vector3f(0, 0, 1));
+        }
+        const auto ring = fusion.GetNormalTileRingStats();
+        const auto cache = fusion.GetBoundedCacheStats();
+        ASSERT_TRUE(cache);
+        const size_t expected_misses = slots == 2 ? 5 : 4;
+        EXPECT_EQ(ring.hits, samples.size() - expected_misses);
+        EXPECT_EQ(ring.misses, expected_misses);
+        EXPECT_EQ(ring.hits + ring.misses, samples.size());
+        EXPECT_EQ(cache->normal_tile_loads, 4);
+        EXPECT_EQ(cache->normal_tile_hits, expected_misses - 4);
+        EXPECT_EQ(cache->normal_tile_loads + cache->normal_tile_hits,
+                  ring.misses);
+        EXPECT_EQ(cache->reserved_bytes, 0);
+        if (slots <= 4) {
+          EXPECT_EQ(ring.indexed_lookups, 0);
+          EXPECT_EQ(ring.hint_checks, 0);
+        } else if (hints) {
+          EXPECT_EQ(ring.hint_checks, samples.size());
+          EXPECT_LT(ring.indexed_lookups, samples.size());
+        } else {
+          EXPECT_EQ(ring.hint_checks, 0);
+          EXPECT_EQ(ring.indexed_lookups, samples.size());
+        }
+        std::cout << "NORMAL_RING_PROOF snorm=" << snorm << " slots=" << slots
+                  << " hints=" << hints << " requests=" << samples.size()
+                  << " hits=" << ring.hits << " misses=" << ring.misses
+                  << " loads=" << cache->normal_tile_loads
+                  << " cache_hits=" << cache->normal_tile_hits
+                  << " indexed=" << ring.indexed_lookups
+                  << " hint_checks=" << ring.hint_checks << '\n';
+      }
+    }
+  }
+}
 
 TEST(StereoFusionOptions, FullRamLoadThreadPolicy) {
   StereoFusionOptions options;
@@ -412,6 +569,22 @@ TEST(StereoFusion, Integration) {
       EXPECT_EQ(a.b, b.b);
     }
   };
+
+  // The guarded codec preserves ordered geometry and visibility. This
+  // fixture uses exactly representable 0/1 normal components.
+  StereoFusionOptions guarded_options = options;
+  guarded_options.bounded_cache_components = true;
+  guarded_options.bounded_cache_normal_tile_size = 8;
+  guarded_options.bounded_cache_normal_tile_slots = 2;
+  guarded_options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  guarded_options.bounded_cache_normal_mapped_files = 2;
+  guarded_options.bounded_cache_normal_snorm16 = true;
+  guarded_options.bounded_cache_normal_snorm16_guard = true;
+  StereoFusion guarded(guarded_options, temp_dir, "COLMAP", "", "geometric");
+  guarded.Run();
+  expect_same_fusion(guarded);
+  ASSERT_TRUE(guarded.GetBoundedCacheStats());
+  EXPECT_GT(guarded.GetBoundedCacheStats()->normal_tile_loads, 0);
 
   options.bounded_cache_neighborhood = true;
   options.cache_size = 50000.0 / (1024.0 * 1024.0 * 1024.0);
@@ -964,6 +1137,102 @@ TEST(StereoFusion, Rotation180Invariance) {
   EXPECT_NEAR(points1[0].z, points2[0].z, 1e-5f);
 }
 
+TEST(StereoFusion, SignedNormalGuardRestoresLossyTwoViewDecision) {
+  if (!ImmutableMapRegion::Supported())
+    GTEST_SKIP() << "Immutable FP32 map owners are unsupported on this host";
+  const auto root = CreateTestDir();
+  CreateDirIfNotExists(root / "sparse");
+  CreateDirIfNotExists(root / "images");
+  CreateDirIfNotExists(root / "stereo");
+  CreateDirIfNotExists(root / "stereo" / "depth_maps");
+  CreateDirIfNotExists(root / "stereo" / "normal_maps");
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 2;
+  dataset.camera_width = 30;
+  dataset.camera_height = 20;
+  dataset.camera_params = {30.0, 15.0, 10.0, 0.0};
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  // Both views project the same raster point. Sparse tracks still establish
+  // the two-view neighborhood; only the normal decision differs.
+  for (const frame_t frame_id : reconstruction.RegFrameIds()) {
+    reconstruction.Frame(frame_id).SetRigFromWorld(Rigid3d());
+  }
+  reconstruction.Write(root / "sparse");
+  std::vector<std::string> names;
+  for (const auto& [image_id, image] : reconstruction.Images()) {
+    names.push_back(image.Name());
+    Mat<float> depth(30, 20, 1);
+    depth.Fill(5.0f);
+    depth.Write(root / "stereo" / "depth_maps" /
+                (image.Name() + ".geometric.bin"));
+    Mat<float> normal(30, 20, 3);
+    normal.Fill(0.0f);
+    const float z = names.size() == 1 ? 1.0f : 0.99999f;
+    for (size_t row = 0; row < 20; ++row) {
+      for (size_t col = 0; col < 30; ++col) normal.Set(row, col, 2, z);
+    }
+    normal.Write(root / "stereo" / "normal_maps" /
+                 (image.Name() + ".geometric.bin"));
+    Bitmap bitmap(30, 20, true);
+    bitmap.Fill(BitmapColor<uint8_t>(0, 64, 128));
+    bitmap.Write(root / "images" / image.Name());
+  }
+  ASSERT_EQ(names.size(), 2);
+  {
+    std::ofstream config(root / "stereo" / "fusion.cfg");
+    for (const auto& name : names) config << name << '\n';
+  }
+  StereoFusionOptions options;
+  options.min_num_pixels = 1;
+  options.max_num_pixels = 100;
+  options.max_traversal_depth = 10;
+  options.check_num_images = 10;
+  options.num_threads = 1;
+  options.max_normal_error = 0;
+  StereoFusion exact(options, root, "COLMAP", "", "geometric");
+  exact.Run();
+  ASSERT_GT(exact.GetFusedPoints().size(), 0);
+  options.bounded_cache = true;
+  options.bounded_cache_components = true;
+  options.cache_size = 1;
+  options.bounded_cache_normal_tile_size = 8;
+  options.bounded_cache_normal_tile_slots = 2;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 3;
+  options.bounded_cache_normal_snorm16 = true;
+  ASSERT_TRUE(options.Check());
+  StereoFusion raw(options, root, "COLMAP", "", "geometric");
+  raw.Run();
+  EXPECT_LT(raw.GetFusedPoints().size(), exact.GetFusedPoints().size());
+  if (!normal_precision_guard::SupportedBuild()) {
+    options.bounded_cache_normal_snorm16_guard = true;
+    EXPECT_FALSE(options.Check());
+    return;
+  }
+  options.bounded_cache_normal_snorm16_guard = true;
+  StereoFusion guarded(options, root, "COLMAP", "", "geometric");
+  guarded.Run();
+  const auto& expected = exact.GetFusedPoints();
+  const auto& actual = guarded.GetFusedPoints();
+  ASSERT_EQ(actual.size(), expected.size());
+  EXPECT_EQ(guarded.GetFusedPointsVisibility(),
+            exact.GetFusedPointsVisibility());
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_FLOAT_EQ(actual[i].x, expected[i].x);
+    EXPECT_FLOAT_EQ(actual[i].y, expected[i].y);
+    EXPECT_FLOAT_EQ(actual[i].z, expected[i].z);
+    EXPECT_EQ(actual[i].r, expected[i].r);
+    EXPECT_EQ(actual[i].g, expected[i].g);
+    EXPECT_EQ(actual[i].b, expected[i].b);
+  }
+  ASSERT_TRUE(guarded.GetBoundedCacheStats());
+  EXPECT_EQ(guarded.GetBoundedCacheStats()->reserved_bytes, 0);
+  EXPECT_EQ(guarded.GetMappedNormalStats().active_copies, 0);
+}
+
 #if defined(__SSE__) || defined(_M_X64) || \
     (defined(_M_IX86_FP) && _M_IX86_FP >= 1)
 #endif
@@ -981,6 +1250,110 @@ TEST(StereoFusionOptions, CachePoliciesAreMutuallyExclusive) {
   EXPECT_FALSE(options.Check());
   options.use_cache = false;
   EXPECT_TRUE(options.Check());
+}
+
+TEST(StereoFusionOptions, SignedNormalGuardIsExplicitlyBounded) {
+  StereoFusionOptions options;
+  EXPECT_FALSE(options.bounded_cache_normal_snorm16);
+  EXPECT_FALSE(options.bounded_cache_normal_snorm16_guard);
+  options.bounded_cache_normal_snorm16_guard = true;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache_normal_snorm16 = true;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache = true;
+  options.bounded_cache_components = true;
+  options.bounded_cache_normal_tile_size = 8;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 2;
+  EXPECT_EQ(options.Check(), normal_precision_guard::SupportedBuild());
+  options.bounded_cache_normal_snorm16_guard = false;
+  EXPECT_TRUE(options.Check());  // Approximate SNORM remains independent.
+}
+
+TEST(StereoFusion, UnsupportedBuildNeverScreensNormalDecisions) {
+  using namespace normal_precision_guard;
+  if (SupportedBuild())
+    GTEST_SKIP() << "This regression exercises an unsupported compiler build";
+  EXPECT_FALSE(SupportedArithmetic());
+  Operand a{Vec(0, 0, 1), Error::Zero(), false};
+  Operand b{Vec(0, 0, -1), Error::Zero(), false};
+  // Even an obvious rejection must defer to the original FP32 callback.
+  EXPECT_EQ(ScreenNormal(a, b, 0.0f), Screen::kExact);
+  b.value = a.value;
+  EXPECT_EQ(ScreenNormal(a, b, 0.0f), Screen::kExact);
+  EXPECT_FALSE(PrepareRotation(Rot::Identity()).valid);
+}
+
+TEST(StereoFusion, SignedNormalExactCallbackOwnsRotatedTemporary) {
+  using namespace normal_precision_guard;
+  Rot rotation;
+  rotation << 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f;
+  const Vec local(1.0f, 0.0f, 0.0f);
+  const Vec expected = rotation * local;
+  auto root = CompressedOperand(rotation, local);
+  const auto candidate = CompressedOperand(rotation, local);
+  int reads = 0;
+  const auto read_rotated = [&]() -> Vec {
+    ++reads;
+    // Match production's by-value source, which a lazy return would outlive.
+    return rotation * Vec(1.0f, 0.0f, 0.0f);
+  };
+  bool used_exact = false;
+  EXPECT_TRUE(NormalAccept(
+      root, candidate, 1.0f, read_rotated, read_rotated, &used_exact));
+  EXPECT_TRUE(used_exact);
+  EXPECT_EQ(reads, 2);
+  EXPECT_EQ(root.value, expected);
+  EXPECT_TRUE(root.exact);
+}
+
+TEST(StereoFusion, SignedNormalDecisionFallsBackAtBoundary) {
+  using namespace normal_precision_guard;
+  const Rot rotation = Rot::Identity();
+  const Vec root(0.0f, 0.0f, 1.0f);
+  const Vec candidate(0.0f, 0.0f, 1.0f);
+  auto operand = CompressedOperand(rotation, root);
+  const auto next = CompressedOperand(rotation, candidate);
+  int reads = 0;
+  bool used_exact = false;
+  EXPECT_TRUE(NormalAccept(
+      operand,
+      next,
+      1.0f,
+      [&] {
+        ++reads;
+        return root;
+      },
+      [&] {
+        ++reads;
+        return candidate;
+      },
+      &used_exact));
+  EXPECT_TRUE(used_exact);
+  EXPECT_EQ(reads, 2);
+  EXPECT_TRUE(operand.exact);
+  // A raw SNORM decode rounds 0.99999 to 1 and would accept equality here.
+  // The guarded decision must consult the original FP32 normal and reject.
+  const Vec original_below(0.0f, 0.0f, 0.99999f);
+  const Vec decoded_below(0.0f, 0.0f, 1.0f);
+  auto exact_root = CompressedOperand(rotation, root);
+  const auto rounded_candidate = CompressedOperand(rotation, decoded_below);
+  int exact_reads = 0;
+  EXPECT_FALSE(NormalAccept(
+      exact_root,
+      rounded_candidate,
+      1.0f,
+      [&] {
+        ++exact_reads;
+        return root;
+      },
+      [&] {
+        ++exact_reads;
+        return original_below;
+      },
+      &used_exact));
+  EXPECT_TRUE(used_exact);
+  EXPECT_EQ(exact_reads, 2);
 }
 
 // Compare compact resident maps with their decoded FP32 equivalents.

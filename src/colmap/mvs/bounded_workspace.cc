@@ -98,8 +98,10 @@ RasterShape ReadMapShape(const std::filesystem::path& path,
 size_t BoundedWorkspace::ImageData::NumBytes() const {
   return CheckedAddBytes(
       bitmap.NumBytes(),
-      CheckedAddBytes(depth_map.GetData().capacity() * sizeof(float),
-                      normal_map.GetData().capacity() * sizeof(float)));
+      CheckedAddBytes(
+          depth_map.GetData().capacity() * sizeof(float),
+          CheckedAddBytes(normal_map.GetData().capacity() * sizeof(float),
+                          snorm_normals.capacity() * sizeof(int16_t))));
 }
 
 Eigen::Vector3f BoundedWorkspace::ImageData::GetNormal(const size_t row,
@@ -108,6 +110,15 @@ Eigen::Vector3f BoundedWorkspace::ImageData::GetNormal(const size_t row,
   THROW_CHECK_GE(col, normal_origin_x);
   const size_t local_row = row - normal_origin_y;
   const size_t local_col = col - normal_origin_x;
+  if (!snorm_normals.empty()) {
+    THROW_CHECK_LT(local_row, snorm_height);
+    THROW_CHECK_LT(local_col, snorm_width);
+    const size_t index = local_row * snorm_width + local_col;
+    const size_t plane = snorm_width * snorm_height;
+    return {DecodeNormalSnorm16(snorm_normals[index]),
+            DecodeNormalSnorm16(snorm_normals[plane + index]),
+            DecodeNormalSnorm16(snorm_normals[2 * plane + index])};
+  }
   THROW_CHECK_LT(local_row, normal_map.GetHeight());
   THROW_CHECK_LT(local_col, normal_map.GetWidth());
   Eigen::Vector3f normal;
@@ -515,6 +526,9 @@ BoundedWorkspace::BoundedWorkspace(const Options& options)
       normal_tile_grid_once_(model_.images.size()),
       normal_tile_grids_(model_.images.size()) {
   THROW_CHECK(!options.compact_rgb_to_depth_grid || options.image_as_rgb);
+  THROW_CHECK(!options.normal_tiles_snorm16 ||
+              (options.mapped_normal_bytes_limit > 0 &&
+               options.mapped_normal_files_limit > 0));
   const double bytes = options.cache_size * 1024.0 * 1024.0 * 1024.0;
   THROW_CHECK(std::isfinite(bytes));
   THROW_CHECK_GE(bytes, 1.0);
@@ -705,13 +719,17 @@ size_t BoundedWorkspace::GetNormalTileReservationBytes(
     const int image_idx, const size_t tile_size) const {
   THROW_CHECK_GT(tile_size, 0);
   const auto grid = GetNormalTileGrid(image_idx);
-  return CheckedRasterBytes(
-      std::min(tile_size, grid.first), std::min(tile_size, grid.second), 12);
+  return CheckedRasterBytes(std::min(tile_size, grid.first),
+                            std::min(tile_size, grid.second),
+                            options_.normal_tiles_snorm16 ? 18 : 12);
 }
 
 size_t BoundedWorkspace::GetNormalTileResidentBytes(
     const int image_idx, const size_t tile_size) const {
-  return GetNormalTileReservationBytes(image_idx, tile_size);
+  const auto grid = GetNormalTileGrid(image_idx);
+  return CheckedRasterBytes(std::min(tile_size, grid.first),
+                            std::min(tile_size, grid.second),
+                            options_.normal_tiles_snorm16 ? 6 : 12);
 }
 
 BoundedWorkspace::ImageLease BoundedWorkspace::AcquireNormalTile(
@@ -733,6 +751,22 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireNormalTile(
                                   std::min(tile_size, grid.first - x),
                                   std::min(tile_size, grid.second - y),
                                   tile_size});
+}
+
+Eigen::Vector3f BoundedWorkspace::ReadOriginalNormal(const int image_idx,
+                                                     const size_t row,
+                                                     const size_t col) {
+  THROW_CHECK(options_.normal_tiles_snorm16);
+  const auto grid = GetNormalTileGrid(image_idx);
+  THROW_CHECK_LT(row, grid.second);
+  THROW_CHECK_LT(col, grid.first);
+  THROW_CHECK(mapped_normal_pool_ != nullptr);
+  const auto owner =
+      mapped_normal_pool_->Acquire(ComponentKey(image_idx, Component::kNormal),
+                                   GetNormalMapPath(image_idx),
+                                   row,
+                                   1);
+  return (*owner).ReadFloat3(row, col);
 }
 
 size_t BoundedWorkspace::GetMappedNormalReservationBytes(
@@ -795,7 +829,10 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
   model_.images.at(image_idx);
   const auto state = cache_state_;
   size_t required_bytes =
-      region ? CheckedRasterBytes(region->width, region->height, 12) : 0;
+      region ? CheckedRasterBytes(region->width,
+                                  region->height,
+                                  options_.normal_tiles_snorm16 ? 18 : 12)
+             : 0;
   if (region && required_bytes > state->stats.capacity_bytes) {
     throw std::runtime_error("Normal tile exceeds bounded decoded cache");
   }
@@ -934,6 +971,20 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
       } else {
         data->normal_map.Read(GetNormalMapPath(image_idx));
       }
+      if (region && options_.normal_tiles_snorm16) {
+        const auto& source = data->normal_map.GetData();
+        for (const float value : source) {
+          THROW_CHECK(std::isfinite(value) && value >= -1.0f && value <= 1.0f)
+              << "SNORM16 normal tiles require finite components in [-1,1]";
+        }
+        data->snorm_normals.resize(source.size());
+        for (size_t i = 0; i < source.size(); ++i) {
+          data->snorm_normals[i] = EncodeNormalSnorm16Unchecked(source[i]);
+        }
+        data->snorm_width = region->width;
+        data->snorm_height = region->height;
+        data->normal_map = NormalMap();
+      }
       if (!region) {
         data->normal_map.Downsize(width, height);
         const auto grid = GetDepthMapDimensions(image_idx);
@@ -970,10 +1021,10 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
       }
     }
     THROW_CHECK_LE(data->NumBytes(), required_bytes);
-    THROW_CHECK_LE(data->NumBytes(),
-                   region
-                       ? CheckedRasterBytes(region->width, region->height, 12)
-                       : GetResidentBytesEstimate(image_idx, component));
+    THROW_CHECK_LE(
+        data->NumBytes(),
+        region ? GetNormalTileResidentBytes(image_idx, region->tile_size)
+               : GetResidentBytesEstimate(image_idx, component));
   } catch (...) {
     data.reset();
     lock.lock();
