@@ -322,6 +322,35 @@ TEST_F(MatFileTest, MappedNormalStripeCrossesPlanarPageAndRowEdges) {
   EXPECT_THROW(ImmutableMapRegion(path_, 0, 1), std::exception);
 }
 
+TEST(Mat, SignedNormalCodecPreservesValidComponentPolicy) {
+  for (const float value : {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f}) {
+    const auto encoded = EncodeNormalSnorm16Unchecked(value);
+    const float decoded = DecodeNormalSnorm16(encoded);
+    EXPECT_LE(std::abs(decoded - value), 1.0f / 32767.0f);
+    EXPECT_GE(decoded, -1.0f);
+    EXPECT_LE(decoded, 1.0f);
+  }
+  EXPECT_EQ(DecodeNormalSnorm16(EncodeNormalSnorm16Unchecked(1.0f)), 1.0f);
+  EXPECT_EQ(DecodeNormalSnorm16(EncodeNormalSnorm16Unchecked(-1.0f)), -1.0f);
+}
+
+TEST(Mat, OctNormalDirectionAndMagnitudeContracts) {
+  OctNormalPair encoded{};
+  EncodeNormalOct2x16Unchecked(Eigen::Vector3f::Zero(), &encoded);
+  EXPECT_EQ(encoded.x, std::numeric_limits<int16_t>::min());
+  EXPECT_EQ(encoded.y, std::numeric_limits<int16_t>::min());
+  EXPECT_TRUE(DecodeNormalOct2x16(encoded.x, encoded.y).isZero());
+  const Eigen::Vector3f folded(-0.3f, 0.2f, -0.93f);
+  EncodeNormalOct2x16Unchecked(folded, &encoded);
+  EXPECT_GT(DecodeNormalOct2x16(encoded.x, encoded.y).dot(folded.normalized()),
+            0.99999f);
+  const Eigen::Vector3f nonunit(0.99f, 0.0f, 0.0f);
+  EXPECT_LT(std::abs(DecodeNormalMagnitudeUnorm16(
+                         EncodeNormalMagnitudeUnorm16Unchecked(nonunit)) -
+                     0.99f),
+            1.4e-5f);
+}
+
 }  // namespace
 }  // namespace mvs
 }  // namespace colmap
