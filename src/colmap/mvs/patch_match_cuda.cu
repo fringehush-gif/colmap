@@ -1163,17 +1163,27 @@ __global__ void SweepFromTopToBottom(
         continue;
       }
 
+      // Three distinct depths serve the five fixed depth/normal candidates.
+      // Keep sampling and every photometric/geometric addition in original order.
+      float geometric_costs[3] = {0};
+      if (kGeomConsistencyTerm) {
+        for (int i = 0; i < 3; ++i) {
+          geometric_costs[i] =
+              ComputeGeomConsistencyCost(poses_texture,
+                                         src_depth_maps_texture,
+                                         row,
+                                         col,
+                                         depths[i],
+                                         pcc_computer.src_image_idx,
+                                         options.geom_consistency_max_cost);
+        }
+      }
+
       costs[0] += cost_map.Get(row, col, pcc_computer.src_image_idx);
       if (kGeomConsistencyTerm) {
         costs[0] +=
             options.geom_consistency_regularizer *
-            ComputeGeomConsistencyCost(poses_texture,
-                                       src_depth_maps_texture,
-                                       row,
-                                       col,
-                                       depths[0],
-                                       pcc_computer.src_image_idx,
-                                       options.geom_consistency_max_cost);
+            geometric_costs[0];
       }
 
       for (int i = 1; i < kNumCosts; ++i) {
@@ -1183,13 +1193,7 @@ __global__ void SweepFromTopToBottom(
         if (kGeomConsistencyTerm) {
           costs[i] +=
               options.geom_consistency_regularizer *
-              ComputeGeomConsistencyCost(poses_texture,
-                                         src_depth_maps_texture,
-                                         row,
-                                         col,
-                                         depths[i],
-                                         pcc_computer.src_image_idx,
-                                         options.geom_consistency_max_cost);
+              geometric_costs[i == 3 ? 0 : (i == 4 ? 2 : i)];
         }
       }
     }
