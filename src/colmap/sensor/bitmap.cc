@@ -2,12 +2,19 @@
 
 #include "colmap/sensor/bitmap.h"
 
+#include "colmap/sensor/bitmap_reader.h"
+#include "colmap/sensor/bitmap_rgb8.h"
 #include "colmap/sensor/database.h"
 #include "colmap/util/file.h"
+#include "colmap/util/hash_containers.h"
 #include "colmap/util/logging.h"
 #include "colmap/util/oiio_utils.h"
 
+#include <atomic>
 #include <cstring>
+#include <limits>
+#include <mutex>
+#include <stdexcept>
 
 #include <OpenImageIO/color.h>
 #include <OpenImageIO/imagebufalgo.h>
@@ -15,6 +22,25 @@
 
 namespace colmap {
 namespace {
+
+struct BitmapReaderRegistry {
+  struct Entry {
+    const ScopedBitmapReader* owner;
+    std::weak_ptr<ScopedBitmapReader> reader;
+  };
+  std::mutex mutex;
+  FlatHashMap<std::string, Entry> entries;
+  std::atomic<size_t> count{0};
+};
+
+BitmapReaderRegistry& ReaderRegistry() {
+  static BitmapReaderRegistry registry;
+  return registry;
+}
+
+std::string ReaderPath(const std::filesystem::path& path) {
+  return std::filesystem::absolute(path).lexically_normal().generic_string();
+}
 
 struct OIIOMetaData : public Bitmap::MetaData {
   OIIOMetaData() = default;
@@ -116,6 +142,118 @@ bool IsEquivalentColorSpace(const std::string_view& colorspace1,
 }
 
 }  // namespace
+
+ScopedBitmapReader::ScopedBitmapReader(
+    std::vector<std::string> paths,
+    Callback callback,
+    FlatHashMap<std::string, std::pair<int, int>> image_sizes)
+    : paths_(std::move(paths)),
+      callback_(std::move(callback)),
+      image_sizes_(std::move(image_sizes)) {}
+
+std::shared_ptr<ScopedBitmapReader> ScopedBitmapReader::Create(
+    const std::vector<std::filesystem::path>& paths,
+    Callback callback,
+    const std::vector<std::pair<int, int>>& image_sizes_wh) {
+  if (paths.empty() || !callback) {
+    throw std::invalid_argument(
+        "Bitmap reader requires an exact roster/callback");
+  }
+  if (!image_sizes_wh.empty() && image_sizes_wh.size() != paths.size()) {
+    throw std::invalid_argument(
+        "Bitmap reader dimensions must cover its exact roster");
+  }
+  FlatHashMap<std::string, std::pair<int, int>> image_sizes;
+  std::vector<std::string> keys;
+  FlatHashSet<std::string> unique;
+  keys.reserve(paths.size());
+  for (const auto& path : paths) {
+    if (!path.is_absolute()) {
+      throw std::invalid_argument("Bitmap reader paths must be absolute");
+    }
+    auto key = ReaderPath(path);
+    if (!unique.insert(key).second) {
+      throw std::invalid_argument("Bitmap reader roster has duplicate paths");
+    }
+    keys.push_back(std::move(key));
+    if (!image_sizes_wh.empty()) {
+      const auto size = image_sizes_wh.at(keys.size() - 1);
+      if (size.first <= 0 || size.second <= 0 ||
+          size.first > std::numeric_limits<int>::max() / 3 ||
+          size.second > std::numeric_limits<int>::max() / (size.first * 3)) {
+        throw std::invalid_argument(
+            "Bitmap reader RGB8 dimensions are invalid");
+      }
+      image_sizes.emplace(keys.back(), size);
+    }
+  }
+  auto reader = std::shared_ptr<ScopedBitmapReader>(new ScopedBitmapReader(
+      std::move(keys), std::move(callback), std::move(image_sizes)));
+  auto& registry = ReaderRegistry();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  for (const auto& key : reader->paths_) {
+    const auto found = registry.entries.find(key);
+    if (found != registry.entries.end() && !found->second.reader.expired()) {
+      // Unlock before the unregistered reader's destructor calls Close.
+      throw std::invalid_argument("Bitmap reader path already has an owner");
+    }
+  }
+  for (const auto& key : reader->paths_) {
+    registry.entries[key] = {reader.get(), reader};
+  }
+  registry.count.store(registry.entries.size(), std::memory_order_release);
+  return reader;
+}
+
+std::shared_ptr<ScopedBitmapReader> ScopedBitmapReader::Find(
+    const std::filesystem::path& path) {
+  auto& registry = ReaderRegistry();
+  // Stock Bitmap readers incur no path normalization/mutex when unused.
+  if (!registry.count.load(std::memory_order_acquire)) return nullptr;
+  const auto key = ReaderPath(path);
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  const auto found = registry.entries.find(key);
+  return found == registry.entries.end() ? nullptr
+                                         : found->second.reader.lock();
+}
+
+ScopedBitmapReader::~ScopedBitmapReader() { Close(); }
+
+void ScopedBitmapReader::Close() {
+  auto& registry = ReaderRegistry();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  for (const auto& key : paths_) {
+    const auto found = registry.entries.find(key);
+    if (found != registry.entries.end() && found->second.owner == this) {
+      registry.entries.erase(key);
+    }
+  }
+  registry.count.store(registry.entries.size(), std::memory_order_release);
+}
+
+bool ScopedBitmapReader::Read(const std::filesystem::path& path,
+                              bool as_rgb,
+                              bool linearize_colorspace,
+                              Bitmap* target) const {
+  const auto key = ReaderPath(path);
+  const bool read = callback_(
+      std::filesystem::path(key), as_rgb, linearize_colorspace, target);
+  const auto expected = image_sizes_.find(key);
+  if (read && expected != image_sizes_.end() &&
+      (target->Width() != expected->second.first ||
+       target->Height() != expected->second.second)) {
+    throw std::invalid_argument(
+        "Bitmap payload grid differs from its declared resident dimensions");
+  }
+  return read;
+}
+
+std::optional<std::pair<int, int>> ScopedBitmapReader::ImageSize(
+    const std::filesystem::path& path) const {
+  const auto found = image_sizes_.find(ReaderPath(path));
+  if (found == image_sizes_.end()) return std::nullopt;
+  return found->second;
+}
 
 Bitmap::Bitmap()
     : width_(0), height_(0), channels_(0), linear_colorspace_(false) {
@@ -372,6 +510,9 @@ std::optional<double> Bitmap::ExifAltitude() const {
 bool Bitmap::Read(const std::filesystem::path& path,
                   const bool as_rgb,
                   const bool linearize_colorspace) {
+  if (auto reader = ScopedBitmapReader::Find(path)) {
+    return reader->Read(path, as_rgb, linearize_colorspace, this);
+  }
   if (!ExistsFile(path)) {
     VLOG(3) << "Failed to read bitmap, because file does not exist";
     return false;
@@ -616,6 +757,19 @@ void Bitmap::Crop(const int left,
 
 Bitmap Bitmap::Clone() const { return *this; }
 
+void ConvertPackedRGB8ToGrey(const uint8_t* rgb,
+                             size_t num_pixels,
+                             uint8_t* gray) {
+  for (size_t i = 0; i < num_pixels; ++i) {
+    // Same expression/order as the original CloneAsGrey loop. Non-negative
+    // weighted sum plus 0.5 permits truncation and compiler vectorization.
+    // NOLINTNEXTLINE(bugprone-incorrect-roundings)
+    gray[i] =
+        static_cast<uint8_t>(.2126f * rgb[3 * i + 0] + .7152f * rgb[3 * i + 1] +
+                             .0722f * rgb[3 * i + 2] + .5f);
+  }
+}
+
 Bitmap Bitmap::CloneAsGrey() const {
   if (IsGrey()) {
     return Clone();
@@ -626,14 +780,8 @@ Bitmap Bitmap::CloneAsGrey() const {
     cloned.channels_ = 1;
     cloned.linear_colorspace_ = linear_colorspace_;
     cloned.data_.resize(width_ * height_);
-    for (size_t i = 0; i < cloned.data_.size(); ++i) {
-      // The weighted sum is non-negative, so adding 0.5 before truncating is
-      // equivalent to std::round and allows the loop to be vectorized.
-      // NOLINTNEXTLINE(bugprone-incorrect-roundings)
-      cloned.data_[i] = static_cast<uint8_t>(.2126f * data_[3 * i + 0] +
-                                             .7152f * data_[3 * i + 1] +
-                                             .0722f * data_[3 * i + 2] + .5f);
-    }
+    ConvertPackedRGB8ToGrey(
+        data_.data(), cloned.data_.size(), cloned.data_.data());
     cloned.meta_data_ = OIIOMetaData::Clone(meta_data_);
     auto* cloned_meta_data = OIIOMetaData::Upcast(cloned.meta_data_.get());
     cloned_meta_data->image_spec.nchannels = 1;
