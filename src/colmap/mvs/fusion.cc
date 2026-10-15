@@ -12,6 +12,7 @@
 #include "colmap/util/timer.h"
 
 #include <algorithm>
+#include <exception>
 #include <fstream>
 #include <iterator>
 #include <tuple>
@@ -95,6 +96,7 @@ void StereoFusionOptions::Print() const {
   PrintOption(bounded_cache);
   PrintOption(bounded_cache_components);
   PrintOption(bounded_cache_neighborhood);
+  PrintOption(bounded_cache_prefill_threads);
   PrintOption(bounded_cache_compact_rgb);
   PrintOption(cache_size);
   const auto& bbox_min = bounding_box.first.transpose().eval();
@@ -116,6 +118,11 @@ bool StereoFusionOptions::Check() const {
   CHECK_OPTION_EQ((bounded_cache_compact_rgb && !bounded_cache), false);
   CHECK_OPTION_EQ((bounded_cache_components && !bounded_cache), false);
   CHECK_OPTION_EQ((bounded_cache_neighborhood && !bounded_cache), false);
+  CHECK_OPTION_GE(bounded_cache_prefill_threads, -1);
+  CHECK_OPTION_NE(bounded_cache_prefill_threads, 0);
+  CHECK_OPTION_EQ(
+      (bounded_cache_prefill_threads != -1 && !bounded_cache_neighborhood),
+      false);
   CHECK_OPTION_GE(full_ram_load_threads, -1);
   CHECK_OPTION_NE(full_ram_load_threads, 0);
   CHECK_OPTION_EQ((full_ram_load_threads != -1 && (use_cache || bounded_cache)),
@@ -154,12 +161,17 @@ std::optional<BoundedWorkspace::CacheStats> StereoFusion::GetBoundedCacheStats()
   return bounded_workspace_->GetCacheStats();
 }
 
+size_t StereoFusion::GetMaxBoundedPrefillLanesScheduled() const {
+  return max_bounded_prefill_lanes_scheduled_;
+}
+
 void StereoFusion::Run() {
   Timer run_timer;
   run_timer.Start();
 
   fused_points_.clear();
   fused_points_visibility_.clear();
+  max_bounded_prefill_lanes_scheduled_ = 0;
 
   options_.Print();
 
@@ -303,6 +315,23 @@ void StereoFusion::Run() {
 
   LOG(INFO) << StringPrintf("Starting fusion with %d threads", num_threads);
   ThreadPool thread_pool(num_threads);
+  // Only an explicit larger prefill count needs another pool. It is created
+  // once per run and bounded by the configured image roster.
+  std::unique_ptr<ThreadPool> independent_prefill_pool;
+  if (bounded_workspace_ && options_.bounded_cache_neighborhood &&
+      options_.bounded_cache_prefill_threads > num_threads) {
+    const size_t roster_size = std::max<size_t>(
+        std::count(used_images_.begin(), used_images_.end(), true), 1);
+    const size_t workers =
+        std::min(static_cast<size_t>(options_.bounded_cache_prefill_threads),
+                 roster_size);
+    if (workers > static_cast<size_t>(num_threads)) {
+      independent_prefill_pool =
+          std::make_unique<ThreadPool>(static_cast<int>(workers));
+    }
+  }
+  ThreadPool& prefill_pool =
+      independent_prefill_pool ? *independent_prefill_pool : thread_pool;
 
   // Using a row stride of 10 to avoid starting parallel processing in rows that
   // are too close to each other which may lead to duplicated work, since nearby
@@ -349,7 +378,7 @@ void StereoFusion::Run() {
     const auto& fused_pixel_mask = fused_pixel_masks_.at(image_idx);
 
     if (bounded_workspace_ && options_.bounded_cache_neighborhood) {
-      PrepareBoundedNeighborhood(image_idx, num_threads, thread_pool);
+      PrepareBoundedNeighborhood(image_idx, num_threads, prefill_pool);
       if (CheckIfStopped()) break;
     }
 
@@ -509,20 +538,38 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
   // Distinct slots are allocated before tasks start. Even if Wait rethrows,
   // member leases outlive the pool's worker join and no pointer is published.
   neighborhood_leases_.resize(prefill_views.size());
-  const size_t lane_count = std::min(workers, prefill_views.size());
+  const size_t prefill_threads =
+      options_.bounded_cache_prefill_threads == -1
+          ? workers
+          : static_cast<size_t>(options_.bounded_cache_prefill_threads);
+  const size_t lane_count = std::min(prefill_threads, prefill_views.size());
+  max_bounded_prefill_lanes_scheduled_ =
+      std::max(max_bounded_prefill_lanes_scheduled_, lane_count);
   std::vector<std::vector<std::pair<size_t, int>>> lanes(lane_count);
   for (size_t index = 0; index < prefill_views.size(); ++index) {
     lanes[index % lane_count].emplace_back(index, prefill_views[index]);
   }
-  for (auto& lane : lanes) {
-    thread_pool.AddTask([this, component, lane = std::move(lane)]() {
-      for (const auto& [slot, view] : lane) {
-        neighborhood_leases_[slot] =
-            bounded_workspace_->AcquireComponent(view, component);
-      }
-    });
+  try {
+    for (auto& lane : lanes) {
+      thread_pool.AddTask([this, component, lane = std::move(lane)]() {
+        for (const auto& [slot, view] : lane) {
+          neighborhood_leases_[slot] =
+              bounded_workspace_->AcquireComponent(view, component);
+        }
+      });
+    }
+    thread_pool.Wait();
+  } catch (...) {
+    // AddTask can fail after earlier lanes were queued. Join them before
+    // releasing their member-owned leases or closing a resident reader scope.
+    const auto failure = std::current_exception();
+    try {
+      thread_pool.Wait();
+    } catch (...) {
+    }
+    neighborhood_leases_.clear();
+    std::rethrow_exception(failure);
   }
-  thread_pool.Wait();
   if (CheckIfStopped()) {
     neighborhood_leases_.clear();
     return;

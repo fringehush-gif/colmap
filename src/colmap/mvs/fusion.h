@@ -69,6 +69,10 @@ struct StereoFusionOptions {
   // may borrow its immutable arrays only until the root's worker join.
   bool bounded_cache_neighborhood = false;
 
+  // -1 uses the fusion pool. A positive value caps independent prefill lanes
+  // without changing the number of fusion row workers.
+  int bounded_cache_prefill_threads = -1;
+
   // Opt-in bounded-cache RGB compaction to the depth grid.
   bool bounded_cache_compact_rgb = false;
 
@@ -104,6 +108,7 @@ class StereoFusion : public BaseController {
   // Get per-point visibility lists (indices of images that observe each point).
   const std::vector<std::vector<int>>& GetFusedPointsVisibility() const;
   std::optional<BoundedWorkspace::CacheStats> GetBoundedCacheStats() const;
+  size_t GetMaxBoundedPrefillLanesScheduled() const;
 
   // Execute the depth map fusion pipeline.
   void Run();
@@ -127,6 +132,7 @@ class StereoFusion : public BaseController {
   BoundedWorkspace* bounded_workspace_ = nullptr;
   std::vector<const BoundedWorkspace::ImageData*> neighborhood_data_;
   std::vector<BoundedWorkspace::ImageLease> neighborhood_leases_;
+  size_t max_bounded_prefill_lanes_scheduled_ = 0;
   std::vector<char> used_images_;
   std::vector<char> fused_images_;
   std::vector<std::vector<int>> overlapping_images_;

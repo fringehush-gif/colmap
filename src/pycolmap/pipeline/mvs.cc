@@ -261,6 +261,12 @@ void BindMVS(py::module& m) {
               "bounded_cache_compact_rgb",
               &SFOpts::bounded_cache_compact_rgb,
               "Keep RGB8 colors at the depth-map grid in bounded mode.")
+          .def_readwrite(
+              "bounded_cache_prefill_threads",
+              &SFOpts::bounded_cache_prefill_threads,
+              "Neighborhood prefill workers: -1 follows fusion "
+              "workers, 1 is serial, positive values cap concurrency. "
+              "Non-default values require neighborhood pinning.")
           .def_readwrite("bounding_box",
                          &SFOpts::bounding_box,
                          "Bounding box Tuple[min, max]")
