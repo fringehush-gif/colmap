@@ -52,6 +52,10 @@ void BindTwoViewGeometryEstimator(py::module& m) {
       .def_readwrite("use_degensac", &TwoViewGeometryOptions::use_degensac)
       .def_readwrite("use_sampson_refinement",
                      &TwoViewGeometryOptions::use_sampson_refinement)
+      .def_readwrite("use_optimistic_essential_scoring",
+                     &TwoViewGeometryOptions::use_optimistic_essential_scoring,
+                     "Experimental essential MSAC lower-bound screening; "
+                     "disabled by default. LO and final residuals stay exact.")
       .def_readwrite("compute_relative_pose",
                      &TwoViewGeometryOptions::compute_relative_pose)
       .def_readwrite("multiple_models",

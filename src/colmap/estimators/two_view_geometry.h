@@ -99,6 +99,11 @@ struct TwoViewGeometryOptions {
   // TwoViewGeometryOptions used to robustly estimate the geometry.
   RANSACOptions ransac_options;
 
+  // Experimental sample-model MSAC lower-bound rejection before essential
+  // pose/cheirality evaluation. Local refinement and final scoring stay exact.
+  // Disabled until broader/parallel consumer performance is established.
+  bool use_optimistic_essential_scoring = false;
+
   TwoViewGeometryOptions() {
     ransac_options.max_error = 4.0;
     ransac_options.confidence = 0.999;

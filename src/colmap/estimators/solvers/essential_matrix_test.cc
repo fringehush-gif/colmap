@@ -9,6 +9,9 @@
 #include "colmap/scene/camera.h"
 #include "colmap/util/eigen_alignment.h"
 
+#include <cmath>
+#include <limits>
+
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <gtest/gtest.h>
@@ -160,6 +163,151 @@ std::vector<CamRayWithJac> WithJacobians(
         camera.CamRayFromImgWithJac(camera.ImgFromCam(rays[i]).value()).value();
   }
   return cam_rays_with_jac;
+}
+
+// A fixed, front-facing scene with substantial baseline; no random generator is
+// involved in the data or the essential-matrix reference used by these tests.
+Rigid3d DeterministicCam2FromCam1() {
+  return Rigid3d(
+      Eigen::Quaterniond(Eigen::AngleAxisd(0.12, Eigen::Vector3d::UnitY())),
+      Eigen::Vector3d(0.8, 0.1, 0.05).normalized());
+}
+
+void DeterministicEpipolarCorrespondences(const Rigid3d& cam2_from_cam1,
+                                          size_t num_rays,
+                                          std::vector<Eigen::Vector3d>* rays1,
+                                          std::vector<Eigen::Vector3d>* rays2) {
+  rays1->clear();
+  rays2->clear();
+  rays1->reserve(num_rays);
+  rays2->reserve(num_rays);
+  for (size_t i = 0; i < num_rays; ++i) {
+    const Eigen::Vector3d point((static_cast<int>(i % 10) - 4.5) * 0.2,
+                                (static_cast<int>(i / 10) - 4.0) * 0.12,
+                                2.0 + 0.09 * (i % 13));
+    rays1->push_back(point.normalized());
+    rays2->push_back((cam2_from_cam1 * point).normalized());
+  }
+}
+
+TEST(EssentialMatrixTangentSampsonEstimator,
+     OptimisticResidualsBoundCheiralityGatedResiduals) {
+  const Camera camera = Camera::CreateFromModelId(
+      1, CameraModelId::kEquirectangular, /*focal_length=*/0.0, 1000, 500);
+  const Rigid3d cam2_from_cam1 = DeterministicCam2FromCam1();
+  const Eigen::Matrix3d E = EssentialMatrixFromPose(cam2_from_cam1);
+  std::vector<Eigen::Vector3d> rays1;
+  std::vector<Eigen::Vector3d> rays2;
+  DeterministicEpipolarCorrespondences(cam2_from_cam1, 40, &rays1, &rays2);
+  // Negating the second bearing preserves the epipolar equation while moving
+  // its triangulated point behind that camera for the majority-selected pose.
+  for (size_t i = 0; i < 4; ++i) rays2[i] = -rays2[i];
+  const auto crj1 = WithJacobians(camera, rays1);
+  const auto crj2 = WithJacobians(camera, rays2);
+
+  std::vector<double> optimistic;
+  std::vector<double> exact;
+  EssentialMatrixTangentSampsonEstimator::OptimisticResiduals(
+      crj1, crj2, E, &optimistic);
+  EssentialMatrixTangentSampsonEstimator::Residuals(crj1, crj2, E, &exact);
+  ASSERT_EQ(optimistic.size(), rays1.size());
+  ASSERT_EQ(exact.size(), rays1.size());
+  size_t gated = 0;
+  size_t accepted = 0;
+  for (size_t i = 0; i < rays1.size(); ++i) {
+    EXPECT_TRUE(std::isfinite(optimistic[i]));
+    EXPECT_GE(optimistic[i], 0.0);
+    EXPECT_LE(optimistic[i], exact[i]);
+    if (exact[i] == std::numeric_limits<double>::max()) {
+      ++gated;
+    } else {
+      ++accepted;
+    }
+  }
+  EXPECT_GE(gated, 1);
+  EXPECT_GE(accepted, 30);
+}
+
+TEST(EssentialMatrixTangentSampsonEstimator,
+     OptimisticLORANSACMatchesExactMSACWithGrossOutliers) {
+  const Camera camera = Camera::CreateFromModelId(
+      1, CameraModelId::kEquirectangular, /*focal_length=*/0.0, 1000, 500);
+  const Rigid3d cam2_from_cam1 = DeterministicCam2FromCam1();
+  std::vector<Eigen::Vector3d> rays1;
+  std::vector<Eigen::Vector3d> rays2;
+  DeterministicEpipolarCorrespondences(cam2_from_cam1, 100, &rays1, &rays2);
+  for (size_t i = 0; i < 30; ++i) {  // 30% gross outliers.
+    rays2[i] =
+        Eigen::Vector3d(0.6 + 0.03 * i, -0.7 + 0.02 * i, -0.4).normalized();
+  }
+  const auto crj1 = WithJacobians(camera, rays1);
+  const auto crj2 = WithJacobians(camera, rays2);
+  RANSACOptions options;
+  options.max_error = 2.0;  // pixels
+  options.min_num_trials = 64;
+  options.max_num_trials = 64;
+  options.random_seed = 20261010;
+  options.num_threads = 1;
+  const auto estimate = [&](const bool enabled) {
+    LORANSAC<EssentialMatrixTangentSampsonEstimator,
+             EssentialMatrixTangentSampsonEstimator,
+             MEstimatorSupportMeasurer>
+        ransac(options, EssentialMatrixTangentSampsonEstimator(enabled));
+    return ransac.Estimate(crj1, crj2);
+  };
+  const auto exact = estimate(false);
+  const auto screened = estimate(true);
+  ASSERT_TRUE(exact.success);
+  ASSERT_TRUE(screened.success);
+  EXPECT_GE(exact.support.num_inliers, 60);
+  EXPECT_EQ(screened.support.num_inliers, exact.support.num_inliers);
+  EXPECT_DOUBLE_EQ(screened.support.score, exact.support.score);
+  EXPECT_EQ(screened.inlier_mask, exact.inlier_mask);
+  EXPECT_TRUE(screened.model.isApprox(exact.model, 0.0));
+}
+
+TEST(EssentialMatrixTangentSampsonEstimator,
+     OptimisticResidualsBoundFullScoring) {
+  const Camera camera = Camera::CreateFromModelId(
+      1, CameraModelId::kEquirectangular, 0.0, 1000, 500);
+  for (int trial = 0; trial < 8; ++trial) {
+    const auto pose = TestCam2FromCam1();
+    const Eigen::Matrix3d E = EssentialMatrixFromPose(pose);
+    std::vector<Eigen::Vector3d> rays1, rays2;
+    RandomEpipolarCorrespondences(pose, 30, false, rays1, rays2);
+    // Include inconsistent pairs alongside the epipolar correspondences.
+    for (size_t i = 1; i < rays2.size(); i += 3) rays2[i] = -rays2[i];
+    const auto first = WithJacobians(camera, rays1);
+    const auto second = WithJacobians(camera, rays2);
+    for (int boundary = 0; boundary < 3; ++boundary) {
+      auto X = first;
+      auto Y = second;
+      if (boundary == 1) {
+        X[0].jacobian.setZero();
+        Y[0].jacobian.setZero();
+      } else if (boundary == 2) {
+        X[0].jacobian.setConstant(std::numeric_limits<double>::quiet_NaN());
+      }
+      std::vector<double> lower, full;
+      EssentialMatrixTangentSampsonEstimator::OptimisticResiduals(
+          X, Y, E, &lower);
+      EssentialMatrixTangentSampsonEstimator::Residuals(X, Y, E, &full);
+      ASSERT_EQ(lower.size(), X.size());
+      ASSERT_EQ(full.size(), X.size());
+      if (boundary == 2) {
+        EXPECT_TRUE(std::isnan(lower[0]));
+        EXPECT_FALSE(internal::CannotImproveOptimisticMSAC(lower, 4.0, 1.0));
+      }
+      for (size_t i = 0; i < lower.size(); ++i) {
+        if (std::isfinite(lower[i])) {
+          EXPECT_GE(lower[i], 0.0);
+          EXPECT_LE(lower[i], full[i]);
+        } else {
+          EXPECT_FALSE(internal::CannotImproveOptimisticMSAC(lower, 4.0, 1.0));
+        }
+      }
+    }
+  }
 }
 
 // Refine recovers the true pose from a perturbed initial E on exact rays.

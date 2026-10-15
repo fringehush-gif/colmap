@@ -557,7 +557,9 @@ TwoViewGeometry EstimateSphericalTwoViewGeometry(
   LORANSAC<EssentialMatrixTangentSampsonEstimator,
            EssentialMatrixTangentSampsonEstimator,
            MEstimatorSupportMeasurer>
-      E_ransac(RansacOptionsWithMinInlierRatio(options));
+      E_ransac(RansacOptionsWithMinInlierRatio(options),
+               EssentialMatrixTangentSampsonEstimator(
+                   options.use_optimistic_essential_scoring));
   const auto E_report =
       E_ransac.Estimate(matched_cam_rays1_with_jac, matched_cam_rays2_with_jac);
   geometry.E = E_report.model;
@@ -1108,7 +1110,9 @@ TwoViewGeometry EstimateCalibratedTwoViewGeometry(
   LORANSAC<EssentialMatrixTangentSampsonEstimator,
            EssentialMatrixTangentSampsonEstimator,
            MEstimatorSupportMeasurer>
-      E_ransac(ransac_options);
+      E_ransac(ransac_options,
+               EssentialMatrixTangentSampsonEstimator(
+                   options.use_optimistic_essential_scoring));
   const auto E_report =
       E_ransac.Estimate(matched_cam_rays1_with_jac, matched_cam_rays2_with_jac);
   geometry.E = E_report.model;
