@@ -7,6 +7,7 @@
 #include "colmap/util/string.h"
 #include "colmap/util/types.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -110,6 +111,7 @@ class BaseOptionManager {
 
   std::vector<std::pair<std::string, const bool*>> options_bool_;
   std::vector<std::pair<std::string, const int*>> options_int_;
+  std::vector<std::pair<std::string, const int64_t*>> options_int64_;
   std::vector<std::pair<std::string, const double*>> options_double_;
   std::vector<std::pair<std::string, const std::string*>> options_string_;
   std::vector<std::pair<std::string, const std::filesystem::path*>>
@@ -195,6 +197,8 @@ void BaseOptionManager::RegisterOption(const std::string& name,
     options_bool_.emplace_back(name, reinterpret_cast<const bool*>(option));
   } else if constexpr (std::is_same<T, int>::value) {
     options_int_.emplace_back(name, reinterpret_cast<const int*>(option));
+  } else if constexpr (std::is_same<T, int64_t>::value) {
+    options_int64_.emplace_back(name, option);
   } else if constexpr (std::is_same<T, double>::value) {
     options_double_.emplace_back(name, reinterpret_cast<const double*>(option));
   } else if constexpr (std::is_same<T, std::string>::value) {
