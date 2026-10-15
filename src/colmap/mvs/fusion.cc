@@ -24,6 +24,11 @@
 
 namespace colmap {
 namespace mvs {
+namespace {
+// A source hypothesis: one immutable row band per owner. This is not a
+// measured optimum and does not alter any sampled FP32 value.
+constexpr size_t kMappedNormalStripeRows = 256;
+}  // namespace
 namespace internal {
 
 std::vector<int> FusionNeighborhood(
@@ -140,7 +145,10 @@ bool StereoFusionOptions::Check() const {
                     bounded_cache_normal_mapped_bytes == 0)),
                   false);
   CHECK_OPTION_EQ((bounded_cache_normal_tile_size == 0 &&
-                   bounded_cache_normal_mapped_bytes > 0),
+                   bounded_cache_normal_mapped_bytes > 0 &&
+                   (!bounded_cache || !bounded_cache_components ||
+                    bounded_cache_neighborhood || num_threads != 1 ||
+                    bounded_cache_normal_mapped_files < 2)),
                   false);
   CHECK_OPTION_EQ((bounded_cache_neighborhood && !bounded_cache), false);
   CHECK_OPTION_GE(bounded_cache_prefill_threads, -1);
@@ -212,7 +220,8 @@ std::optional<std::string> StereoFusion::GetBoundedCacheDiagnosticRow() const {
   std::ostringstream row;
   row.imbue(std::locale::classic());
   row << "COLMAP_FUSION_CACHE_DIAGNOSTIC_V1"
-      << " tile_mode=" << (options_.bounded_cache_normal_tile_size > 0);
+      << " tile_mode=" << (options_.bounded_cache_normal_tile_size > 0)
+      << " direct_mapped_mode=" << direct_mapped_normals_;
   const auto cache = GetBoundedCacheStats();
   if (cache) {
     row << " decoded_capacity_bytes=" << cache->capacity_bytes
@@ -228,21 +237,37 @@ std::optional<std::string> StereoFusion::GetBoundedCacheDiagnosticRow() const {
     row << " decoded_cache=unavailable";
   }
 
-  if (options_.bounded_cache_normal_tile_size > 0 && cache) {
+  if (options_.bounded_cache_normal_mapped_bytes > 0 && cache) {
     const auto mapped = GetMappedNormalStats();
-    const auto ring = GetNormalTileRingStats();
     row << " mapped_capacity_bytes=" << mapped.capacity_bytes
         << " mapped_capacity_files=" << mapped.capacity_files
+        << " mapped_capacity_regions=" << mapped.capacity_regions
         << " mapped_peak_charged_bytes=" << mapped.peak_charged_bytes
         << " mapped_peak_charged_files=" << mapped.peak_charged_files
+        << " mapped_peak_charged_regions=" << mapped.peak_charged_regions
         << " mapped_loads=" << mapped.loads << " mapped_hits=" << mapped.hits
         << " mapped_waits=" << mapped.waits
         << " mapped_evictions=" << mapped.evictions
         << " mapped_active_copies=" << mapped.active_copies
-        << " ring_hits=" << ring.hits << " ring_misses=" << ring.misses
-        << " ring_indexed_lookups=" << ring.indexed_lookups
-        << " ring_hint_checks=" << ring.hint_checks
-        << " ring_hint_hits=unavailable";
+        << " mapped_source_loads=" << mapped.source_loads
+        << " mapped_source_hits=" << mapped.source_hits
+        << " mapped_source_evictions=" << mapped.source_evictions
+        << " mapped_source_charged_files=" << mapped.source_charged_files
+        << " mapped_source_peak_charged_files="
+        << mapped.source_peak_charged_files
+        << " mapped_source_live_files=" << mapped.source_live_files
+        << " mapped_source_peak_live_files=" << mapped.source_peak_live_files;
+    if (direct_mapped_normals_) {
+      row << " direct_ring_slots=" << mapped_normal_ring_.size()
+          << " direct_window_rows=" << kMappedNormalStripeRows
+          << " direct_ring_hits=unavailable";
+    } else {
+      const auto ring = GetNormalTileRingStats();
+      row << " ring_hits=" << ring.hits << " ring_misses=" << ring.misses
+          << " ring_indexed_lookups=" << ring.indexed_lookups
+          << " ring_hint_checks=" << ring.hint_checks
+          << " ring_hint_hits=unavailable";
+    }
   } else {
     row << " mapped_normal=unavailable ring=unavailable";
   }
@@ -257,6 +282,11 @@ void StereoFusion::Run() {
   fused_points_visibility_.clear();
   max_bounded_prefill_lanes_scheduled_ = 0;
   normal_tile_rings_.clear();
+  mapped_normal_ring_.clear();
+  mapped_normal_ring_index_.Clear();
+  mapped_normal_next_ = 0;
+  direct_mapped_normals_ = options_.bounded_cache_normal_tile_size == 0 &&
+                           options_.bounded_cache_normal_mapped_bytes > 0;
   normal_tile_worker_headroom_ = 0;
 
   options_.Print();
@@ -403,6 +433,43 @@ void StereoFusion::Run() {
             .transpose();
   }
 
+  if (direct_mapped_normals_) {
+    THROW_CHECK_EQ(num_threads, 1);
+    const auto mapped = bounded_workspace_->GetMappedNormalStats();
+    size_t largest = 0, used = 0;
+    for (size_t index = 0; index < used_images_.size(); ++index) {
+      if (!used_images_[index]) continue;
+      ++used;
+      const auto grid =
+          bounded_workspace_->GetNormalTileGrid(static_cast<int>(index));
+      for (size_t begin = 0; begin < grid.second;) {
+        const size_t count =
+            std::min(kMappedNormalStripeRows, grid.second - begin);
+        largest =
+            std::max(largest,
+                     bounded_workspace_->GetMappedNormalWindowReservationBytes(
+                         static_cast<int>(index), begin, count));
+        begin += count;
+      }
+    }
+    if (used) {
+      THROW_CHECK_GT(largest, 0);
+      THROW_CHECK_LE(largest, mapped.capacity_bytes);
+      const size_t owners_by_bytes = mapped.capacity_bytes / largest;
+      THROW_CHECK_GE(owners_by_bytes, 2)
+          << "Mapped normal stripes need one retained owner and one incoming";
+      THROW_CHECK_GE(mapped.capacity_files, 2);
+      THROW_CHECK_GE(mapped.capacity_regions / 3, 2);
+      const size_t retained = std::min(
+          {static_cast<size_t>(options_.bounded_cache_normal_tile_slots),
+           mapped.capacity_files - 1,
+           mapped.capacity_regions / 3 - 1,
+           owners_by_bytes - 1});
+      THROW_CHECK_GT(retained, 0);
+      mapped_normal_ring_.resize(retained);
+      mapped_normal_ring_index_.Reset(model.images.size(), retained);
+    }
+  }
   if (options_.bounded_cache_normal_tile_size > 0) {
     size_t largest_component = 0, largest_tile = 0;
     using Component = BoundedWorkspace::Component;
@@ -520,6 +587,7 @@ void StereoFusion::Run() {
     }
     thread_pool.Wait();
     ClearNormalTileRings();
+    ClearMappedNormalRing();
 
     num_fused_images += 1;
     fused_images_.at(image_idx) = true;
@@ -576,6 +644,62 @@ void StereoFusion::ClearNormalTileRings() {
       slot.image_idx = -1;
     }
   }
+}
+
+void StereoFusion::ClearMappedNormalRing() {
+  // Only the single joined row worker may have borrowed these owners.
+  mapped_normal_ring_index_.Clear();
+  for (auto& slot : mapped_normal_ring_) {
+    slot.lease.reset();
+    slot.image_idx = -1;
+    slot.row_begin = slot.row_count = 0;
+  }
+}
+
+const ImmutableMapRegion* StereoFusion::AcquireWorkerMappedNormal(
+    const int image_idx, const int row) {
+  THROW_CHECK_GE(row, 0);
+  const size_t sample_row = static_cast<size_t>(row);
+  const size_t band = sample_row / kMappedNormalStripeRows;
+  const size_t found = mapped_normal_ring_index_.Find(image_idx, band);
+  if (found < mapped_normal_ring_.size()) {
+    const auto& slot = mapped_normal_ring_[found];
+    THROW_CHECK_EQ(slot.image_idx, image_idx);
+    THROW_CHECK(slot.lease);
+    THROW_CHECK_LE(slot.row_begin, sample_row);
+    THROW_CHECK_LT(sample_row - slot.row_begin, slot.row_count);
+    return slot.lease.get();
+  }
+  THROW_CHECK(!mapped_normal_ring_.empty());
+  const size_t slot_index = mapped_normal_next_;
+  auto& slot = mapped_normal_ring_[slot_index];
+  mapped_normal_next_ = (mapped_normal_next_ + 1) % mapped_normal_ring_.size();
+  if (slot.lease) {
+    THROW_CHECK(mapped_normal_ring_index_.Erase(
+        slot.image_idx, slot.row_begin / kMappedNormalStripeRows, slot_index));
+  }
+  slot.lease.reset();  // Release victim before a potentially waiting acquire.
+  slot.image_idx = -1;
+  slot.row_begin = slot.row_count = 0;
+  const auto grid = bounded_workspace_->GetNormalTileGrid(image_idx);
+  THROW_CHECK_LT(sample_row, grid.second);
+  const size_t begin =
+      sample_row / kMappedNormalStripeRows * kMappedNormalStripeRows;
+  const size_t count = std::min(kMappedNormalStripeRows, grid.second - begin);
+  slot.lease =
+      bounded_workspace_->AcquireMappedNormalWindow(image_idx, begin, count);
+  slot.image_idx = image_idx;
+  slot.row_begin = begin;
+  slot.row_count = count;
+  try {
+    THROW_CHECK(mapped_normal_ring_index_.Insert(image_idx, band, slot_index));
+  } catch (...) {
+    slot.lease.reset();
+    slot.image_idx = -1;
+    slot.row_begin = slot.row_count = 0;
+    throw;
+  }
+  return slot.lease.get();
 }
 
 const BoundedWorkspace::ImageData* StereoFusion::AcquireWorkerNormalTile(
@@ -918,9 +1042,12 @@ void StereoFusion::Fuse(const int thread_id,
         options_.bounded_cache_normal_tile_size > 0
             ? AcquireWorkerNormalTile(thread_id, image_idx, row, col)
             : nullptr;
+    const auto* mapped_normal = direct_mapped_normals_
+                                    ? AcquireWorkerMappedNormal(image_idx, row)
+                                    : nullptr;
     auto normal_lease =
         bounded_workspace_ && options_.bounded_cache_components &&
-                !tile_image &&
+                !tile_image && !mapped_normal &&
                 (!image_data || image_data->normal_map.GetWidth() == 0)
             ? bounded_workspace_->AcquireComponent(
                   image_idx, BoundedWorkspace::Component::kNormal)
@@ -928,14 +1055,15 @@ void StereoFusion::Fuse(const int thread_id,
     const auto* normal_image = tile_image     ? tile_image
                                : normal_lease ? normal_lease.get()
                                               : image_data;
-    const auto normal_map = normal_image
+    const auto normal_map = normal_image || mapped_normal
                                 ? std::shared_ptr<const NormalMap>()
                                 : workspace_->GetNormalMapLease(image_idx);
     const Eigen::Vector3f local_normal =
-        normal_image ? normal_image->GetNormal(row, col)
-                     : Eigen::Vector3f(normal_map->Get(row, col, 0),
-                                       normal_map->Get(row, col, 1),
-                                       normal_map->Get(row, col, 2));
+        mapped_normal  ? mapped_normal->ReadFloat3(row, col)
+        : normal_image ? normal_image->GetNormal(row, col)
+                       : Eigen::Vector3f(normal_map->Get(row, col, 0),
+                                         normal_map->Get(row, col, 1),
+                                         normal_map->Get(row, col, 2));
     const Eigen::Vector3f normal = inv_R_.at(image_idx) * local_normal;
     normal_lease.reset();
 

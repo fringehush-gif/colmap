@@ -9,6 +9,7 @@
 #include "colmap/util/string.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
@@ -262,19 +263,144 @@ BoundedWorkspace::MappedNormalPool::Lease::~Lease() {
 
 BoundedWorkspace::MappedNormalPool::MappedNormalPool(const size_t bytes,
                                                      const size_t files) {
+  THROW_CHECK_LE(files, std::numeric_limits<size_t>::max() / 3);
   stats.capacity_bytes = bytes;
   stats.capacity_files = files;
+  stats.capacity_regions = files * 3;
 }
 
 BoundedWorkspace::MappedNormalPool::Lease
 BoundedWorkspace::MappedNormalPool::Acquire(const int image_idx,
                                             const std::filesystem::path& path) {
-  // Only FP32 normal files use this pool; image_idx is therefore an exact key.
+  return AcquireImpl(Key{image_idx, 0, 0}, path);
+}
+
+BoundedWorkspace::MappedNormalPool::Lease
+BoundedWorkspace::MappedNormalPool::Acquire(const int image_idx,
+                                            const std::filesystem::path& path,
+                                            const size_t row_begin,
+                                            const size_t row_count) {
+  THROW_CHECK_GT(row_count, 0);
+  return AcquireImpl(Key{image_idx, row_begin, row_count}, path);
+}
+
+std::shared_ptr<const ImmutableMapSource>
+BoundedWorkspace::MappedNormalPool::AcquireSource(
+    const int image_idx, const std::filesystem::path& path) {
+  std::unique_lock<std::mutex> lock(mutex);
+  for (;;) {
+    auto found = sources.find(image_idx);
+    if (found != sources.end()) {
+      THROW_CHECK_EQ(found->second.path, path);
+      if (found->second.loading) {
+        ++stats.waits;
+        changed.wait(lock);
+        continue;
+      }
+      found->second.last_access = ++clock;
+      ++stats.source_hits;
+      return found->second.source;
+    }
+    if (sources.size() + sources_closing >= stats.capacity_files) {
+      auto victim = sources.end();
+      for (auto it = sources.begin(); it != sources.end(); ++it) {
+        if (it->second.loading) continue;
+        bool pinned = false;
+        for (const auto& [key, entry] : entries) {
+          if (std::get<0>(key) == it->first &&
+              (entry.loading || entry.pins != 0)) {
+            pinned = true;
+            break;
+          }
+        }
+        if (!pinned && (victim == sources.end() ||
+                        it->second.last_access < victim->second.last_access)) {
+          victim = it;
+        }
+      }
+      if (victim == sources.end()) {
+        ++stats.waits;
+        changed.wait(lock);
+        continue;
+      }
+      // A cached, unpinned stripe still owns its source. Retire those stripes
+      // first so a single-FD pool can make forward progress for a new image.
+      for (auto it = entries.begin(); it != entries.end();) {
+        if (std::get<0>(it->first) != victim->first) {
+          ++it;
+          continue;
+        }
+        stats.resident_bytes -= it->second.owner->GetMappingBytes();
+        --stats.resident_files;
+        stats.resident_regions -= it->second.regions;
+        it = entries.erase(it);
+        ++stats.evictions;
+      }
+      // A caller may temporarily hold a source while waiting on stripe
+      // capacity; it releases that reference before sleeping below.
+      if (victim->second.source.use_count() != 1) {
+        ++stats.waits;
+        changed.wait_for(lock, std::chrono::milliseconds(10));
+        continue;
+      }
+      auto retired = std::move(victim->second.source);
+      sources.erase(victim);
+      ++sources_closing;
+      ++stats.source_evictions;
+      lock.unlock();
+      retired
+          .reset();  // Close outside the pool mutex before reusing its FD slot.
+      lock.lock();
+      --sources_closing;
+      --stats.source_live_files;
+      stats.source_charged_files = sources.size() + sources_closing;
+      changed.notify_all();
+      continue;
+    }
+    SourceEntry pending;
+    pending.path = path;
+    const bool inserted = sources.emplace(image_idx, std::move(pending)).second;
+    THROW_CHECK(inserted);
+    stats.source_charged_files = sources.size() + sources_closing;
+    stats.source_peak_charged_files =
+        std::max(stats.source_peak_charged_files, stats.source_charged_files);
+    lock.unlock();
+    std::shared_ptr<const ImmutableMapSource> source;
+    try {
+      source = std::make_shared<ImmutableMapSource>(path);
+    } catch (...) {
+      lock.lock();
+      sources.erase(image_idx);
+      stats.source_charged_files = sources.size() + sources_closing;
+      changed.notify_all();
+      throw;
+    }
+    lock.lock();
+    auto& ready = sources.at(image_idx);
+    ready.source = source;
+    ready.loading = false;
+    ready.last_access = ++clock;
+    ++stats.source_loads;
+    ++stats.source_live_files;
+    stats.source_peak_live_files =
+        std::max(stats.source_peak_live_files, stats.source_live_files);
+    changed.notify_all();
+    return source;
+  }
+}
+
+BoundedWorkspace::MappedNormalPool::Lease
+BoundedWorkspace::MappedNormalPool::AcquireImpl(
+    const Key key, const std::filesystem::path& path) {
+  // The third key component distinguishes a full owner from every stripe.
+  const bool window = std::get<2>(key) != 0;
+  const size_t regions = window ? 3 : 1;
   std::unique_lock<std::mutex> lock(mutex);
   size_t requested = 0;
   bool reservation_known = false;
+  std::shared_ptr<const ImmutableMapSource> source;
   for (;;) {
-    auto found = entries.find(image_idx);
+    auto found = entries.find(key);
     if (found != entries.end()) {
       if (found->second.loading) {
         ++stats.waits;
@@ -292,16 +418,22 @@ BoundedWorkspace::MappedNormalPool::Acquire(const int image_idx,
       // exact image's mapped file, so only a new mapping needs filesystem
       // reservation metadata. Recheck the key after dropping the lock.
       lock.unlock();
-      requested = ImmutableMapRegion::GetMappingReservationBytes(path);
+      source = AcquireSource(std::get<0>(key), path);
+      requested = window ? source->GetWindowReservationBytes(std::get<1>(key),
+                                                             std::get<2>(key))
+                         : source->GetMappingReservationBytes();
       lock.lock();
       reservation_known = true;
       continue;
     }
     THROW_CHECK_LE(requested, stats.capacity_bytes);
+    THROW_CHECK_LE(regions, stats.capacity_regions);
     while (requested > stats.capacity_bytes - stats.resident_bytes -
                            stats.reserved_bytes ||
            stats.resident_files + stats.reserved_files >=
-               stats.capacity_files) {
+               stats.capacity_files ||
+           regions > stats.capacity_regions - stats.resident_regions -
+                         stats.reserved_regions) {
       auto victim = entries.end();
       for (auto it = entries.begin(); it != entries.end(); ++it) {
         if (!it->second.loading && it->second.pins == 0 &&
@@ -313,48 +445,64 @@ BoundedWorkspace::MappedNormalPool::Acquire(const int image_idx,
       if (victim == entries.end()) break;
       stats.resident_bytes -= victim->second.owner->GetMappingBytes();
       --stats.resident_files;
+      stats.resident_regions -= victim->second.regions;
       entries.erase(victim);  // Unmap/close before freeing the charge.
       ++stats.evictions;
     }
     if (requested > stats.capacity_bytes - stats.resident_bytes -
                         stats.reserved_bytes ||
-        stats.resident_files + stats.reserved_files >= stats.capacity_files) {
+        stats.resident_files + stats.reserved_files >= stats.capacity_files ||
+        regions > stats.capacity_regions - stats.resident_regions -
+                      stats.reserved_regions) {
+      source.reset();
+      reservation_known = false;
       ++stats.waits;
       changed.wait(lock);
       continue;
     }
-    auto [inserted, fresh] = entries.try_emplace(image_idx);
+    auto [inserted, fresh] = entries.try_emplace(key);
     THROW_CHECK(fresh);
     inserted->second.pins = 1;
     inserted->second.reserved_bytes = requested;
+    inserted->second.regions = regions;
     stats.reserved_bytes += requested;
     ++stats.reserved_files;
+    stats.reserved_regions += regions;
     stats.peak_charged_bytes = std::max(
         stats.peak_charged_bytes, stats.resident_bytes + stats.reserved_bytes);
     stats.peak_charged_files = std::max(
         stats.peak_charged_files, stats.resident_files + stats.reserved_files);
+    stats.peak_charged_regions =
+        std::max(stats.peak_charged_regions,
+                 stats.resident_regions + stats.reserved_regions);
     lock.unlock();
     std::unique_ptr<ImmutableMapRegion> owner;
     try {
-      owner = std::make_unique<ImmutableMapRegion>(path);
+      owner = window ? std::make_unique<ImmutableMapRegion>(
+                           source, std::get<1>(key), std::get<2>(key))
+                     : std::make_unique<ImmutableMapRegion>(source);
       THROW_CHECK_LE(owner->GetMappingBytes(), requested);
+      THROW_CHECK_EQ(owner->GetMappingRegionCount(), regions);
     } catch (...) {
       lock.lock();
-      entries.erase(image_idx);
+      entries.erase(key);
       stats.reserved_bytes -= requested;
       --stats.reserved_files;
+      stats.reserved_regions -= regions;
       changed.notify_all();
       throw;
     }
     lock.lock();
-    auto& entry = entries.at(image_idx);
+    auto& entry = entries.at(key);
     entry.owner = std::move(owner);
     entry.loading = false;
     entry.last_access = ++clock;
     stats.reserved_bytes -= requested;
     --stats.reserved_files;
+    stats.reserved_regions -= regions;
     stats.resident_bytes += entry.owner->GetMappingBytes();
     ++stats.resident_files;
+    stats.resident_regions += regions;
     ++stats.loads;
     ++stats.active_copies;
     changed.notify_all();
@@ -585,6 +733,49 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireNormalTile(
                                   std::min(tile_size, grid.first - x),
                                   std::min(tile_size, grid.second - y),
                                   tile_size});
+}
+
+size_t BoundedWorkspace::GetMappedNormalReservationBytes(
+    const int image_idx) const {
+  THROW_CHECK(mapped_normal_pool_ != nullptr);
+  GetNormalTileGrid(image_idx);  // Validate both stored grids and payloads.
+  return mapped_normal_pool_
+      ->AcquireSource(image_idx, GetNormalMapPath(image_idx))
+      ->GetMappingReservationBytes();
+}
+
+size_t BoundedWorkspace::GetMappedNormalWindowReservationBytes(
+    const int image_idx, const size_t row_begin, const size_t row_count) const {
+  THROW_CHECK(mapped_normal_pool_ != nullptr);
+  const auto grid = GetNormalTileGrid(image_idx);
+  THROW_CHECK_LT(row_begin, grid.second);
+  THROW_CHECK_GT(row_count, 0);
+  THROW_CHECK_LE(row_count, grid.second - row_begin);
+  return mapped_normal_pool_
+      ->AcquireSource(image_idx, GetNormalMapPath(image_idx))
+      ->GetWindowReservationBytes(row_begin, row_count);
+}
+
+BoundedWorkspace::MappedNormalLease BoundedWorkspace::AcquireMappedNormal(
+    const int image_idx) {
+  THROW_CHECK(mapped_normal_pool_ != nullptr);
+  GetNormalTileGrid(image_idx);  // Failed admission remains retryable.
+  auto owner = std::make_shared<MappedNormalPool::Lease>(
+      mapped_normal_pool_->Acquire(image_idx, GetNormalMapPath(image_idx)));
+  return MappedNormalLease(owner, &**owner);
+}
+
+BoundedWorkspace::MappedNormalLease BoundedWorkspace::AcquireMappedNormalWindow(
+    const int image_idx, const size_t row_begin, const size_t row_count) {
+  THROW_CHECK(mapped_normal_pool_ != nullptr);
+  const auto grid = GetNormalTileGrid(image_idx);
+  THROW_CHECK_LT(row_begin, grid.second);
+  THROW_CHECK_GT(row_count, 0);
+  THROW_CHECK_LE(row_count, grid.second - row_begin);
+  auto owner =
+      std::make_shared<MappedNormalPool::Lease>(mapped_normal_pool_->Acquire(
+          image_idx, GetNormalMapPath(image_idx), row_begin, row_count));
+  return MappedNormalLease(owner, &**owner);
 }
 
 BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImage(
