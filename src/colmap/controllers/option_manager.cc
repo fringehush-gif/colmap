@@ -1170,6 +1170,13 @@ void OptionManager::AddStereoFusionOptions() {
       "Quantize bounded normal tiles to SNORM16. Decisions are approximate "
       "unless bounded_cache_normal_snorm16_guard is also enabled.");
   AddDefaultOption(
+      "StereoFusion.bounded_cache_exact_depth",
+      &stereo_fusion->bounded_cache_exact_depth,
+      "Optional serial exact-depth diagnostic: finite-positive mask, "
+      "original FP32 for every native decision and XYZ output. Requires "
+      "bounded components, unchanged grids, FP32 backing/normals, tiles "
+      "off, and explicit mapped-owner byte/file limits.");
+  AddDefaultOption(
       "StereoFusion.bounded_cache_normal_snorm16_guard",
       &stereo_fusion->bounded_cache_normal_snorm16_guard,
       "Use original FP32 normals for uncertain compact-normal decisions. "

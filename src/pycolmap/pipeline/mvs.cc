@@ -277,6 +277,8 @@ void BindMVS(py::module& m) {
                          &SFOpts::bounded_cache_normal_tile_hints)
           .def_readwrite("bounded_cache_normal_snorm16",
                          &SFOpts::bounded_cache_normal_snorm16)
+          .def_readwrite("bounded_cache_exact_depth",
+                         &SFOpts::bounded_cache_exact_depth)
           .def_readwrite("bounded_cache_normal_snorm16_guard",
                          &SFOpts::bounded_cache_normal_snorm16_guard)
           .def_readwrite("bounded_cache_normal_mapped_bytes",

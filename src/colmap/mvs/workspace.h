@@ -36,6 +36,9 @@ class Workspace {
     // Approximate signed-normalized tiles retain original FP32 backing.
     // Conservative decision screening is a separate consumer option.
     bool normal_tiles_snorm16 = false;
+    // Default-off exact-depth diagnostic: finite native-positive mask only.
+    // Every consumed positive depth is copied from immutable original FP32.
+    bool exact_depth_state = false;
 
     // Independent immutable FP32 normal-file mapping budget for tile copies.
     // Both limits are zero when tiles are disabled; this is not decoded RSS.

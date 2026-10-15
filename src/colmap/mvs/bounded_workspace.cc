@@ -60,7 +60,7 @@ RasterShape ReadMapShape(const std::filesystem::path& path,
   std::ifstream file(path, std::ios::binary);
   THROW_CHECK_FILE_OPEN(file, path);
   // Keep the same bounded three-delimiter FP32 contract as Mat<float>::Read.
-  // Ordinary map readers accept trailing bytes.
+  // Native map readers accept trailing bytes.
   std::string header;
   size_t separators = 0;
   while (header.size() < 128 && separators < 3) {
@@ -97,11 +97,27 @@ RasterShape ReadMapShape(const std::filesystem::path& path,
 
 size_t BoundedWorkspace::ImageData::NumBytes() const {
   return CheckedAddBytes(
-      bitmap.NumBytes(),
+      CheckedAddBytes(bitmap.NumBytes(),
+                      positive_depth_mask.capacity() * sizeof(uint8_t)),
       CheckedAddBytes(
           depth_map.GetData().capacity() * sizeof(float),
           CheckedAddBytes(normal_map.GetData().capacity() * sizeof(float),
                           snorm_normals.capacity() * sizeof(int16_t))));
+}
+
+bool BoundedWorkspace::ImageData::HasPositiveDepth(const size_t row,
+                                                   const size_t col) const {
+  THROW_CHECK_LT(row, exact_depth_height);
+  THROW_CHECK_LT(col, exact_depth_width);
+  const size_t index = row * exact_depth_width + col;
+  return (positive_depth_mask.at(index / 8) & (uint8_t{1} << (index % 8))) != 0;
+}
+
+float BoundedWorkspace::ImageData::GetDepth(const size_t row,
+                                            const size_t col) const {
+  THROW_CHECK(positive_depth_mask.empty())
+      << "Exact-state mask has no decoded depth; read original FP32";
+  return depth_map.Get(row, col);
 }
 
 Eigen::Vector3f BoundedWorkspace::ImageData::GetNormal(const size_t row,
@@ -526,6 +542,9 @@ BoundedWorkspace::BoundedWorkspace(const Options& options)
       normal_tile_grid_once_(model_.images.size()),
       normal_tile_grids_(model_.images.size()) {
   THROW_CHECK(!options.compact_rgb_to_depth_grid || options.image_as_rgb);
+  THROW_CHECK(!options.exact_depth_state ||
+              (options.mapped_normal_bytes_limit > 0 &&
+               options.mapped_normal_files_limit > 0));
   THROW_CHECK(!options.normal_tiles_snorm16 ||
               (options.mapped_normal_bytes_limit > 0 &&
                options.mapped_normal_files_limit > 0));
@@ -546,6 +565,8 @@ BoundedWorkspace::BoundedWorkspace(const Options& options)
   cache_state_ = std::make_shared<CacheState>(static_cast<size_t>(bytes),
                                               model_.images.size() * 4);
 }
+
+BoundedWorkspace::~BoundedWorkspace() { ReleaseOriginalDepthNeighborhood(); }
 
 int BoundedWorkspace::ComponentKey(const int image_idx,
                                    const Component component) const {
@@ -635,6 +656,12 @@ size_t BoundedWorkspace::RequiredLoadBytes(const int image_idx,
       bytes = CheckedAddBytes(bytes, CheckedAddBytes(scratch, scratch));
     }
   }
+  if (read_depth && options_.exact_depth_state) {
+    bytes =
+        CheckedAddBytes(bytes,
+                        ImageData::PositiveDepthMaskBytes(
+                            CheckedRasterBytes(depth.width, depth.height, 1)));
+  }
   if (read_bitmap && options_.compact_rgb_to_depth_grid) {
     const auto grid = GetDepthMapDimensions(image_idx);
     if (grid.first != width || grid.second != height) {
@@ -690,7 +717,11 @@ size_t BoundedWorkspace::GetResidentBytesEstimate(
           : CheckedRasterBytes(image.GetWidth(),
                                image.GetHeight(),
                                options_.image_as_rgb ? 3 : 1);
-  const size_t depth_bytes = CheckedRasterBytes(grid.first, grid.second, 4);
+  const size_t depth_bytes =
+      options_.exact_depth_state
+          ? ImageData::PositiveDepthMaskBytes(
+                CheckedRasterBytes(grid.first, grid.second, 1))
+          : CheckedRasterBytes(grid.first, grid.second, 4);
   const size_t normal_bytes = CheckedRasterBytes(grid.first, grid.second, 12);
   if (component == Component::kBitmap) return rgb_bytes;
   if (component == Component::kDepth) return depth_bytes;
@@ -769,12 +800,171 @@ Eigen::Vector3f BoundedWorkspace::ReadOriginalNormal(const int image_idx,
   return (*owner).ReadFloat3(row, col);
 }
 
+void BoundedWorkspace::PrepareOriginalDepth(const int image_idx,
+                                            const size_t width,
+                                            const size_t height) {
+  THROW_CHECK(options_.exact_depth_state);
+  THROW_CHECK(mapped_normal_pool_ != nullptr);
+  const auto path = GetDepthMapPath(image_idx);
+  const auto shape = ReadMapShape(path, 1);
+  THROW_CHECK_EQ(shape.width, width)
+      << "Original depth grid differs from consumed fusion grid";
+  THROW_CHECK_EQ(shape.height, height)
+      << "Original depth grid differs from consumed fusion grid";
+  THROW_CHECK_GT(width, 0);
+  THROW_CHECK_GT(height, 0);
+  const size_t reservation =
+      ImmutableMapRegion::GetMappingReservationBytes(path);
+  THROW_CHECK_LE(reservation, options_.mapped_normal_bytes_limit);
+  auto admitted = mapped_normal_pool_->Acquire(
+      ComponentKey(image_idx, Component::kDepth), path);
+  if (original_depth_sources_.empty()) {
+    original_depth_sources_.resize(model_.images.size());
+  }
+  original_depth_sources_.at(image_idx) = {
+      width, height, path, reservation, nullptr};
+  ++depth_mapped_neighborhood_stats_.source_admissions;
+  depth_mapped_neighborhood_stats_.metadata_peak_bytes =
+      std::max(depth_mapped_neighborhood_stats_.metadata_peak_bytes,
+               DepthPinMetadataBytes(0));
+}
+
+size_t BoundedWorkspace::DepthPinMetadataBytes(
+    const size_t selected_metadata_bytes) const {
+  struct SourceBeforePins {
+    size_t width, height;
+    std::filesystem::path path;
+  };
+  // Actual ABI sizeof and allocated capacities, also reported with toggle off.
+  return original_depth_sources_.capacity() *
+             (sizeof(OriginalDepthSource) - sizeof(SourceBeforePins)) +
+         selected_metadata_bytes +
+         original_depth_pins_.capacity() * sizeof(MappedNormalPool::Lease) +
+         sizeof(original_depth_pins_) +
+         sizeof(depth_mapped_neighborhood_stats_);
+}
+
+void BoundedWorkspace::ReleaseOriginalDepthNeighborhood() noexcept {
+  // Row tasks must have joined. Drop every borrowed pointer before unpinning.
+  for (auto& source : original_depth_sources_) source.borrowed_owner = nullptr;
+  original_depth_pins_.clear();
+}
+
+bool BoundedWorkspace::PrepareOriginalDepthNeighborhood(
+    const std::vector<int>& views,
+    const std::function<bool()>& stop_requested) {
+  THROW_CHECK(options_.exact_depth_state);
+  THROW_CHECK_EQ(options_.num_threads, 1);
+  THROW_CHECK(!options_.normal_tiles_snorm16);
+  THROW_CHECK(mapped_normal_pool_ != nullptr);
+  ReleaseOriginalDepthNeighborhood();
+  auto& stats = depth_mapped_neighborhood_stats_;
+  ++stats.root_preparations;
+  // This is root metadata, not a raster/cache. The existing graph helper also
+  // materializes roster-sized membership; no scan/open occurs per scalar.
+  std::vector<uint8_t> selected(original_depth_sources_.size(), uint8_t{0});
+  size_t total = 0, excluded = 0, excluded_count = 0;
+  bool fits = !views.empty();
+  for (const int image_idx : views) {
+    const auto& source = original_depth_sources_.at(image_idx);
+    THROW_CHECK_GT(source.width, 0);
+    THROW_CHECK_GT(source.mapping_reservation_bytes, 0);
+    THROW_CHECK_EQ(selected.at(image_idx), 0)
+        << "Duplicate reachable depth source";
+    selected[image_idx] = 1;
+    if (source.mapping_reservation_bytes >
+        options_.mapped_normal_bytes_limit - total) {
+      fits = false;
+    } else if (fits) {
+      total += source.mapping_reservation_bytes;
+    }
+  }
+  for (size_t index = 0; index < original_depth_sources_.size(); ++index) {
+    const auto& source = original_depth_sources_[index];
+    if (source.width && !selected[index]) {
+      excluded = std::max(excluded, source.mapping_reservation_bytes);
+      ++excluded_count;
+    }
+  }
+  // Serial demand can require one excluded map. Do not wait for capacity held
+  // by this worker's own neighborhood pins, even on an unexpected queue view.
+  fits = fits && excluded <= options_.mapped_normal_bytes_limit - total &&
+         views.size() <= options_.mapped_normal_files_limit &&
+         (!excluded_count || views.size() < options_.mapped_normal_files_limit);
+  stats.metadata_peak_bytes =
+      std::max(stats.metadata_peak_bytes,
+               DepthPinMetadataBytes(sizeof(selected) +
+                                     selected.capacity() * sizeof(uint8_t)));
+  if (!fits) {
+    ++stats.fallback_roots;
+    return false;
+  }
+  try {
+    original_depth_pins_.reserve(views.size());
+    stats.metadata_peak_bytes =
+        std::max(stats.metadata_peak_bytes,
+                 DepthPinMetadataBytes(sizeof(selected) +
+                                       selected.capacity() * sizeof(uint8_t)));
+    for (const int image_idx : views) {
+      if (stop_requested && stop_requested()) {
+        ReleaseOriginalDepthNeighborhood();
+        ++stats.cancelled_roots;
+        return false;
+      }
+      const auto& source = original_depth_sources_.at(image_idx);
+      original_depth_pins_.push_back(mapped_normal_pool_->Acquire(
+          ComponentKey(image_idx, Component::kDepth), source.path));
+      ++stats.pin_acquires;
+    }
+    // Publish only after the entire set is pinned successfully. These pointers
+    // remain stable until joined root tasks permit explicit release.
+    for (size_t index = 0; index < views.size(); ++index)
+      original_depth_sources_.at(views[index]).borrowed_owner =
+          &*original_depth_pins_[index];
+    ++stats.complete_roots;
+    return true;
+  } catch (...) {
+    ReleaseOriginalDepthNeighborhood();
+    throw;
+  }
+}
+
+float BoundedWorkspace::ReadOriginalDepth(const int image_idx,
+                                          const size_t row,
+                                          const size_t col,
+                                          Mat<float>& scalar_scratch) {
+  THROW_CHECK(options_.exact_depth_state);
+  THROW_CHECK(mapped_normal_pool_ != nullptr);
+  const auto& source = original_depth_sources_.at(image_idx);
+  THROW_CHECK_GT(source.width, 0);
+  THROW_CHECK_GT(source.height, 0);
+  THROW_CHECK_LT(row, source.height);
+  THROW_CHECK_LT(col, source.width);
+  std::optional<MappedNormalPool::Lease> mapped;
+  const ImmutableMapRegion* owner = source.borrowed_owner;
+  if (!owner) {
+    mapped.emplace(mapped_normal_pool_->Acquire(
+        ComponentKey(image_idx, Component::kDepth), source.path));
+    owner = &**mapped;
+    ++depth_mapped_neighborhood_stats_.scalar_acquires;
+  }
+  // Preserve the public scratch argument and lease lifetime; no Mat copy.
+  (void)scalar_scratch;
+  const float value =
+      owner->ReadFloat1Sample(row, col, source.width, source.height);
+  THROW_CHECK(std::isfinite(value)) << "Nonfinite original exact depth";
+  if (source.borrowed_owner) ++depth_mapped_neighborhood_stats_.borrowed_reads;
+  return value;  // Fallback releases here; borrowed owner lasts until root
+                 // join.
+}
+
 size_t BoundedWorkspace::GetMappedNormalReservationBytes(
     const int image_idx) const {
   THROW_CHECK(mapped_normal_pool_ != nullptr);
   GetNormalTileGrid(image_idx);  // Validate both stored grids and payloads.
   return mapped_normal_pool_
-      ->AcquireSource(image_idx, GetNormalMapPath(image_idx))
+      ->AcquireSource(ComponentKey(image_idx, Component::kNormal),
+                      GetNormalMapPath(image_idx))
       ->GetMappingReservationBytes();
 }
 
@@ -786,7 +976,8 @@ size_t BoundedWorkspace::GetMappedNormalWindowReservationBytes(
   THROW_CHECK_GT(row_count, 0);
   THROW_CHECK_LE(row_count, grid.second - row_begin);
   return mapped_normal_pool_
-      ->AcquireSource(image_idx, GetNormalMapPath(image_idx))
+      ->AcquireSource(ComponentKey(image_idx, Component::kNormal),
+                      GetNormalMapPath(image_idx))
       ->GetWindowReservationBytes(row_begin, row_count);
 }
 
@@ -795,7 +986,8 @@ BoundedWorkspace::MappedNormalLease BoundedWorkspace::AcquireMappedNormal(
   THROW_CHECK(mapped_normal_pool_ != nullptr);
   GetNormalTileGrid(image_idx);  // Failed admission remains retryable.
   auto owner = std::make_shared<MappedNormalPool::Lease>(
-      mapped_normal_pool_->Acquire(image_idx, GetNormalMapPath(image_idx)));
+      mapped_normal_pool_->Acquire(ComponentKey(image_idx, Component::kNormal),
+                                   GetNormalMapPath(image_idx)));
   return MappedNormalLease(owner, &**owner);
 }
 
@@ -806,9 +998,11 @@ BoundedWorkspace::MappedNormalLease BoundedWorkspace::AcquireMappedNormalWindow(
   THROW_CHECK_LT(row_begin, grid.second);
   THROW_CHECK_GT(row_count, 0);
   THROW_CHECK_LE(row_count, grid.second - row_begin);
-  auto owner =
-      std::make_shared<MappedNormalPool::Lease>(mapped_normal_pool_->Acquire(
-          image_idx, GetNormalMapPath(image_idx), row_begin, row_count));
+  auto owner = std::make_shared<MappedNormalPool::Lease>(
+      mapped_normal_pool_->Acquire(ComponentKey(image_idx, Component::kNormal),
+                                   GetNormalMapPath(image_idx),
+                                   row_begin,
+                                   row_count));
   return MappedNormalLease(owner, &**owner);
 }
 
@@ -958,12 +1152,40 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
     }
     if (component == Component::kImage || component == Component::kDepth) {
       data->depth_map.Read(GetDepthMapPath(image_idx));
-      data->depth_map.Downsize(width, height);
+      if (options_.exact_depth_state) {
+        const auto grid = GetDepthMapDimensions(image_idx);
+        THROW_CHECK_LE(data->depth_map.GetWidth(), width)
+            << "Exact depth mask refuses native downsize";
+        THROW_CHECK_LE(data->depth_map.GetHeight(), height)
+            << "Exact depth mask refuses native downsize";
+        THROW_CHECK_EQ(data->depth_map.GetWidth(), grid.first);
+        THROW_CHECK_EQ(data->depth_map.GetHeight(), grid.second);
+        const auto& source = data->depth_map.GetData();
+        THROW_CHECK_EQ(source.size(),
+                       CheckedRasterBytes(grid.first, grid.second, 1));
+        data->positive_depth_mask.assign(
+            ImageData::PositiveDepthMaskBytes(source.size()), uint8_t{0});
+        for (size_t index = 0; index < source.size(); ++index) {
+          const float value = source[index];
+          THROW_CHECK(std::isfinite(value))
+              << "Exact depth mask requires every source sample finite";
+          // Native comparison preserves runtime DAZ/subnormal classification.
+          if (value > 0.0f) {
+            data->positive_depth_mask[index / 8] |= uint8_t{1} << (index % 8);
+          }
+        }
+        data->exact_depth_width = grid.first;
+        data->exact_depth_height = grid.second;
+        data->depth_map = DepthMap();
+      } else {
+        data->depth_map.Downsize(width, height);
+      }
     }
     if (component == Component::kImage || component == Component::kNormal) {
       if (region) {
-        auto mapped = mapped_normal_pool_->Acquire(image_idx,
-                                                   GetNormalMapPath(image_idx));
+        auto mapped = mapped_normal_pool_->Acquire(
+            ComponentKey(image_idx, Component::kNormal),
+            GetNormalMapPath(image_idx));
         data->normal_map.ReadRegion(
             *mapped, region->x, region->y, region->width, region->height);
         data->normal_origin_x = region->x;
@@ -993,8 +1215,12 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
       }
     }
     if (component == Component::kImage) {
-      THROW_CHECK_EQ(data->depth_map.GetWidth(), data->normal_map.GetWidth());
-      THROW_CHECK_EQ(data->depth_map.GetHeight(), data->normal_map.GetHeight());
+      THROW_CHECK_EQ(options_.exact_depth_state ? data->exact_depth_width
+                                                : data->depth_map.GetWidth(),
+                     data->normal_map.GetWidth());
+      THROW_CHECK_EQ(options_.exact_depth_state ? data->exact_depth_height
+                                                : data->depth_map.GetHeight(),
+                     data->normal_map.GetHeight());
     }
     if (options_.compact_rgb_to_depth_grid &&
         (component == Component::kImage || component == Component::kBitmap)) {
