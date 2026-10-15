@@ -170,6 +170,11 @@ void BindMVS(py::module& m) {
               "Validate source normals without decoding them; reference "
               "normals are always materialized.")
           .def_readwrite(
+              "rotation_buffer_reuse",
+              &PMOpts::rotation_buffer_reuse,
+              "Retain rotated GPU buffers between sweeps. CUDA only; "
+              "uses additional GPU memory.")
+          .def_readwrite(
               "allow_missing_files",
               &PMOpts::allow_missing_files,
               "Whether to tolerate missing images/maps in the problem setup")

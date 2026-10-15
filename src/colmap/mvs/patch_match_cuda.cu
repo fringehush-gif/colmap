@@ -18,6 +18,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <sstream>
 
 // The number of threads per Cuda thread block. Warning: Do not change this
@@ -1195,7 +1196,8 @@ __global__ void SweepFromTopToBottom(
       }
 
       // Three distinct depths serve the five fixed depth/normal candidates.
-      // Keep sampling and every photometric/geometric addition in original order.
+      // Keep sampling and every photometric/geometric addition in original
+      // order.
       float geometric_costs[3] = {0};
       if (kGeomConsistencyTerm) {
         for (int i = 0; i < 3; ++i) {
@@ -1213,9 +1215,7 @@ __global__ void SweepFromTopToBottom(
 
       costs[0] += cost_map.Get(row, col, pcc_computer.src_image_idx);
       if (kGeomConsistencyTerm) {
-        costs[0] +=
-            options.geom_consistency_regularizer *
-            geometric_costs[0];
+        costs[0] += options.geom_consistency_regularizer * geometric_costs[0];
       }
 
       for (int i = 1; i < kNumCosts; ++i) {
@@ -1223,9 +1223,8 @@ __global__ void SweepFromTopToBottom(
         pcc_computer.normal = normals[i];
         costs[i] += pcc_computer.Compute();
         if (kGeomConsistencyTerm) {
-          costs[i] +=
-              options.geom_consistency_regularizer *
-              geometric_costs[i == 3 ? 0 : (i == 4 ? 2 : i)];
+          costs[i] += options.geom_consistency_regularizer *
+                      geometric_costs[i == 3 ? 0 : (i == 4 ? 2 : i)];
         }
       }
     }
@@ -1347,6 +1346,46 @@ __global__ void SweepFromTopToBottom(
   }
 }
 
+#ifndef COLMAP_HIP_ENABLED
+namespace {
+
+cudaTextureDesc RotationRefTextureDesc() {
+  cudaTextureDesc desc = {};
+  desc.addressMode[0] = cudaAddressModeBorder;
+  desc.addressMode[1] = cudaAddressModeBorder;
+  desc.addressMode[2] = cudaAddressModeBorder;
+  desc.filterMode = cudaFilterModePoint;
+  desc.readMode = cudaReadModeNormalizedFloat;
+  desc.normalizedCoords = false;
+  return desc;
+}
+
+cudaArray_t BorrowRotationRefArray(
+    const CudaArrayLayeredTexture<uint8_t>& owner) {
+  cudaResourceDesc resource = {};
+  CUDA_SAFE_CALL(cudaGetTextureObjectResourceDesc(&resource, owner.GetObj()));
+  THROW_CHECK_EQ(resource.resType, cudaResourceTypeArray);
+  THROW_CHECK(resource.res.array.array != nullptr);
+  cudaChannelFormatDesc channel = {};
+  cudaExtent extent = {};
+  unsigned int flags = 0;
+  CUDA_SAFE_CALL(
+      cudaArrayGetInfo(&channel, &extent, &flags, resource.res.array.array));
+  THROW_CHECK_EQ(extent.width, owner.GetWidth());
+  THROW_CHECK_EQ(extent.height, owner.GetHeight());
+  THROW_CHECK_EQ(extent.depth, owner.GetDepth());
+  THROW_CHECK_EQ(channel.x, 8);
+  THROW_CHECK_EQ(channel.y, 0);
+  THROW_CHECK_EQ(channel.z, 0);
+  THROW_CHECK_EQ(channel.w, 0);
+  THROW_CHECK_EQ(channel.f, cudaChannelFormatKindUnsigned);
+  THROW_CHECK_NE(flags & cudaArrayLayered, 0);
+  return resource.res.array.array;
+}
+
+}  // namespace
+#endif
+
 PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
                                const PatchMatch::Problem& problem)
     : options_(options),
@@ -1354,11 +1393,20 @@ PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
       ref_width_(0),
       ref_height_(0),
       rotation_in_half_pi_(0) {
+#ifdef COLMAP_HIP_ENABLED
+  THROW_CHECK(!options_.rotation_buffer_reuse)
+      << "PatchMatchStereo.rotation_buffer_reuse requires CUDA";
+#endif
   SetBestCudaDevice(std::stoi(options_.gpu_index));
   InitRefImage();
   InitSourceImages();
   InitTransforms();
   InitWorkspaceMemory();
+#ifndef COLMAP_HIP_ENABLED
+  if (options_.rotation_buffer_reuse) {
+    InitAlternateOrientationMemory();
+  }
+#endif
 }
 
 void PatchMatchCuda::Run() {
@@ -1543,10 +1591,12 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
       if (last_sweep) {
         if (options_.filter) {
-          consistency_mask_ =
-              std::make_unique<GpuMat<uint8_t>>(cost_map_->GetWidth(),
-                                                cost_map_->GetHeight(),
-                                                cost_map_->GetDepth());
+          if (!options_.rotation_buffer_reuse) {
+            consistency_mask_ =
+                std::make_unique<GpuMat<uint8_t>>(cost_map_->GetWidth(),
+                                                  cost_map_->GetHeight(),
+                                                  cost_map_->GetDepth());
+          }
           consistency_mask_->FillWithScalar(0);
         }
         if (options_.geom_consistency) {
@@ -1592,12 +1642,19 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
       // Rotate selected image map.
       if (last_sweep && options_.filter) {
-        std::unique_ptr<GpuMat<uint8_t>> rot_consistency_mask_(
-            new GpuMat<uint8_t>(cost_map_->GetWidth(),
-                                cost_map_->GetHeight(),
-                                cost_map_->GetDepth()));
-        consistency_mask_->Rotate(rot_consistency_mask_.get());
-        consistency_mask_.swap(rot_consistency_mask_);
+#ifndef COLMAP_HIP_ENABLED
+        if (options_.rotation_buffer_reuse) {
+          alternate_consistency_mask_->Rotate(consistency_mask_.get());
+        } else
+#endif
+        {
+          std::unique_ptr<GpuMat<uint8_t>> rot_consistency_mask_(
+              new GpuMat<uint8_t>(cost_map_->GetWidth(),
+                                  cost_map_->GetHeight(),
+                                  cost_map_->GetDepth()));
+          consistency_mask_->Rotate(rot_consistency_mask_.get());
+          consistency_mask_.swap(rot_consistency_mask_);
+        }
       }
 
       sweep_timer.Print(" Sweep " + std::to_string(sweep + 1));
@@ -1627,6 +1684,13 @@ void PatchMatchCuda::ComputeCudaConfig() {
 }
 
 void PatchMatchCuda::BindRefImageTexture() {
+#ifndef COLMAP_HIP_ENABLED
+  if (options_.rotation_buffer_reuse) {
+    BindReusableRefImageTexture();
+    return;
+  }
+#endif
+
   cudaTextureDesc texture_desc;
   memset(&texture_desc, 0, sizeof(texture_desc));
   texture_desc.addressMode[0] = cudaAddressModeBorder;
@@ -1638,6 +1702,37 @@ void PatchMatchCuda::BindRefImageTexture() {
   ref_image_texture_ = CudaArrayLayeredTexture<uint8_t>::FromGpuMat(
       texture_desc, *ref_image_->image);
 }
+
+#ifndef COLMAP_HIP_ENABLED
+void PatchMatchCuda::BindReusableRefImageTexture() {
+  if (ref_image_texture_ == nullptr) {
+    // Initial filtered image: retain the original one allocation/one D2D copy.
+    ref_image_texture_ = CudaArrayLayeredTexture<uint8_t>::FromGpuMat(
+        RotationRefTextureDesc(), *ref_image_->image);
+    ref_image_array_ = BorrowRotationRefArray(*ref_image_texture_);
+    return;
+  }
+  // The texture and borrowed array handle are swapped together and remain
+  // owned by this instance for the complete problem. No texture/array
+  // recreation.
+  THROW_CHECK(ref_image_array_ != nullptr);
+  THROW_CHECK_EQ(ref_image_texture_->GetWidth(), ref_image_->image->GetWidth());
+  THROW_CHECK_EQ(ref_image_texture_->GetHeight(),
+                 ref_image_->image->GetHeight());
+  THROW_CHECK_EQ(ref_image_texture_->GetDepth(), ref_image_->image->GetDepth());
+  cudaMemcpy3DParms params = {};
+  params.extent = make_cudaExtent(ref_image_->image->GetWidth(),
+                                  ref_image_->image->GetHeight(),
+                                  ref_image_->image->GetDepth());
+  params.kind = cudaMemcpyDeviceToDevice;
+  params.srcPtr = make_cudaPitchedPtr((void*)ref_image_->image->GetPtr(),
+                                      ref_image_->image->GetPitch(),
+                                      ref_image_->image->GetWidth(),
+                                      ref_image_->image->GetHeight());
+  params.dstArray = ref_image_array_;
+  CUDA_SAFE_CALL(cudaMemcpy3D(&params));
+}
+#endif
 
 void PatchMatchCuda::InitRefImage() {
   const Image& ref_image = problem_.images->at(problem_.ref_image_idx);
@@ -1938,7 +2033,12 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   global_workspace_ = std::make_unique<GpuMat<float>>(
       ref_max_dim, problem_.src_image_idxs.size(), 2);
 
-  consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(0, 0, 0);
+  if (options_.rotation_buffer_reuse && options_.filter) {
+    consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
+        ref_width_, ref_height_, problem_.src_image_idxs.size());
+  } else {
+    consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(0, 0, 0);
+  }
 
   ComputeCudaConfig();
 
@@ -1956,7 +2056,79 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   }
 }
 
+#ifndef COLMAP_HIP_ENABLED
+void PatchMatchCuda::InitAlternateOrientationMemory() {
+  const size_t width = ref_height_, height = ref_width_;
+  const size_t sources = problem_.src_image_idxs.size();
+  alternate_rand_state_map_ = std::make_unique<GpuMatPRNG>(width, height);
+  alternate_depth_map_ = std::make_unique<GpuMat<float>>(width, height);
+  alternate_normal_map_ = std::make_unique<GpuMat<float>>(width, height, 3);
+  alternate_ref_image_ = std::make_unique<GpuMatRefImage>(width, height);
+  alternate_prev_sel_prob_map_ =
+      std::make_unique<GpuMat<float>>(width, height, sources);
+  alternate_sel_prob_map_ =
+      std::make_unique<GpuMat<float>>(width, height, sources);
+  alternate_cost_map_ = std::make_unique<GpuMat<float>>(width, height, sources);
+  if (options_.filter) {
+    alternate_consistency_mask_ =
+        std::make_unique<GpuMat<uint8_t>>(width, height, sources);
+  }
+  // Construct the array/texture by dimensions only. Never copy uninitialized
+  // alternate_ref_image_ pixels to create it. Its first copy follows Rotate.
+  alternate_ref_image_texture_ =
+      std::make_unique<CudaArrayLayeredTexture<uint8_t>>(
+          RotationRefTextureDesc(), width, height, 1);
+  alternate_ref_image_array_ =
+      BorrowRotationRefArray(*alternate_ref_image_texture_);
+
+  size_t pitched_bytes = 0;
+  const auto add = [&pitched_bytes](const auto& mat) {
+    if (mat == nullptr) return;
+    const size_t max = std::numeric_limits<size_t>::max();
+    if (mat->GetHeight() == 0 || mat->GetDepth() == 0) return;
+    THROW_CHECK_LE(mat->GetPitch(), max / mat->GetHeight());
+    const size_t plane = mat->GetPitch() * mat->GetHeight();
+    THROW_CHECK_LE(plane, max / mat->GetDepth());
+    const size_t bytes = plane * mat->GetDepth();
+    THROW_CHECK_LE(bytes, max - pitched_bytes);
+    pitched_bytes += bytes;
+  };
+  add(rand_state_map_);
+  add(alternate_rand_state_map_);
+  add(depth_map_);
+  add(alternate_depth_map_);
+  add(normal_map_);
+  add(alternate_normal_map_);
+  add(ref_image_->image);
+  add(alternate_ref_image_->image);
+  add(ref_image_->sum_image);
+  add(alternate_ref_image_->sum_image);
+  add(ref_image_->squared_sum_image);
+  add(alternate_ref_image_->squared_sum_image);
+  add(prev_sel_prob_map_);
+  add(alternate_prev_sel_prob_map_);
+  add(sel_prob_map_);
+  add(alternate_sel_prob_map_);
+  add(cost_map_);
+  add(alternate_cost_map_);
+  add(consistency_mask_);
+  add(alternate_consistency_mask_);
+  add(global_workspace_);
+  LOG(INFO) << "Rotation reuse retained pitched bytes: " << pitched_bytes
+            << ", curandState bytes: " << sizeof(curandState)
+            << ", reference array logical bytes: "
+            << size_t{2} * ref_width_ * ref_height_;
+}
+#endif
+
 void PatchMatchCuda::Rotate() {
+#ifndef COLMAP_HIP_ENABLED
+  if (options_.rotation_buffer_reuse) {
+    RotateWithBufferReuse();
+    return;
+  }
+#endif
+
   rotation_in_half_pi_ = (rotation_in_half_pi_ + 1) % 4;
 
   size_t width;
@@ -2025,6 +2197,48 @@ void PatchMatchCuda::Rotate() {
   // Recompute Cuda configuration for rotated reference image.
   ComputeCudaConfig();
 }
+
+#ifndef COLMAP_HIP_ENABLED
+void PatchMatchCuda::RotateWithBufferReuse() {
+  rotation_in_half_pi_ = (rotation_in_half_pi_ + 1) % 4;
+  const size_t width = rotation_in_half_pi_ % 2 == 0 ? ref_width_ : ref_height_;
+  const size_t height =
+      rotation_in_half_pi_ % 2 == 0 ? ref_height_ : ref_width_;
+  THROW_CHECK_EQ(alternate_depth_map_->GetWidth(), width);
+  THROW_CHECK_EQ(alternate_depth_map_->GetHeight(), height);
+
+  // Preserve original producer/kernel/wait order. Every destination element,
+  // including every logical PRNG state, is overwritten by the existing Rotate.
+  rand_state_map_->Rotate(alternate_rand_state_map_.get());
+  rand_state_map_.swap(alternate_rand_state_map_);
+  depth_map_->Rotate(alternate_depth_map_.get());
+  depth_map_.swap(alternate_depth_map_);
+  RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
+      normal_map_->View());
+  normal_map_->Rotate(alternate_normal_map_.get());
+  normal_map_.swap(alternate_normal_map_);
+  ref_image_->image->Rotate(alternate_ref_image_->image.get());
+  ref_image_->sum_image->Rotate(alternate_ref_image_->sum_image.get());
+  ref_image_->squared_sum_image->Rotate(
+      alternate_ref_image_->squared_sum_image.get());
+  ref_image_.swap(alternate_ref_image_);
+  ref_image_texture_.swap(alternate_ref_image_texture_);
+  std::swap(ref_image_array_, alternate_ref_image_array_);
+  BindRefImageTexture();
+
+  // Both probability roles exist independently in BOTH dimensions. A sweep
+  // overwrites selected probabilities completely before consuming them.
+  sel_prob_map_->Rotate(alternate_prev_sel_prob_map_.get());
+  prev_sel_prob_map_.swap(alternate_prev_sel_prob_map_);
+  sel_prob_map_.swap(alternate_sel_prob_map_);
+  cost_map_->Rotate(alternate_cost_map_.get());
+  cost_map_.swap(alternate_cost_map_);
+  if (options_.filter) {
+    consistency_mask_.swap(alternate_consistency_mask_);
+  }
+  ComputeCudaConfig();
+}
+#endif
 
 }  // namespace mvs
 }  // namespace colmap

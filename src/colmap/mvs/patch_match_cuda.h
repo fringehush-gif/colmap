@@ -43,6 +43,11 @@ class PatchMatchCuda {
   void InitSourceImages();
   void InitTransforms();
   void InitWorkspaceMemory();
+#ifndef COLMAP_HIP_ENABLED
+  void InitAlternateOrientationMemory();
+  void BindReusableRefImageTexture();
+  void RotateWithBufferReuse();
+#endif
 
   // Rotate reference image by 90 degrees in counter-clockwise direction.
   void Rotate();
@@ -104,6 +109,24 @@ class PatchMatchCuda {
   // Shared memory is too small to hold local state for each thread,
   // so this is workspace memory in global memory.
   std::unique_ptr<GpuMat<float>> global_workspace_;
+
+#ifndef COLMAP_HIP_ENABLED
+  // Per-problem storage for the opposite reference-image orientation.
+  std::unique_ptr<GpuMatPRNG> alternate_rand_state_map_;
+  std::unique_ptr<GpuMat<float>> alternate_depth_map_;
+  std::unique_ptr<GpuMat<float>> alternate_normal_map_;
+  std::unique_ptr<GpuMatRefImage> alternate_ref_image_;
+  std::unique_ptr<GpuMat<float>> alternate_prev_sel_prob_map_;
+  std::unique_ptr<GpuMat<float>> alternate_sel_prob_map_;
+  std::unique_ptr<GpuMat<float>> alternate_cost_map_;
+  std::unique_ptr<GpuMat<uint8_t>> alternate_consistency_mask_;
+  std::unique_ptr<CudaArrayLayeredTexture<uint8_t>>
+      alternate_ref_image_texture_;
+  // Non-owning array caches; the two owning textures outlive every use. Swap
+  // each cache with its matching owner. Never cudaFreeArray these handles.
+  cudaArray_t ref_image_array_ = nullptr;
+  cudaArray_t alternate_ref_image_array_ = nullptr;
+#endif
 };
 
 }  // namespace mvs

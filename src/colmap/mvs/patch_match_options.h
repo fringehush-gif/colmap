@@ -103,6 +103,11 @@ struct PatchMatchOptions {
   // Whether to write the consistency graph.
   bool write_consistency_graph = false;
 
+  // Retain rotated GPU buffers between sweeps to avoid repeated allocations.
+  // Uses additional GPU memory proportional to image size and source count.
+  // CUDA only; leave disabled when GPU memory is limited.
+  bool rotation_buffer_reuse = false;
+
   void Print() const;
   bool Check() const;
 };
