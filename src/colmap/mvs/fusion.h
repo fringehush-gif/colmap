@@ -4,6 +4,7 @@
 
 #include "colmap/mvs/bounded_workspace.h"
 #include "colmap/mvs/mat.h"
+#include "colmap/mvs/normal_precision_guard.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/base_controller.h"
 #include "colmap/util/eigen_alignment.h"
@@ -280,6 +281,8 @@ class StereoFusion : public BaseController {
   std::vector<Eigen::Matrix<float, 3, 4, Eigen::RowMajor>> P_;
   std::vector<Eigen::Matrix<float, 3, 4, Eigen::RowMajor>> inv_P_;
   std::vector<Eigen::Matrix<float, 3, 3, Eigen::RowMajor>> inv_R_;
+  std::vector<normal_precision_guard::PreparedRotation>
+      prepared_normal_rotations_;
 
   struct FusionData {
     int image_idx = kInvalidImageId;

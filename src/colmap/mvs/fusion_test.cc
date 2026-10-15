@@ -1233,12 +1233,303 @@ TEST(StereoFusion, SignedNormalGuardRestoresLossyTwoViewDecision) {
   EXPECT_EQ(guarded.GetMappedNormalStats().active_copies, 0);
 }
 
+TEST(StereoFusion, GuardFastUpMatchesLibmOnBoundaries) {
+  if (!normal_precision_guard::SupportedBuild())
+    GTEST_SKIP() << "Exact normal screen is unqualified for this compiler math";
+  const double infinity = std::numeric_limits<double>::infinity();
+  const double normal_min = std::numeric_limits<double>::min();
+  const double denormal_min = std::numeric_limits<double>::denorm_min();
+  const double cases[] = {0.0,
+                          -0.0,
+                          denormal_min,
+                          -denormal_min,
+                          normal_min,
+                          1.0,
+                          1.0 / 65534.0,
+                          std::numeric_limits<double>::max(),
+                          -1.0,
+                          -infinity,
+                          infinity};
+  for (const double value : cases) {
+    const double expected = std::nextafter(value, infinity);
+    const double actual = normal_precision_guard::Up(value);
+    EXPECT_EQ(std::memcmp(&actual, &expected, sizeof(double)), 0)
+        << "input=" << value;
+  }
+  EXPECT_TRUE(std::isnan(
+      normal_precision_guard::Up(std::numeric_limits<double>::quiet_NaN())));
+}
+
+TEST(StereoFusion, GuardRotationReusePreservesOperandBitsAndDecision) {
+  if (!normal_precision_guard::SupportedBuild())
+    GTEST_SKIP() << "Exact normal screen is unqualified for this compiler math";
+  using namespace normal_precision_guard;
+  ASSERT_TRUE(SupportedArithmetic());
+  const Rot rotations[] = {
+      Rot::Identity(),
+      Eigen::AngleAxisf(0.37f, Vec(1.0f, 2.0f, 3.0f).normalized())
+          .toRotationMatrix()};
+  const Vec decoded[] = {Vec(0.0f, 0.0f, 1.0f),
+                         Vec(0.375f, -0.625f, 0.875f),
+                         Vec(-1.0f, 0.25f, 0.0f)};
+  // Independent conservative arithmetic: libm Up and the original r*decoded
+  // expression. The production helper receives that exact rotated value.
+  const auto reference_up = [](double x) {
+    return std::nextafter(x, std::numeric_limits<double>::infinity());
+  };
+  const auto reference_add = [&](double a, double b) {
+    return reference_up(a + b);
+  };
+  const auto reference_mul = [&](double a, double b) {
+    return reference_up(a * b);
+  };
+  for (const Rot& rotation : rotations) {
+    for (const Vec& normal : decoded) {
+      const Vec rotated = rotation * normal;
+      const Operand candidate =
+          CompressedOperandFromRotated(rotation, normal, rotated);
+      Operand reference{rotation * normal, Error::Zero(), false};
+      const double e = reference_up(1.0 / 65534.0 + 0x1p-24);
+      const double u = 0x1p-24;
+      const double gamma = reference_up(7 * u / (1 - 7 * u));
+      for (int i = 0; i < 3; ++i) {
+        double delta = 0, magnitudes = 0;
+        for (int j = 0; j < 3; ++j) {
+          delta = reference_add(
+              delta, reference_mul(std::abs(double(rotation(i, j))), e));
+          magnitudes =
+              reference_add(magnitudes,
+                            reference_mul(std::abs(double(rotation(i, j))),
+                                          std::abs(double(normal(j)))));
+        }
+        reference.error(i) = reference_add(
+            reference_add(
+                delta,
+                reference_mul(gamma, reference_add(2 * magnitudes, delta))),
+            32 * double(std::numeric_limits<float>::denorm_min()));
+      }
+      for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(std::memcmp(
+                      &candidate.value(i), &reference.value(i), sizeof(float)),
+                  0);
+        EXPECT_EQ(std::memcmp(
+                      &candidate.error(i), &reference.error(i), sizeof(double)),
+                  0);
+      }
+      EXPECT_EQ(candidate.exact, reference.exact);
+      EXPECT_EQ(ScreenNormal(candidate, candidate, 0.5f),
+                ScreenNormal(reference, reference, 0.5f));
+    }
+  }
+}
+
+TEST(StereoFusion, GuardedRotationRefusesUnsupportedRounding) {
+  if (!normal_precision_guard::SupportedBuild())
+    GTEST_SKIP() << "Exact normal screen is unqualified for this compiler math";
+  using namespace normal_precision_guard;
+  const int saved_rounding = std::fegetround();
+  ASSERT_NE(saved_rounding, -1);
+  struct RoundingRestorer {
+    int saved;
+    ~RoundingRestorer() { std::fesetround(saved); }
+  } restore{saved_rounding};
+  ASSERT_EQ(std::fesetround(FE_DOWNWARD), 0);
+  EXPECT_FALSE(SupportedArithmetic());
+  auto root = CompressedOperand(Rot::Identity(), Vec(0.0f, 0.0f, 1.0f));
+  const auto candidate = CompressedOperandFromRotated(
+      Rot::Identity(), Vec(0.0f, 0.0f, 1.0f), Vec(0.0f, 0.0f, 1.0f));
+  int reads = 0;
+  bool exact = false;
+  EXPECT_TRUE(NormalAccept(
+      root,
+      candidate,
+      0.5f,
+      [&] {
+        ++reads;
+        return Vec(0.0f, 0.0f, 1.0f);
+      },
+      [&] {
+        ++reads;
+        return Vec(0.0f, 0.0f, 1.0f);
+      },
+      &exact));
+  EXPECT_TRUE(exact);
+  EXPECT_EQ(reads, 2);
+}
+
 #if defined(__SSE__) || defined(_M_X64) || \
     (defined(_M_IX86_FP) && _M_IX86_FP >= 1)
 #endif
 
+TEST(StereoFusion, PreparedNormalRotationMatchesOrdinaryBounds) {
+  if (!normal_precision_guard::SupportedBuild())
+    GTEST_SKIP() << "Exact normal screen is unqualified for this compiler math";
+  using namespace normal_precision_guard;
+  const auto check = [](const Rot& rotation, const Vec& decoded) {
+    const Vec rotated = rotation * decoded;
+    const auto ordinary =
+        CompressedOperandFromRotated(rotation, decoded, rotated);
+    const auto prepared = CompressedOperandFromRotated(
+        rotation, PrepareRotation(rotation), decoded, rotated);
+    for (int i = 0; i < 3; ++i) {
+      EXPECT_EQ(
+          std::memcmp(&ordinary.error(i), &prepared.error(i), sizeof(double)),
+          0);
+    }
+    for (const float threshold : {-1.0f, 0.0f, 0.984807753f, 1.0f}) {
+      EXPECT_EQ(ScreenNormal(ordinary, ordinary, threshold),
+                ScreenNormal(prepared, prepared, threshold));
+    }
+  };
+  for (int sample = 0; sample < 128; ++sample) {
+    SCOPED_TRACE(sample);
+    Rot rotation;
+    Vec decoded;
+    for (int i = 0; i < 9; ++i) {
+      rotation.data()[i] = float((sample * 31 + i * 17) % 257 - 128) / 128;
+    }
+    for (int i = 0; i < 3; ++i) {
+      decoded(i) = float((sample * 43 + i * 19) % 251 - 125) / 125;
+    }
+    check(rotation, decoded);
+  }
+  for (const std::uint32_t bits : {0u,
+                                   0x80000000u,
+                                   1u,
+                                   0x007fffffu,
+                                   0x00800000u,
+                                   0x7f7fffffu,
+                                   0xff7fffffu,
+                                   0x7f800000u,
+                                   0xff800000u,
+                                   0x7fc00001u}) {
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    for (int axis = 0; axis < 12; ++axis) {
+      Rot rotation = Rot::Identity();
+      Vec decoded(0.0f, 0.0f, 1.0f);
+      if (axis < 9) {
+        rotation.data()[axis] = value;
+      } else {
+        decoded(axis - 9) = value;
+      }
+      check(rotation, decoded);
+    }
+  }
+}
+
+TEST(StereoFusion, PreparedNormalRotationRechecksArithmeticControls) {
+  if (!normal_precision_guard::SupportedBuild())
+    GTEST_SKIP() << "Exact normal screen is unqualified for this compiler math";
+  using namespace normal_precision_guard;
+  struct ControlsRestorer {
+    int rounding = std::fegetround();
 #if defined(__SSE__) || defined(_M_X64) || \
     (defined(_M_IX86_FP) && _M_IX86_FP >= 1)
+    unsigned csr = _mm_getcsr();
+#endif
+    ~ControlsRestorer() {
+      std::fesetround(rounding);
+#if defined(__SSE__) || defined(_M_X64) || \
+    (defined(_M_IX86_FP) && _M_IX86_FP >= 1)
+      _mm_setcsr(csr);
+#endif
+    }
+  } restore;
+  ASSERT_NE(restore.rounding, -1);
+  ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+#if defined(__SSE__) || defined(_M_X64) || \
+    (defined(_M_IX86_FP) && _M_IX86_FP >= 1)
+  _mm_setcsr(_mm_getcsr() & ~((1u << 15) | (3u << 13) | (1u << 6)));
+#endif
+  const Rot rotation = Rot::Identity();
+  const Vec decoded(0.25f, -0.5f, 1.0f);
+  const Vec rotated = rotation * decoded;
+  const auto prepared_nearest = PrepareRotation(rotation);
+  ASSERT_TRUE(prepared_nearest.valid);
+  for (const int mode : {FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    if (std::fesetround(mode) != 0) {
+      continue;
+    }
+    const auto prepared_unsupported = PrepareRotation(rotation);
+    EXPECT_FALSE(prepared_unsupported.valid);
+    const auto changed = CompressedOperandFromRotated(
+        rotation, prepared_nearest, decoded, rotated);
+    EXPECT_TRUE(
+        (changed.error.array() == std::numeric_limits<double>::infinity())
+            .all());
+    EXPECT_EQ(ScreenNormal(changed, changed, 0.5f), Screen::kExact);
+    ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+    const auto restored = CompressedOperandFromRotated(
+        rotation, prepared_unsupported, decoded, rotated);
+    const auto ordinary =
+        CompressedOperandFromRotated(rotation, decoded, rotated);
+    for (int i = 0; i < 3; ++i) {
+      EXPECT_EQ(
+          std::memcmp(&restored.error(i), &ordinary.error(i), sizeof(double)),
+          0);
+    }
+  }
+}
+
+#if defined(__SSE__) || defined(_M_X64) || \
+    (defined(_M_IX86_FP) && _M_IX86_FP >= 1)
+TEST(StereoFusion, PreparedNormalRotationRechecksIndependentSseControls) {
+  if (!normal_precision_guard::SupportedBuild())
+    GTEST_SKIP() << "Exact normal screen is unqualified for this compiler math";
+  using namespace normal_precision_guard;
+  struct ControlsRestorer {
+    int rounding = std::fegetround();
+    unsigned csr = _mm_getcsr();
+    ~ControlsRestorer() {
+      std::fesetround(rounding);
+      _mm_setcsr(csr);
+    }
+  } restore;
+  ASSERT_NE(restore.rounding, -1);
+  ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+  const unsigned nearest_csr =
+      _mm_getcsr() & ~((1u << 15) | (3u << 13) | (1u << 6));
+  _mm_setcsr(nearest_csr);
+  const Rot rotation = Rot::Identity();
+  const Vec decoded(0.25f, -0.5f, 1.0f);
+  const Vec rotated = rotation * decoded;
+  const auto prepared_nearest = PrepareRotation(rotation);
+  ASSERT_TRUE(prepared_nearest.valid);
+  for (const unsigned controls : {1u << 13,
+                                  2u << 13,
+                                  3u << 13,
+                                  1u << 15,
+                                  1u << 6,
+                                  (1u << 15) | (1u << 6)}) {
+    SCOPED_TRACE(controls);
+    _mm_setcsr(nearest_csr | controls);
+    for (const bool prepare_now : {false, true}) {
+      const auto prepared =
+          prepare_now ? PrepareRotation(rotation) : prepared_nearest;
+      if (prepare_now) {
+        EXPECT_FALSE(prepared.valid);
+      }
+      const auto unsupported =
+          CompressedOperandFromRotated(rotation, prepared, decoded, rotated);
+      EXPECT_TRUE(
+          (unsupported.error.array() == std::numeric_limits<double>::infinity())
+              .all());
+      EXPECT_EQ(ScreenNormal(unsupported, unsupported, 0.5f), Screen::kExact);
+    }
+    const auto prepared_unsupported = PrepareRotation(rotation);
+    _mm_setcsr(nearest_csr);
+    const auto restored = CompressedOperandFromRotated(
+        rotation, prepared_unsupported, decoded, rotated);
+    const auto ordinary =
+        CompressedOperandFromRotated(rotation, decoded, rotated);
+    for (int i = 0; i < 3; ++i) {
+      EXPECT_EQ(
+          std::memcmp(&restored.error(i), &ordinary.error(i), sizeof(double)),
+          0);
+    }
+  }
+}
 #endif
 
 TEST(StereoFusionOptions, CachePoliciesAreMutuallyExclusive) {
