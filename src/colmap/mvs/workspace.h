@@ -33,6 +33,9 @@ class Workspace {
 
     // Opt-in bounded fusion: retain nearest-sampled RGB on the depth grid.
     bool compact_rgb_to_depth_grid = false;
+    // Approximate signed-normalized tiles retain original FP32 backing.
+    // Conservative decision screening is a separate consumer option.
+    bool normal_tiles_snorm16 = false;
 
     // Independent immutable FP32 normal-file mapping budget for tile copies.
     // Both limits are zero when tiles are disabled; this is not decoded RSS.

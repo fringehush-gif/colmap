@@ -81,6 +81,11 @@ struct StereoFusionOptions {
   int bounded_cache_normal_tile_size = 0;
   int bounded_cache_normal_tile_slots = 4;
   bool bounded_cache_normal_tile_hints = true;
+  // Approximate signed-normalized tiles, default off. The separate guard
+  // enables conservative decision screening with exact original FP32 fallback
+  // only on supported compiler arithmetic; unsupported builds reject it.
+  bool bounded_cache_normal_snorm16 = false;
+  bool bounded_cache_normal_snorm16_guard = false;
   int64_t bounded_cache_normal_mapped_bytes = 0;
   int bounded_cache_normal_mapped_files = 0;
 
@@ -108,6 +113,10 @@ struct StereoFusionOptions {
 
   // Emit one bounded, cold-path cache diagnostic row after CLI Fusion.
   bool bounded_cache_diagnostics = false;
+
+  // Whether this build supports conservative SNORM decision screening.
+  // Runtime floating-point controls are checked separately at each decision.
+  static bool SupportsNormalPrecisionGuard();
 
   // Check the options for validity.
   bool Check() const;
@@ -197,6 +206,7 @@ class StereoFusion : public BaseController {
   void Run();
 
  private:
+  friend struct StereoFusionExactDepthTestPeer;
   void PrepareBoundedNeighborhood(int image_idx,
                                   int num_threads,
                                   ThreadPool& thread_pool);

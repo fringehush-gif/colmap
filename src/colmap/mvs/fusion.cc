@@ -3,6 +3,7 @@
 #include "colmap/mvs/fusion.h"
 
 #include "colmap/math/math.h"
+#include "colmap/mvs/normal_precision_guard.h"
 #include "colmap/util/eigen_alignment.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/file.h"
@@ -107,6 +108,8 @@ void StereoFusionOptions::Print() const {
   PrintOption(bounded_cache_normal_tile_size);
   PrintOption(bounded_cache_normal_tile_slots);
   PrintOption(bounded_cache_normal_tile_hints);
+  PrintOption(bounded_cache_normal_snorm16);
+  PrintOption(bounded_cache_normal_snorm16_guard);
   PrintOption(bounded_cache_normal_mapped_bytes);
   PrintOption(bounded_cache_normal_mapped_files);
   PrintOption(bounded_cache_neighborhood);
@@ -118,6 +121,10 @@ void StereoFusionOptions::Print() const {
   PrintOption(bbox_min);
   PrintOption(bbox_max);
 #undef PrintOption
+}
+
+bool StereoFusionOptions::SupportsNormalPrecisionGuard() {
+  return normal_precision_guard::SupportedBuild();
 }
 
 bool StereoFusionOptions::Check() const {
@@ -134,6 +141,18 @@ bool StereoFusionOptions::Check() const {
   CHECK_OPTION_EQ((bounded_cache_diagnostics && !bounded_cache), false);
   CHECK_OPTION_GE(bounded_cache_normal_tile_size, 0);
   CHECK_OPTION_GT(bounded_cache_normal_tile_slots, 0);
+  CHECK_OPTION_EQ((bounded_cache_normal_snorm16 &&
+                   (bounded_cache_normal_tile_size == 0 ||
+                    bounded_cache_normal_mapped_bytes == 0)),
+                  false);
+  CHECK_OPTION_EQ(
+      (bounded_cache_normal_snorm16_guard && !bounded_cache_normal_snorm16),
+      false);
+  // Unsupported compiler math must never silently activate an approximate
+  // screen under the exact guard option. Ordinary Fusion remains available.
+  CHECK_OPTION_EQ(
+      (bounded_cache_normal_snorm16_guard && !SupportsNormalPrecisionGuard()),
+      false);
   CHECK_OPTION_GE(bounded_cache_normal_mapped_bytes, 0);
   CHECK_OPTION_GE(bounded_cache_normal_mapped_files, 0);
   CHECK_OPTION_LE(static_cast<uint64_t>(bounded_cache_normal_mapped_bytes),
@@ -316,6 +335,8 @@ void StereoFusion::Run() {
   workspace_options.image_as_rgb = true;
   workspace_options.compact_rgb_to_depth_grid =
       options_.bounded_cache_compact_rgb;
+  workspace_options.normal_tiles_snorm16 =
+      options_.bounded_cache_normal_snorm16;
   workspace_options.mapped_normal_bytes_limit =
       static_cast<size_t>(options_.bounded_cache_normal_mapped_bytes);
   workspace_options.mapped_normal_files_limit =
@@ -803,9 +824,11 @@ const BoundedWorkspace::ImageData* StereoFusion::AcquireWorkerNormalTile(
     return data && static_cast<size_t>(col) >= data->normal_origin_x &&
            static_cast<size_t>(row) >= data->normal_origin_y &&
            static_cast<size_t>(col) - data->normal_origin_x <
-               data->normal_map.GetWidth() &&
+               (data->snorm_normals.empty() ? data->normal_map.GetWidth()
+                                            : data->snorm_width) &&
            static_cast<size_t>(row) - data->normal_origin_y <
-               data->normal_map.GetHeight();
+               (data->snorm_normals.empty() ? data->normal_map.GetHeight()
+                                            : data->snorm_height);
   };
   if (!ring.last_slot_by_image.empty()) {
     ++ring.hint_checks;
@@ -1052,6 +1075,10 @@ void StereoFusion::Fuse(const int thread_id,
 
   Eigen::Vector4f fused_ref_point = Eigen::Vector4f::Zero();
   Eigen::Vector3f fused_ref_normal = Eigen::Vector3f::Zero();
+  normal_precision_guard::Operand guarded_ref_normal{
+      Eigen::Vector3f::Zero(), Eigen::Vector3d::Zero(), false};
+  int guarded_ref_image = -1;
+  size_t guarded_ref_row = 0, guarded_ref_col = 0;
 
   // Points of different pixels of the currently point to be fused.
   std::vector<float> fused_point_x;
@@ -1165,9 +1192,29 @@ void StereoFusion::Fuse(const int thread_id,
 
     // Check for consistent normal direction with reference normal.
     if (traversal_depth > 0) {
-      const float cos_normal_error = fused_ref_normal.dot(normal);
-      if (cos_normal_error < min_cos_normal_error_) {
-        continue;
+      if (options_.bounded_cache_normal_snorm16_guard) {
+        const auto candidate = normal_precision_guard::CompressedOperand(
+            inv_R_.at(image_idx), local_normal);
+        if (!normal_precision_guard::NormalAccept(
+                guarded_ref_normal,
+                candidate,
+                min_cos_normal_error_,
+                [&]() -> Eigen::Vector3f {
+                  return inv_R_.at(guarded_ref_image) *
+                         bounded_workspace_->ReadOriginalNormal(
+                             guarded_ref_image,
+                             guarded_ref_row,
+                             guarded_ref_col);
+                },
+                [&]() -> Eigen::Vector3f {
+                  return inv_R_.at(image_idx) *
+                         bounded_workspace_->ReadOriginalNormal(
+                             image_idx, row, col);
+                }))
+          continue;
+      } else {
+        const float cos_normal_error = fused_ref_normal.dot(normal);
+        if (cos_normal_error < min_cos_normal_error_) continue;
       }
     }
 
@@ -1233,6 +1280,13 @@ void StereoFusion::Fuse(const int thread_id,
     if (traversal_depth == 0) {
       fused_ref_point = Eigen::Vector4f(xyz(0), xyz(1), xyz(2), 1.0f);
       fused_ref_normal = normal;
+      if (options_.bounded_cache_normal_snorm16_guard) {
+        guarded_ref_normal = normal_precision_guard::CompressedOperand(
+            inv_R_.at(image_idx), local_normal);
+        guarded_ref_image = image_idx;
+        guarded_ref_row = row;
+        guarded_ref_col = col;
+      }
     }
 
     if (fused_point_x.size() >= static_cast<size_t>(options_.max_num_pixels)) {

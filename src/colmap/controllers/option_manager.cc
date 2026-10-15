@@ -1164,6 +1164,17 @@ void OptionManager::AddStereoFusionOptions() {
                    &stereo_fusion->bounded_cache_normal_tile_slots);
   AddDefaultOption("StereoFusion.bounded_cache_normal_tile_hints",
                    &stereo_fusion->bounded_cache_normal_tile_hints);
+  AddDefaultOption(
+      "StereoFusion.bounded_cache_normal_snorm16",
+      &stereo_fusion->bounded_cache_normal_snorm16,
+      "Quantize bounded normal tiles to SNORM16. Decisions are approximate "
+      "unless bounded_cache_normal_snorm16_guard is also enabled.");
+  AddDefaultOption(
+      "StereoFusion.bounded_cache_normal_snorm16_guard",
+      &stereo_fusion->bounded_cache_normal_snorm16_guard,
+      "Use original FP32 normals for uncertain compact-normal decisions. "
+      "Requires supported strict floating-point arithmetic and bounded "
+      "SNORM16 tiles.");
   AddDefaultOption("StereoFusion.bounded_cache_normal_mapped_bytes",
                    &stereo_fusion->bounded_cache_normal_mapped_bytes);
   AddDefaultOption("StereoFusion.bounded_cache_normal_mapped_files",

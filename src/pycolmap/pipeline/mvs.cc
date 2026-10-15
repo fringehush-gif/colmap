@@ -275,6 +275,10 @@ void BindMVS(py::module& m) {
                          &SFOpts::bounded_cache_normal_tile_slots)
           .def_readwrite("bounded_cache_normal_tile_hints",
                          &SFOpts::bounded_cache_normal_tile_hints)
+          .def_readwrite("bounded_cache_normal_snorm16",
+                         &SFOpts::bounded_cache_normal_snorm16)
+          .def_readwrite("bounded_cache_normal_snorm16_guard",
+                         &SFOpts::bounded_cache_normal_snorm16_guard)
           .def_readwrite("bounded_cache_normal_mapped_bytes",
                          &SFOpts::bounded_cache_normal_mapped_bytes)
           .def_readwrite("bounded_cache_normal_mapped_files",
@@ -282,6 +286,11 @@ void BindMVS(py::module& m) {
           .def_readwrite("bounding_box",
                          &SFOpts::bounding_box,
                          "Bounding box Tuple[min, max]")
+          .def_static(
+              "supports_normal_precision_guard",
+              &SFOpts::SupportsNormalPrecisionGuard,
+              "Whether this build supports conservative SNORM decision "
+              "screening. Runtime rounding controls are checked separately.")
           .def("check", &SFOpts::Check);
   MakeDataclass(PyStereoFusionOptions);
 
