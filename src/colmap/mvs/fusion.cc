@@ -12,6 +12,7 @@
 #include "colmap/util/timer.h"
 
 #include <fstream>
+#include <iterator>
 
 #include <Eigen/Geometry>
 
@@ -296,8 +297,10 @@ void StereoFusion::Run() {
 
     fused_points_visibility_.insert(
         fused_points_visibility_.end(),
-        task_fused_points_visibility_[thread_id].begin(),
-        task_fused_points_visibility_[thread_id].end());
+        std::make_move_iterator(
+            task_fused_points_visibility_[thread_id].begin()),
+        std::make_move_iterator(
+            task_fused_points_visibility_[thread_id].end()));
     task_fused_points_visibility_[thread_id].clear();
   }
 
