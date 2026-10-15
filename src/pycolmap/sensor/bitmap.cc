@@ -2,10 +2,17 @@
 
 #include "pycolmap/sensor/bitmap.h"
 
+#include "colmap/sensor/bitmap_reader.h"
+#include "colmap/sensor/bitmap_rgb8.h"
+
 #include "pycolmap/helpers.h"
 #include "pycolmap/pybind11_extension.h"
 
+#include <atomic>
+#include <cstring>
 #include <filesystem>
+#include <limits>
+#include <memory>
 
 #include <pybind11/eigen.h>
 #include <pybind11/pybind11.h>
@@ -18,6 +25,212 @@ namespace py = pybind11;
 #include <stddef.h>
 typedef ptrdiff_t ssize_t;
 #endif
+
+namespace {
+
+std::atomic<uint64_t> next_bitmap_scope_identity{1};
+
+struct PythonBitmapReaderState {
+  explicit PythonBitmapReaderState(py::function loader)
+      : loader(std::move(loader)) {}
+  py::function loader;
+  std::weak_ptr<ScopedBitmapReader> reader;
+  const uint64_t identity =
+      next_bitmap_scope_identity.fetch_add(1, std::memory_order_relaxed);
+  std::atomic<size_t> reads{0};
+  std::atomic<size_t> rgb_copy_bytes{0};
+  std::atomic<size_t> gray_bytes{0};
+};
+
+class PythonBitmapReadScope {
+ public:
+  enum class PayloadMode { kRgb8, kGray8 };
+
+  PythonBitmapReadScope(const std::vector<std::filesystem::path>& paths,
+                        py::function loader,
+                        bool normalized_srgb,
+                        bool camera_metadata_external,
+                        const std::vector<std::pair<int, int>>& image_sizes_wh)
+      : PythonBitmapReadScope(paths,
+                              std::move(loader),
+                              normalized_srgb,
+                              camera_metadata_external,
+                              image_sizes_wh,
+                              PayloadMode::kRgb8) {}
+
+  static std::unique_ptr<PythonBitmapReadScope> GrayOnly(
+      const std::vector<std::filesystem::path>& paths,
+      py::function loader,
+      bool normalized_srgb,
+      bool camera_metadata_external,
+      const std::vector<std::pair<int, int>>& image_sizes_wh) {
+    return std::make_unique<PythonBitmapReadScope>(paths,
+                                                   std::move(loader),
+                                                   normalized_srgb,
+                                                   camera_metadata_external,
+                                                   image_sizes_wh,
+                                                   PayloadMode::kGray8);
+  }
+
+  PythonBitmapReadScope(const std::vector<std::filesystem::path>& paths,
+                        py::function loader,
+                        bool normalized_srgb,
+                        bool camera_metadata_external,
+                        const std::vector<std::pair<int, int>>& image_sizes_wh,
+                        PayloadMode mode) {
+    if (!normalized_srgb || !camera_metadata_external) {
+      throw std::invalid_argument(
+          mode == PayloadMode::kGray8
+              ? "Bitmap gray8 ingress requires normalized sRGB and external "
+                "camera metadata"
+              : "Bitmap RGB8 ingress requires normalized sRGB and external "
+                "camera metadata");
+    }
+    if (mode == PayloadMode::kGray8 && image_sizes_wh.size() != paths.size()) {
+      throw std::invalid_argument(
+          "Gray-only Bitmap scope requires image_sizes_wh for its exact "
+          "roster");
+    }
+    // A final in-flight native reader may release this owner on its worker
+    // thread. Python callback destruction must still occur with the GIL held.
+    state_ = std::shared_ptr<PythonBitmapReaderState>(
+        new PythonBitmapReaderState(std::move(loader)),
+        [](PythonBitmapReaderState* state) {
+          py::gil_scoped_acquire acquire;
+          delete state;
+        });
+    // Reader retains callback state for admitted in-flight reads. The reverse
+    // state->reader edge is weak, so this does not create an ownership cycle.
+    const auto state = state_;
+    reader_ = ScopedBitmapReader::Create(
+        paths,
+        [state, mode](const std::filesystem::path& path,
+                      bool as_rgb,
+                      bool linearize,
+                      Bitmap* target) {
+          const bool gray_only = mode == PayloadMode::kGray8;
+          if (gray_only && as_rgb) {
+            throw std::invalid_argument(
+                "Gray-only Bitmap scope refuses RGB reads");
+          }
+          if (linearize) {
+            throw std::invalid_argument(
+                "Bitmap RGB8 ingress does not silently quantize linear-light "
+                "output");
+          }
+          py::gil_scoped_acquire acquire;
+          py::object pixels;
+          try {
+            pixels = state->loader(path);
+          } catch (const py::error_already_set& error) {
+            throw std::runtime_error(std::string("Bitmap RGB8 loader: ") +
+                                     error.what());
+          }
+          if (!PyObject_CheckBuffer(pixels.ptr())) {
+            throw std::invalid_argument(
+                "Bitmap loader must return a uint8 HWC buffer");
+          }
+          const py::buffer buffer = py::reinterpret_borrow<py::buffer>(pixels);
+          const auto info = buffer.request();
+          if (gray_only) {
+            if (info.ndim != 2 || info.itemsize != 1 || info.format != "B" ||
+                info.shape[0] <= 0 || info.shape[1] <= 0 ||
+                info.shape[1] > std::numeric_limits<int>::max() ||
+                info.shape[0] >
+                    std::numeric_limits<int>::max() / info.shape[1] ||
+                info.strides[1] != 1 || info.strides[0] != info.shape[1]) {
+              throw std::invalid_argument(
+                  "Gray-only Bitmap loader requires positive, packed 2D uint8");
+            }
+          } else if (info.ndim != 3 || info.itemsize != 1 ||
+                     info.format != "B" || info.shape[0] <= 0 ||
+                     info.shape[1] <= 0 || info.shape[2] != 3 ||
+                     info.shape[1] > std::numeric_limits<int>::max() / 3 ||
+                     info.shape[0] > std::numeric_limits<int>::max() /
+                                         (info.shape[1] * 3) ||
+                     info.strides[2] != 1 || info.strides[1] != 3 ||
+                     info.strides[0] != info.shape[1] * 3) {
+            throw std::invalid_argument(
+                "Bitmap loader requires positive, packed, unsigned uint8 HWC "
+                "RGB");
+          }
+          const auto reader = state->reader.lock();
+          if (!reader)
+            throw std::runtime_error("Bitmap RGB8 reader scope is closed");
+          const auto expected = reader->ImageSize(path);
+          if (expected && (info.shape[1] != expected->first ||
+                           info.shape[0] != expected->second)) {
+            throw std::invalid_argument(
+                "Bitmap payload grid differs from declared resident "
+                "dimensions");
+          }
+          Bitmap owned(static_cast<int>(info.shape[1]),
+                       static_cast<int>(info.shape[0]),
+                       as_rgb,
+                       false);
+          const size_t source_bytes = static_cast<size_t>(info.shape[0]) *
+                                      info.shape[1] * (gray_only ? 1 : 3);
+          const size_t bytes = owned.NumBytes();
+          {
+            // Buffer export/pixels/state retain the source lease allocation
+            // while memcpy and the native grayscale conversion release the GIL.
+            py::gil_scoped_release release;
+            if (gray_only || as_rgb) {
+              std::memcpy(owned.RowMajorData().data(), info.ptr, bytes);
+            } else {
+              ConvertPackedRGB8ToGrey(static_cast<const uint8_t*>(info.ptr),
+                                      bytes,
+                                      owned.RowMajorData().data());
+            }
+            *target = std::move(owned);
+          }
+          state->reads.fetch_add(1, std::memory_order_relaxed);
+          if (as_rgb)
+            state->rgb_copy_bytes.fetch_add(source_bytes,
+                                            std::memory_order_relaxed);
+          else
+            state->gray_bytes.fetch_add(bytes, std::memory_order_relaxed);
+          return true;
+        },
+        image_sizes_wh);
+    state_->reader = reader_;
+  }
+
+  ~PythonBitmapReadScope() { Close(); }
+  void Close() {
+    if (reader_) {
+      reader_->Close();
+      reader_.reset();
+    }
+  }
+  bool Closed() const { return !reader_; }
+  uint64_t IdentityToken() const { return state_->identity; }
+  std::optional<std::pair<int, int>> ImageSize(
+      const std::filesystem::path& path) const {
+    if (!reader_) throw std::runtime_error("Bitmap reader scope is closed");
+    if (ScopedBitmapReader::Find(path) != reader_) {
+      throw std::invalid_argument(
+          "Bitmap dimensions requested outside this scope");
+    }
+    return reader_->ImageSize(path);
+  }
+  py::dict Stats() const {
+    py::dict result;
+    result["bitmapReads"] = state_->reads.load(std::memory_order_relaxed);
+    result["ownedRgbCopyBytes"] =
+        state_->rgb_copy_bytes.load(std::memory_order_relaxed);
+    result["grayOutputBytes"] =
+        state_->gray_bytes.load(std::memory_order_relaxed);
+    result["memfdPublicationBytes"] = 0;
+    return result;
+  }
+
+ private:
+  std::shared_ptr<PythonBitmapReaderState> state_;
+  std::shared_ptr<ScopedBitmapReader> reader_;
+};
+
+}  // namespace
 
 py::array_t<uint8_t> ArrayFromBitmap(const Bitmap& self) {
   std::vector<ssize_t> shape = {static_cast<ssize_t>(self.Height()),
@@ -70,6 +283,57 @@ Bitmap BitmapFromArray(py::array_t<uint8_t, py::array::c_style> array,
 }
 
 void BindBitmap(pybind11::module& m) {
+  py::classh<PythonBitmapReadScope>(m, "BitmapReadScope")
+      .def(
+          py::init<const std::vector<std::filesystem::path>&,
+                   py::function,
+                   bool,
+                   bool,
+                   const std::vector<std::pair<int, int>>&>(),
+          "paths"_a,
+          "loader"_a,
+          "normalized_srgb"_a,
+          "camera_metadata_external"_a,
+          "image_sizes_wh"_a = std::vector<std::pair<int, int>>{},
+          "Scoped exact-path RGB8 ingress for Bitmap::Read. The loader returns "
+          "immutable packed HWC uint8 from the shared cache. RGB copies into "
+          "owned storage; grayscale converts directly into owned gray. No disk "
+          "fallback on a managed-path error. Keep open until readers join; "
+          "not a CLI-process callback or external Bitmap-storage borrow.")
+      .def_static(
+          "gray_only",
+          &PythonBitmapReadScope::GrayOnly,
+          "paths"_a,
+          "loader"_a,
+          "normalized_srgb"_a,
+          "camera_metadata_external"_a,
+          "image_sizes_wh"_a,
+          "Explicit gray-only exact-path scope. Loader returns positive packed "
+          "2D uint8 that stays immutable through the copy. RGB reads fail "
+          "without invoking it; native Bitmap owns a grayscale copy. "
+          "Keep open through worker join.")
+      .def("close", &PythonBitmapReadScope::Close)
+      .def("stats", &PythonBitmapReadScope::Stats)
+      .def("image_size",
+           &PythonBitmapReadScope::ImageSize,
+           "path"_a,
+           "Declared width/height without invoking the pixel loader.")
+      .def_property_readonly("closed", &PythonBitmapReadScope::Closed)
+      .def_property_readonly("identity_token",
+                             &PythonBitmapReadScope::IdentityToken)
+      .def(
+          "__enter__",
+          [](PythonBitmapReadScope& self) -> PythonBitmapReadScope& {
+            if (self.Closed())
+              throw std::runtime_error("Bitmap reader scope is closed");
+            return self;
+          },
+          py::return_value_policy::reference_internal)
+      .def("__exit__",
+           [](PythonBitmapReadScope& self, py::object, py::object, py::object) {
+             self.Close();
+             return false;
+           });
   using BitmapRescaleFilter = Bitmap::RescaleFilter;
   py::enum_<BitmapRescaleFilter> PyRescaleFilter(m, "BitmapRescaleFilter");
   PyRescaleFilter.value("BILINEAR", BitmapRescaleFilter::kBilinear)
@@ -114,7 +378,7 @@ void BindBitmap(pybind11::module& m) {
                              /*linearize_colorspace=*/linearize_colorspace)) {
               return py::none();
             }
-            return py::cast(bitmap);
+            return py::cast(std::move(bitmap));
           },
           "path"_a,
           "as_rgb"_a,
