@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -31,6 +32,13 @@ class BoundedWorkspace : public Workspace {
   struct ImageData {
     Bitmap bitmap;
     DepthMap depth_map;
+    std::vector<uint8_t> positive_depth_mask;
+    size_t exact_depth_width = 0, exact_depth_height = 0;
+    static size_t PositiveDepthMaskBytes(size_t samples) {
+      return samples / 8 + (samples % 8 != 0);
+    }
+    bool HasPositiveDepth(size_t row, size_t col) const;
+    float GetDepth(size_t row, size_t col) const;
     NormalMap normal_map;
     std::vector<int16_t> snorm_normals;
     size_t snorm_width = 0, snorm_height = 0;
@@ -98,6 +106,7 @@ class BoundedWorkspace : public Workspace {
   };
 
   explicit BoundedWorkspace(const Options& options);
+  ~BoundedWorkspace() override;
   void Load(const std::vector<std::string>&) override {}
   ImageLease AcquireImage(int image_idx);
   ImageLease AcquireComponent(int image_idx, Component component);
@@ -108,6 +117,28 @@ class BoundedWorkspace : public Workspace {
   // Short mapped row lease; exact FP32 normal read for ambiguous SNORM
   // decisions.
   Eigen::Vector3f ReadOriginalNormal(int image_idx, size_t row, size_t col);
+  // Admit complete original FP32 depth before starting row workers. Stored
+  // and consumed grids must agree; inputs remain immutable for the run.
+  void PrepareOriginalDepth(int image_idx, size_t width, size_t height);
+  float ReadOriginalDepth(int image_idx,
+                          size_t row,
+                          size_t col,
+                          Mat<float>& scalar_scratch);
+  struct DepthMappedNeighborhoodStats {
+    size_t source_admissions = 0, root_preparations = 0;
+    size_t complete_roots = 0, fallback_roots = 0, cancelled_roots = 0;
+    size_t pin_acquires = 0, borrowed_reads = 0, scalar_acquires = 0;
+    size_t metadata_peak_bytes = 0;
+  };
+  // Caller thread with joined row tasks: all reachable owners or fallback.
+  // Keep worst excluded scalar byte/file headroom to avoid self-waiting.
+  bool PrepareOriginalDepthNeighborhood(
+      const std::vector<int>& views,
+      const std::function<bool()>& stop_requested);
+  void ReleaseOriginalDepthNeighborhood() noexcept;
+  DepthMappedNeighborhoodStats GetDepthMappedNeighborhoodStats() const {
+    return depth_mapped_neighborhood_stats_;
+  }
   // Pins the complete FP32 normal file. The owner must outlive every sample.
   using MappedNormalLease = std::shared_ptr<const ImmutableMapRegion>;
   MappedNormalLease AcquireMappedNormal(int image_idx);
@@ -138,6 +169,7 @@ class BoundedWorkspace : public Workspace {
   const NormalMap& GetNormalMap(int image_idx) override;
 
  private:
+  friend struct BoundedWorkspaceExactDepthPinTestPeer;
   struct NormalRegion {
     size_t x, y, width, height, tile_size;
   };
@@ -190,6 +222,16 @@ class BoundedWorkspace : public Workspace {
                          std::optional<NormalRegion> region);
   std::shared_ptr<CacheState> cache_state_;
   std::shared_ptr<MappedNormalPool> mapped_normal_pool_;
+  struct OriginalDepthSource {
+    size_t width = 0, height = 0;
+    std::filesystem::path path;
+    size_t mapping_reservation_bytes = 0;
+    const ImmutableMapRegion* borrowed_owner = nullptr;
+  };
+  std::vector<OriginalDepthSource> original_depth_sources_;
+  std::vector<MappedNormalPool::Lease> original_depth_pins_;
+  DepthMappedNeighborhoodStats depth_mapped_neighborhood_stats_;
+  size_t DepthPinMetadataBytes(size_t selected_metadata_bytes) const;
   // Map files and model paths are immutable for a Workspace lifetime. Publish
   // both validated shapes together; failed first admission remains retryable.
   mutable std::vector<std::once_flag> normal_tile_grid_once_;

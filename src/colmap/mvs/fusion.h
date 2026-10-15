@@ -91,6 +91,9 @@ struct StereoFusionOptions {
   // only on supported compiler arithmetic; unsupported builds reject it.
   bool bounded_cache_normal_snorm16 = false;
   bool bounded_cache_normal_snorm16_guard = false;
+  // Default-off serial exact-depth state, independent of lossy codecs.
+  // Retain only finite-positive bits; use original FP32 for every predicate.
+  bool bounded_cache_exact_depth = false;
   int64_t bounded_cache_normal_mapped_bytes = 0;
   int bounded_cache_normal_mapped_files = 0;
 
@@ -207,6 +210,9 @@ class StereoFusion : public BaseController {
   // Get per-point visibility lists (indices of images that observe each point).
   const std::vector<std::vector<int>>& GetFusedPointsVisibility() const;
   std::optional<BoundedWorkspace::CacheStats> GetBoundedCacheStats() const;
+  std::pair<size_t, size_t> GetDepthExactStateReadCounts() const;
+  BoundedWorkspace::DepthMappedNeighborhoodStats
+  GetDepthMappedNeighborhoodStats() const;
   size_t GetMaxBoundedPrefillLanesScheduled() const;
   BoundedWorkspace::MappedNormalStats GetMappedNormalStats() const;
   struct NormalTileRingStats {
@@ -333,6 +339,11 @@ class StereoFusion : public BaseController {
     }
   };
 
+  struct ExactDepthScratch {
+    Mat<float> scalar;
+    size_t root_reads = 0, candidate_reads = 0;
+  };
+  std::vector<ExactDepthScratch> exact_depth_scratch_;
   // Already fused points.
   std::vector<PlyPoint> fused_points_;
   std::vector<std::vector<int>> fused_points_visibility_;

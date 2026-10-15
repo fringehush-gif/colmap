@@ -136,6 +136,7 @@ void StereoFusionOptions::Print() const {
   PrintOption(bounded_cache_normal_tile_hints);
   PrintOption(bounded_cache_normal_snorm16);
   PrintOption(bounded_cache_normal_snorm16_guard);
+  PrintOption(bounded_cache_exact_depth);
   PrintOption(bounded_cache_normal_mapped_bytes);
   PrintOption(bounded_cache_normal_mapped_files);
   PrintOption(bounded_cache_neighborhood);
@@ -189,12 +190,21 @@ bool StereoFusionOptions::Check() const {
       (bounded_cache_normal_tile_size > 0 &&
        (!bounded_cache_components || bounded_cache_normal_mapped_bytes == 0)),
       false);
-  CHECK_OPTION_EQ((bounded_cache_normal_tile_size == 0 &&
-                   bounded_cache_normal_mapped_bytes > 0 &&
-                   (!bounded_cache || !bounded_cache_components ||
-                    bounded_cache_neighborhood || num_threads != 1 ||
-                    bounded_cache_normal_mapped_files < 2)),
-                  false);
+  CHECK_OPTION_EQ(
+      (!bounded_cache_exact_depth && bounded_cache_normal_tile_size == 0 &&
+       bounded_cache_normal_mapped_bytes > 0 &&
+       (!bounded_cache || !bounded_cache_components ||
+        bounded_cache_neighborhood || num_threads != 1 ||
+        bounded_cache_normal_mapped_files < 2)),
+      false);
+  CHECK_OPTION_EQ(
+      (bounded_cache_exact_depth &&
+       (!bounded_cache || !bounded_cache_components ||
+        bounded_cache_normal_snorm16 || bounded_cache_normal_snorm16_guard ||
+        bounded_cache_normal_tile_size != 0 || num_threads != 1 ||
+        bounded_cache_normal_mapped_bytes == 0 ||
+        bounded_cache_normal_mapped_files == 0)),
+      false);
   CHECK_OPTION_EQ((bounded_cache_neighborhood && !bounded_cache), false);
   CHECK_OPTION_GE(bounded_cache_prefill_threads, -1);
   CHECK_OPTION_NE(bounded_cache_prefill_threads, 0);
@@ -237,6 +247,22 @@ std::optional<BoundedWorkspace::CacheStats> StereoFusion::GetBoundedCacheStats()
     const {
   if (!bounded_workspace_) return std::nullopt;
   return bounded_workspace_->GetCacheStats();
+}
+
+std::pair<size_t, size_t> StereoFusion::GetDepthExactStateReadCounts() const {
+  std::pair<size_t, size_t> counts{};
+  for (const auto& scratch : exact_depth_scratch_) {
+    counts.first += scratch.root_reads;
+    counts.second += scratch.candidate_reads;
+  }
+  return counts;  // Read only after all row workers have joined.
+}
+
+BoundedWorkspace::DepthMappedNeighborhoodStats
+StereoFusion::GetDepthMappedNeighborhoodStats() const {
+  return bounded_workspace_
+             ? bounded_workspace_->GetDepthMappedNeighborhoodStats()
+             : BoundedWorkspace::DepthMappedNeighborhoodStats{};
 }
 
 size_t StereoFusion::GetMaxBoundedPrefillLanesScheduled() const {
@@ -367,7 +393,9 @@ void StereoFusion::Run() {
   mapped_normal_ring_.clear();
   mapped_normal_ring_index_.Clear();
   mapped_normal_next_ = 0;
-  direct_mapped_normals_ = options_.bounded_cache_normal_tile_size == 0 &&
+  exact_depth_scratch_.clear();
+  direct_mapped_normals_ = !options_.bounded_cache_exact_depth &&
+                           options_.bounded_cache_normal_tile_size == 0 &&
                            options_.bounded_cache_normal_mapped_bytes > 0;
   normal_tile_worker_headroom_ = 0;
 
@@ -389,6 +417,7 @@ void StereoFusion::Run() {
   workspace_options.image_as_rgb = true;
   workspace_options.compact_rgb_to_depth_grid =
       options_.bounded_cache_compact_rgb;
+  workspace_options.exact_depth_state = options_.bounded_cache_exact_depth;
   workspace_options.normal_tiles_snorm16 =
       options_.bounded_cache_normal_snorm16;
   workspace_options.mapped_normal_bytes_limit =
@@ -455,6 +484,12 @@ void StereoFusion::Run() {
 
   task_fused_points_.resize(num_threads);
   task_fused_points_visibility_.resize(num_threads);
+  if (options_.bounded_cache_exact_depth) {
+    exact_depth_scratch_.resize(num_threads);
+    for (auto& scratch : exact_depth_scratch_) {
+      scratch.scalar = Mat<float>(1, 1, 1);
+    }
+  }
 
   used_images_.assign(model.images.size(), false);
   fused_images_.assign(model.images.size(), false);
@@ -486,6 +521,10 @@ void StereoFusion::Run() {
     if (bounded_workspace_) {
       std::tie(depth_width, depth_height) =
           bounded_workspace_->GetDepthMapDimensions(image_idx);
+      if (options_.bounded_cache_exact_depth) {
+        bounded_workspace_->PrepareOriginalDepth(
+            image_idx, depth_width, depth_height);
+      }
     } else {
       const auto depth_map = workspace_->GetDepthMapLease(image_idx);
       depth_width = depth_map->GetWidth();
@@ -602,6 +641,17 @@ void StereoFusion::Run() {
   }
 
   LOG(INFO) << StringPrintf("Starting fusion with %d threads", num_threads);
+  // Construct before the pool: release after its destructor joins any tasks
+  // left by enqueue, callback or Wait failure.
+  struct DepthPinExit {
+    BoundedWorkspace* workspace;
+    ~DepthPinExit() {
+      if (workspace) workspace->ReleaseOriginalDepthNeighborhood();
+    }
+  } depth_pin_exit{options_.bounded_cache_exact_depth &&
+                           options_.bounded_cache_neighborhood
+                       ? bounded_workspace_
+                       : nullptr};
   ThreadPool thread_pool(num_threads);
   // Only an explicit larger prefill count needs another pool. It is created
   // once per run and bounded by the configured image roster.
@@ -683,6 +733,9 @@ void StereoFusion::Run() {
                             fused_pixel_mask);
       }
       thread_pool.Wait();
+      if (depth_pin_exit.workspace) {
+        depth_pin_exit.workspace->ReleaseOriginalDepthNeighborhood();
+      }
       ClearNormalTileRings();
       ClearMappedNormalRing();
 
@@ -697,6 +750,9 @@ void StereoFusion::Run() {
           " in %.3fs (%d points)", timer.ElapsedSeconds(), total_fused_points);
     }
 
+    if (depth_pin_exit.workspace) {
+      depth_pin_exit.workspace->ReleaseOriginalDepthNeighborhood();
+    }
     std::fill(neighborhood_data_.begin(), neighborhood_data_.end(), nullptr);
     neighborhood_leases_.clear();
 
@@ -726,6 +782,29 @@ void StereoFusion::Run() {
     }
 
     LOG(INFO) << "Number of fused points: " << fused_points_.size();
+    if (options_.bounded_cache_exact_depth) {
+      const auto counts = GetDepthExactStateReadCounts();
+      LOG(INFO) << (options_.bounded_cache_neighborhood
+                        ? "Exact FP32 depth state with mapped neighborhoods: "
+                          "root_reads="
+                        : "Exact FP32 depth state: root_reads=")
+                << counts.first << " candidate_reads=" << counts.second
+                << " scalar_payload_bytes="
+                << 4 * (counts.first + counts.second)
+                << " scratch_payload_bytes=" << 4 * exact_depth_scratch_.size();
+      const auto pins = GetDepthMappedNeighborhoodStats();
+      LOG(INFO) << "Exact depth mapped neighborhoods: pin_enabled="
+                << int(options_.bounded_cache_neighborhood)
+                << " source_admissions=" << pins.source_admissions
+                << " roots=" << pins.root_preparations
+                << " complete=" << pins.complete_roots
+                << " fallback=" << pins.fallback_roots
+                << " cancelled=" << pins.cancelled_roots
+                << " pin_acquires=" << pins.pin_acquires
+                << " borrowed_reads=" << pins.borrowed_reads
+                << " scalar_acquires=" << pins.scalar_acquires
+                << " metadata_peak_bytes=" << pins.metadata_peak_bytes;
+    }
     run_timer.PrintMinutes();
   } catch (...) {
     const auto failure = std::current_exception();
@@ -992,6 +1071,11 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
                                                   image_idx,
                                                   options_.max_traversal_depth);
   if (views.empty()) return;
+  if (options_.bounded_cache_exact_depth) {
+    bounded_workspace_->PrepareOriginalDepthNeighborhood(
+        views, [this] { return CheckIfStopped(); });
+    if (CheckIfStopped()) return;
+  }
   using Component = BoundedWorkspace::Component;
   const size_t capacity = bounded_workspace_->GetCacheStats().capacity_bytes;
   const size_t workers = static_cast<size_t>(num_threads);
@@ -1253,13 +1337,30 @@ void StereoFusion::Fuse(const int thread_id,
     const auto* image_data = pinned ? pinned : image_lease.get();
     const auto depth_map = image_data ? std::shared_ptr<const DepthMap>()
                                       : workspace_->GetDepthMapLease(image_idx);
-    const float depth = image_data ? image_data->depth_map.Get(row, col)
-                                   : depth_map->Get(row, col);
+    const bool exact_depth = options_.bounded_cache_exact_depth;
+    const bool exact_nonpositive =
+        exact_depth && !image_data->HasPositiveDepth(row, col);
+    float depth = exact_depth
+                      ? 0.0f
+                      : (image_data ? image_data->depth_map.Get(row, col)
+                                    : depth_map->Get(row, col));
     if (options_.bounded_cache_components && image_lease) {
       image_lease.reset();
       image_data = nullptr;
     }
 
+    if (exact_depth) {
+      if (exact_nonpositive) continue;
+      auto& scratch = exact_depth_scratch_.at(thread_id);
+      depth = bounded_workspace_->ReadOriginalDepth(
+          image_idx, row, col, scratch.scalar);
+      THROW_CHECK_GT(depth, 0.0f) << "Original depth/positive mask disagree";
+      if (traversal_depth == 0)
+        ++scratch.root_reads;
+      else
+        ++scratch.candidate_reads;
+    }
+    // Original FP32 now feeds every unchanged predicate and output operation.
     // Pixels with negative depth are filtered.
     if (depth <= 0.0f) {
       continue;

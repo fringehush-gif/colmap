@@ -49,6 +49,12 @@ COLMAP_ADD_TEST(
     LINK_LIBS colmap_mvs
 )
 COLMAP_ADD_TEST(
+    NAME exact_depth_state_test
+    SRCS exact_depth_state_test.cc
+    LINK_LIBS colmap_mvs
+)
+
+COLMAP_ADD_TEST(
     NAME fusion_test
     SRCS fusion_test.cc
     LINK_LIBS colmap_mvs
