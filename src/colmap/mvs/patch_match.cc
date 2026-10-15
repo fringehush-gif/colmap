@@ -444,13 +444,9 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
     std::vector<int> src_image_idxs;
     std::vector<int> valid_image_idxs;
     for (const auto image_idx : used_image_idxs) {
-      const auto image_path = workspace_->GetBitmapPath(image_idx);
-      const auto depth_path = workspace_->GetDepthMapPath(image_idx);
-      const auto normal_path = workspace_->GetNormalMapPath(image_idx);
-
-      if (!ExistsFile(image_path) ||
-          (options.geom_consistency && !ExistsFile(depth_path)) ||
-          (options.geom_consistency && !ExistsFile(normal_path))) {
+      if (!workspace_->HasBitmap(image_idx) ||
+          (options.geom_consistency && !workspace_->HasDepthMap(image_idx)) ||
+          (options.geom_consistency && !workspace_->HasNormalMap(image_idx))) {
         if (options.allow_missing_files) {
           LOG(WARNING) << StringPrintf(
               "Skipping source image %d: %s for missing "
@@ -477,14 +473,16 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
       futures.reserve(valid_image_idxs.size());
       for (const auto image_idx : valid_image_idxs) {
         futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
-          images.at(image_idx).SetBitmap(workspace_->GetBitmap(image_idx));
+          images.at(image_idx).SetBitmap(
+              *workspace_->GetBitmapLease(image_idx));
           if (options.geom_consistency) {
-            depth_maps.at(image_idx) = workspace_->GetDepthMap(image_idx);
+            depth_maps.at(image_idx) = *workspace_->GetDepthMapLease(image_idx);
             if (!options.reference_only_normal_materialization ||
                 image_idx == problem.ref_image_idx ||
                 !workspace_->ValidateSourceNormalWithoutMaterialization(
                     image_idx)) {
-              normal_maps.at(image_idx) = workspace_->GetNormalMap(image_idx);
+              normal_maps.at(image_idx) =
+                  *workspace_->GetNormalMapLease(image_idx);
             }
           }
         }));

@@ -186,18 +186,19 @@ void StereoFusion::Run() {
     }
 
     const auto& image = model.images.at(image_idx);
-    const auto& depth_map = workspace_->GetDepthMap(image_idx);
+    const auto depth_map = workspace_->GetDepthMapLease(image_idx);
 
     used_images_.at(image_idx) = true;
 
-    InitFusedPixelMask(image_idx, depth_map.GetWidth(), depth_map.GetHeight());
+    InitFusedPixelMask(
+        image_idx, depth_map->GetWidth(), depth_map->GetHeight());
 
     depth_map_sizes_.at(image_idx) =
-        std::make_pair(depth_map.GetWidth(), depth_map.GetHeight());
+        std::make_pair(depth_map->GetWidth(), depth_map->GetHeight());
 
     bitmap_scales_.at(image_idx) = std::make_pair(
-        static_cast<float>(depth_map.GetWidth()) / image.GetWidth(),
-        static_cast<float>(depth_map.GetHeight()) / image.GetHeight());
+        static_cast<float>(depth_map->GetWidth()) / image.GetWidth(),
+        static_cast<float>(depth_map->GetHeight()) / image.GetHeight());
 
     Eigen::Matrix<float, 3, 3, Eigen::RowMajor> K =
         Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>>(
@@ -382,8 +383,8 @@ void StereoFusion::Fuse(const int thread_id,
       continue;
     }
 
-    const auto& depth_map = workspace_->GetDepthMap(image_idx);
-    const float depth = depth_map.Get(row, col);
+    const auto depth_map = workspace_->GetDepthMapLease(image_idx);
+    const float depth = depth_map->Get(row, col);
 
     // Pixels with negative depth are filtered.
     if (depth <= 0.0f) {
@@ -413,11 +414,11 @@ void StereoFusion::Fuse(const int thread_id,
     }
 
     // Determine normal direction in global reference frame.
-    const auto& normal_map = workspace_->GetNormalMap(image_idx);
+    const auto normal_map = workspace_->GetNormalMapLease(image_idx);
     const Eigen::Vector3f normal =
-        inv_R_.at(image_idx) * Eigen::Vector3f(normal_map.Get(row, col, 0),
-                                               normal_map.Get(row, col, 1),
-                                               normal_map.Get(row, col, 2));
+        inv_R_.at(image_idx) * Eigen::Vector3f(normal_map->Get(row, col, 0),
+                                               normal_map->Get(row, col, 1),
+                                               normal_map->Get(row, col, 2));
 
     // Check for consistent normal direction with reference normal.
     if (traversal_depth > 0) {
@@ -434,10 +435,11 @@ void StereoFusion::Fuse(const int thread_id,
 
     // Read the color of the pixel.
     const auto& bitmap_scale = bitmap_scales_.at(image_idx);
+    const auto bitmap = workspace_->GetBitmapLease(image_idx);
     const auto color =
-        workspace_->GetBitmap(image_idx)
-            .InterpolateNearestNeighbor(col / bitmap_scale.first,
-                                        row / bitmap_scale.second)
+        bitmap
+            ->InterpolateNearestNeighbor(col / bitmap_scale.first,
+                                         row / bitmap_scale.second)
             .value_or(BitmapColor<uint8_t>(0));
 
     // Set the current pixel as visited.

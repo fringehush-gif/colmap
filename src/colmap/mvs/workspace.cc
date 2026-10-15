@@ -129,6 +129,8 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
     normal_maps_[image_idx] = std::move(normal_map);
   };
 
+  // Each model slot is published by at most one task in this Load call.
+  std::vector<uint8_t> enqueued(num_images, 0);
   const int num_threads = GetEffectiveNumThreads(options_.num_threads);
   ThreadPool thread_pool(num_threads);
   Timer timer;
@@ -138,8 +140,10 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
                             num_threads);
   for (size_t i = 0; i < image_names.size(); ++i) {
     const int image_idx = model_.GetImageIdx(image_names[i]);
+    if (enqueued[image_idx]) continue;
     if (HasBitmap(image_idx) && HasDepthMap(image_idx)) {
       thread_pool.AddTask(LoadWorkspaceData, image_idx);
+      enqueued[image_idx] = 1;
     } else {
       LOG(WARNING) << StringPrintf(
           "Ignoring image %s, because input does not exist.",
@@ -160,6 +164,20 @@ const DepthMap& Workspace::GetDepthMap(const int image_idx) {
 
 const NormalMap& Workspace::GetNormalMap(const int image_idx) {
   return *THROW_CHECK_NOTNULL(normal_maps_.at(image_idx));
+}
+
+std::shared_ptr<const Bitmap> Workspace::GetBitmapLease(const int image_idx) {
+  return {std::shared_ptr<const Bitmap>{}, &GetBitmap(image_idx)};
+}
+
+std::shared_ptr<const DepthMap> Workspace::GetDepthMapLease(
+    const int image_idx) {
+  return {std::shared_ptr<const DepthMap>{}, &GetDepthMap(image_idx)};
+}
+
+std::shared_ptr<const NormalMap> Workspace::GetNormalMapLease(
+    const int image_idx) {
+  return {std::shared_ptr<const NormalMap>{}, &GetNormalMap(image_idx)};
 }
 
 std::filesystem::path Workspace::GetBitmapPath(const int image_idx) const {
@@ -210,6 +228,11 @@ CachedWorkspace::CachedWorkspace(const Options& options)
              [](const int) { return std::make_shared<CachedImage>(); }) {}
 
 const Bitmap& CachedWorkspace::GetBitmap(const int image_idx) {
+  return *GetBitmapLease(image_idx);
+}
+
+std::shared_ptr<const Bitmap> CachedWorkspace::GetBitmapLease(
+    const int image_idx) {
   std::shared_ptr<CachedImage> cached_image;
   {
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
@@ -230,10 +253,15 @@ const Bitmap& CachedWorkspace::GetBitmap(const int image_idx) {
       cache_.UpdateNumBytes(image_idx);
     }
   }
-  return *cached_image->bitmap;
+  return {cached_image, cached_image->bitmap.get()};
 }
 
 const DepthMap& CachedWorkspace::GetDepthMap(const int image_idx) {
+  return *GetDepthMapLease(image_idx);
+}
+
+std::shared_ptr<const DepthMap> CachedWorkspace::GetDepthMapLease(
+    const int image_idx) {
   std::shared_ptr<CachedImage> cached_image;
   {
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
@@ -255,10 +283,15 @@ const DepthMap& CachedWorkspace::GetDepthMap(const int image_idx) {
       cache_.UpdateNumBytes(image_idx);
     }
   }
-  return *cached_image->depth_map;
+  return {cached_image, cached_image->depth_map.get()};
 }
 
 const NormalMap& CachedWorkspace::GetNormalMap(const int image_idx) {
+  return *GetNormalMapLease(image_idx);
+}
+
+std::shared_ptr<const NormalMap> CachedWorkspace::GetNormalMapLease(
+    const int image_idx) {
   std::shared_ptr<CachedImage> cached_image;
   {
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
@@ -280,7 +313,7 @@ const NormalMap& CachedWorkspace::GetNormalMap(const int image_idx) {
       cache_.UpdateNumBytes(image_idx);
     }
   }
-  return *cached_image->normal_map;
+  return {cached_image, cached_image->normal_map.get()};
 }
 
 bool CachedWorkspace::ValidateSourceNormalWithoutMaterialization(
