@@ -300,6 +300,118 @@ TEST(StereoFusion, Integration) {
   }
 }
 
+TEST(StereoFusion, CompactResidentRgbMatchesDiskFusion) {
+  const auto root = CreateTestDir();
+  CreateDirIfNotExists(root / "sparse");
+  CreateDirIfNotExists(root / "images");
+  CreateDirIfNotExists(root / "stereo");
+  CreateDirIfNotExists(root / "stereo" / "depth_maps");
+  CreateDirIfNotExists(root / "stereo" / "normal_maps");
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 2;
+  dataset.camera_width = 10;
+  dataset.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  reconstruction.Write(root / "sparse");
+  Workspace::Options workspace_options;
+  workspace_options.workspace_path = root;
+  workspace_options.workspace_format = "COLMAP";
+  workspace_options.input_type = "geometric";
+  Workspace descriptor(workspace_options);
+  std::vector<std::string> names;
+  std::vector<std::filesystem::path> paths;
+  auto originals = std::make_shared<std::vector<Bitmap>>();
+  for (int image_id = 1; image_id <= 2; ++image_id) {
+    const auto name = reconstruction.Image(image_id).Name();
+    names.push_back(name);
+    const int image = descriptor.GetModel().GetImageIdx(name);
+    paths.push_back(descriptor.GetBitmapPath(image));
+    Mat<float> depth(7, 3, 1);
+    depth.Fill(5.0f);
+    depth.Write(descriptor.GetDepthMapPath(image));
+    Mat<float> normal(7, 3, 3);
+    normal.Fill(0.0f);
+    for (int row = 0; row < 3; ++row) {
+      for (int col = 0; col < 7; ++col) {
+        normal.Set(row, col, 2, 1.0f);
+      }
+    }
+    normal.Write(descriptor.GetNormalMapPath(image));
+    Bitmap bitmap(10, 5, true);
+    for (int row = 0; row < 5; ++row) {
+      for (int col = 0; col < 10; ++col) {
+        bitmap.SetPixel(
+            col,
+            row,
+            BitmapColor<uint8_t>(
+                col * 19 + row, row * 31 + col, image_id * 20 + col));
+      }
+    }
+    ASSERT_TRUE(bitmap.Write(paths.back()));
+    originals->push_back(bitmap);
+  }
+  {
+    std::ofstream config(root / "stereo" / "fusion.cfg");
+    for (const auto& name : names) config << name << '\n';
+  }
+  StereoFusionOptions options;
+  options.num_threads = 1;
+  options.min_num_pixels = 1;
+  options.max_num_pixels = 100;
+  options.max_traversal_depth = 10;
+  options.check_num_images = 10;
+  StereoFusion disk(options, root, "COLMAP", "", "geometric");
+  disk.Run();
+  const auto& expected = disk.GetFusedPoints();
+  ASSERT_FALSE(expected.empty());
+  auto scope = ScopedBitmapReader::Create(
+      paths,
+      [strong = originals, paths](
+          const auto& path, bool rgb, bool linear, Bitmap* target) {
+        EXPECT_TRUE(rgb);
+        EXPECT_FALSE(linear);
+        for (size_t i = 0; i < paths.size(); ++i) {
+          if (path == std::filesystem::absolute(paths[i]).lexically_normal()) {
+            *target = strong->at(i);
+            return true;
+          }
+        }
+        return false;
+      },
+      {{10, 5}, {10, 5}});
+  originals.reset();
+  for (const auto& path : paths) ASSERT_TRUE(std::filesystem::remove(path));
+  options.bounded_cache = true;
+  options.bounded_cache_compact_rgb = true;
+  options.cache_size = 600.0 / (1024.0 * 1024.0 * 1024.0);
+  StereoFusion compact(options, root, "COLMAP", "", "geometric");
+  compact.Run();  // The strong scope owner stays alive through worker join.
+  const auto& actual = compact.GetFusedPoints();
+  ASSERT_EQ(actual.size(), expected.size());
+  EXPECT_EQ(compact.GetFusedPointsVisibility(),
+            disk.GetFusedPointsVisibility());
+  for (size_t i = 0; i < actual.size(); ++i) {
+    const auto& a = actual[i];
+    const auto& b = expected[i];
+    EXPECT_FLOAT_EQ(a.x, b.x);
+    EXPECT_FLOAT_EQ(a.y, b.y);
+    EXPECT_FLOAT_EQ(a.z, b.z);
+    EXPECT_FLOAT_EQ(a.nx, b.nx);
+    EXPECT_FLOAT_EQ(a.ny, b.ny);
+    EXPECT_FLOAT_EQ(a.nz, b.nz);
+    EXPECT_EQ(a.r, b.r);
+    EXPECT_EQ(a.g, b.g);
+    EXPECT_EQ(a.b, b.b);
+  }
+  scope->Close();
+  for (const auto& name : names) {
+    EXPECT_FALSE(descriptor.HasBitmap(descriptor.GetModel().GetImageIdx(name)));
+  }
+}
+
 TEST(ReadPointsVisibility, RoundTrip) {
   const auto test_dir = CreateTestDir();
   const auto vis_path = test_dir / "test.vis";

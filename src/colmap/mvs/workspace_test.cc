@@ -512,6 +512,208 @@ TEST(BoundedWorkspaceBase, LeaseOutlivesWorkspace) {
   lease.reset();
 }
 
+TEST(BoundedWorkspaceResident, CompactRgbAdmissionAndExactSamples) {
+  const auto root = CreateTestDir();
+  CreateDirIfNotExists(root / "sparse");
+  CreateDirIfNotExists(root / "images");
+  CreateDirIfNotExists(root / "stereo");
+  CreateDirIfNotExists(root / "stereo" / "depth_maps");
+  CreateDirIfNotExists(root / "stereo" / "normal_maps");
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 1;
+  dataset.camera_width = 10;
+  dataset.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  reconstruction.Write(root / "sparse");
+  const auto name = reconstruction.Image(1).Name();
+  Workspace::Options options;
+  options.workspace_path = root;
+  options.workspace_format = "COLMAP";
+  options.input_type = "geometric";
+  options.compact_rgb_to_depth_grid = true;
+  const Workspace descriptor(options);
+  const auto bitmap_path = descriptor.GetBitmapPath(0);
+  auto original = std::make_shared<Bitmap>(10, 5, true);
+  for (int row = 0; row < 5; ++row) {
+    for (int col = 0; col < 10; ++col) {
+      original->SetPixel(
+          col,
+          row,
+          BitmapColor<uint8_t>(
+              col * 23 + row, row * 47 + col, col * 13 + row * 7));
+    }
+  }
+  ASSERT_TRUE(original->Write(bitmap_path));
+  auto scope = ScopedBitmapReader::Create(
+      {bitmap_path},
+      [owner = original](const auto&, bool rgb, bool linear, Bitmap* target) {
+        EXPECT_TRUE(rgb);
+        EXPECT_FALSE(linear);
+        *target = *owner;
+        return true;
+      },
+      {{10, 5}});
+  const Bitmap golden = *original;
+  original.reset();  // The registered callback now owns its source pixels.
+  ASSERT_TRUE(std::filesystem::remove(bitmap_path));
+  ASSERT_TRUE(descriptor.HasBitmap(0));
+  const int image = descriptor.GetModel().GetImageIdx(name);
+
+  for (const auto grid :
+       {std::pair{10, 5}, {7, 3}, {1, 1}, {10, 1}, {1, 5}, {9, 4}}) {
+    Mat<float> depth(grid.first, grid.second, 1);
+    depth.Fill(2.0f);
+    Mat<float> normal(grid.first, grid.second, 3);
+    normal.Fill(1.0f);
+    depth.Write(descriptor.GetDepthMapPath(image));
+    normal.Write(descriptor.GetNormalMapPath(image));
+    const bool compacted = grid != std::pair{10, 5};
+    const size_t pixels = grid.first * grid.second;
+    const size_t reservation = 150 + pixels * (16 + (compacted ? 3 : 0));
+    options.cache_size =
+        static_cast<double>(reservation + 1) / (1024.0 * 1024.0 * 1024.0);
+    BoundedWorkspace workspace(options);
+    EXPECT_EQ(workspace.GetLoadReservationBytes(image), reservation);
+    EXPECT_EQ(workspace.GetCacheStats().loads, 0);
+    auto lease = workspace.AcquireImage(image);
+    ASSERT_TRUE(lease);
+    EXPECT_EQ(lease->bitmap.Width(), grid.first);
+    EXPECT_EQ(lease->bitmap.Height(), grid.second);
+    EXPECT_EQ(lease->bitmap_on_depth_grid, compacted);
+    EXPECT_EQ(lease->NumBytes(), pixels * 19);
+    const float sx = static_cast<float>(grid.first) / 10;
+    const float sy = static_cast<float>(grid.second) / 5;
+    for (int row = 0; row < grid.second; ++row) {
+      for (int col = 0; col < grid.first; ++col) {
+        const auto expected =
+            golden.InterpolateNearestNeighbor(col / sx, row / sy)
+                .value_or(BitmapColor<uint8_t>(0));
+        const auto actual = lease->bitmap.GetPixel(col, row).value();
+        EXPECT_EQ(actual.r, expected.r);
+        EXPECT_EQ(actual.g, expected.g);
+        EXPECT_EQ(actual.b, expected.b);
+      }
+    }
+    const auto stats = workspace.GetCacheStats();
+    EXPECT_EQ(stats.peak_charged_bytes, reservation);
+    EXPECT_EQ(stats.reserved_bytes, 0);
+    EXPECT_EQ(stats.resident_bytes, pixels * 19);
+    lease.reset();
+    options.cache_size =
+        static_cast<double>(reservation - 1) / (1024.0 * 1024.0 * 1024.0);
+    BoundedWorkspace too_small(options);
+    EXPECT_THROW(too_small.AcquireImage(image), std::runtime_error);
+    EXPECT_EQ(too_small.GetCacheStats().loads, 0);
+  }
+  scope->Close();
+  scope.reset();
+  EXPECT_FALSE(descriptor.HasBitmap(image));
+  auto no_header = ScopedBitmapReader::Create(
+      {bitmap_path}, [](const auto&, bool, bool, Bitmap*) { return false; });
+  BoundedWorkspace no_metadata(options);
+  EXPECT_THROW(no_metadata.GetLoadReservationBytes(image),
+               std::invalid_argument);
+  EXPECT_EQ(no_metadata.GetCacheStats().loads, 0);
+  no_header->Close();
+  no_header.reset();
+
+  Bitmap disk(10, 5, true);
+  disk.Fill(BitmapColor<uint8_t>(7, 8, 9));
+  ASSERT_TRUE(disk.Write(bitmap_path));
+  auto failed = ScopedBitmapReader::Create(
+      {bitmap_path},
+      [](const auto&, bool, bool, Bitmap*) { return false; },
+      {{10, 5}});
+  options.cache_size = 1000.0 / (1024.0 * 1024.0 * 1024.0);
+  BoundedWorkspace managed_failure(options);
+  EXPECT_THROW(managed_failure.AcquireImage(image), std::exception);
+  failed->Close();
+  failed.reset();
+  BoundedWorkspace ordinary_disk(options);
+  EXPECT_EQ(ordinary_disk.AcquireImage(image)->bitmap.GetPixel(0, 0)->g, 8);
+}
+
+TEST(BoundedWorkspaceResident, ScopeAndPixelsSurviveConcurrentEviction) {
+  const auto root = CreateTestDir();
+  CreateDirIfNotExists(root / "sparse");
+  CreateDirIfNotExists(root / "images");
+  CreateDirIfNotExists(root / "stereo");
+  CreateDirIfNotExists(root / "stereo" / "depth_maps");
+  CreateDirIfNotExists(root / "stereo" / "normal_maps");
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 2;
+  dataset.camera_width = 10;
+  dataset.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  reconstruction.Write(root / "sparse");
+  Workspace::Options options;
+  options.workspace_path = root;
+  options.workspace_format = "COLMAP";
+  options.input_type = "geometric";
+  options.cache_size = 951.0 / (1024.0 * 1024.0 * 1024.0);
+  Workspace descriptor(options);
+  std::vector<std::filesystem::path> paths;
+  std::vector<int> images;
+  auto owners = std::make_shared<std::vector<Bitmap>>();
+  for (int image_id = 1; image_id <= 2; ++image_id) {
+    const auto name = reconstruction.Image(image_id).Name();
+    const int image = descriptor.GetModel().GetImageIdx(name);
+    images.push_back(image);
+    paths.push_back(descriptor.GetBitmapPath(image));
+    DepthMap depth(10, 5, 1.0f, 10.0f);
+    depth.Fill(static_cast<float>(image_id + 1));
+    depth.Write(descriptor.GetDepthMapPath(image));
+    NormalMap normal(10, 5);
+    normal.Fill(1.0f);
+    normal.Write(descriptor.GetNormalMapPath(image));
+    Bitmap bitmap(10, 5, true);
+    bitmap.Fill(BitmapColor<uint8_t>(image_id, image_id, image_id));
+    owners->push_back(bitmap);
+  }
+  std::weak_ptr<std::vector<Bitmap>> weak_owner = owners;
+  auto scope = ScopedBitmapReader::Create(
+      paths,
+      [strong = owners, paths](const auto& path, bool, bool, Bitmap* target) {
+        for (size_t i = 0; i < paths.size(); ++i) {
+          if (path == std::filesystem::absolute(paths[i]).lexically_normal()) {
+            *target = strong->at(i);
+            return true;
+          }
+        }
+        return false;
+      },
+      {{10, 5}, {10, 5}});
+  owners.reset();
+  ASSERT_FALSE(weak_owner.expired());
+  ASSERT_TRUE(descriptor.HasBitmap(images[0]));
+  ASSERT_TRUE(descriptor.HasBitmap(images[1]));
+  BoundedWorkspace workspace(options);
+  auto held = workspace.AcquireImage(images[0]);
+  auto copied_pin = held;
+  auto waiting = std::async(std::launch::async,
+                            [&] { return workspace.AcquireImage(images[1]); });
+  EXPECT_EQ(waiting.wait_for(std::chrono::milliseconds(30)),
+            std::future_status::timeout);
+  held.reset();
+  copied_pin.reset();
+  auto second = waiting.get();  // Worker has joined before closing the scope.
+  EXPECT_EQ(workspace.GetCacheStats().evictions, 1);
+  scope->Close();
+  scope.reset();
+  EXPECT_TRUE(weak_owner.expired());
+  EXPECT_FALSE(descriptor.HasBitmap(images[0]));
+  EXPECT_FALSE(descriptor.HasBitmap(images[1]));
+  ASSERT_TRUE(second);
+  EXPECT_EQ(second->bitmap.GetPixel(0, 0)->r, 2);
+  EXPECT_EQ(second->depth_map.Get(0, 0), 3.0f);
+}
+
 // Full-RAM normal-storage contracts.
 
 }  // namespace

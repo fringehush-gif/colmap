@@ -24,6 +24,7 @@ class BoundedWorkspace : public Workspace {
     Bitmap bitmap;
     DepthMap depth_map;
     NormalMap normal_map;
+    bool bitmap_on_depth_grid = false;
     size_t NumBytes() const;
   };
 

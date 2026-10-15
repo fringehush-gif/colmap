@@ -31,6 +31,9 @@ class Workspace {
     // Whether to read image as RGB or gray scale.
     bool image_as_rgb = true;
 
+    // Opt-in bounded fusion: retain nearest-sampled RGB on the depth grid.
+    bool compact_rgb_to_depth_grid = false;
+
     // Location and type of workspace.
     std::filesystem::path workspace_path;
     std::string workspace_format;

@@ -2,6 +2,8 @@
 
 #include "colmap/mvs/bounded_workspace.h"
 
+#include "colmap/sensor/bitmap_reader.h"
+#include "colmap/util/file.h"
 #include "colmap/util/logging.h"
 #include "colmap/util/oiio_utils.h"
 
@@ -212,6 +214,7 @@ void BoundedWorkspace::ImageLease::reset() noexcept {
 
 BoundedWorkspace::BoundedWorkspace(const Options& options)
     : Workspace(options) {
+  THROW_CHECK(!options.compact_rgb_to_depth_grid || options.image_as_rgb);
   const double bytes = options.cache_size * 1024.0 * 1024.0 * 1024.0;
   THROW_CHECK(std::isfinite(bytes));
   THROW_CHECK_GE(bytes, 1.0);
@@ -226,16 +229,29 @@ BoundedWorkspace::BoundedWorkspace(const Options& options)
 size_t BoundedWorkspace::RequiredLoadBytes(const int image_idx) const {
   // Header-only planning. Fusion inputs must remain immutable while loading.
   const auto bitmap_path = GetBitmapPath(image_idx);
-  EnsureOpenImageIOInitialized();
-  OIIO::ImageSpec config;
-  config["oiio:reorient"] = 0;
-  const auto utf8_path = bitmap_path.u8string();
-  const std::string path(reinterpret_cast<const char*>(utf8_path.data()),
-                         utf8_path.size());
-  const auto input = OIIO::ImageInput::open(path, &config);
-  THROW_CHECK_NOTNULL(input.get());
-  const OIIO::ImageSpec spec = input->spec();
-  input->close();
+  OIIO::ImageSpec spec;
+  if (const auto reader = ScopedBitmapReader::Find(bitmap_path)) {
+    const auto dimensions = reader->ImageSize(bitmap_path);
+    if (!dimensions) {
+      throw std::invalid_argument(
+          "Resident fusion image needs declared RGB8 dimensions before "
+          "admission");
+    }
+    spec.width = dimensions->first;
+    spec.height = dimensions->second;
+    spec.nchannels = 3;
+  } else {
+    EnsureOpenImageIOInitialized();
+    OIIO::ImageSpec config;
+    config["oiio:reorient"] = 0;
+    const auto utf8_path = bitmap_path.u8string();
+    const std::string path(reinterpret_cast<const char*>(utf8_path.data()),
+                           utf8_path.size());
+    const auto input = OIIO::ImageInput::open(path, &config);
+    THROW_CHECK_NOTNULL(input.get());
+    spec = input->spec();
+    input->close();
+  }
   THROW_CHECK_GT(spec.width, 0);
   THROW_CHECK_GT(spec.height, 0);
   THROW_CHECK_GE(spec.nchannels, 1);
@@ -265,6 +281,14 @@ size_t BoundedWorkspace::RequiredLoadBytes(const int image_idx) const {
     if (shape.width > width || shape.height > height) {
       const size_t scratch = CheckedAddBytes(shape.bytes, shape.bytes);
       bytes = CheckedAddBytes(bytes, CheckedAddBytes(scratch, scratch));
+    }
+  }
+  if (options_.compact_rgb_to_depth_grid) {
+    const auto grid = GetDepthMapDimensions(image_idx);
+    if (grid.first != width || grid.second != height) {
+      // Source pixels remain live until the compact buffer is filled.
+      bytes = CheckedAddBytes(bytes,
+                              CheckedRasterBytes(grid.first, grid.second, 3));
     }
   }
   return bytes;
@@ -303,10 +327,14 @@ std::pair<size_t, size_t> BoundedWorkspace::GetDepthMapDimensions(
 size_t BoundedWorkspace::GetResidentBytesEstimate(const int image_idx) const {
   const auto grid = GetDepthMapDimensions(image_idx);
   const auto& image = model_.images.at(image_idx);
-  return CheckedAddBytes(
-      CheckedRasterBytes(
-          image.GetWidth(), image.GetHeight(), options_.image_as_rgb ? 3 : 1),
-      CheckedRasterBytes(grid.first, grid.second, 16));
+  const size_t rgb_bytes =
+      options_.compact_rgb_to_depth_grid
+          ? CheckedRasterBytes(grid.first, grid.second, 3)
+          : CheckedRasterBytes(image.GetWidth(),
+                               image.GetHeight(),
+                               options_.image_as_rgb ? 3 : 1);
+  return CheckedAddBytes(rgb_bytes,
+                         CheckedRasterBytes(grid.first, grid.second, 16));
 }
 
 BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImage(
@@ -388,6 +416,29 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImage(
     data->normal_map.Downsize(width, height);
     THROW_CHECK_EQ(data->depth_map.GetWidth(), data->normal_map.GetWidth());
     THROW_CHECK_EQ(data->depth_map.GetHeight(), data->normal_map.GetHeight());
+    if (options_.compact_rgb_to_depth_grid) {
+      const auto grid = GetDepthMapDimensions(image_idx);
+      if (grid.first != width || grid.second != height) {
+        Bitmap compact(
+            static_cast<int>(grid.first), static_cast<int>(grid.second), true);
+        // Match fusion float division, round and out-of-range black.
+        const float scale_x = static_cast<float>(grid.first) / width;
+        const float scale_y = static_cast<float>(grid.second) / height;
+        for (size_t row = 0; row < grid.second; ++row) {
+          for (size_t col = 0; col < grid.first; ++col) {
+            compact.SetPixel(
+                col,
+                row,
+                data->bitmap
+                    .InterpolateNearestNeighbor(static_cast<int>(col) / scale_x,
+                                                static_cast<int>(row) / scale_y)
+                    .value_or(BitmapColor<uint8_t>(0)));
+          }
+        }
+        data->bitmap = std::move(compact);
+        data->bitmap_on_depth_grid = true;
+      }
+    }
     THROW_CHECK_LE(data->NumBytes(), required_bytes);
     THROW_CHECK_LE(data->NumBytes(), GetResidentBytesEstimate(image_idx));
   } catch (...) {

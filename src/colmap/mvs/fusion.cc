@@ -63,6 +63,7 @@ void StereoFusionOptions::Print() const {
   PrintOption(check_num_images);
   PrintOption(use_cache);
   PrintOption(bounded_cache);
+  PrintOption(bounded_cache_compact_rgb);
   PrintOption(cache_size);
   const auto& bbox_min = bounding_box.first.transpose().eval();
   const auto& bbox_max = bounding_box.second.transpose().eval();
@@ -80,6 +81,7 @@ bool StereoFusionOptions::Check() const {
   CHECK_OPTION_GE(max_normal_error, 0);
   CHECK_OPTION_GT(check_num_images, 0);
   CHECK_OPTION_GT(cache_size, 0);
+  CHECK_OPTION_EQ((bounded_cache_compact_rgb && !bounded_cache), false);
   return true;
 }
 
@@ -131,6 +133,8 @@ void StereoFusion::Run() {
   workspace_options.num_threads = options_.num_threads;
   workspace_options.max_image_size = options_.max_image_size;
   workspace_options.image_as_rgb = true;
+  workspace_options.compact_rgb_to_depth_grid =
+      options_.bounded_cache_compact_rgb;
   workspace_options.cache_size = options_.cache_size;
   workspace_options.workspace_path = workspace_path_;
   workspace_options.workspace_format = workspace_format_;
@@ -465,10 +469,12 @@ void StereoFusion::Fuse(const int thread_id,
                                     : workspace_->GetBitmapLease(image_idx);
     const Bitmap& bitmap_data = image_lease ? image_lease->bitmap : *bitmap;
     const auto color =
-        bitmap_data
-            .InterpolateNearestNeighbor(col / bitmap_scale.first,
-                                        row / bitmap_scale.second)
-            .value_or(BitmapColor<uint8_t>(0));
+        image_lease && image_lease->bitmap_on_depth_grid
+            ? bitmap_data.GetPixel(col, row).value_or(BitmapColor<uint8_t>(0))
+            : bitmap_data
+                  .InterpolateNearestNeighbor(col / bitmap_scale.first,
+                                              row / bitmap_scale.second)
+                  .value_or(BitmapColor<uint8_t>(0));
 
     // Set the current pixel as visited.
     fused_pixel_mask.Set(row, col, 1);

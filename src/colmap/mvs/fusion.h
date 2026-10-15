@@ -55,6 +55,9 @@ struct StereoFusionOptions {
   // Opt-in byte-bounded, pinned whole-image fusion cache.
   bool bounded_cache = false;
 
+  // Opt-in bounded-cache RGB compaction to the depth grid.
+  bool bounded_cache_compact_rgb = false;
+
   // Cache size in gigabytes for fusion. The fusion keeps the bitmaps, depth
   // maps, normal maps, and consistency graphs of this number of images in
   // memory. A higher value leads to less disk access and faster fusion, while
