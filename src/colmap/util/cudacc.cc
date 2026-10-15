@@ -7,10 +7,10 @@
 
 namespace colmap {
 
-CudaTimer::CudaTimer() {
+CudaTimer::CudaTimer(cudaStream_t stream) : stream_(stream) {
   CUDA_SAFE_CALL(cudaEventCreate(&start_));
   CUDA_SAFE_CALL(cudaEventCreate(&stop_));
-  CUDA_SAFE_CALL(cudaEventRecord(start_, 0));
+  CUDA_SAFE_CALL(cudaEventRecord(start_, stream_));
 }
 
 CudaTimer::~CudaTimer() {
@@ -19,7 +19,7 @@ CudaTimer::~CudaTimer() {
 }
 
 void CudaTimer::Print(const std::string& message) {
-  CUDA_SAFE_CALL(cudaEventRecord(stop_, 0));
+  CUDA_SAFE_CALL(cudaEventRecord(stop_, stream_));
   CUDA_SAFE_CALL(cudaEventSynchronize(stop_));
   CUDA_SAFE_CALL(cudaEventElapsedTime(&elapsed_time_, start_, stop_));
   LOG(INFO) << StringPrintf(
@@ -45,9 +45,8 @@ void CudaCheck(const char* file, const int line) {
   }
 }
 
-void CudaSyncAndCheck(const char* file, const int line) {
-  // Synchronizes the default stream which is a nullptr.
-  const cudaError_t error = cudaStreamSynchronize(nullptr);
+void CudaSyncAndCheck(const char* file, const int line, cudaStream_t stream) {
+  const cudaError_t error = cudaStreamSynchronize(stream);
   if (cudaSuccess != error) {
     LOG(FATAL_THROW)
         << StringPrintf("CUDA error at %s:%i - %s",

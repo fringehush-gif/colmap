@@ -12,14 +12,26 @@
 
 namespace colmap {
 
+// COLMAP CUDA translation units use per-thread default streams. Host-only
+// translation units must select that stream explicitly. HIP retains stream 0.
+inline cudaStream_t CudaDefaultStream() {
+#ifdef COLMAP_HIP_ENABLED
+  return nullptr;
+#else
+  return cudaStreamPerThread;
+#endif
+}
+
 class CudaTimer {
  public:
-  CudaTimer();
+  // Pass nullptr for the legacy stream, or an explicitly managed stream.
+  explicit CudaTimer(cudaStream_t stream = CudaDefaultStream());
   ~CudaTimer();
 
   void Print(const std::string& message);
 
  private:
+  cudaStream_t stream_;
   cudaEvent_t start_;
   cudaEvent_t stop_;
   float elapsed_time_;
@@ -30,6 +42,8 @@ void CudaSafeCall(const cudaError_t error,
                   const int line);
 
 void CudaCheck(const char* file, const int line);
-void CudaSyncAndCheck(const char* file, const int line);
+void CudaSyncAndCheck(const char* file,
+                      const int line,
+                      cudaStream_t stream = CudaDefaultStream());
 
 }  // namespace colmap
