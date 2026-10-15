@@ -29,6 +29,124 @@ namespace colmap {
 namespace mvs {
 namespace {
 
+TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
+  const auto root = CreateTestDir();
+  for (const auto& sub : {"sparse",
+                          "images",
+                          "stereo",
+                          "stereo/depth_maps",
+                          "stereo/normal_maps"}) {
+    CreateDirIfNotExists(root / sub);
+  }
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 1;
+  dataset.camera_width = 30;
+  dataset.camera_height = 40;
+  dataset.camera_params = {30.0, 15.0, 20.0, 0.0};
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  reconstruction.Write(root / "sparse");
+  ASSERT_EQ(reconstruction.Images().size(), 1);
+  const auto name = reconstruction.Images().begin()->second.Name();
+  Mat<float> depth(30, 40, 1);
+  depth.Fill(5.0f);
+  depth.Write(root / "stereo/depth_maps" / (name + ".geometric.bin"));
+  Mat<float> normal(30, 40, 3);
+  normal.Fill(0.0f);
+  for (int row = 0; row < 40; ++row) {
+    for (int col = 0; col < 30; ++col) normal.Set(row, col, 2, 1.0f);
+  }
+  normal.Write(root / "stereo/normal_maps" / (name + ".geometric.bin"));
+  Bitmap image(30, 40, true);
+  image.Fill(BitmapColor<uint8_t>(0, 64, 128));
+  ASSERT_TRUE(image.Write(root / "images" / name));
+  {
+    std::ofstream config(root / "stereo/fusion.cfg");
+    config << name << '\n';
+  }
+  Model model;
+  model.Read(root, "COLMAP");
+  const auto overlapping = model.GetMaxOverlappingImages(10, 0.0);
+  ASSERT_EQ(model.images.size(), 1);
+  ASSERT_EQ(overlapping.size(), 1);
+  ASSERT_TRUE(overlapping.front().empty());
+
+  // Include every serialized attribute and its visibility association. Bits
+  // distinguish signed zero as well; task completion order is irrelevant.
+  using Record = std::tuple<uint32_t,
+                            uint32_t,
+                            uint32_t,
+                            uint32_t,
+                            uint32_t,
+                            uint32_t,
+                            uint8_t,
+                            uint8_t,
+                            uint8_t,
+                            std::vector<int>>;
+  const auto bits = [](float value) {
+    uint32_t result;
+    std::memcpy(&result, &value, sizeof(result));
+    return result;
+  };
+  const auto capture = [&](const StereoFusion& fusion) {
+    std::vector<Record> records;
+    const auto& points = fusion.GetFusedPoints();
+    const auto& visibility = fusion.GetFusedPointsVisibility();
+    records.reserve(points.size());
+    for (size_t i = 0; i < points.size(); ++i) {
+      const auto& p = points[i];
+      EXPECT_TRUE(std::isfinite(p.x) && std::isfinite(p.y) &&
+                  std::isfinite(p.z) && std::isfinite(p.nx) &&
+                  std::isfinite(p.ny) && std::isfinite(p.nz));
+      auto visible = visibility.at(i);
+      EXPECT_EQ(visible, std::vector<int>{0});
+      records.emplace_back(bits(p.x),
+                           bits(p.y),
+                           bits(p.z),
+                           bits(p.nx),
+                           bits(p.ny),
+                           bits(p.nz),
+                           p.r,
+                           p.g,
+                           p.b,
+                           std::move(visible));
+    }
+    std::sort(records.begin(), records.end());
+    return records;
+  };
+  StereoFusionOptions options;
+  options.min_num_pixels = 1;
+  options.num_threads = 1;
+  StereoFusion serial(options, root, "COLMAP", "", "geometric");
+  serial.Run();
+  ASSERT_EQ(serial.GetFusedPoints().size(), 30 * 40);
+  ASSERT_EQ(serial.GetFusedPointsVisibility().size(), 30 * 40);
+  const auto expected = capture(serial);
+  options.num_threads = 2;
+  StereoFusion parallel(options, root, "COLMAP", "", "geometric");
+  for (int run = 0; run < 2; ++run) {
+    parallel.Run();
+    ASSERT_EQ(parallel.GetFusedPoints().size(), expected.size());
+    ASSERT_EQ(parallel.GetFusedPointsVisibility().size(), expected.size());
+    EXPECT_EQ(capture(parallel), expected);
+  }
+
+  // All row bands execute, but every pixel is skipped before Fuse. The
+  // unconditional task-entry worker lookup must remain valid in this case.
+  const auto masks = root / "masks";
+  CreateDirIfNotExists(masks);
+  Bitmap mask(30, 40, true);
+  mask.Fill(BitmapColor<uint8_t>(0, 0, 0));
+  ASSERT_TRUE(mask.Write(masks / (name + ".png")));
+  options.mask_path = masks;
+  StereoFusion masked(options, root, "COLMAP", "", "geometric");
+  masked.Run();
+  EXPECT_TRUE(masked.GetFusedPoints().empty());
+  EXPECT_TRUE(masked.GetFusedPointsVisibility().empty());
+}
+
 TEST(StereoFusion, Integration) {
   const auto temp_dir = CreateTestDir();
   CreateDirIfNotExists(temp_dir / "sparse");
