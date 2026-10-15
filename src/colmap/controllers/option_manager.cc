@@ -1156,6 +1156,8 @@ void OptionManager::AddStereoFusionOptions() {
   AddDefaultOption("StereoFusion.bounded_cache", &stereo_fusion->bounded_cache);
   AddDefaultOption("StereoFusion.bounded_cache_components",
                    &stereo_fusion->bounded_cache_components);
+  AddDefaultOption("StereoFusion.bounded_cache_diagnostics",
+                   &stereo_fusion->bounded_cache_diagnostics);
   AddDefaultOption("StereoFusion.bounded_cache_normal_tile_size",
                    &stereo_fusion->bounded_cache_normal_tile_size);
   AddDefaultOption("StereoFusion.bounded_cache_normal_tile_slots",

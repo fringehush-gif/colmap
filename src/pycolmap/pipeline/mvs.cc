@@ -261,6 +261,8 @@ void BindMVS(py::module& m) {
               "bounded_cache_compact_rgb",
               &SFOpts::bounded_cache_compact_rgb,
               "Keep RGB8 colors at the depth-map grid in bounded mode.")
+          .def_readwrite("bounded_cache_diagnostics",
+                         &SFOpts::bounded_cache_diagnostics)
           .def_readwrite(
               "bounded_cache_prefill_threads",
               &SFOpts::bounded_cache_prefill_threads,
