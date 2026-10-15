@@ -3,12 +3,25 @@
 #include "colmap/mvs/fusion.h"
 
 #include "colmap/math/math.h"
+#include "colmap/mvs/model.h"
+#include "colmap/scene/frame.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/bitmap.h"
+#include "colmap/sensor/bitmap_reader.h"
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cfenv>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
+#include <iostream>
+#include <limits>
+#include <string>
+#include <tuple>
 
 #include <gtest/gtest.h>
 
@@ -121,6 +134,26 @@ TEST(StereoFusion, Integration) {
   cancelled_fusion.Run();
   EXPECT_TRUE(stop_checked);
   EXPECT_TRUE(cancelled_fusion.GetFusedPoints().empty());
+  // Aggregation consumes worker visibility buffers. A second run must
+  // reconstruct the complete ordered output after those buffers were moved.
+  const auto first_points = fused_points;
+  const auto first_visibility = visibility;
+  fusion.Run();
+  ASSERT_EQ(fusion.GetFusedPoints().size(), first_points.size());
+  EXPECT_EQ(fusion.GetFusedPointsVisibility(), first_visibility);
+  for (size_t i = 0; i < first_points.size(); ++i) {
+    const auto& a = first_points[i];
+    const auto& b = fusion.GetFusedPoints()[i];
+    EXPECT_FLOAT_EQ(a.x, b.x);
+    EXPECT_FLOAT_EQ(a.y, b.y);
+    EXPECT_FLOAT_EQ(a.z, b.z);
+    EXPECT_FLOAT_EQ(a.nx, b.nx);
+    EXPECT_FLOAT_EQ(a.ny, b.ny);
+    EXPECT_FLOAT_EQ(a.nz, b.nz);
+    EXPECT_EQ(a.r, b.r);
+    EXPECT_EQ(a.g, b.g);
+    EXPECT_EQ(a.b, b.b);
+  }
 }
 
 TEST(ReadPointsVisibility, RoundTrip) {
@@ -262,6 +295,16 @@ TEST(StereoFusion, Rotation180Invariance) {
   EXPECT_NEAR(points1[0].y, points2[0].y, 1e-5f);
   EXPECT_NEAR(points1[0].z, points2[0].z, 1e-5f);
 }
+
+#if defined(__SSE__) || defined(_M_X64) || \
+    (defined(_M_IX86_FP) && _M_IX86_FP >= 1)
+#endif
+
+#if defined(__SSE__) || defined(_M_X64) || \
+    (defined(_M_IX86_FP) && _M_IX86_FP >= 1)
+#endif
+
+// Compare compact resident maps with their decoded FP32 equivalents.
 
 }  // namespace
 }  // namespace mvs
