@@ -232,12 +232,13 @@ void StereoFusion::Run() {
                                     const int image_idx,
                                     const Mat<char>& fused_pixel_mask) {
     const int row_end = std::min(height, row_start + kRowStride);
+    // One row-band callback stays on its executing pool worker.
+    const int thread_id = thread_pool.GetThreadIndex();
     for (int row = row_start; row < row_end; ++row) {
       for (int col = 0; col < width; ++col) {
         if (fused_pixel_mask.Get(row, col) > 0) {
           continue;
         }
-        const int thread_id = thread_pool.GetThreadIndex();
         Fuse(thread_id, image_idx, row, col);
       }
     }
