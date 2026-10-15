@@ -231,6 +231,21 @@ COLMAP_ADD_TEST(
     LINK_LIBS colmap_util
 )
 COLMAP_ADD_TEST(
+    NAME threadpool_constructor_test
+    SRCS threadpool_constructor_test.cc
+    LINK_LIBS colmap_util
+)
+if(TESTS_ENABLED)
+    # Interpose pthread calls from libstdc++; keep the ordinary task test portable.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_definitions(colmap_util_threadpool_constructor_test
+            PRIVATE COLMAP_TEST_PTHREAD_INTERPOSITION)
+        target_link_libraries(colmap_util_threadpool_constructor_test
+            ${CMAKE_DL_LIBS})
+    endif()
+    set_tests_properties(util/threadpool_constructor_test PROPERTIES TIMEOUT 15)
+endif()
+COLMAP_ADD_TEST(
     NAME timer_test
     SRCS timer_test.cc
     LINK_LIBS colmap_util

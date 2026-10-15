@@ -158,10 +158,24 @@ void Thread::RunFunc() {
 ThreadPool::ThreadPool(const int num_threads)
     : stopped_(false), num_active_workers_(0) {
   const int num_effective_threads = GetEffectiveNumThreads(num_threads);
-  for (int index = 0; index < num_effective_threads; ++index) {
-    std::function<void(void)> worker =
-        std::bind(&ThreadPool::WorkerFunc, this, index);
-    workers_.emplace_back(worker);
+  try {
+    for (int index = 0; index < num_effective_threads; ++index) {
+      std::function<void(void)> worker =
+          std::bind(&ThreadPool::WorkerFunc, this, index);
+      workers_.emplace_back(worker);
+    }
+  } catch (...) {
+    // A failed constructor does not run the destructor. Wake and join the
+    // workers already created before their joinable threads are destroyed.
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopped_ = true;
+    }
+    task_condition_.notify_all();
+    for (auto& worker : workers_) {
+      worker.join();
+    }
+    throw;
   }
 }
 

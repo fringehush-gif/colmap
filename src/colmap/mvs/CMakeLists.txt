@@ -92,6 +92,11 @@ COLMAP_ADD_TEST(
     LINK_LIBS colmap_mvs
 )
 COLMAP_ADD_TEST(
+    NAME patch_match_io_test
+    SRCS patch_match_io_test.cc
+    LINK_LIBS colmap_mvs
+)
+COLMAP_ADD_TEST(
     NAME texture_mapping_test
     SRCS texture_mapping_test.cc
     LINK_LIBS colmap_mvs
