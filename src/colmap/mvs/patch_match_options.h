@@ -50,6 +50,11 @@ struct PatchMatchOptions {
   // of memory, if the consistency graph is dense.
   double cache_size = 32.0;
 
+  // During geometric PatchMatch, source normals are unused by the CUDA path.
+  // Validate them without creating decoded CPU arrays; false restores the
+  // ordinary materialization path. Reference normals are always materialized.
+  bool reference_only_normal_materialization = true;
+
   // Index of the GPU used for patch match. For multi-GPU usage,
   // you should separate multiple GPU indices by comma, e.g., "0,1,2,3".
   std::string gpu_index = "-1";
