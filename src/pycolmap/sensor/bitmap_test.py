@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
+import threading
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 import pycolmap
 
@@ -224,3 +226,181 @@ def test_bitmap_thumbnail_noop() -> None:
     assert scale == 1.0
     assert bitmap.width == 40
     assert bitmap.height == 30
+
+
+def test_gray_bitmap_read_scope_native_copy_and_metadata(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "resident-only.png"
+    gray = np.array([[0, 71, 255], [19, 128, 234]], dtype=np.uint8)
+    calls = []
+
+    def loader(requested: Path) -> np.ndarray:
+        calls.append(requested)
+        return gray
+
+    with pycolmap.BitmapReadScope.gray_only(
+        [path], loader, True, True, [(3, 2)]
+    ) as scope:
+        assert scope.identity_token > 0
+        assert scope.image_size(path) == (3, 2)
+        assert calls == []  # metadata does not materialize pixels
+        bitmap = pycolmap.Bitmap.read(path, as_rgb=False)
+        assert bitmap is not None and bitmap.is_grey
+        np.testing.assert_array_equal(bitmap.to_array(), gray)
+        assert calls == [path]
+        assert scope.stats()["bitmapReads"] == 1
+        assert scope.stats()["ownedRgbCopyBytes"] == 0
+        assert scope.stats()["grayOutputBytes"] == gray.size
+    assert scope.closed
+    gray[0, 0] = 99
+    assert bitmap.to_array()[0, 0] == 0  # native Bitmap owns the copied bytes
+
+
+def test_gray_bitmap_read_scope_refuses_rgb_before_loader(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "resident-only.png"
+    calls = []
+    with pycolmap.BitmapReadScope.gray_only(
+        [path], lambda requested: calls.append(requested), True, True, [(2, 1)]
+    ) as scope:
+        with pytest.raises(ValueError, match="refuses RGB reads"):
+            pycolmap.Bitmap.read(path, as_rgb=True)
+        assert calls == []
+        assert scope.stats()["bitmapReads"] == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        np.zeros((2, 3, 3), dtype=np.uint8),
+        np.zeros((2, 3), dtype=np.uint16),
+        np.zeros((2, 6), dtype=np.uint8)[:, ::2],
+    ],
+)
+def test_gray_bitmap_read_scope_rejects_nonpacked_2d_uint8(
+    tmp_path: Path, payload: np.ndarray
+) -> None:
+    path = tmp_path / "resident-only.png"
+    with pycolmap.BitmapReadScope.gray_only(
+        [path], lambda requested: payload, True, True, [(3, 2)]
+    ):
+        with pytest.raises(ValueError, match="packed 2D uint8"):
+            pycolmap.Bitmap.read(path, as_rgb=False)
+
+
+def test_gray_bitmap_read_scope_rejects_wrong_grid_and_linearized_read(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "resident-only.png"
+    payload = np.zeros((2, 3), dtype=np.uint8)
+    with pycolmap.BitmapReadScope.gray_only(
+        [path], lambda requested: payload, True, True, [(4, 2)]
+    ):
+        with pytest.raises(ValueError, match="declared resident dimensions"):
+            pycolmap.Bitmap.read(path, as_rgb=False)
+        with pytest.raises(ValueError, match="linear-light"):
+            pycolmap.Bitmap.read(path, as_rgb=False, linearize_colorspace=True)
+
+
+@pytest.mark.parametrize(
+    "normalized_srgb,external", [(False, True), (True, False)]
+)
+def test_gray_bitmap_read_scope_requires_admission(
+    tmp_path: Path, normalized_srgb: bool, external: bool
+) -> None:
+    with pytest.raises(ValueError, match="normalized sRGB and external camera"):
+        pycolmap.BitmapReadScope.gray_only(
+            [tmp_path / "resident-only.png"],
+            lambda requested: None,
+            normalized_srgb,
+            external,
+            [(3, 2)],
+        )
+
+
+def test_rgb_bitmap_read_scope_keeps_existing_gray_conversion(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "resident-only.png"
+    rgb = np.array([[[0, 71, 255], [19, 128, 234]]], dtype=np.uint8)
+    expected = pycolmap.Bitmap.from_array(rgb).clone_as_grey().to_array()
+    with pycolmap.BitmapReadScope(
+        [path], lambda requested: rgb, True, True, [(2, 1)]
+    ) as scope:
+        color = pycolmap.Bitmap.read(path, as_rgb=True)
+        gray = pycolmap.Bitmap.read(path, as_rgb=False)
+        assert color is not None and gray is not None
+        np.testing.assert_array_equal(color.to_array(), rgb)
+        np.testing.assert_array_equal(gray.to_array(), expected)
+        assert scope.stats()["bitmapReads"] == 2
+        assert scope.stats()["ownedRgbCopyBytes"] == rgb.size
+        assert scope.stats()["grayOutputBytes"] == 2
+
+
+def test_gray_bitmap_read_scope_requires_declared_roster_grid(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="requires image_sizes_wh"):
+        pycolmap.BitmapReadScope.gray_only(
+            [tmp_path / "resident-only.png"],
+            lambda requested: None,
+            True,
+            True,
+            [],
+        )
+
+
+def test_gray_bitmap_read_scope_rejects_overlapping_exact_owner(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "resident-only.png"
+    gray = np.zeros((2, 3), dtype=np.uint8)
+    with pycolmap.BitmapReadScope.gray_only(
+        [path], lambda requested: gray, True, True, [(3, 2)]
+    ):
+        with pytest.raises(ValueError, match="already has an owner"):
+            pycolmap.BitmapReadScope.gray_only(
+                [path], lambda requested: gray, True, True, [(3, 2)]
+            )
+
+
+def test_gray_bitmap_read_scope_close_preserves_admitted_read(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "resident-only.png"
+    gray = np.array([[1, 2, 3]], dtype=np.uint8)
+    entered = threading.Event()
+    release = threading.Event()
+    outputs = []
+    errors = []
+
+    def loader(requested: Path) -> np.ndarray:
+        entered.set()
+        if not release.wait(timeout=5):
+            raise RuntimeError("loader join timed out")
+        return gray
+
+    scope = pycolmap.BitmapReadScope.gray_only(
+        [path], loader, True, True, [(3, 1)]
+    )
+
+    def read() -> None:
+        try:
+            outputs.append(pycolmap.Bitmap.read(path, as_rgb=False))
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=read)
+    worker.start()
+    try:
+        assert entered.wait(timeout=5)
+        scope.close()
+    finally:
+        release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert errors == []
+    assert len(outputs) == 1 and outputs[0] is not None
+    np.testing.assert_array_equal(outputs[0].to_array(), gray)
