@@ -46,6 +46,19 @@ TEST(StereoFusionOptions, FullRamLoadThreadPolicy) {
   EXPECT_FALSE(options.Check());
 }
 
+TEST(StereoFusionOptions, BoundedComponentPolicy) {
+  StereoFusionOptions options;
+  options.bounded_cache_components = true;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache_components = false;
+  options.bounded_cache_neighborhood = true;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache = true;
+  EXPECT_TRUE(options.Check());
+  options.bounded_cache_components = true;
+  EXPECT_TRUE(options.Check());
+}
+
 TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
   const auto root = CreateTestDir();
   for (const auto& sub : {"sparse",
@@ -318,6 +331,57 @@ TEST(StereoFusion, Integration) {
     EXPECT_EQ(a.g, b.g);
     EXPECT_EQ(a.b, b.b);
   }
+
+  const auto expect_same_fusion = [&](const StereoFusion& candidate) {
+    const auto& actual = candidate.GetFusedPoints();
+    ASSERT_EQ(actual.size(), fused_points.size());
+    EXPECT_EQ(candidate.GetFusedPointsVisibility(), visibility);
+    for (size_t i = 0; i < actual.size(); ++i) {
+      const auto& a = fused_points[i];
+      const auto& b = actual[i];
+      EXPECT_FLOAT_EQ(a.x, b.x);
+      EXPECT_FLOAT_EQ(a.y, b.y);
+      EXPECT_FLOAT_EQ(a.z, b.z);
+      EXPECT_FLOAT_EQ(a.nx, b.nx);
+      EXPECT_FLOAT_EQ(a.ny, b.ny);
+      EXPECT_FLOAT_EQ(a.nz, b.nz);
+      EXPECT_EQ(a.r, b.r);
+      EXPECT_EQ(a.g, b.g);
+      EXPECT_EQ(a.b, b.b);
+    }
+  };
+
+  options.bounded_cache_neighborhood = true;
+  options.cache_size = 50000.0 / (1024.0 * 1024.0 * 1024.0);
+  StereoFusion borrowed_whole(options, temp_dir, "COLMAP", "", "geometric");
+  borrowed_whole.Run();
+  expect_same_fusion(borrowed_whole);
+  ASSERT_TRUE(borrowed_whole.GetBoundedCacheStats());
+  EXPECT_GT(borrowed_whole.GetBoundedCacheStats()
+                ->component_loads[static_cast<size_t>(
+                    BoundedWorkspace::Component::kImage)],
+            0);
+
+  options.bounded_cache_components = true;
+  options.cache_size = 12000.0 / (1024.0 * 1024.0 * 1024.0);
+  StereoFusion borrowed_depth(options, temp_dir, "COLMAP", "", "geometric");
+  borrowed_depth.Run();
+  expect_same_fusion(borrowed_depth);
+  ASSERT_TRUE(borrowed_depth.GetBoundedCacheStats());
+  const auto component_loads =
+      borrowed_depth.GetBoundedCacheStats()->component_loads;
+  EXPECT_GT(
+      component_loads[static_cast<size_t>(BoundedWorkspace::Component::kDepth)],
+      0);
+  EXPECT_GT(component_loads[static_cast<size_t>(
+                BoundedWorkspace::Component::kNormal)],
+            0);
+  EXPECT_GT(component_loads[static_cast<size_t>(
+                BoundedWorkspace::Component::kBitmap)],
+            0);
+
+  options.bounded_cache_components = false;
+  options.bounded_cache_neighborhood = false;
 
   bool stop_checked = false;
   StereoFusion cancelled_fusion(options, temp_dir, "COLMAP", "", "geometric");

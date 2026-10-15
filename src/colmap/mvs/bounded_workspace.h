@@ -4,6 +4,7 @@
 
 #include "colmap/mvs/workspace.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -20,6 +21,7 @@ class BoundedWorkspace : public Workspace {
   struct CacheState;
 
  public:
+  enum class Component { kImage = 0, kDepth = 1, kNormal = 2, kBitmap = 3 };
   struct ImageData {
     Bitmap bitmap;
     DepthMap depth_map;
@@ -59,13 +61,17 @@ class BoundedWorkspace : public Workspace {
     size_t hits = 0;
     size_t waits = 0;
     size_t evictions = 0;
+    std::array<size_t, 4> component_loads{};
   };
 
   explicit BoundedWorkspace(const Options& options);
   void Load(const std::vector<std::string>&) override {}
   ImageLease AcquireImage(int image_idx);
-  size_t GetLoadReservationBytes(int image_idx) const;
-  size_t GetResidentBytesEstimate(int image_idx) const;
+  ImageLease AcquireComponent(int image_idx, Component component);
+  size_t GetLoadReservationBytes(int image_idx,
+                                 Component component = Component::kImage) const;
+  size_t GetResidentBytesEstimate(
+      int image_idx, Component component = Component::kImage) const;
   std::pair<size_t, size_t> GetDepthMapDimensions(int image_idx) const;
   CacheStats GetCacheStats() const;
 
@@ -75,7 +81,8 @@ class BoundedWorkspace : public Workspace {
   const NormalMap& GetNormalMap(int image_idx) override;
 
  private:
-  size_t RequiredLoadBytes(int image_idx) const;
+  int ComponentKey(int image_idx, Component component) const;
+  size_t RequiredLoadBytes(int image_idx, Component component) const;
   std::shared_ptr<CacheState> cache_state_;
 };
 

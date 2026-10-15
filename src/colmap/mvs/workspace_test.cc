@@ -451,10 +451,68 @@ TEST(BoundedWorkspaceBase, ReservationCoalescingAndPinnedEviction) {
   for (auto& reader : readers) reader.get();
   EXPECT_EQ(workspace.GetCacheStats().loads, 3);
 
+  BoundedWorkspace components(options);
+  using Component = BoundedWorkspace::Component;
+  EXPECT_EQ(components.GetLoadReservationBytes(first, Component::kDepth), 200);
+  EXPECT_EQ(components.GetLoadReservationBytes(first, Component::kNormal), 600);
+  EXPECT_EQ(components.GetLoadReservationBytes(first, Component::kBitmap), 150);
+  auto depth_pin = components.AcquireComponent(first, Component::kDepth);
+  auto normal_pin = components.AcquireComponent(first, Component::kNormal);
+  auto bitmap_pin = components.AcquireComponent(first, Component::kBitmap);
+  ASSERT_TRUE(depth_pin && normal_pin && bitmap_pin);
+  EXPECT_EQ(depth_pin->depth_map.Get(0, 0), 2.0f);
+  EXPECT_EQ(normal_pin->normal_map.Get(0, 0, 2), 1.0f);
+  EXPECT_EQ(bitmap_pin->bitmap.GetPixel(0, 0)->r, 1);
+  auto component_wait = std::async(std::launch::async, [&] {
+    return components.AcquireComponent(second, Component::kDepth);
+  });
+  EXPECT_EQ(component_wait.wait_for(std::chrono::milliseconds(30)),
+            std::future_status::timeout);
+  normal_pin.reset();
+  auto second_depth = component_wait.get();
+  ASSERT_TRUE(second_depth);
+  EXPECT_EQ(second_depth->depth_map.Get(0, 0), 3.0f);
+  EXPECT_EQ(depth_pin->depth_map.Get(0, 0), 2.0f);
+  second_depth.reset();
+  auto normal_again = components.AcquireComponent(first, Component::kNormal);
+  ASSERT_TRUE(normal_again);
+  EXPECT_EQ(normal_again->normal_map.Get(0, 0, 2), 1.0f);
+  const auto component_stats = components.GetCacheStats();
+  EXPECT_EQ(
+      component_stats.component_loads[static_cast<size_t>(Component::kDepth)],
+      2);
+  EXPECT_EQ(
+      component_stats.component_loads[static_cast<size_t>(Component::kNormal)],
+      2);
+  EXPECT_EQ(
+      component_stats.component_loads[static_cast<size_t>(Component::kBitmap)],
+      1);
+  EXPECT_GE(component_stats.evictions, 2);
+  EXPECT_LE(component_stats.peak_charged_bytes, component_stats.capacity_bytes);
+
   options.cache_size = 949.0 / (1024.0 * 1024.0 * 1024.0);
   BoundedWorkspace too_small(options);
   EXPECT_THROW(too_small.AcquireImage(first), std::runtime_error);
   EXPECT_EQ(too_small.GetCacheStats().loads, 0);
+  {
+    std::ofstream malformed_normal(
+        root / "stereo" / "normal_maps" / (names[0] + ".geometric.bin"),
+        std::ios::trunc | std::ios::binary);
+    malformed_normal << std::string(129, ' ');
+  }
+  // Component requests only require their own input. A damaged normal must
+  // not prevent an otherwise valid depth or bitmap component from loading.
+  BoundedWorkspace selective(options);
+  EXPECT_EQ(
+      selective.AcquireComponent(first, Component::kDepth)->depth_map.Get(0, 0),
+      2.0f);
+  EXPECT_EQ(selective.AcquireComponent(first, Component::kBitmap)
+                ->bitmap.GetPixel(0, 0)
+                ->r,
+            1);
+  EXPECT_THROW(selective.AcquireComponent(first, Component::kNormal),
+               std::exception);
+  EXPECT_THROW(selective.AcquireImage(first), std::exception);
   {
     std::ofstream malformed(
         root / "stereo" / "depth_maps" / (names[0] + ".geometric.bin"),
