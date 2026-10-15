@@ -568,6 +568,46 @@ TEST(BoundedWorkspaceBase, ReservationCoalescingAndPinnedEviction) {
       EXPECT_EQ(mapped_stats.reserved_bytes, 0);
       EXPECT_LE(mapped_stats.peak_charged_bytes, mapped_file_bytes);
     }
+    {
+      // A direct sample pins its owner through eviction. Releasing the only
+      // file slot lets a waiting view progress without decoded tile entries.
+      BoundedWorkspace mapped(options);
+      EXPECT_EQ(mapped.GetMappedNormalReservationBytes(first),
+                mapped_file_bytes);
+      auto owner = mapped.AcquireMappedNormal(first);
+      auto same_owner = mapped.AcquireMappedNormal(first);
+      ASSERT_EQ(owner.get(), same_owner.get());
+      EXPECT_EQ(owner->ReadFloat3(1, 1).z(), 1.0f);
+      auto waiting = std::async(std::launch::async, [&] {
+        return mapped.AcquireMappedNormal(second);
+      });
+      const auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (mapped.GetMappedNormalStats().waits == 0 &&
+             std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      EXPECT_GE(mapped.GetMappedNormalStats().waits, 1);
+      EXPECT_EQ(waiting.wait_for(std::chrono::milliseconds(30)),
+                std::future_status::timeout);
+      owner.reset();
+      same_owner.reset();
+      auto replacement = waiting.get();
+      ASSERT_TRUE(replacement);
+      EXPECT_EQ(replacement->ReadFloat3(1, 3).z(), 2.0f);
+      replacement.reset();
+      const auto direct_stats = mapped.GetMappedNormalStats();
+      EXPECT_EQ(direct_stats.loads, 2);
+      EXPECT_EQ(direct_stats.evictions, 1);
+      EXPECT_EQ(direct_stats.source_loads, 2);
+      EXPECT_EQ(direct_stats.source_evictions, 1);
+      EXPECT_LE(direct_stats.source_peak_charged_files, 1);
+      EXPECT_LE(direct_stats.source_peak_live_files, 1);
+      EXPECT_EQ(direct_stats.active_copies, 0);
+      EXPECT_EQ(direct_stats.reserved_bytes, 0);
+      EXPECT_LE(direct_stats.peak_charged_bytes, mapped_file_bytes);
+      EXPECT_EQ(mapped.GetTileMetadataStats().slot_count, 0);
+    }
     options.mapped_normal_bytes_limit = 0;
     options.mapped_normal_files_limit = 0;
 
@@ -647,6 +687,8 @@ TEST(BoundedWorkspaceBase, NormalTileGridValidationRetriesAndCoalesces) {
   options.workspace_path = root;
   options.workspace_format = "COLMAP";
   options.input_type = "geometric";
+  options.mapped_normal_bytes_limit = 1 << 20;
+  options.mapped_normal_files_limit = 2;
   {
     BoundedWorkspace rejected(options);
     const int image_idx = rejected.GetModel().GetImageIdx(name);
@@ -654,6 +696,8 @@ TEST(BoundedWorkspaceBase, NormalTileGridValidationRetriesAndCoalesces) {
     // once flag: both attempts still reject the malformed source.
     EXPECT_THROW(rejected.GetNormalTileGrid(image_idx), std::exception);
     EXPECT_THROW(rejected.GetNormalTileGrid(image_idx), std::exception);
+    EXPECT_THROW(rejected.AcquireMappedNormal(image_idx), std::exception);
+    EXPECT_EQ(rejected.GetMappedNormalStats().loads, 0);
   }
 
   NormalMap normal(10, 5);
@@ -677,6 +721,19 @@ TEST(BoundedWorkspaceBase, NormalTileGridValidationRetriesAndCoalesces) {
     }
     EXPECT_EQ(valid.GetNormalTileGrid(image_idx),
               std::make_pair(size_t{10}, size_t{5}));
+    std::vector<std::future<BoundedWorkspace::MappedNormalLease>> owners;
+    for (int i = 0; i < 8; ++i) {
+      owners.push_back(std::async(std::launch::async, [&] {
+        return valid.AcquireMappedNormal(image_idx);
+      }));
+    }
+    const auto first_owner = owners.front().get();
+    for (size_t i = 1; i < owners.size(); ++i) {
+      EXPECT_EQ(owners[i].get().get(), first_owner.get());
+    }
+    EXPECT_EQ(first_owner->ReadFloat3(0, 0).z(), 1.0f);
+    EXPECT_EQ(valid.GetMappedNormalStats().loads, 1);
+    EXPECT_EQ(valid.GetMappedNormalStats().source_loads, 1);
   }
 
   // Input files are immutable while a Workspace owns them. A fresh instance
@@ -935,6 +992,107 @@ TEST(BoundedWorkspaceResident, ScopeAndPixelsSurviveConcurrentEviction) {
   ASSERT_TRUE(second);
   EXPECT_EQ(second->bitmap.GetPixel(0, 0)->r, 2);
   EXPECT_EQ(second->depth_map.Get(0, 0), 3.0f);
+}
+
+TEST(BoundedWorkspaceBase, MappedNormalStripeKeysPinAcrossBands) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  const auto root = CreateTestDir();
+  CreateDirIfNotExists(root / "sparse");
+  CreateDirIfNotExists(root / "images");
+  CreateDirIfNotExists(root / "stereo");
+  CreateDirIfNotExists(root / "stereo" / "depth_maps");
+  CreateDirIfNotExists(root / "stereo" / "normal_maps");
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 1;
+  dataset.camera_width = 10;
+  dataset.camera_height = 260;
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  reconstruction.Write(root / "sparse");
+  const auto name = reconstruction.Image(1).Name();
+  DepthMap depth(10, 260, 1.0f, 10.0f);
+  depth.Fill(2.0f);
+  depth.Write(root / "stereo" / "depth_maps" / (name + ".geometric.bin"));
+  const auto normal_path =
+      root / "stereo" / "normal_maps" / (name + ".geometric.bin");
+  NormalMap normal(10, 260);
+  normal.Fill(1.0f);
+  normal.Set(256, 9, 2, 2.0f);
+  normal.Write(normal_path);
+  Workspace::Options options;
+  options.workspace_path = root;
+  options.workspace_format = "COLMAP";
+  options.input_type = "geometric";
+  const size_t first_bytes =
+      ImmutableMapRegion::GetWindowReservationBytes(normal_path, 0, 256);
+  const size_t edge_bytes =
+      ImmutableMapRegion::GetWindowReservationBytes(normal_path, 256, 4);
+  options.mapped_normal_bytes_limit = std::max(first_bytes, edge_bytes);
+  options.mapped_normal_files_limit = 1;
+  {
+    BoundedWorkspace workspace(options);
+    const int image = workspace.GetModel().GetImageIdx(name);
+    auto first = workspace.AcquireMappedNormalWindow(image, 0, 256);
+    auto same = workspace.AcquireMappedNormalWindow(image, 0, 256);
+    ASSERT_EQ(first.get(), same.get());
+    EXPECT_EQ(first->ReadFloat3(255, 9).z(), 1.0f);
+    EXPECT_THROW(first->ReadFloat3(256, 9), std::exception);
+    auto waiting = std::async(std::launch::async, [&] {
+      return workspace.AcquireMappedNormalWindow(image, 256, 4);
+    });
+    auto coalesced = std::async(std::launch::async, [&] {
+      return workspace.AcquireMappedNormalWindow(image, 256, 4);
+    });
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (workspace.GetMappedNormalStats().waits < 2 &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    EXPECT_GE(workspace.GetMappedNormalStats().waits, 2);
+    first.reset();
+    same.reset();
+    auto edge = waiting.get();
+    auto edge_copy = coalesced.get();
+    ASSERT_EQ(edge.get(), edge_copy.get());
+    EXPECT_EQ(edge->ReadFloat3(256, 9).z(), 2.0f);
+    const auto stats = workspace.GetMappedNormalStats();
+    EXPECT_EQ(stats.loads, 2);
+    EXPECT_EQ(stats.source_loads, 1);
+    EXPECT_GE(stats.source_hits, 1);
+    EXPECT_LE(stats.source_peak_charged_files, 1);
+    EXPECT_EQ(stats.source_live_files, 1);
+    EXPECT_GE(stats.hits, 2);
+    EXPECT_EQ(stats.evictions, 1);
+    EXPECT_EQ(stats.resident_files, 1);
+    EXPECT_EQ(stats.resident_regions, 3);
+    EXPECT_EQ(stats.peak_charged_regions, 3);
+    EXPECT_LE(stats.peak_charged_bytes, stats.capacity_bytes);
+    EXPECT_EQ(workspace.GetTileMetadataStats().slot_count, 0);
+  }
+  // Repair is only admitted by a fresh immutable Workspace, never by a
+  // pinned owner observing a file rewrite mid-lifetime.
+  {
+    std::ofstream bad(normal_path, std::ios::trunc | std::ios::binary);
+    bad << std::string(129, ' ');
+  }
+  {
+    BoundedWorkspace bad(options);
+    const int image = bad.GetModel().GetImageIdx(name);
+    EXPECT_THROW(bad.AcquireMappedNormalWindow(image, 0, 256), std::exception);
+    EXPECT_EQ(bad.GetMappedNormalStats().reserved_bytes, 0);
+    EXPECT_EQ(bad.GetMappedNormalStats().source_charged_files, 0);
+    EXPECT_THROW(bad.AcquireMappedNormalWindow(image, 0, 256), std::exception);
+    EXPECT_EQ(bad.GetMappedNormalStats().source_charged_files, 0);
+  }
+  normal.Write(normal_path);
+  BoundedWorkspace repaired(options);
+  const int image = repaired.GetModel().GetImageIdx(name);
+  EXPECT_EQ(
+      repaired.AcquireMappedNormalWindow(image, 256, 4)->ReadFloat3(256, 9).z(),
+      2.0f);
 }
 
 // Full-RAM normal-storage contracts.

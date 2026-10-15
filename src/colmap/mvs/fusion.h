@@ -10,12 +10,14 @@
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/ply.h"
 
+#include <algorithm>
 #include <cfloat>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Core>
@@ -70,7 +72,10 @@ struct StereoFusionOptions {
   // not decode the other components. All components share the byte budget.
   bool bounded_cache_components = false;
 
-  // FP32 normal-map tiles in bounded component mode. Mapped-owner limits are
+  // FP32 normal-map tiles in bounded component mode. With tile_size=0 and a
+  // positive mapped budget, one fusion worker samples directly from pinned
+  // FP32 maps, without decoded normal tiles. All defaults retain prior paths.
+  // Mapped-owner limits are
   // independent virtual/file-backed byte and handle budgets, not decoded RSS.
   // The tile/neighborhood composition awaits a separate headroom policy.
   int bounded_cache_normal_tile_size = 0;
@@ -111,6 +116,58 @@ struct StereoFusionOptions {
   void Print() const;
 };
 
+namespace internal {
+// Index only the already-owned serial mapped ring. Entries and last-image
+// hints are bounded by the admitted slot count and model image count.
+class MappedNormalRingIndex {
+ public:
+  using Key = std::pair<int, size_t>;
+
+  void Reset(size_t images, size_t slot_count) {
+    index_.clear();
+    index_.reserve(slot_count);
+    hints_.assign(images, Hint{slot_count, 0});
+    slots_ = slot_count;
+  }
+  void Clear() {
+    index_.clear();
+    std::fill(hints_.begin(), hints_.end(), Hint{slots_, 0});
+  }
+  size_t Find(int image, size_t band) {
+    const auto& hint = hints_.at(static_cast<size_t>(image));
+    if (hint.slot < slots_ && hint.band == band) return hint.slot;
+    const auto found = index_.find({image, band});
+    if (found == index_.end()) return slots_;
+    hints_[image] = {found->second, band};
+    return found->second;
+  }
+  bool Insert(int image, size_t band, size_t slot) {
+    auto& hint = hints_.at(static_cast<size_t>(image));
+    if (slot >= slots_ || index_.size() >= slots_) return false;
+    const auto inserted = index_.emplace(Key{image, band}, slot);
+    if (inserted.second) hint = {slot, band};
+    return inserted.second;
+  }
+  bool Erase(int image, size_t band, size_t slot) {
+    auto& hint = hints_.at(static_cast<size_t>(image));
+    const auto found = index_.find({image, band});
+    if (found == index_.end() || found->second != slot) return false;
+    index_.erase(found);
+    if (hint.slot == slot && hint.band == band) hint.slot = slots_;
+    return true;
+  }
+
+ private:
+  struct Hint {
+    size_t slot;
+    size_t band;
+  };
+  size_t slots_ = 0;
+  NodeHashMap<Key, size_t, boost::hash<Key>> index_;
+  std::vector<Hint> hints_;
+};
+}  // namespace internal
+
 // Fuses per-view depth and normal maps into a consistent 3D point cloud.
 class StereoFusion : public BaseController {
  public:
@@ -148,6 +205,8 @@ class StereoFusion : public BaseController {
                                                              int image_idx,
                                                              int row,
                                                              int col);
+  const ImmutableMapRegion* AcquireWorkerMappedNormal(int image_idx, int row);
+  void ClearMappedNormalRing();
   void InitFusedPixelMask(int image_idx, size_t width, size_t height);
   void Fuse(int thread_id, int image_idx, int row, int col);
 
@@ -179,6 +238,15 @@ class StereoFusion : public BaseController {
     size_t indexed_lookups = 0, hint_checks = 0;
   };
   std::vector<NormalTileRing> normal_tile_rings_;
+  struct MappedNormalSlot {
+    int image_idx = -1;
+    size_t row_begin = 0, row_count = 0;
+    BoundedWorkspace::MappedNormalLease lease;
+  };
+  std::vector<MappedNormalSlot> mapped_normal_ring_;
+  internal::MappedNormalRingIndex mapped_normal_ring_index_;
+  size_t mapped_normal_next_ = 0;
+  bool direct_mapped_normals_ = false;
   size_t normal_tile_worker_headroom_ = 0;
   std::vector<char> used_images_;
   std::vector<char> fused_images_;

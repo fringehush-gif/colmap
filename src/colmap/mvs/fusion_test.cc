@@ -77,6 +77,36 @@ TEST(StereoFusionOptions, BoundedDiagnosticPolicy) {
   EXPECT_TRUE(options.Check());
 }
 
+TEST(StereoFusion, MappedNormalRingIndexReplacementAndClear) {
+  internal::MappedNormalRingIndex index;
+  index.Reset(3, 2);
+  EXPECT_EQ(index.Find(0, 0), 2);
+  ASSERT_TRUE(index.Insert(0, 0, 0));
+  ASSERT_TRUE(index.Insert(0, 1, 1));
+  // The last-image hint changes bands, while the older stripe remains indexed.
+  EXPECT_EQ(index.Find(0, 0), 0);
+  EXPECT_EQ(index.Find(0, 1), 1);
+  EXPECT_FALSE(index.Insert(0, 1, 0));
+  EXPECT_FALSE(index.Insert(1, 4, 0));  // Metadata cannot exceed ring slots.
+  EXPECT_FALSE(
+      index.Erase(0, 0, 1));  // Stale victim cannot erase another slot.
+  EXPECT_EQ(index.Find(0, 0), 0);
+  ASSERT_TRUE(index.Erase(0, 0, 0));
+  EXPECT_EQ(index.Find(0, 0), 2);
+  ASSERT_TRUE(index.Insert(1, 4, 0));
+  EXPECT_EQ(index.Find(1, 4), 0);
+  // Reusing a victim slot must never return the old image's owner.
+  ASSERT_TRUE(index.Erase(0, 1, 1));
+  ASSERT_TRUE(index.Insert(2, 7, 1));
+  EXPECT_EQ(index.Find(0, 1), 2);
+  EXPECT_EQ(index.Find(2, 7), 1);
+  index.Clear();
+  EXPECT_EQ(index.Find(1, 4), 2);
+  EXPECT_EQ(index.Find(2, 7), 2);
+  ASSERT_TRUE(index.Insert(0, 1, 0));
+  EXPECT_EQ(index.Find(0, 1), 0);
+}
+
 TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
   const auto root = CreateTestDir();
   for (const auto& sub : {"sparse",
@@ -511,6 +541,58 @@ TEST(StereoFusion, Integration) {
     options.bounded_cache_neighborhood = true;
     EXPECT_FALSE(options.Check());
     options.bounded_cache_neighborhood = false;
+    // tile_size=0 with an owned mapped pool is a distinct, serial FP32 route.
+    options.bounded_cache_normal_tile_size = 0;
+    options.bounded_cache_normal_tile_slots = 4;
+    ASSERT_TRUE(options.Check());
+    const auto normal_path = temp_dir / "stereo" / "normal_maps" /
+                             (image_names[0] + ".geometric.bin");
+    const auto one_owner =
+        ImmutableMapRegion::GetMappingReservationBytes(normal_path);
+    options.bounded_cache_normal_mapped_bytes = static_cast<int64_t>(one_owner);
+    StereoFusion insufficient(options, temp_dir, "COLMAP", "", "geometric");
+    EXPECT_THROW(insufficient.Run(), std::exception);
+    EXPECT_EQ(insufficient.GetMappedNormalStats().loads, 0);
+    options.bounded_cache_normal_mapped_bytes = 1 << 20;
+    StereoFusion direct(options, temp_dir, "COLMAP", "", "geometric");
+    direct.Run();
+    expect_same_fusion(direct);
+    ASSERT_TRUE(direct.GetBoundedCacheStats());
+    EXPECT_EQ(direct.GetBoundedCacheStats()->normal_tile_loads, 0);
+    EXPECT_EQ(
+        direct.GetBoundedCacheStats()->component_loads[static_cast<size_t>(
+            BoundedWorkspace::Component::kNormal)],
+        0);
+    EXPECT_GT(direct.GetMappedNormalStats().loads, 0);
+    EXPECT_EQ(direct.GetMappedNormalStats().active_copies, 0);
+    EXPECT_EQ(direct.GetMappedNormalStats().resident_regions,
+              3 * direct.GetMappedNormalStats().resident_files);
+    EXPECT_LE(direct.GetMappedNormalStats().peak_charged_bytes,
+              static_cast<size_t>(options.bounded_cache_normal_mapped_bytes));
+    const auto direct_row = direct.GetBoundedCacheDiagnosticRow();
+    ASSERT_TRUE(direct_row);
+    EXPECT_NE(direct_row->find("direct_mapped_mode=1"), std::string::npos);
+    EXPECT_NE(direct_row->find("direct_window_rows=256"), std::string::npos);
+    EXPECT_NE(direct_row->find("mapped_peak_charged_regions="),
+              std::string::npos);
+    EXPECT_NE(
+        direct_row->find("mapped_loads=" +
+                         std::to_string(direct.GetMappedNormalStats().loads)),
+        std::string::npos);
+    EXPECT_NE(direct_row->find("direct_ring_slots=1"), std::string::npos);
+    options.num_threads = 2;
+    EXPECT_FALSE(options.Check());
+    options.num_threads = 1;
+    options.bounded_cache_normal_mapped_files = 1;
+    EXPECT_FALSE(options.Check());
+    options.bounded_cache_normal_mapped_files = 2;
+    options.bounded_cache_neighborhood = true;
+    EXPECT_FALSE(options.Check());
+    options.bounded_cache_neighborhood = false;
+    options.bounded_cache_components = false;
+    EXPECT_FALSE(options.Check());
+    options.bounded_cache_components = true;
+    options.bounded_cache_normal_tile_size = 7;
     options.bounded_cache_normal_mapped_files = 0;
     EXPECT_FALSE(options.Check());
     options.bounded_cache_normal_mapped_files = 2;
