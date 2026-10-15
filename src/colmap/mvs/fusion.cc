@@ -11,6 +11,7 @@
 #include "colmap/util/threading.h"
 #include "colmap/util/timer.h"
 
+#include <algorithm>
 #include <fstream>
 #include <iterator>
 #include <tuple>
@@ -53,6 +54,7 @@ void StereoFusionOptions::Print() const {
 #define PrintOption(option) LOG(INFO) << #option ": " << (option);
   LOG_HEADING2("StereoFusion::Options");
   PrintOption(mask_path);
+  PrintOption(full_ram_load_threads);
   PrintOption(max_image_size);
   PrintOption(min_num_pixels);
   PrintOption(max_num_pixels);
@@ -82,6 +84,10 @@ bool StereoFusionOptions::Check() const {
   CHECK_OPTION_GT(check_num_images, 0);
   CHECK_OPTION_GT(cache_size, 0);
   CHECK_OPTION_EQ((bounded_cache_compact_rgb && !bounded_cache), false);
+  CHECK_OPTION_GE(full_ram_load_threads, -1);
+  CHECK_OPTION_NE(full_ram_load_threads, 0);
+  CHECK_OPTION_EQ((full_ram_load_threads != -1 && (use_cache || bounded_cache)),
+                  false);
   return true;
 }
 
@@ -152,8 +158,24 @@ void StereoFusion::Run() {
   } else if (options_.use_cache) {
     workspace_ = std::make_unique<CachedWorkspace>(workspace_options);
   } else {
-    workspace_ = std::make_unique<Workspace>(workspace_options);
-    workspace_->Load(image_names);
+    if (options_.full_ram_load_threads != -1) {
+      // Workspace::Load writes one model slot per name. An opt-in parallel
+      // loader must not schedule the same slot twice for duplicate cfg rows.
+      std::vector<std::string> unique_names;
+      FlatHashSet<std::string> seen;
+      unique_names.reserve(image_names.size());
+      for (const auto& name : image_names) {
+        if (seen.insert(name).second) unique_names.push_back(name);
+      }
+      const size_t roster_size = std::max<size_t>(unique_names.size(), 1);
+      workspace_options.num_threads = static_cast<int>(std::min(
+          static_cast<size_t>(options_.full_ram_load_threads), roster_size));
+      workspace_ = std::make_unique<Workspace>(workspace_options);
+      workspace_->Load(unique_names);
+    } else {
+      workspace_ = std::make_unique<Workspace>(workspace_options);
+      workspace_->Load(image_names);
+    }
     num_threads = GetEffectiveNumThreads(options_.num_threads);
   }
 
