@@ -8,6 +8,7 @@
 #include "colmap/util/testing.h"
 
 #include <filesystem>
+#include <fstream>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -105,6 +106,71 @@ TEST_P(ParameterizedWorkspaceTests, MaxImageSize) {
 TEST_P(ParameterizedWorkspaceTests, Load) {
   auto workspace = GetParam()(GetOptions());
   workspace->Load({image_name_});
+}
+
+TEST_P(ParameterizedWorkspaceTests, SourceNormalProbeDoesNotCacheOrResize) {
+  auto options = GetOptions();
+  options.max_image_size = 4;
+  auto workspace = GetParam()(options);
+  workspace->Load({image_name_});
+  const bool cached =
+      dynamic_cast<CachedWorkspace*>(workspace.get()) != nullptr;
+  EXPECT_EQ(workspace->ValidateSourceNormalWithoutMaterialization(0), cached);
+  Mat<float> changed(10, 5, 3);
+  changed.Fill(-2.0f);
+  changed.Write(workspace->GetNormalMapPath(0));
+  const auto& reference = workspace->GetNormalMap(0);
+  EXPECT_EQ(reference.GetWidth(), 4);
+  EXPECT_EQ(reference.GetHeight(), 2);
+  if (cached) EXPECT_LT(reference.Get(0, 0, 0), 0.0f);
+}
+
+TEST_P(ParameterizedWorkspaceTests,
+       CachedSourceNormalProbePreservesResidentMap) {
+  auto workspace = GetParam()(GetOptions());
+  workspace->Load({image_name_});
+  if (dynamic_cast<CachedWorkspace*>(workspace.get()) == nullptr) {
+    EXPECT_FALSE(workspace->ValidateSourceNormalWithoutMaterialization(0));
+    return;
+  }
+  const auto expected = workspace->GetNormalMap(0).GetData();
+  std::ofstream(workspace->GetNormalMapPath(0),
+                std::ios::binary | std::ios::trunc)
+      << "bad map";
+  EXPECT_TRUE(workspace->ValidateSourceNormalWithoutMaterialization(0));
+  EXPECT_EQ(workspace->GetNormalMap(0).GetData(), expected);
+}
+
+TEST_P(ParameterizedWorkspaceTests, SourceNormalProbeFallsBackOnInvalidInput) {
+  auto workspace = GetParam()(GetOptions());
+  if (dynamic_cast<CachedWorkspace*>(workspace.get()) == nullptr) {
+    EXPECT_FALSE(workspace->ValidateSourceNormalWithoutMaterialization(0));
+    return;
+  }
+  const auto path = workspace->GetNormalMapPath(0);
+  Mat<float> non_normal(10, 5, 2);
+  non_normal.Fill(1.0f);
+  non_normal.Write(path);
+  EXPECT_FALSE(workspace->ValidateSourceNormalWithoutMaterialization(0));
+  EXPECT_EQ(workspace->GetNormalMap(0).GetDepth(), 2);
+  // A second instance avoids the intentionally cached two-channel map.
+  auto uncached = GetParam()(GetOptions());
+  for (const char* bytes : {"10&5&3&",
+                            "0&5&3&",
+                            "10,5&3&",
+                            "18446744073709551615&5&3&",
+                            "garbage"}) {
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << bytes;
+    EXPECT_FALSE(uncached->ValidateSourceNormalWithoutMaterialization(0));
+  }
+  std::ofstream(path, std::ios::binary | std::ios::trunc)
+      << std::string(129, ' ') << "10&5&3&";
+  EXPECT_FALSE(uncached->ValidateSourceNormalWithoutMaterialization(0));
+  Mat<float> normal(10, 5, 3);
+  normal.Fill(1.0f);
+  normal.Write(path);
+  std::ofstream(path, std::ios::binary | std::ios::app) << "tail";
+  EXPECT_TRUE(uncached->ValidateSourceNormalWithoutMaterialization(0));
 }
 
 INSTANTIATE_TEST_SUITE_P(WorkspaceTests,

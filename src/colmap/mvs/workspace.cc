@@ -5,11 +5,72 @@
 #include "colmap/util/file.h"
 #include "colmap/util/threading.h"
 
+#include <array>
+#include <charconv>
+#include <cstdint>
 #include <fstream>
+#include <limits>
 #include <numeric>
+#include <string>
+#include <system_error>
 
 namespace colmap {
 namespace mvs {
+namespace {
+
+// A conservative FP32 map admission check. The ordinary reader remains the
+// fallback for every uncertain header, missing payload, or non-normal map.
+// Trailing bytes are accepted, as by Mat<float>::Read.
+bool IsCompleteThreeChannelFloatMap(const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) return false;
+  // The native writer emits decimal dimensions separated by '&'. Cap header
+  // work; unusual or locale-dependent headers retain the ordinary read path.
+  std::string header;
+  size_t delimiters = 0;
+  while (header.size() < 128 && delimiters < 3) {
+    char byte = 0;
+    if (!file.get(byte)) return false;
+    header.push_back(byte);
+    delimiters += byte == '&';
+  }
+  if (delimiters != 3) return false;
+  const size_t first = header.find('&');
+  const size_t second = header.find('&', first + 1);
+  const size_t third = header.size() - 1;
+  std::array<size_t, 3> dimensions{};
+  const auto parse_dimension =
+      [&](const size_t begin, const size_t end, size_t* value) {
+        if (begin == end) return false;
+        const auto result =
+            std::from_chars(header.data() + begin, header.data() + end, *value);
+        return result.ec == std::errc() && result.ptr == header.data() + end &&
+               *value > 0;
+      };
+  if (!parse_dimension(0, first, &dimensions[0]) ||
+      !parse_dimension(first + 1, second, &dimensions[1]) ||
+      !parse_dimension(second + 1, third, &dimensions[2]) ||
+      dimensions[2] != 3) {
+    return false;
+  }
+  const size_t width = dimensions[0];
+  const size_t height = dimensions[1];
+  const size_t depth = dimensions[2];
+  const size_t max_size = std::numeric_limits<size_t>::max();
+  if (width > max_size / height || width * height > max_size / depth ||
+      width * height * depth > max_size / sizeof(float)) {
+    return false;
+  }
+  std::error_code error;
+  const auto file_bytes = std::filesystem::file_size(path, error);
+  const auto payload_bytes = static_cast<std::uintmax_t>(header.size());
+  const auto required_bytes =
+      static_cast<std::uintmax_t>(width * height * depth * sizeof(float));
+  return !error && file_bytes >= payload_bytes &&
+         file_bytes - payload_bytes >= required_bytes;
+}
+
+}  // namespace
 
 Workspace::Workspace(const Options& options) : options_(options) {
   StringToLower(&options_.input_type);
@@ -220,6 +281,20 @@ const NormalMap& CachedWorkspace::GetNormalMap(const int image_idx) {
     }
   }
   return *cached_image->normal_map;
+}
+
+bool CachedWorkspace::ValidateSourceNormalWithoutMaterialization(
+    const int image_idx) {
+  std::shared_ptr<CachedImage> cached_image;
+  {
+    std::lock_guard<std::mutex> cache_lock(cache_mutex_);
+    cached_image = cache_.Get(image_idx);
+  }
+  std::lock_guard<std::mutex> lock(cached_image->mutex);
+  if (cached_image->normal_map) {
+    return cached_image->normal_map->GetDepth() == 3;
+  }
+  return IsCompleteThreeChannelFloatMap(GetNormalMapPath(image_idx));
 }
 
 void ImportPMVSWorkspace(const Workspace& workspace,

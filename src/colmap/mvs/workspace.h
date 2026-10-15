@@ -52,6 +52,12 @@ class Workspace {
   virtual const DepthMap& GetDepthMap(int image_idx);
   virtual const NormalMap& GetNormalMap(int image_idx);
 
+  // Return true only when a source normal has been validated without a new
+  // decoded normal-map allocation. Eager Workspace retains its usual reads.
+  virtual bool ValidateSourceNormalWithoutMaterialization(int image_idx) {
+    return false;
+  }
+
   // Get paths to bitmap, depth map, normal map and consistency graph.
   std::filesystem::path GetBitmapPath(int image_idx) const;
   std::filesystem::path GetDepthMapPath(int image_idx) const;
@@ -87,6 +93,7 @@ class CachedWorkspace : public Workspace {
   const Bitmap& GetBitmap(int image_idx) override;
   const DepthMap& GetDepthMap(int image_idx) override;
   const NormalMap& GetNormalMap(int image_idx) override;
+  bool ValidateSourceNormalWithoutMaterialization(int image_idx) override;
 
  private:
   class CachedImage {

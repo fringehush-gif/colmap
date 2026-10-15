@@ -160,6 +160,11 @@ void BindMVS(py::module& m) {
                          &PMOpts::cache_size,
                          "Cache size in gigabytes for patch match.")
           .def_readwrite(
+              "reference_only_normal_materialization",
+              &PMOpts::reference_only_normal_materialization,
+              "Validate source normals without decoding them; reference "
+              "normals are always materialized.")
+          .def_readwrite(
               "allow_missing_files",
               &PMOpts::allow_missing_files,
               "Whether to tolerate missing images/maps in the problem setup")
