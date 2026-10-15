@@ -6,6 +6,8 @@ COLMAP_ADD_LIBRARY(
     NAME colmap_sensor
     SRCS
         bitmap.h bitmap.cc
+        bitmap_reader.h
+        bitmap_rgb8.h
         database.h database.cc
         imu.h imu.cc
         models.h models.cc

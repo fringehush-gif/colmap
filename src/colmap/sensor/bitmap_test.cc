@@ -2,9 +2,13 @@
 
 #include "colmap/sensor/bitmap.h"
 
+#include "colmap/sensor/bitmap_reader.h"
+#include "colmap/sensor/bitmap_rgb8.h"
 #include "colmap/util/testing.h"
 
+#include <array>
 #include <fstream>
+#include <stdexcept>
 #include <tuple>
 
 #include <OpenImageIO/imagebufalgo.h>
@@ -1285,6 +1289,86 @@ INSTANTIATE_TEST_SUITE_P(
                                       /*supports_native_grey=*/true,
                                       /*supports_rgba=*/false,
                                       /*supports_grey_alpha=*/false)));
+
+TEST(BitmapReader, ExactRosterAndAdmittedLease) {
+  const auto path = std::filesystem::absolute(CreateTestDir() / "resident.png");
+  int calls = 0;
+  auto callback = [&](const std::filesystem::path& selected,
+                      bool as_rgb,
+                      bool linearize,
+                      Bitmap* target) {
+    EXPECT_EQ(selected, path.lexically_normal());
+    EXPECT_TRUE(as_rgb);
+    EXPECT_FALSE(linearize);
+    ++calls;
+    *target = Bitmap(2, 1, true);
+    target->RowMajorData() = {1, 2, 3, 4, 5, 6};
+    return true;
+  };
+  auto reader = ScopedBitmapReader::Create({path}, callback, {{2, 1}});
+  EXPECT_THROW(ScopedBitmapReader::Create({path}, callback),
+               std::invalid_argument);
+  const auto size = reader->ImageSize(path);
+  ASSERT_TRUE(size.has_value());
+  EXPECT_EQ(*size, std::make_pair(2, 1));
+  Bitmap bitmap;
+  EXPECT_TRUE(bitmap.Read(path));
+  EXPECT_EQ(bitmap.RowMajorData(), (std::vector<uint8_t>{1, 2, 3, 4, 5, 6}));
+  auto admitted = ScopedBitmapReader::Find(path);
+  ASSERT_EQ(admitted, reader);
+  reader->Close();
+  reader.reset();
+  EXPECT_EQ(ScopedBitmapReader::Find(path), nullptr);
+  Bitmap in_flight;
+  EXPECT_TRUE(admitted->Read(path, true, false, &in_flight));
+  EXPECT_EQ(in_flight.RowMajorData(), bitmap.RowMajorData());
+  EXPECT_EQ(calls, 2);
+  admitted.reset();
+  Bitmap missing;
+  EXPECT_FALSE(missing.Read(path));
+}
+
+TEST(BitmapReader, ManagedFailureNeverFallsBackToDisk) {
+  const auto path = std::filesystem::absolute(CreateTestDir() / "managed.png");
+  Bitmap disk(1, 1, true);
+  disk.Fill(BitmapColor<uint8_t>(7, 8, 9));
+  ASSERT_TRUE(disk.Write(path));
+  auto reader = ScopedBitmapReader::Create(
+      {path},
+      [](const std::filesystem::path&, bool, bool, Bitmap*) { return false; });
+  Bitmap target;
+  EXPECT_FALSE(target.Read(path));
+  reader->Close();
+  EXPECT_TRUE(target.Read(path));
+  EXPECT_EQ(target.GetPixel(0, 0), BitmapColor<uint8_t>(7, 8, 9));
+}
+
+TEST(BitmapReader, DeclaredDimensionsRejectWrongPayload) {
+  const auto path = std::filesystem::absolute(CreateTestDir() / "wrong.png");
+  auto reader = ScopedBitmapReader::Create(
+      {path},
+      [](const std::filesystem::path&, bool, bool, Bitmap* target) {
+        *target = Bitmap(1, 1, true);
+        return true;
+      },
+      {{2, 1}});
+  Bitmap bitmap;
+  EXPECT_THROW(bitmap.Read(path), std::invalid_argument);
+  reader->Close();
+}
+
+TEST(Bitmap, PackedRGB8DirectGreyUsesExistingCoefficients) {
+  const std::array<uint8_t, 15> rgb = {
+      0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255};
+  const std::array<uint8_t, 5> expected = {0, 54, 182, 18, 255};
+  std::array<uint8_t, 5> gray = {};
+  ConvertPackedRGB8ToGrey(rgb.data(), gray.size(), gray.data());
+  EXPECT_EQ(gray, expected);
+  Bitmap bitmap(5, 1, true);
+  bitmap.RowMajorData().assign(rgb.begin(), rgb.end());
+  EXPECT_EQ(bitmap.CloneAsGrey().RowMajorData(),
+            (std::vector<uint8_t>(expected.begin(), expected.end())));
+}
 
 }  // namespace
 }  // namespace colmap
