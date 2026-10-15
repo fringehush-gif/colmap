@@ -580,6 +580,78 @@ TEST(StereoFusion, Integration) {
                          std::to_string(direct.GetMappedNormalStats().loads)),
         std::string::npos);
     EXPECT_NE(direct_row->find("direct_ring_slots=1"), std::string::npos);
+    EXPECT_NE(direct_row->find("direct_component_pins_admitted=1"),
+              std::string::npos);
+    EXPECT_EQ(direct.GetBoundedCacheStats()->hits, 0);
+    EXPECT_EQ(
+        direct.GetBoundedCacheStats()->component_loads[static_cast<size_t>(
+            BoundedWorkspace::Component::kImage)],
+        0);
+    EXPECT_EQ(
+        direct.GetBoundedCacheStats()->component_loads[static_cast<size_t>(
+            BoundedWorkspace::Component::kDepth)],
+        2);
+    EXPECT_EQ(
+        direct.GetBoundedCacheStats()->component_loads[static_cast<size_t>(
+            BoundedWorkspace::Component::kBitmap)],
+        2);
+    EXPECT_EQ(direct_row->find("direct_depth_borrows=0"), std::string::npos);
+    EXPECT_EQ(direct_row->find("direct_bitmap_borrows=0"), std::string::npos);
+
+    // Both components of either view fit separately, but the complete two-view
+    // owner set does not. Demand acquisition must still make progress and keep
+    // the original ordered output under this tight decoded budget.
+    options.cache_size = 5000.0 / (1024.0 * 1024.0 * 1024.0);
+    StereoFusion direct_demand(options, temp_dir, "COLMAP", "", "geometric");
+    direct_demand.Run();
+    expect_same_fusion(direct_demand);
+    const auto demand_row = direct_demand.GetBoundedCacheDiagnosticRow();
+    ASSERT_TRUE(demand_row);
+    EXPECT_NE(demand_row->find("direct_component_pins_admitted=0"),
+              std::string::npos);
+    ASSERT_TRUE(direct_demand.GetBoundedCacheStats());
+    EXPECT_GT(direct_demand.GetBoundedCacheStats()->hits, 0);
+    EXPECT_EQ(direct_demand.GetBoundedCacheStats()->reserved_bytes, 0);
+
+    // Failure during a bitmap load must unwind all locally acquired
+    // pins before publication. Closing the failing reader then permits a fresh
+    // Run on the same Fusion object with the normal exact-output oracle.
+    options.cache_size = 50000.0 / (1024.0 * 1024.0 * 1024.0);
+    std::atomic<int> direct_failed_calls{0};
+    auto direct_failed_scope = ScopedBitmapReader::Create(
+        {temp_dir / "images" / model.GetImageName(1)},
+        [&direct_failed_calls](
+            const std::filesystem::path&, bool, bool, Bitmap*) {
+          ++direct_failed_calls;
+          return false;
+        },
+        {{30, 20}});
+    StereoFusion direct_failed(options, temp_dir, "COLMAP", "", "geometric");
+    EXPECT_THROW(direct_failed.Run(), std::exception);
+    EXPECT_GT(direct_failed_calls.load(), 0);
+    const auto failed_row = direct_failed.GetBoundedCacheDiagnosticRow();
+    ASSERT_TRUE(failed_row);
+    EXPECT_NE(failed_row->find("direct_component_pins_admitted=0"),
+              std::string::npos);
+    ASSERT_TRUE(direct_failed.GetBoundedCacheStats());
+    EXPECT_EQ(direct_failed.GetBoundedCacheStats()->reserved_bytes, 0);
+    direct_failed_scope->Close();
+    direct_failed.Run();
+    expect_same_fusion(direct_failed);
+
+    StereoFusion direct_cancelled(options, temp_dir, "COLMAP", "", "geometric");
+    direct_cancelled.SetCheckIfStoppedFunc([&direct_cancelled]() {
+      const auto stats = direct_cancelled.GetBoundedCacheStats();
+      return stats && stats->loads >= 4;
+    });
+    direct_cancelled.Run();
+    EXPECT_TRUE(direct_cancelled.GetFusedPoints().empty());
+    ASSERT_TRUE(direct_cancelled.GetBoundedCacheStats());
+    EXPECT_EQ(direct_cancelled.GetBoundedCacheStats()->reserved_bytes, 0);
+    direct_cancelled.SetCheckIfStoppedFunc([]() { return false; });
+    direct_cancelled.Run();
+    expect_same_fusion(direct_cancelled);
+
     options.num_threads = 2;
     EXPECT_FALSE(options.Check());
     options.num_threads = 1;

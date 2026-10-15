@@ -222,6 +222,11 @@ std::optional<std::string> StereoFusion::GetBoundedCacheDiagnosticRow() const {
   row << "COLMAP_FUSION_CACHE_DIAGNOSTIC_V1"
       << " tile_mode=" << (options_.bounded_cache_normal_tile_size > 0)
       << " direct_mapped_mode=" << direct_mapped_normals_;
+  if (direct_mapped_normals_) {
+    row << " direct_component_pins_admitted=" << direct_component_pins_admitted_
+        << " direct_depth_borrows=" << direct_depth_borrows_
+        << " direct_bitmap_borrows=" << direct_bitmap_borrows_;
+  }
   const auto cache = GetBoundedCacheStats();
   if (cache) {
     row << " decoded_capacity_bytes=" << cache->capacity_bytes
@@ -278,6 +283,10 @@ void StereoFusion::Run() {
   Timer run_timer;
   run_timer.Start();
 
+  ClearDirectComponentPins();
+  direct_component_pins_admitted_ = false;
+  direct_depth_borrows_ = 0;
+  direct_bitmap_borrows_ = 0;
   fused_points_.clear();
   fused_points_visibility_.clear();
   max_bounded_prefill_lanes_scheduled_ = 0;
@@ -550,86 +559,171 @@ void StereoFusion::Run() {
     }
   };
 
-  size_t num_fused_images = 0;
-  size_t total_fused_points = 0;
-  for (int image_idx = 0; image_idx >= 0;
-       image_idx = internal::FindNextImage(
-           overlapping_images_, used_images_, fused_images_, image_idx)) {
-    if (CheckIfStopped()) {
-      break;
+  try {
+    // Direct component pins are acquired before row tasks can borrow them.
+    // A failed admission leaves no published raw pointer or retained pin.
+    PrepareDirectComponentPins();
+    size_t num_fused_images = 0;
+    size_t total_fused_points = 0;
+    for (int image_idx = 0; image_idx >= 0;
+         image_idx = internal::FindNextImage(
+             overlapping_images_, used_images_, fused_images_, image_idx)) {
+      if (CheckIfStopped()) {
+        break;
+      }
+
+      Timer timer;
+      timer.Start();
+
+      LOG(INFO) << StringPrintf("Fusing image [%d/%d] with index %d",
+                                num_fused_images + 1,
+                                model.images.size(),
+                                image_idx)
+                << std::flush;
+
+      const int width = depth_map_sizes_.at(image_idx).first;
+      const int height = depth_map_sizes_.at(image_idx).second;
+      const auto& fused_pixel_mask = fused_pixel_masks_.at(image_idx);
+
+      if (bounded_workspace_ && options_.bounded_cache_neighborhood) {
+        PrepareBoundedNeighborhood(image_idx, num_threads, prefill_pool);
+        if (CheckIfStopped()) break;
+      }
+
+      for (int row_start = 0; row_start < height; row_start += kRowStride) {
+        thread_pool.AddTask(ProcessImageRows,
+                            row_start,
+                            height,
+                            width,
+                            image_idx,
+                            fused_pixel_mask);
+      }
+      thread_pool.Wait();
+      ClearNormalTileRings();
+      ClearMappedNormalRing();
+
+      num_fused_images += 1;
+      fused_images_.at(image_idx) = true;
+
+      total_fused_points = 0;
+      for (const auto& task_fused_points : task_fused_points_) {
+        total_fused_points += task_fused_points.size();
+      }
+      LOG(INFO) << StringPrintf(
+          " in %.3fs (%d points)", timer.ElapsedSeconds(), total_fused_points);
     }
 
-    Timer timer;
-    timer.Start();
+    std::fill(neighborhood_data_.begin(), neighborhood_data_.end(), nullptr);
+    neighborhood_leases_.clear();
 
-    LOG(INFO) << StringPrintf("Fusing image [%d/%d] with index %d",
-                              num_fused_images + 1,
-                              model.images.size(),
-                              image_idx)
-              << std::flush;
+    fused_points_.reserve(total_fused_points);
+    fused_points_visibility_.reserve(total_fused_points);
+    for (size_t thread_id = 0; thread_id < task_fused_points_.size();
+         ++thread_id) {
+      fused_points_.insert(fused_points_.end(),
+                           task_fused_points_[thread_id].begin(),
+                           task_fused_points_[thread_id].end());
+      task_fused_points_[thread_id].clear();
 
-    const int width = depth_map_sizes_.at(image_idx).first;
-    const int height = depth_map_sizes_.at(image_idx).second;
-    const auto& fused_pixel_mask = fused_pixel_masks_.at(image_idx);
-
-    if (bounded_workspace_ && options_.bounded_cache_neighborhood) {
-      PrepareBoundedNeighborhood(image_idx, num_threads, prefill_pool);
-      if (CheckIfStopped()) break;
+      fused_points_visibility_.insert(
+          fused_points_visibility_.end(),
+          std::make_move_iterator(
+              task_fused_points_visibility_[thread_id].begin()),
+          std::make_move_iterator(
+              task_fused_points_visibility_[thread_id].end()));
+      task_fused_points_visibility_[thread_id].clear();
     }
 
-    for (int row_start = 0; row_start < height; row_start += kRowStride) {
-      thread_pool.AddTask(ProcessImageRows,
-                          row_start,
-                          height,
-                          width,
-                          image_idx,
-                          fused_pixel_mask);
+    if (fused_points_.empty()) {
+      LOG(WARNING)
+          << "Could not fuse any points. This is likely caused by "
+             "incorrect settings - filtering must be enabled for the last "
+             "call to patch match stereo.";
     }
-    thread_pool.Wait();
-    ClearNormalTileRings();
-    ClearMappedNormalRing();
 
-    num_fused_images += 1;
-    fused_images_.at(image_idx) = true;
-
-    total_fused_points = 0;
-    for (const auto& task_fused_points : task_fused_points_) {
-      total_fused_points += task_fused_points.size();
+    LOG(INFO) << "Number of fused points: " << fused_points_.size();
+    run_timer.PrintMinutes();
+  } catch (...) {
+    const auto failure = std::current_exception();
+    // AddTask or a row callback may fail with earlier tasks still queued.
+    // Join before releasing any component or mapped owner they can borrow.
+    try {
+      thread_pool.Wait();
+    } catch (...) {
     }
-    LOG(INFO) << StringPrintf(
-        " in %.3fs (%d points)", timer.ElapsedSeconds(), total_fused_points);
+    std::fill(neighborhood_data_.begin(), neighborhood_data_.end(), nullptr);
+    neighborhood_leases_.clear();
+    try {
+      ClearMappedNormalRing();
+    } catch (...) {
+      mapped_normal_ring_.clear();
+      mapped_normal_ring_index_.Clear();
+    }
+    ClearDirectComponentPins();
+    std::rethrow_exception(failure);
   }
+  ClearDirectComponentPins();
+}
 
-  std::fill(neighborhood_data_.begin(), neighborhood_data_.end(), nullptr);
-  neighborhood_leases_.clear();
+bool StereoFusion::PrepareDirectComponentPins() {
+  ClearDirectComponentPins();
+  if (!direct_mapped_normals_ || !bounded_workspace_) return false;
+  THROW_CHECK_EQ(options_.num_threads, 1);
 
-  fused_points_.reserve(total_fused_points);
-  fused_points_visibility_.reserve(total_fused_points);
-  for (size_t thread_id = 0; thread_id < task_fused_points_.size();
-       ++thread_id) {
-    fused_points_.insert(fused_points_.end(),
-                         task_fused_points_[thread_id].begin(),
-                         task_fused_points_[thread_id].end());
-    task_fused_points_[thread_id].clear();
-
-    fused_points_visibility_.insert(
-        fused_points_visibility_.end(),
-        std::make_move_iterator(
-            task_fused_points_visibility_[thread_id].begin()),
-        std::make_move_iterator(
-            task_fused_points_visibility_[thread_id].end()));
-    task_fused_points_visibility_[thread_id].clear();
+  using Component = BoundedWorkspace::Component;
+  const size_t capacity = bounded_workspace_->GetCacheStats().capacity_bytes;
+  size_t total_resident = 0;
+  size_t largest_extra = 0;
+  size_t used = 0;
+  for (size_t index = 0; index < used_images_.size(); ++index) {
+    if (!used_images_[index]) continue;
+    ++used;
+    for (const Component component : {Component::kDepth, Component::kBitmap}) {
+      const int view = static_cast<int>(index);
+      const size_t resident =
+          bounded_workspace_->GetResidentBytesEstimate(view, component);
+      const size_t reserved =
+          bounded_workspace_->GetLoadReservationBytes(view, component);
+      THROW_CHECK_GE(reserved, resident);
+      if (resident > capacity - total_resident) return false;
+      total_resident += resident;
+      largest_extra = std::max(largest_extra, reserved - resident);
+    }
   }
+  if (used == 0 || largest_extra > capacity - total_resident) return false;
 
-  if (fused_points_.empty()) {
-    LOG(WARNING)
-        << "Could not fuse any points. This is likely caused by "
-           "incorrect settings - filtering must be enabled for the last "
-           "call to patch match stereo.";
+  // Build the complete owner set locally. A load failure destroys these
+  // leases without exposing any borrowed pointer to fusion workers.
+  std::vector<BoundedWorkspace::ImageLease> depth(used_images_.size());
+  std::vector<BoundedWorkspace::ImageLease> bitmap(used_images_.size());
+  std::vector<const BoundedWorkspace::ImageData*> depth_data(
+      used_images_.size(), nullptr);
+  std::vector<const BoundedWorkspace::ImageData*> bitmap_data(
+      used_images_.size(), nullptr);
+  for (size_t index = 0; index < used_images_.size(); ++index) {
+    if (!used_images_[index]) continue;
+    const int view = static_cast<int>(index);
+    depth[index] =
+        bounded_workspace_->AcquireComponent(view, Component::kDepth);
+    bitmap[index] =
+        bounded_workspace_->AcquireComponent(view, Component::kBitmap);
+    depth_data[index] = depth[index].get();
+    bitmap_data[index] = bitmap[index].get();
   }
+  direct_depth_leases_ = std::move(depth);
+  direct_bitmap_leases_ = std::move(bitmap);
+  direct_depth_data_ = std::move(depth_data);
+  direct_bitmap_data_ = std::move(bitmap_data);
+  direct_component_pins_admitted_ = true;
+  return true;
+}
 
-  LOG(INFO) << "Number of fused points: " << fused_points_.size();
-  run_timer.PrintMinutes();
+void StereoFusion::ClearDirectComponentPins() {
+  // Borrowed pointers must disappear before their owners are released.
+  direct_depth_data_.clear();
+  direct_bitmap_data_.clear();
+  direct_depth_leases_.clear();
+  direct_bitmap_leases_.clear();
 }
 
 void StereoFusion::ClearNormalTileRings() {
@@ -990,9 +1084,11 @@ void StereoFusion::Fuse(const int thread_id,
     // keep one component pinned while its value is copied, then release it
     // before another component acquisition can wait for capacity.
     const auto* pinned =
-        bounded_workspace_ && options_.bounded_cache_neighborhood
+        direct_component_pins_admitted_ ? direct_depth_data_.at(image_idx)
+        : bounded_workspace_ && options_.bounded_cache_neighborhood
             ? neighborhood_data_.at(image_idx)
             : nullptr;
+    if (direct_component_pins_admitted_) ++direct_depth_borrows_;
     auto image_lease = bounded_workspace_ && !pinned
                            ? bounded_workspace_->AcquireComponent(
                                  image_idx,
@@ -1082,13 +1178,20 @@ void StereoFusion::Fuse(const int thread_id,
 
     // Read the color of the pixel.
     const auto& bitmap_scale = bitmap_scales_.at(image_idx);
+    const auto* borrowed_bitmap = direct_component_pins_admitted_
+                                      ? direct_bitmap_data_.at(image_idx)
+                                      : nullptr;
+    if (borrowed_bitmap) ++direct_bitmap_borrows_;
     auto bitmap_lease =
         bounded_workspace_ && options_.bounded_cache_components &&
+                !borrowed_bitmap &&
                 (!image_data || image_data->bitmap.Width() == 0)
             ? bounded_workspace_->AcquireComponent(
                   image_idx, BoundedWorkspace::Component::kBitmap)
             : BoundedWorkspace::ImageLease();
-    const auto* bitmap_image = bitmap_lease ? bitmap_lease.get() : image_data;
+    const auto* bitmap_image = borrowed_bitmap ? borrowed_bitmap
+                               : bitmap_lease  ? bitmap_lease.get()
+                                               : image_data;
     const auto bitmap = bitmap_image ? std::shared_ptr<const Bitmap>()
                                      : workspace_->GetBitmapLease(image_idx);
     const Bitmap& bitmap_data = bitmap_image ? bitmap_image->bitmap : *bitmap;

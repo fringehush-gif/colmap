@@ -200,6 +200,8 @@ class StereoFusion : public BaseController {
   void PrepareBoundedNeighborhood(int image_idx,
                                   int num_threads,
                                   ThreadPool& thread_pool);
+  bool PrepareDirectComponentPins();
+  void ClearDirectComponentPins();
   void ClearNormalTileRings();
   const BoundedWorkspace::ImageData* AcquireWorkerNormalTile(int thread_id,
                                                              int image_idx,
@@ -222,6 +224,15 @@ class StereoFusion : public BaseController {
   BoundedWorkspace* bounded_workspace_ = nullptr;
   std::vector<const BoundedWorkspace::ImageData*> neighborhood_data_;
   std::vector<BoundedWorkspace::ImageLease> neighborhood_leases_;
+  // Direct mapped normals remain separate owners. Only decoded depth and RGB
+  // components are borrowed here, and only through a joined serial Run.
+  std::vector<const BoundedWorkspace::ImageData*> direct_depth_data_;
+  std::vector<const BoundedWorkspace::ImageData*> direct_bitmap_data_;
+  std::vector<BoundedWorkspace::ImageLease> direct_depth_leases_;
+  std::vector<BoundedWorkspace::ImageLease> direct_bitmap_leases_;
+  bool direct_component_pins_admitted_ = false;
+  size_t direct_depth_borrows_ = 0;
+  size_t direct_bitmap_borrows_ = 0;
   size_t max_bounded_prefill_lanes_scheduled_ = 0;
   using NormalTileKey = std::tuple<int, size_t, size_t>;
   struct NormalTileSlot {
