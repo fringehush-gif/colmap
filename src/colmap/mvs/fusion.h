@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "colmap/mvs/bounded_workspace.h"
 #include "colmap/mvs/mat.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/base_controller.h"
@@ -51,6 +52,9 @@ struct StereoFusionOptions {
   // Flag indicating whether to use LRU cache or pre-load all data
   bool use_cache = false;
 
+  // Opt-in byte-bounded, pinned whole-image fusion cache.
+  bool bounded_cache = false;
+
   // Cache size in gigabytes for fusion. The fusion keeps the bitmaps, depth
   // maps, normal maps, and consistency graphs of this number of images in
   // memory. A higher value leads to less disk access and faster fusion, while
@@ -99,6 +103,7 @@ class StereoFusion : public BaseController {
   const float min_cos_normal_error_;
 
   std::unique_ptr<Workspace> workspace_;
+  BoundedWorkspace* bounded_workspace_ = nullptr;
   std::vector<char> used_images_;
   std::vector<char> fused_images_;
   std::vector<std::vector<int>> overlapping_images_;

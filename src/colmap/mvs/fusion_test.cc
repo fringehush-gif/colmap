@@ -214,6 +214,8 @@ TEST(StereoFusion, Integration) {
   options.max_traversal_depth = 10;
   options.check_num_images = 10;
   options.use_cache = false;
+  options.num_threads = 1;
+  EXPECT_FALSE(options.bounded_cache);
 
   StereoFusion fusion(options, temp_dir, "COLMAP", "", "geometric");
   fusion.Run();
@@ -241,6 +243,30 @@ TEST(StereoFusion, Integration) {
 
   for (const auto& vis : visibility) {
     EXPECT_GT(vis.size(), 0);
+  }
+
+  // The opt-in whole-image cache must preserve the eager path's XYZ,
+  // normals, RGB, visibility, and point order on this deterministic fixture.
+  options.bounded_cache = true;
+  options.cache_size = 12000.0 / (1024.0 * 1024.0 * 1024.0);
+  StereoFusion bounded(options, temp_dir, "COLMAP", "", "geometric");
+  bounded.Run();
+  const auto& bounded_points = bounded.GetFusedPoints();
+  const auto& bounded_visibility = bounded.GetFusedPointsVisibility();
+  ASSERT_EQ(bounded_points.size(), fused_points.size());
+  EXPECT_EQ(bounded_visibility, visibility);
+  for (size_t i = 0; i < fused_points.size(); ++i) {
+    const auto& a = fused_points[i];
+    const auto& b = bounded_points[i];
+    EXPECT_FLOAT_EQ(a.x, b.x);
+    EXPECT_FLOAT_EQ(a.y, b.y);
+    EXPECT_FLOAT_EQ(a.z, b.z);
+    EXPECT_FLOAT_EQ(a.nx, b.nx);
+    EXPECT_FLOAT_EQ(a.ny, b.ny);
+    EXPECT_FLOAT_EQ(a.nz, b.nz);
+    EXPECT_EQ(a.r, b.r);
+    EXPECT_EQ(a.g, b.g);
+    EXPECT_EQ(a.b, b.b);
   }
 
   bool stop_checked = false;
@@ -421,6 +447,17 @@ TEST(StereoFusion, Rotation180Invariance) {
 #if defined(__SSE__) || defined(_M_X64) || \
     (defined(_M_IX86_FP) && _M_IX86_FP >= 1)
 #endif
+
+TEST(StereoFusionOptions, CachePoliciesAreMutuallyExclusive) {
+  StereoFusionOptions options;
+  EXPECT_TRUE(options.Check());
+  options.use_cache = true;
+  EXPECT_TRUE(options.Check());
+  options.bounded_cache = true;
+  EXPECT_FALSE(options.Check());
+  options.use_cache = false;
+  EXPECT_TRUE(options.Check());
+}
 
 // Compare compact resident maps with their decoded FP32 equivalents.
 

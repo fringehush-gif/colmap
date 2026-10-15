@@ -246,6 +246,7 @@ void BindMVS(py::module& m) {
           .def_readwrite("cache_size",
                          &SFOpts::cache_size,
                          "Cache size in gigabytes for fusion.")
+          .def_readwrite("bounded_cache", &SFOpts::bounded_cache)
           .def_readwrite("bounding_box",
                          &SFOpts::bounding_box,
                          "Bounding box Tuple[min, max]")

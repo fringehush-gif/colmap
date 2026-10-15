@@ -2,6 +2,7 @@
 
 #include "colmap/mvs/workspace.h"
 
+#include "colmap/mvs/bounded_workspace.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/bitmap.h"
 #include "colmap/sensor/bitmap_reader.h"
@@ -9,8 +10,13 @@
 #include "colmap/util/testing.h"
 
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <limits>
+#include <new>
 #include <thread>
 
 #include <gmock/gmock.h>
@@ -101,6 +107,59 @@ void ExpectLoadedWorkspaceData(Workspace& workspace) {
   }
 }
 
+TEST_F(WorkspaceTests, EagerLoadDeduplicatesPerCall) {
+  for (const int num_threads : {1, 2}) {
+    SCOPED_TRACE(num_threads);
+    auto options = GetOptions();
+    options.num_threads = num_threads;
+    Workspace workspace(options);
+    std::atomic<int> reads{0};
+    auto reader = ScopedBitmapReader::Create(
+        {workspace.GetBitmapPath(0)},
+        [&](const auto&, bool, bool, Bitmap* target) {
+          ++reads;
+          *target = Bitmap(10, 5, true);
+          target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+          return true;
+        },
+        {{10, 5}});
+    workspace.Load({image_name_, image_name_, image_name_});
+    ASSERT_EQ(reads.load(), 1);
+    ExpectLoadedWorkspaceData(workspace);
+    workspace.Load({image_name_, image_name_});
+    ASSERT_EQ(reads.load(), 2);
+    ExpectLoadedWorkspaceData(workspace);
+    reader->Close();
+  }
+}
+
+TEST_F(WorkspaceTests, EagerLoadMissingInputCanBeRestored) {
+  auto options = GetOptions();
+  options.num_threads = 1;
+  Workspace workspace(options);
+  const auto depth_path = workspace.GetDepthMapPath(0);
+  ASSERT_TRUE(std::filesystem::remove(depth_path));
+  std::atomic<int> reads{0};
+  auto reader =
+      ScopedBitmapReader::Create({workspace.GetBitmapPath(0)},
+                                 [&](const auto&, bool, bool, Bitmap* target) {
+                                   ++reads;
+                                   *target = Bitmap(10, 5, true);
+                                   target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+                                   return true;
+                                 },
+                                 {{10, 5}});
+  workspace.Load({image_name_, image_name_});
+  EXPECT_EQ(reads.load(), 0);
+  Mat<float> depth(10, 5, 1);
+  depth.Fill(1.0f);
+  depth.Write(depth_path);
+  workspace.Load({image_name_, image_name_});
+  EXPECT_EQ(reads.load(), 1);
+  ExpectLoadedWorkspaceData(workspace);
+  reader->Close();
+}
+
 TEST_P(ParameterizedWorkspaceTests, GetData) {
   auto workspace = GetParam()(GetOptions());
   const auto& model = workspace->GetModel();
@@ -118,6 +177,31 @@ TEST_P(ParameterizedWorkspaceTests, GetData) {
   EXPECT_THAT(workspace->GetNormalMapPath(0).string(),
               testing::HasSubstr(image_name_));
   EXPECT_GT(workspace->GetNormalMap(0).GetNumBytes(), 0);
+}
+
+TEST_P(ParameterizedWorkspaceTests, ComponentLeasesPreserveOwnershipPolicy) {
+  auto workspace = GetParam()(GetOptions());
+  workspace->Load({image_name_});
+  const auto bitmap = workspace->GetBitmapLease(0);
+  const auto depth = workspace->GetDepthMapLease(0);
+  const auto normal = workspace->GetNormalMapLease(0);
+  ASSERT_TRUE(bitmap);
+  ASSERT_TRUE(depth);
+  ASSERT_TRUE(normal);
+  EXPECT_EQ(bitmap.get(), &workspace->GetBitmap(0));
+  EXPECT_EQ(depth.get(), &workspace->GetDepthMap(0));
+  EXPECT_EQ(normal.get(), &workspace->GetNormalMap(0));
+  if (dynamic_cast<CachedWorkspace*>(workspace.get()) == nullptr) {
+    EXPECT_EQ(bitmap.use_count(), 0);
+    EXPECT_EQ(depth.use_count(), 0);
+    EXPECT_EQ(normal.use_count(), 0);
+  } else {
+    EXPECT_GT(bitmap.use_count(), 0);
+    EXPECT_FALSE(bitmap.owner_before(depth));
+    EXPECT_FALSE(depth.owner_before(bitmap));
+    EXPECT_FALSE(bitmap.owner_before(normal));
+    EXPECT_FALSE(normal.owner_before(bitmap));
+  }
 }
 
 TEST_P(ParameterizedWorkspaceTests, MaxImageSize) {
@@ -217,31 +301,6 @@ INSTANTIATE_TEST_SUITE_P(WorkspaceTests,
                                    options);
                              }));
 
-TEST_P(ParameterizedWorkspaceTests, ComponentLeasesPreserveOwnershipPolicy) {
-  auto workspace = GetParam()(GetOptions());
-  workspace->Load({image_name_});
-  const auto bitmap = workspace->GetBitmapLease(0);
-  const auto depth = workspace->GetDepthMapLease(0);
-  const auto normal = workspace->GetNormalMapLease(0);
-  ASSERT_TRUE(bitmap);
-  ASSERT_TRUE(depth);
-  ASSERT_TRUE(normal);
-  EXPECT_EQ(bitmap.get(), &workspace->GetBitmap(0));
-  EXPECT_EQ(depth.get(), &workspace->GetDepthMap(0));
-  EXPECT_EQ(normal.get(), &workspace->GetNormalMap(0));
-  if (dynamic_cast<CachedWorkspace*>(workspace.get()) == nullptr) {
-    EXPECT_EQ(bitmap.use_count(), 0);
-    EXPECT_EQ(depth.use_count(), 0);
-    EXPECT_EQ(normal.use_count(), 0);
-  } else {
-    EXPECT_GT(bitmap.use_count(), 0);
-    EXPECT_FALSE(bitmap.owner_before(depth));
-    EXPECT_FALSE(depth.owner_before(bitmap));
-    EXPECT_FALSE(bitmap.owner_before(normal));
-    EXPECT_FALSE(normal.owner_before(bitmap));
-  }
-}
-
 TEST(CachedWorkspaceLease, SurvivesConcurrentEviction) {
   const auto temp_dir = CreateTestDir();
   CreateDirIfNotExists(temp_dir / "sparse");
@@ -316,58 +375,144 @@ TEST(CachedWorkspaceLease, SurvivesConcurrentEviction) {
   EXPECT_FLOAT_EQ(normal_copy.GetData()[0], 2.0f);
 }
 
-TEST_F(WorkspaceTests, EagerLoadDeduplicatesPerCall) {
-  for (const int num_threads : {1, 2}) {
-    SCOPED_TRACE(num_threads);
-    auto options = GetOptions();
-    options.num_threads = num_threads;
-    Workspace workspace(options);
-    std::atomic<int> reads{0};
-    auto reader = ScopedBitmapReader::Create(
-        {workspace.GetBitmapPath(0)},
-        [&](const auto&, bool, bool, Bitmap* target) {
-          ++reads;
-          *target = Bitmap(10, 5, true);
-          target->Fill(BitmapColor<uint8_t>(7, 8, 9));
-          return true;
-        },
-        {{10, 5}});
-    workspace.Load({image_name_, image_name_, image_name_});
-    ASSERT_EQ(reads.load(), 1);
-    ExpectLoadedWorkspaceData(workspace);
-    workspace.Load({image_name_, image_name_});
-    ASSERT_EQ(reads.load(), 2);
-    ExpectLoadedWorkspaceData(workspace);
-    reader->Close();
+TEST(BoundedWorkspaceBase, ReservationCoalescingAndPinnedEviction) {
+  const auto root = CreateTestDir();
+  CreateDirIfNotExists(root / "sparse");
+  CreateDirIfNotExists(root / "images");
+  CreateDirIfNotExists(root / "stereo");
+  CreateDirIfNotExists(root / "stereo" / "depth_maps");
+  CreateDirIfNotExists(root / "stereo" / "normal_maps");
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 2;
+  dataset.camera_width = 10;
+  dataset.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  reconstruction.Write(root / "sparse");
+  std::vector<std::string> names;
+  for (int image_id = 1; image_id <= 2; ++image_id) {
+    const auto name = reconstruction.Image(image_id).Name();
+    names.push_back(name);
+    DepthMap depth(10, 5, 1.0f, 10.0f);
+    depth.Fill(static_cast<float>(image_id + 1));
+    depth.Write(root / "stereo" / "depth_maps" / (name + ".geometric.bin"));
+    if (image_id == 1) {
+      // The native FP32 reader accepts trailing bytes; admission must agree.
+      std::ofstream tail(
+          root / "stereo" / "depth_maps" / (name + ".geometric.bin"),
+          std::ios::app | std::ios::binary);
+      tail.put('x');
+    }
+    NormalMap normal(10, 5);
+    normal.Fill(1.0f);
+    normal.Write(root / "stereo" / "normal_maps" / (name + ".geometric.bin"));
+    Bitmap bitmap(10, 5, true);
+    bitmap.Fill(BitmapColor<uint8_t>(image_id, image_id, image_id));
+    ASSERT_TRUE(bitmap.Write(root / "images" / name));
   }
+  Workspace::Options options;
+  options.workspace_path = root;
+  options.workspace_format = "COLMAP";
+  options.input_type = "geometric";
+  options.cache_size = 951.0 / (1024.0 * 1024.0 * 1024.0);
+  BoundedWorkspace workspace(options);
+  const int first = workspace.GetModel().GetImageIdx(names[0]);
+  const int second = workspace.GetModel().GetImageIdx(names[1]);
+  EXPECT_EQ(workspace.GetLoadReservationBytes(first), 950);
+  EXPECT_EQ(workspace.GetCacheStats().loads, 0);
+  auto pin = workspace.AcquireImage(first);
+  auto copy = pin;
+  EXPECT_EQ(pin.get(), copy.get());
+  EXPECT_EQ(workspace.GetCacheStats().loads, 1);
+  auto waiting = std::async(std::launch::async,
+                            [&] { return workspace.AcquireImage(second); });
+  EXPECT_EQ(waiting.wait_for(std::chrono::milliseconds(30)),
+            std::future_status::timeout);
+  pin.reset();
+  copy.reset();
+  auto next = waiting.get();
+  ASSERT_TRUE(next);
+  EXPECT_EQ(next->depth_map.Get(0, 0), 3.0f);
+  const auto stats = workspace.GetCacheStats();
+  EXPECT_EQ(stats.loads, 2);
+  EXPECT_EQ(stats.evictions, 1);
+  EXPECT_EQ(stats.reserved_bytes, 0);
+  EXPECT_LE(stats.peak_charged_bytes, stats.capacity_bytes);
+  next.reset();
+  std::vector<std::future<void>> readers;
+  for (int i = 0; i < 8; ++i) {
+    readers.push_back(std::async(std::launch::async, [&] {
+      const auto same = workspace.AcquireImage(first);
+      EXPECT_EQ(same->depth_map.Get(0, 0), 2.0f);
+    }));
+  }
+  for (auto& reader : readers) reader.get();
+  EXPECT_EQ(workspace.GetCacheStats().loads, 3);
+
+  options.cache_size = 949.0 / (1024.0 * 1024.0 * 1024.0);
+  BoundedWorkspace too_small(options);
+  EXPECT_THROW(too_small.AcquireImage(first), std::runtime_error);
+  EXPECT_EQ(too_small.GetCacheStats().loads, 0);
+  {
+    std::ofstream malformed(
+        root / "stereo" / "depth_maps" / (names[0] + ".geometric.bin"),
+        std::ios::trunc | std::ios::binary);
+    malformed << std::string(129, ' ');
+  }
+  BoundedWorkspace malformed(options);
+  EXPECT_THROW(malformed.GetLoadReservationBytes(first), std::exception);
+  EXPECT_EQ(malformed.GetCacheStats().loads, 0);
 }
 
-TEST_F(WorkspaceTests, EagerLoadMissingInputCanBeRestored) {
-  auto options = GetOptions();
-  options.num_threads = 1;
-  Workspace workspace(options);
-  const auto depth_path = workspace.GetDepthMapPath(0);
-  ASSERT_TRUE(std::filesystem::remove(depth_path));
-  std::atomic<int> reads{0};
-  auto reader =
-      ScopedBitmapReader::Create({workspace.GetBitmapPath(0)},
-                                 [&](const auto&, bool, bool, Bitmap* target) {
-                                   ++reads;
-                                   *target = Bitmap(10, 5, true);
-                                   target->Fill(BitmapColor<uint8_t>(7, 8, 9));
-                                   return true;
-                                 },
-                                 {{10, 5}});
-  workspace.Load({image_name_, image_name_});
-  EXPECT_EQ(reads.load(), 0);
-  Mat<float> depth(10, 5, 1);
-  depth.Fill(1.0f);
+TEST(BoundedWorkspaceBase, LeaseOutlivesWorkspace) {
+  const auto root = CreateTestDir();
+  CreateDirIfNotExists(root / "sparse");
+  CreateDirIfNotExists(root / "images");
+  CreateDirIfNotExists(root / "stereo");
+  CreateDirIfNotExists(root / "stereo" / "depth_maps");
+  CreateDirIfNotExists(root / "stereo" / "normal_maps");
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 1;
+  dataset.camera_width = 10;
+  dataset.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  reconstruction.Write(root / "sparse");
+  const auto name = reconstruction.Image(1).Name();
+  Bitmap bitmap(10, 5, true);
+  bitmap.Fill(BitmapColor<uint8_t>(7, 8, 9));
+  ASSERT_TRUE(bitmap.Write(root / "images" / name));
+  DepthMap depth(10, 5, 1.0f, 10.0f);
+  depth.Fill(2.0f);
+  NormalMap normal(10, 5);
+  normal.Fill(1.0f);
+  const auto depth_path =
+      root / "stereo" / "depth_maps" / (name + ".geometric.bin");
+  const auto normal_path =
+      root / "stereo" / "normal_maps" / (name + ".geometric.bin");
   depth.Write(depth_path);
-  workspace.Load({image_name_, image_name_});
-  EXPECT_EQ(reads.load(), 1);
-  ExpectLoadedWorkspaceData(workspace);
-  reader->Close();
+  normal.Write(normal_path);
+  Workspace::Options options;
+  options.workspace_path = root;
+  options.workspace_format = "COLMAP";
+  options.input_type = "geometric";
+  BoundedWorkspace::ImageLease lease;
+  {
+    auto workspace = std::make_unique<BoundedWorkspace>(options);
+    const int image = workspace->GetModel().GetImageIdx(name);
+    lease = workspace->AcquireImage(image);
+    ASSERT_TRUE(lease);
+  }
+  EXPECT_EQ(lease->depth_map.Get(0, 0), 2.0f);
+  EXPECT_EQ(lease->bitmap.GetPixel(0, 0)->g, 8);
+  lease.reset();
 }
+
+// Full-RAM normal-storage contracts.
 
 }  // namespace
 }  // namespace mvs
