@@ -1152,6 +1152,8 @@ void OptionManager::AddStereoFusionOptions() {
   AddDefaultOption("StereoFusion.cache_size", &stereo_fusion->cache_size);
   AddDefaultOption("StereoFusion.use_cache", &stereo_fusion->use_cache);
   AddDefaultOption("StereoFusion.bounded_cache", &stereo_fusion->bounded_cache);
+  AddDefaultOption("StereoFusion.bounded_cache_compact_rgb",
+                   &stereo_fusion->bounded_cache_compact_rgb);
 }
 
 void OptionManager::AddPoissonMeshingOptions() {

@@ -247,6 +247,10 @@ void BindMVS(py::module& m) {
                          &SFOpts::cache_size,
                          "Cache size in gigabytes for fusion.")
           .def_readwrite("bounded_cache", &SFOpts::bounded_cache)
+          .def_readwrite(
+              "bounded_cache_compact_rgb",
+              &SFOpts::bounded_cache_compact_rgb,
+              "Keep RGB8 colors at the depth-map grid in bounded mode.")
           .def_readwrite("bounding_box",
                          &SFOpts::bounding_box,
                          "Bounding box Tuple[min, max]")

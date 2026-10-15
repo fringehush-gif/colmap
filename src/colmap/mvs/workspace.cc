@@ -2,6 +2,7 @@
 
 #include "colmap/mvs/workspace.h"
 
+#include "colmap/sensor/bitmap_reader.h"
 #include "colmap/util/file.h"
 #include "colmap/util/threading.h"
 
@@ -193,7 +194,8 @@ std::filesystem::path Workspace::GetNormalMapPath(const int image_idx) const {
 }
 
 bool Workspace::HasBitmap(const int image_idx) const {
-  return ExistsFile(GetBitmapPath(image_idx));
+  const auto path = GetBitmapPath(image_idx);
+  return ScopedBitmapReader::Find(path) || ExistsFile(path);
 }
 
 bool Workspace::HasDepthMap(const int image_idx) const {
