@@ -2,9 +2,13 @@
 
 #include "colmap/sfm/incremental_triangulator.h"
 
+#include "colmap/math/random.h"
 #include "colmap/scene/database_cache.h"
 #include "colmap/scene/database_sqlite.h"
 #include "colmap/scene/synthetic.h"
+
+#include <limits>
+#include <tuple>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -322,6 +326,144 @@ TEST(IncrementalTriangulator, Retriangulate) {
   EXPECT_EQ(num_tris,
             synthetic_options.num_points3D * reconstruction.NumRegImages());
   EXPECT_EQ(reconstruction.NumPoints3D(), synthetic_options.num_points3D);
+}
+
+struct FiniteTrackFixture {
+  std::shared_ptr<Database> database =
+      Database::Open(kInMemorySqliteDatabasePath);
+  Reconstruction reconstruction;
+  std::shared_ptr<DatabaseCache> cache;
+  FiniteTrackFixture() {
+    SetPRNGSeed(0);
+    SyntheticDatasetOptions options;
+    options.num_rigs = 1;
+    options.num_cameras_per_rig = 1;
+    options.num_frames_per_rig = 5;
+    options.num_points3D = 5;
+    SynthesizeDataset(options, &reconstruction, database.get());
+    cache = DatabaseCache::Create(*database, DatabaseCache::Options());
+  }
+  ~FiniteTrackFixture() { database->Close(); }
+};
+
+class NonfiniteTrackCoordinate
+    : public testing::TestWithParam<std::tuple<int, double>> {};
+
+TEST_P(NonfiniteTrackCoordinate, CompletionRejectsInvalidObservation) {
+  FiniteTrackFixture fixture;
+  auto& reconstruction = fixture.reconstruction;
+  const auto id = reconstruction.Points3D().begin()->first;
+  const auto row = reconstruction.Point3D(id).track.Element(0);
+  reconstruction.DeleteObservation(row.image_id, row.point2D_idx);
+  reconstruction.Image(row.image_id)
+      .Point2D(row.point2D_idx)
+      .xy[std::get<0>(GetParam())] = std::get<1>(GetParam());
+  IncrementalTriangulator triangulator(fixture.cache->CorrespondenceGraph(),
+                                       reconstruction);
+  EXPECT_EQ(
+      triangulator.CompleteTracks(IncrementalTriangulator::Options(), {id}), 0);
+  EXPECT_FALSE(
+      reconstruction.Image(row.image_id).Point2D(row.point2D_idx).HasPoint3D());
+  EXPECT_EQ(reconstruction.NumPoints3D(), 5);
+  EXPECT_EQ(reconstruction.ComputeNumObservations(), 24);
+}
+
+TEST_P(NonfiniteTrackCoordinate, MergeRejectsInvalidObservation) {
+  FiniteTrackFixture fixture;
+  auto& reconstruction = fixture.reconstruction;
+  const auto id = reconstruction.Points3D().begin()->first;
+  const auto row = reconstruction.Point3D(id).track.Element(0);
+  SplitPoint3D(reconstruction, id);
+  reconstruction.Image(row.image_id)
+      .Point2D(row.point2D_idx)
+      .xy[std::get<0>(GetParam())] = std::get<1>(GetParam());
+  IncrementalTriangulator triangulator(fixture.cache->CorrespondenceGraph(),
+                                       reconstruction);
+  EXPECT_EQ(triangulator.MergeTracks(IncrementalTriangulator::Options(), {id}),
+            0);
+  EXPECT_EQ(reconstruction.NumPoints3D(), 6);
+  EXPECT_EQ(reconstruction.ComputeNumObservations(), 25);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    InvalidCoordinates,
+    NonfiniteTrackCoordinate,
+    testing::Combine(
+        testing::Values(0, 1),
+        testing::Values(std::numeric_limits<double>::quiet_NaN(),
+                        std::numeric_limits<double>::infinity(),
+                        -std::numeric_limits<double>::infinity())));
+
+class NonfiniteTrackPosition : public testing::TestWithParam<double> {};
+
+TEST_P(NonfiniteTrackPosition, MergeRejectsInvalidPosition) {
+  FiniteTrackFixture fixture;
+  auto& reconstruction = fixture.reconstruction;
+  const auto id = reconstruction.Points3D().begin()->first;
+  SplitPoint3D(reconstruction, id);
+  reconstruction.Point3D(id).xyz.x() = GetParam();
+  IncrementalTriangulator triangulator(fixture.cache->CorrespondenceGraph(),
+                                       reconstruction);
+  EXPECT_EQ(triangulator.MergeTracks(IncrementalTriangulator::Options(), {id}),
+            0);
+  EXPECT_EQ(reconstruction.NumPoints3D(), 6);
+  EXPECT_EQ(reconstruction.ComputeNumObservations(), 25);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    InvalidPositions,
+    NonfiniteTrackPosition,
+    testing::Values(std::numeric_limits<double>::quiet_NaN(),
+                    std::numeric_limits<double>::infinity(),
+                    -std::numeric_limits<double>::infinity()));
+
+TEST(FiniteTrackBoundary, CompletionAcceptsExactThreshold) {
+  FiniteTrackFixture fixture;
+  auto& reconstruction = fixture.reconstruction;
+  const auto id = reconstruction.Points3D().begin()->first;
+  const auto row = reconstruction.Point3D(id).track.Element(0);
+  reconstruction.DeleteObservation(row.image_id, row.point2D_idx);
+  auto& image = reconstruction.Image(row.image_id);
+  const auto projection = image.CameraPtr()->ImgFromCam(
+      image.CamFromWorld() * reconstruction.Point3D(id).xyz);
+  ASSERT_TRUE(projection.has_value());
+  image.Point2D(row.point2D_idx).xy = *projection + Eigen::Vector2d(4.0, 0.0);
+  IncrementalTriangulator::Options options;
+  options.complete_max_reproj_error = 4.0;
+  IncrementalTriangulator triangulator(fixture.cache->CorrespondenceGraph(),
+                                       reconstruction);
+  EXPECT_EQ(triangulator.CompleteTracks(options, {id}), 1);
+  EXPECT_TRUE(image.Point2D(row.point2D_idx).HasPoint3D());
+  EXPECT_EQ(reconstruction.ComputeNumObservations(), 25);
+}
+
+TEST(FiniteTrackBoundary, MergeAcceptsExactThreshold) {
+  FiniteTrackFixture fixture;
+  auto& reconstruction = fixture.reconstruction;
+  const auto id = reconstruction.Points3D().begin()->first;
+  const auto row = reconstruction.Point3D(id).track.Element(0);
+  const auto split_row = reconstruction.Point3D(id).track.Element(2);
+  SplitPoint3D(reconstruction, id);
+  const auto other_id = reconstruction.Image(split_row.image_id)
+                            .Point2D(split_row.point2D_idx)
+                            .point3D_id;
+  const auto& first = reconstruction.Point3D(id);
+  const auto& second = reconstruction.Point3D(other_id);
+  const Eigen::Vector3d merged_xyz =
+      (first.track.Length() * first.xyz + second.track.Length() * second.xyz) /
+      (first.track.Length() + second.track.Length());
+  auto& image = reconstruction.Image(row.image_id);
+  const auto projection =
+      image.CameraPtr()->ImgFromCam(image.CamFromWorld() * merged_xyz);
+  ASSERT_TRUE(projection.has_value());
+  image.Point2D(row.point2D_idx).xy = *projection + Eigen::Vector2d(4.0, 0.0);
+  IncrementalTriangulator::Options options;
+  options.merge_max_reproj_error = 4.0;
+  IncrementalTriangulator triangulator(fixture.cache->CorrespondenceGraph(),
+                                       reconstruction);
+  EXPECT_EQ(triangulator.MergeTracks(options, {id}), 5);
+  EXPECT_EQ(reconstruction.NumPoints3D(), 5);
+  EXPECT_EQ(reconstruction.ComputeNumObservations(), 25);
 }
 
 }  // namespace

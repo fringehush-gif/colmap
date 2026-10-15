@@ -10,6 +10,7 @@
 #include "colmap/util/logging.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include <Eigen/Geometry>
 
@@ -137,24 +138,43 @@ bool EstimateTriangulation(const EstimateTriangulationOptions& options,
   THROW_CHECK_EQ(points.size(), cameras.size());
   options.Check();
 
-  std::vector<TriangulationEstimator::PointData> point_data;
-  point_data.resize(points.size());
-  std::vector<TriangulationEstimator::PoseData> pose_data;
-  pose_data.resize(points.size());
+  std::vector<TriangulationEstimator::PointData> point_data(points.size());
+  std::vector<TriangulationEstimator::PoseData> pose_data(points.size());
+  // Allocate the original-row map only when an observation is ineligible.
+  std::vector<size_t> original_indices;
+  bool skipped_observation = false;
+  size_t num_valid = 0;
   for (size_t i = 0; i < points.size(); ++i) {
-    point_data[i].img_point = points[i];
-    // Unit bearing in the camera frame. CamRayFromImg yields a valid ray for
-    // any camera model, including omnidirectional (EQUIRECTANGULAR)
-    // back-hemisphere observations that CamFromImg cannot represent. Fall back
-    // to a defined forward bearing (+Z) if unprojection fails, so downstream
-    // normalize() in the DLT never sees a zero vector (which would produce
-    // NaNs).
-    point_data[i].cam_ray =
-        cameras[i]->CamRayFromImg(points[i]).value_or(Eigen::Vector3d::UnitZ());
-    pose_data[i].cam_from_world = cams_from_world[i].ToMatrix();
-    pose_data[i].proj_center = cams_from_world[i].TgtOriginInSrc();
-    pose_data[i].camera = cameras[i];
+    const auto cam_ray = cameras[i]->CamRayFromImg(points[i]);
+    const double squared_norm = cam_ray ? cam_ray->squaredNorm() : 0.0;
+    if (!cam_ray || !cam_ray->allFinite() || !std::isfinite(squared_norm) ||
+        squared_norm <= 0.0) {
+      if (!skipped_observation) {
+        skipped_observation = true;
+        original_indices.reserve(points.size());
+        for (size_t j = 0; j < num_valid; ++j) {
+          original_indices.push_back(j);
+        }
+      }
+      continue;
+    }
+    // Keep actual unit bearings, including valid omnidirectional observations.
+    // A failed unprojection must never become a synthetic forward bearing.
+    point_data[num_valid].img_point = points[i];
+    point_data[num_valid].cam_ray = *cam_ray;
+    pose_data[num_valid].cam_from_world = cams_from_world[i].ToMatrix();
+    pose_data[num_valid].proj_center = cams_from_world[i].TgtOriginInSrc();
+    pose_data[num_valid].camera = cameras[i];
+    if (skipped_observation) {
+      original_indices.push_back(i);
+    }
+    ++num_valid;
   }
+  if (num_valid < TriangulationEstimator::kMinNumSamples) {
+    return false;
+  }
+  point_data.resize(num_valid);
+  pose_data.resize(num_valid);
 
   // Robustly estimate track using LORANSAC.
   LORANSAC<TriangulationEstimator,
@@ -170,7 +190,15 @@ bool EstimateTriangulation(const EstimateTriangulationOptions& options,
     return false;
   }
 
-  *inlier_mask = std::move(report.inlier_mask);
+  if (skipped_observation) {
+    THROW_CHECK_EQ(original_indices.size(), report.inlier_mask.size());
+    inlier_mask->assign(points.size(), false);
+    for (size_t i = 0; i < original_indices.size(); ++i) {
+      (*inlier_mask)[original_indices[i]] = report.inlier_mask[i];
+    }
+  } else {
+    *inlier_mask = std::move(report.inlier_mask);
+  }
   *xyz = report.model;
 
   return report.success;
