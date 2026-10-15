@@ -33,10 +33,23 @@
 namespace colmap {
 namespace mvs {
 
-// Calibration of reference image as {fx, cx, fy, cy}.
-__constant__ float ref_K[4];
-// Calibration of reference image as {1/fx, -cx/fx, 1/fy, -cy/fy}.
-__constant__ float ref_inv_K[4];
+namespace {
+
+// An immutable value copied into each kernel launch's parameter state.
+struct RefCamera {
+  float K[4];      // fx, cx, fy, cy
+  float inv_K[4];  // 1/fx, -cx/fx, 1/fy, -cy/fy
+};
+static_assert(sizeof(RefCamera) == 8 * sizeof(float));
+
+RefCamera MakeRefCamera(const float K[4], const float inv_K[4]) {
+  RefCamera camera;
+  std::copy_n(K, 4, camera.K);
+  std::copy_n(inv_K, 4, camera.inv_K);
+  return camera;
+}
+
+}  // namespace
 
 __device__ inline void Mat33DotVec3(const float mat[9],
                                     const float vec[3],
@@ -64,7 +77,8 @@ __device__ inline float GenerateRandomDepth(const float depth_min,
   return curand_uniform(rand_state) * (depth_max - depth_min) + depth_min;
 }
 
-__device__ inline void GenerateRandomNormal(const int row,
+__device__ inline void GenerateRandomNormal(const RefCamera& camera,
+                                            const int row,
                                             const int col,
                                             curandState* rand_state,
                                             float normal[3]) {
@@ -85,8 +99,8 @@ __device__ inline void GenerateRandomNormal(const int row,
   normal[2] = 1.0f - 2.0f * s;
 
   // Make sure normal is looking away from camera.
-  const float view_ray[3] = {ref_inv_K[0] * col + ref_inv_K[1],
-                             ref_inv_K[2] * row + ref_inv_K[3],
+  const float view_ray[3] = {camera.inv_K[0] * col + camera.inv_K[1],
+                             camera.inv_K[2] * row + camera.inv_K[3],
                              1.0f};
   if (DotProduct3(normal, view_ray) > 0) {
     normal[0] = -normal[0];
@@ -103,7 +117,8 @@ __device__ inline float PerturbDepth(const float perturbation,
   return GenerateRandomDepth(depth_min, depth_max, rand_state);
 }
 
-__device__ inline void PerturbNormal(const int row,
+__device__ inline void PerturbNormal(const RefCamera& camera,
+                                     const int row,
                                      const int col,
                                      const float perturbation,
                                      const float normal[3],
@@ -139,13 +154,14 @@ __device__ inline void PerturbNormal(const int row,
 
   // Make sure the perturbed normal is still looking in the same direction as
   // the viewing direction, otherwise try again but with smaller perturbation.
-  const float view_ray[3] = {ref_inv_K[0] * col + ref_inv_K[1],
-                             ref_inv_K[2] * row + ref_inv_K[3],
+  const float view_ray[3] = {camera.inv_K[0] * col + camera.inv_K[1],
+                             camera.inv_K[2] * row + camera.inv_K[3],
                              1.0f};
   if (DotProduct3(perturbed_normal, view_ray) >= 0.0f) {
     const int kMaxNumTrials = 3;
     if (num_trials < kMaxNumTrials) {
-      PerturbNormal(row,
+      PerturbNormal(camera,
+                    row,
                     col,
                     0.5f * perturbation,
                     normal,
@@ -168,24 +184,26 @@ __device__ inline void PerturbNormal(const int row,
   perturbed_normal[2] *= inv_norm;
 }
 
-__device__ inline void ComputePointAtDepth(const float row,
+__device__ inline void ComputePointAtDepth(const RefCamera& camera,
+                                           const float row,
                                            const float col,
                                            const float depth,
                                            float point[3]) {
-  point[0] = depth * (ref_inv_K[0] * col + ref_inv_K[1]);
-  point[1] = depth * (ref_inv_K[2] * row + ref_inv_K[3]);
+  point[0] = depth * (camera.inv_K[0] * col + camera.inv_K[1]);
+  point[1] = depth * (camera.inv_K[2] * row + camera.inv_K[3]);
   point[2] = depth;
 }
 
 // Transfer depth on plane from viewing ray at row1 to row2. The returned
 // depth is the intersection of the viewing ray through row2 with the plane
 // at row1 defined by the given depth and normal.
-__device__ inline float PropagateDepth(const float depth1,
+__device__ inline float PropagateDepth(const RefCamera& camera,
+                                       const float depth1,
                                        const float normal1[3],
                                        const float row1,
                                        const float row2) {
   // Point along first viewing ray.
-  const float x1 = depth1 * (ref_inv_K[2] * row1 + ref_inv_K[3]);
+  const float x1 = depth1 * (camera.inv_K[2] * row1 + camera.inv_K[3]);
   const float y1 = depth1;
   // Point on plane defined by point along first viewing ray and plane normal1.
   const float x2 = x1 + normal1[2];
@@ -195,7 +213,7 @@ __device__ inline float PropagateDepth(const float depth1,
   // const float x3 = 0.0f;
   // const float y3 = 0.0f;
   // Point on second viewing ray.
-  const float x4 = ref_inv_K[2] * row2 + ref_inv_K[3];
+  const float x4 = camera.inv_K[2] * row2 + camera.inv_K[3];
   // const float y4 = 1.0f;
 
   // Intersection of the lines ((x1, y1), (x2, y2)) and ((x3, y3), (x4, y4)).
@@ -242,6 +260,7 @@ __device__ inline void ComputeViewingAngles(
 }
 
 __device__ inline void ComposeHomography(
+    const RefCamera& camera,
     const cudaTextureObject_t poses_texture,
     const int image_idx,
     const int row,
@@ -269,8 +288,9 @@ __device__ inline void ComposeHomography(
 
   // Distance to the plane.
   const float dist =
-      depth * (normal[0] * (ref_inv_K[0] * col + ref_inv_K[1]) +
-               normal[1] * (ref_inv_K[2] * row + ref_inv_K[3]) + normal[2]);
+      depth *
+      (normal[0] * (camera.inv_K[0] * col + camera.inv_K[1]) +
+       normal[1] * (camera.inv_K[2] * row + camera.inv_K[3]) + normal[2]);
   const float inv_dist = 1.0f / dist;
 
   const float inv_dist_N0 = inv_dist * normal[0];
@@ -278,30 +298,30 @@ __device__ inline void ComposeHomography(
   const float inv_dist_N2 = inv_dist * normal[2];
 
   // Homography as H = K * (R - T * n' / d) * Kref^-1.
-  H[0] = ref_inv_K[0] * (K[0] * (R[0] + inv_dist_N0 * T[0]) +
-                         K[1] * (R[6] + inv_dist_N0 * T[2]));
-  H[1] = ref_inv_K[2] * (K[0] * (R[1] + inv_dist_N1 * T[0]) +
-                         K[1] * (R[7] + inv_dist_N1 * T[2]));
+  H[0] = camera.inv_K[0] * (K[0] * (R[0] + inv_dist_N0 * T[0]) +
+                            K[1] * (R[6] + inv_dist_N0 * T[2]));
+  H[1] = camera.inv_K[2] * (K[0] * (R[1] + inv_dist_N1 * T[0]) +
+                            K[1] * (R[7] + inv_dist_N1 * T[2]));
   H[2] = K[0] * (R[2] + inv_dist_N2 * T[0]) +
          K[1] * (R[8] + inv_dist_N2 * T[2]) +
-         ref_inv_K[1] * (K[0] * (R[0] + inv_dist_N0 * T[0]) +
-                         K[1] * (R[6] + inv_dist_N0 * T[2])) +
-         ref_inv_K[3] * (K[0] * (R[1] + inv_dist_N1 * T[0]) +
-                         K[1] * (R[7] + inv_dist_N1 * T[2]));
-  H[3] = ref_inv_K[0] * (K[2] * (R[3] + inv_dist_N0 * T[1]) +
-                         K[3] * (R[6] + inv_dist_N0 * T[2]));
-  H[4] = ref_inv_K[2] * (K[2] * (R[4] + inv_dist_N1 * T[1]) +
-                         K[3] * (R[7] + inv_dist_N1 * T[2]));
+         camera.inv_K[1] * (K[0] * (R[0] + inv_dist_N0 * T[0]) +
+                            K[1] * (R[6] + inv_dist_N0 * T[2])) +
+         camera.inv_K[3] * (K[0] * (R[1] + inv_dist_N1 * T[0]) +
+                            K[1] * (R[7] + inv_dist_N1 * T[2]));
+  H[3] = camera.inv_K[0] * (K[2] * (R[3] + inv_dist_N0 * T[1]) +
+                            K[3] * (R[6] + inv_dist_N0 * T[2]));
+  H[4] = camera.inv_K[2] * (K[2] * (R[4] + inv_dist_N1 * T[1]) +
+                            K[3] * (R[7] + inv_dist_N1 * T[2]));
   H[5] = K[2] * (R[5] + inv_dist_N2 * T[1]) +
          K[3] * (R[8] + inv_dist_N2 * T[2]) +
-         ref_inv_K[1] * (K[2] * (R[3] + inv_dist_N0 * T[1]) +
-                         K[3] * (R[6] + inv_dist_N0 * T[2])) +
-         ref_inv_K[3] * (K[2] * (R[4] + inv_dist_N1 * T[1]) +
-                         K[3] * (R[7] + inv_dist_N1 * T[2]));
-  H[6] = ref_inv_K[0] * (R[6] + inv_dist_N0 * T[2]);
-  H[7] = ref_inv_K[2] * (R[7] + inv_dist_N1 * T[2]);
-  H[8] = R[8] + ref_inv_K[1] * (R[6] + inv_dist_N0 * T[2]) +
-         ref_inv_K[3] * (R[7] + inv_dist_N1 * T[2]) + inv_dist_N2 * T[2];
+         camera.inv_K[1] * (K[2] * (R[3] + inv_dist_N0 * T[1]) +
+                            K[3] * (R[6] + inv_dist_N0 * T[2])) +
+         camera.inv_K[3] * (K[2] * (R[4] + inv_dist_N1 * T[1]) +
+                            K[3] * (R[7] + inv_dist_N1 * T[2]));
+  H[6] = camera.inv_K[0] * (R[6] + inv_dist_N0 * T[2]);
+  H[7] = camera.inv_K[2] * (R[7] + inv_dist_N1 * T[2]);
+  H[8] = R[8] + camera.inv_K[1] * (R[6] + inv_dist_N0 * T[2]) +
+         camera.inv_K[3] * (R[7] + inv_dist_N1 * T[2]) + inv_dist_N2 * T[2];
 }
 
 // Each thread in the current warp / thread block reads in 3 columns of the
@@ -431,12 +451,14 @@ struct PhotoConsistencyCostComputer {
   float* local_weights = nullptr;
 
   __device__ PhotoConsistencyCostComputer(
+      const RefCamera& camera,
       const cudaTextureObject_t ref_image_texture,
       const cudaTextureObject_t src_images_texture,
       const cudaTextureObject_t poses_texture,
       const float sigma_spatial,
       const float sigma_color)
       : local_ref_image(ref_image_texture),
+        camera_(camera),
         src_images_texture_(src_images_texture),
         poses_texture_(poses_texture),
         bilateral_weight_computer_(sigma_spatial, sigma_color) {}
@@ -491,7 +513,7 @@ struct PhotoConsistencyCostComputer {
   __device__ inline float Compute() const {
     float tform[9];
     ComposeHomography(
-        poses_texture_, src_image_idx, row, col, depth, normal, tform);
+        camera_, poses_texture_, src_image_idx, row, col, depth, normal, tform);
 
     float tform_step[8];
     for (int i = 0; i < 8; ++i) {
@@ -603,12 +625,14 @@ struct PhotoConsistencyCostComputer {
   }
 
  private:
+  const RefCamera& camera_;
   const cudaTextureObject_t src_images_texture_;
   const cudaTextureObject_t poses_texture_;
   const BilateralWeightComputer bilateral_weight_computer_;
 };
 
 __device__ inline float ComputeGeomConsistencyCost(
+    const RefCamera& camera,
     const cudaTextureObject_t poses_texture,
     const cudaTextureObject_t src_depth_maps_texture,
     const float row,
@@ -628,7 +652,7 @@ __device__ inline float ComputeGeomConsistencyCost(
 
   // Project point in reference image to world.
   float forward_point[3];
-  ComputePointAtDepth(row, col, depth, forward_point);
+  ComputePointAtDepth(camera, row, col, depth, forward_point);
 
   // Project world point to source image.
   const float inv_forward_z =
@@ -664,10 +688,10 @@ __device__ inline float ComputeGeomConsistencyCost(
   // Project world point back to reference image.
   const float backward_col =
       inv_backward_point_z *
-      (ref_K[0] * backward_point_x + ref_K[1] * backward_point_z);
+      (camera.K[0] * backward_point_x + camera.K[1] * backward_point_z);
   const float backward_row =
       inv_backward_point_z *
-      (ref_K[2] * backward_point_y + ref_K[3] * backward_point_z);
+      (camera.K[2] * backward_point_y + camera.K[3] * backward_point_z);
 
   // Return truncated reprojection error between original observation and
   // the forward-backward projected observation.
@@ -844,14 +868,15 @@ class LikelihoodComputer {
 };
 
 // Generate random normals for each pixel in the normal map.
-__global__ void InitNormalMap(GpuMatView<float> normal_map,
+__global__ void InitNormalMap(const RefCamera camera,
+                              GpuMatView<float> normal_map,
                               GpuMatView<curandState> rand_state_map) {
   const int row = blockDim.y * blockIdx.y + threadIdx.y;
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
   if (col < normal_map.GetWidth() && row < normal_map.GetHeight()) {
     curandState rand_state = rand_state_map.Get(row, col);
     float normal[3];
-    GenerateRandomNormal(row, col, &rand_state, normal);
+    GenerateRandomNormal(camera, row, col, &rand_state, normal);
     normal_map.SetSlice(row, col, normal);
     rand_state_map.Set(row, col, rand_state);
   }
@@ -874,6 +899,7 @@ __global__ void RotateNormalMap(GpuMatView<float> normal_map) {
 
 template <int kWindowSize, int kWindowStep>
 __global__ void ComputeInitialCost(
+    const RefCamera camera,
     GpuMatView<float> cost_map,
     const GpuMatView<float> depth_map,
     const GpuMatView<float> normal_map,
@@ -888,7 +914,8 @@ __global__ void ComputeInitialCost(
 
   typedef PhotoConsistencyCostComputer<kWindowSize, kWindowStep>
       PhotoConsistencyCostComputerType;
-  PhotoConsistencyCostComputerType pcc_computer(ref_image_texture,
+  PhotoConsistencyCostComputerType pcc_computer(camera,
+                                                ref_image_texture,
                                                 src_images_texture,
                                                 poses_texture,
                                                 sigma_spatial,
@@ -951,6 +978,7 @@ template <int kWindowSize,
           bool kFilterPhotoConsistency = false,
           bool kFilterGeomConsistency = false>
 __global__ void SweepFromTopToBottom(
+    const RefCamera camera,
     GpuMatView<float> global_workspace,
     GpuMatView<curandState> rand_state_map,
     GpuMatView<float> cost_map,
@@ -1012,7 +1040,8 @@ __global__ void SweepFromTopToBottom(
 
   typedef PhotoConsistencyCostComputer<kWindowSize, kWindowStep>
       PhotoConsistencyCostComputerType;
-  PhotoConsistencyCostComputerType pcc_computer(ref_image_texture,
+  PhotoConsistencyCostComputerType pcc_computer(camera,
+                                                ref_image_texture,
                                                 src_images_texture,
                                                 poses_texture,
                                                 options.sigma_spatial,
@@ -1066,7 +1095,7 @@ __global__ void SweepFromTopToBottom(
     // the depth of very oblique structures, i.e. pixels whose normal direction
     // is significantly different from their viewing direction.
     prev_param_state.depth = PropagateDepth(
-        prev_param_state.depth, prev_param_state.normal, row - 1, row);
+        camera, prev_param_state.depth, prev_param_state.normal, row - 1, row);
 
     // Read parameters for current pixel from previous sweep.
     curr_param_state.depth = depth_map.Get(row, col);
@@ -1075,7 +1104,8 @@ __global__ void SweepFromTopToBottom(
     // Generate random parameters.
     rand_param_state.depth =
         PerturbDepth(options.perturbation, curr_param_state.depth, &rand_state);
-    PerturbNormal(row,
+    PerturbNormal(camera,
+                  row,
                   col,
                   options.perturbation * M_PI,
                   curr_param_state.normal,
@@ -1086,7 +1116,7 @@ __global__ void SweepFromTopToBottom(
     // modulate selection probabilities with priors.
 
     float point[3];
-    ComputePointAtDepth(row, col, curr_param_state.depth, point);
+    ComputePointAtDepth(camera, row, col, curr_param_state.depth, point);
 
     for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
       const float cost = cost_map.Get(row, col, image_idx);
@@ -1111,7 +1141,8 @@ __global__ void SweepFromTopToBottom(
           likelihood_computer.ComputeIncProb(cos_incident_angle);
 
       float H[9];
-      ComposeHomography(poses_texture,
+      ComposeHomography(camera,
+                        poses_texture,
                         image_idx,
                         row,
                         col,
@@ -1169,7 +1200,8 @@ __global__ void SweepFromTopToBottom(
       if (kGeomConsistencyTerm) {
         for (int i = 0; i < 3; ++i) {
           geometric_costs[i] =
-              ComputeGeomConsistencyCost(poses_texture,
+              ComputeGeomConsistencyCost(camera,
+                                         poses_texture,
                                          src_depth_maps_texture,
                                          row,
                                          col,
@@ -1236,7 +1268,7 @@ __global__ void SweepFromTopToBottom(
       int num_consistent = 0;
 
       float best_point[3];
-      ComputePointAtDepth(row, col, best_depth, best_point);
+      ComputePointAtDepth(camera, row, col, best_depth, best_point);
 
       const float min_ncc_prob =
           likelihood_computer.ComputeNCCProb(1.0f - options.filter_min_ncc);
@@ -1263,7 +1295,8 @@ __global__ void SweepFromTopToBottom(
             num_consistent += 1;
           }
         } else if (!kFilterPhotoConsistency) {
-          if (ComputeGeomConsistencyCost(poses_texture,
+          if (ComputeGeomConsistencyCost(camera,
+                                         poses_texture,
                                          src_depth_maps_texture,
                                          row,
                                          col,
@@ -1276,7 +1309,8 @@ __global__ void SweepFromTopToBottom(
           }
         } else {
           if (sel_prob_map.Get(row, col, image_idx) >= min_ncc_prob &&
-              ComputeGeomConsistencyCost(poses_texture,
+              ComputeGeomConsistencyCost(camera,
+                                         poses_texture,
                                          src_depth_maps_texture,
                                          row,
                                          col,
@@ -1427,6 +1461,8 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   ComputeCudaConfig();
   ComputeInitialCost<kWindowSize, kWindowStep>
       <<<sweep_grid_size_, sweep_block_size_>>>(
+          MakeRefCamera(ref_K_host_[rotation_in_half_pi_],
+                        ref_inv_K_host_[rotation_in_half_pi_]),
           cost_map_->View(),
           depth_map_->View(),
           normal_map_->View(),
@@ -1478,29 +1514,31 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
       const bool last_sweep = iter == options_.num_iterations - 1 && sweep == 3;
 
-#define CALL_SWEEP_FUNC                                   \
-  SweepFromTopToBottom<kWindowSize,                       \
-                       kWindowStep,                       \
-                       kGeomConsistencyTerm,              \
-                       kFilterPhotoConsistency,           \
-                       kFilterGeomConsistency>            \
-      <<<sweep_grid_size_, sweep_block_size_>>>(          \
-          global_workspace_->View(),                      \
-          rand_state_map_->View(),                        \
-          cost_map_->View(),                              \
-          depth_map_->View(),                             \
-          normal_map_->View(),                            \
-          consistency_mask_->View(),                      \
-          sel_prob_map_->View(),                          \
-          prev_sel_prob_map_->View(),                     \
-          ref_image_texture_->GetObj(),                   \
-          ref_image_->sum_image->View(),                  \
-          ref_image_->squared_sum_image->View(),          \
-          src_images_texture_->GetObj(),                  \
-          src_depth_maps_texture_ == nullptr              \
-              ? 0                                         \
-              : src_depth_maps_texture_->GetObj(),        \
-          poses_texture_[rotation_in_half_pi_]->GetObj(), \
+#define CALL_SWEEP_FUNC                                         \
+  SweepFromTopToBottom<kWindowSize,                             \
+                       kWindowStep,                             \
+                       kGeomConsistencyTerm,                    \
+                       kFilterPhotoConsistency,                 \
+                       kFilterGeomConsistency>                  \
+      <<<sweep_grid_size_, sweep_block_size_>>>(                \
+          MakeRefCamera(ref_K_host_[rotation_in_half_pi_],      \
+                        ref_inv_K_host_[rotation_in_half_pi_]), \
+          global_workspace_->View(),                            \
+          rand_state_map_->View(),                              \
+          cost_map_->View(),                                    \
+          depth_map_->View(),                                   \
+          normal_map_->View(),                                  \
+          consistency_mask_->View(),                            \
+          sel_prob_map_->View(),                                \
+          prev_sel_prob_map_->View(),                           \
+          ref_image_texture_->GetObj(),                         \
+          ref_image_->sum_image->View(),                        \
+          ref_image_->squared_sum_image->View(),                \
+          src_images_texture_->GetObj(),                        \
+          src_depth_maps_texture_ == nullptr                    \
+              ? 0                                               \
+              : src_depth_maps_texture_->GetObj(),              \
+          poses_texture_[rotation_in_half_pi_]->GetObj(),       \
           sweep_options);
 
       if (last_sweep) {
@@ -1791,15 +1829,6 @@ void PatchMatchCuda::InitTransforms() {
     ref_inv_K_host_[i][3] = -ref_K_host_[i][3] / ref_K_host_[i][2];
   }
 
-  // Bind 0 degrees version to constant global memory.
-  CUDA_SAFE_CALL(cudaMemcpyToSymbol(
-      ref_K, ref_K_host_[0], sizeof(float) * 4, 0, cudaMemcpyHostToDevice));
-  CUDA_SAFE_CALL(cudaMemcpyToSymbol(ref_inv_K,
-                                    ref_inv_K_host_[0],
-                                    sizeof(float) * 4,
-                                    0,
-                                    cudaMemcpyHostToDevice));
-
   //////////////////////////////////////////////////////////////////////////////
   // Generate rotated versions of camera poses.
   //////////////////////////////////////////////////////////////////////////////
@@ -1920,7 +1949,10 @@ void PatchMatchCuda::InitWorkspaceMemory() {
                               init_normal_map.GetWidth() * sizeof(float));
   } else {
     InitNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
-        normal_map_->View(), rand_state_map_->View());
+        MakeRefCamera(ref_K_host_[rotation_in_half_pi_],
+                      ref_inv_K_host_[rotation_in_half_pi_]),
+        normal_map_->View(),
+        rand_state_map_->View());
   }
 }
 
@@ -1989,18 +2021,6 @@ void PatchMatchCuda::Rotate() {
     cost_map_->Rotate(rotated_cost_map.get());
     cost_map_.swap(rotated_cost_map);
   }
-
-  // Rotate calibration.
-  CUDA_SAFE_CALL(cudaMemcpyToSymbol(ref_K,
-                                    ref_K_host_[rotation_in_half_pi_],
-                                    sizeof(float) * 4,
-                                    0,
-                                    cudaMemcpyHostToDevice));
-  CUDA_SAFE_CALL(cudaMemcpyToSymbol(ref_inv_K,
-                                    ref_inv_K_host_[rotation_in_half_pi_],
-                                    sizeof(float) * 4,
-                                    0,
-                                    cudaMemcpyHostToDevice));
 
   // Recompute Cuda configuration for rotated reference image.
   ComputeCudaConfig();
