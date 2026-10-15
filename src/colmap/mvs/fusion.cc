@@ -409,6 +409,10 @@ void StereoFusion::Run() {
   P_.resize(model.images.size());
   inv_P_.resize(model.images.size());
   inv_R_.resize(model.images.size());
+  prepared_normal_rotations_.clear();
+  if (options_.bounded_cache_normal_snorm16_guard) {
+    prepared_normal_rotations_.resize(model.images.size());
+  }
 
   for (const auto& image_name : image_names) {
     const int image_idx = model.GetImageIdx(image_name);
@@ -461,6 +465,10 @@ void StereoFusion::Run() {
         Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>>(
             image.GetR())
             .transpose();
+    if (options_.bounded_cache_normal_snorm16_guard) {
+      prepared_normal_rotations_.at(image_idx) =
+          normal_precision_guard::PrepareRotation(inv_R_.at(image_idx));
+    }
   }
 
   if (direct_mapped_normals_) {
@@ -1193,8 +1201,12 @@ void StereoFusion::Fuse(const int thread_id,
     // Check for consistent normal direction with reference normal.
     if (traversal_depth > 0) {
       if (options_.bounded_cache_normal_snorm16_guard) {
-        const auto candidate = normal_precision_guard::CompressedOperand(
-            inv_R_.at(image_idx), local_normal);
+        const auto candidate =
+            normal_precision_guard::CompressedOperandFromRotated(
+                inv_R_.at(image_idx),
+                prepared_normal_rotations_.at(image_idx),
+                local_normal,
+                normal);
         if (!normal_precision_guard::NormalAccept(
                 guarded_ref_normal,
                 candidate,
@@ -1281,8 +1293,12 @@ void StereoFusion::Fuse(const int thread_id,
       fused_ref_point = Eigen::Vector4f(xyz(0), xyz(1), xyz(2), 1.0f);
       fused_ref_normal = normal;
       if (options_.bounded_cache_normal_snorm16_guard) {
-        guarded_ref_normal = normal_precision_guard::CompressedOperand(
-            inv_R_.at(image_idx), local_normal);
+        guarded_ref_normal =
+            normal_precision_guard::CompressedOperandFromRotated(
+                inv_R_.at(image_idx),
+                prepared_normal_rotations_.at(image_idx),
+                local_normal,
+                normal);
         guarded_ref_image = image_idx;
         guarded_ref_row = row;
         guarded_ref_col = col;
