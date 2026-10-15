@@ -68,6 +68,15 @@ TEST(StereoFusionOptions, BoundedComponentPolicy) {
   EXPECT_FALSE(options.Check());
 }
 
+TEST(StereoFusionOptions, BoundedDiagnosticPolicy) {
+  StereoFusionOptions options;
+  EXPECT_FALSE(options.bounded_cache_diagnostics);
+  options.bounded_cache_diagnostics = true;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache = true;
+  EXPECT_TRUE(options.Check());
+}
+
 TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
   const auto root = CreateTestDir();
   for (const auto& sub : {"sparse",
@@ -271,6 +280,7 @@ TEST(StereoFusion, Integration) {
 
   StereoFusion fusion(options, temp_dir, "COLMAP", "", "geometric");
   fusion.Run();
+  EXPECT_FALSE(fusion.GetBoundedCacheDiagnosticRow());
 
   // Verify that some points were fused
   const auto& fused_points = fusion.GetFusedPoints();
@@ -458,6 +468,7 @@ TEST(StereoFusion, Integration) {
     options.bounded_cache_normal_tile_slots = 2;
     options.bounded_cache_normal_mapped_bytes = 1 << 20;
     options.bounded_cache_normal_mapped_files = 2;
+    options.bounded_cache_diagnostics = true;
     ASSERT_TRUE(options.Check());
     StereoFusion tiled(options, temp_dir, "COLMAP", "", "geometric");
     tiled.Run();
@@ -469,6 +480,19 @@ TEST(StereoFusion, Integration) {
     EXPECT_EQ(tiled.GetMappedNormalStats().active_copies, 0);
     EXPECT_LE(tiled.GetMappedNormalStats().peak_charged_bytes,
               static_cast<size_t>(options.bounded_cache_normal_mapped_bytes));
+    const auto tile_row = tiled.GetBoundedCacheDiagnosticRow();
+    ASSERT_TRUE(tile_row);
+    EXPECT_EQ(tile_row->find("COLMAP_FUSION_CACHE_DIAGNOSTIC_V1"), 0);
+    EXPECT_NE(
+        tile_row->find(
+            "decoded_normal_tile_loads=" +
+            std::to_string(tiled.GetBoundedCacheStats()->normal_tile_loads)),
+        std::string::npos);
+    EXPECT_NE(
+        tile_row->find("mapped_loads=" +
+                       std::to_string(tiled.GetMappedNormalStats().loads)),
+        std::string::npos);
+    EXPECT_NE(tile_row->find("ring_hint_hits=unavailable"), std::string::npos);
     options.bounded_cache_normal_tile_slots = 64;
     options.bounded_cache_normal_tile_hints = true;
     options.cache_size = 50000.0 / (1024.0 * 1024.0 * 1024.0);
@@ -477,6 +501,13 @@ TEST(StereoFusion, Integration) {
     expect_same_fusion(indexed_tiles);
     EXPECT_GT(indexed_tiles.GetNormalTileRingStats().indexed_lookups, 0);
     EXPECT_GT(indexed_tiles.GetNormalTileRingStats().hint_checks, 0);
+    const auto indexed_row = indexed_tiles.GetBoundedCacheDiagnosticRow();
+    ASSERT_TRUE(indexed_row);
+    EXPECT_NE(indexed_row->find(
+                  "ring_indexed_lookups=" +
+                  std::to_string(
+                      indexed_tiles.GetNormalTileRingStats().indexed_lookups)),
+              std::string::npos);
     options.bounded_cache_neighborhood = true;
     EXPECT_FALSE(options.Check());
     options.bounded_cache_neighborhood = false;
@@ -520,6 +551,11 @@ TEST(StereoFusion, Integration) {
     EXPECT_EQ(a.g, b.g);
     EXPECT_EQ(a.b, b.b);
   }
+
+  const auto no_tile_row = cancelled_fusion.GetBoundedCacheDiagnosticRow();
+  ASSERT_TRUE(no_tile_row);
+  EXPECT_NE(no_tile_row->find("mapped_normal=unavailable ring=unavailable"),
+            std::string::npos);
 }
 
 TEST(StereoFusion, CompactResidentRgbMatchesDiskFusion) {

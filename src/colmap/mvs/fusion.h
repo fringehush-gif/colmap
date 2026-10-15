@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -100,6 +101,9 @@ struct StereoFusionOptions {
       std::make_pair(Eigen::Vector3f(-FLT_MAX, -FLT_MAX, -FLT_MAX),
                      Eigen::Vector3f(FLT_MAX, FLT_MAX, FLT_MAX));
 
+  // Emit one bounded, cold-path cache diagnostic row after CLI Fusion.
+  bool bounded_cache_diagnostics = false;
+
   // Check the options for validity.
   bool Check() const;
 
@@ -124,10 +128,13 @@ class StereoFusion : public BaseController {
   size_t GetMaxBoundedPrefillLanesScheduled() const;
   BoundedWorkspace::MappedNormalStats GetMappedNormalStats() const;
   struct NormalTileRingStats {
+    size_t hits = 0;
+    size_t misses = 0;
     size_t indexed_lookups = 0;
     size_t hint_checks = 0;
   };
   NormalTileRingStats GetNormalTileRingStats() const;
+  std::optional<std::string> GetBoundedCacheDiagnosticRow() const;
 
   // Execute the depth map fusion pipeline.
   void Run();

@@ -16,6 +16,8 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <locale>
+#include <sstream>
 #include <tuple>
 
 #include <Eigen/Geometry>
@@ -96,6 +98,7 @@ void StereoFusionOptions::Print() const {
   PrintOption(use_cache);
   PrintOption(bounded_cache);
   PrintOption(bounded_cache_components);
+  PrintOption(bounded_cache_diagnostics);
   PrintOption(bounded_cache_normal_tile_size);
   PrintOption(bounded_cache_normal_tile_slots);
   PrintOption(bounded_cache_normal_tile_hints);
@@ -123,6 +126,7 @@ bool StereoFusionOptions::Check() const {
   CHECK_OPTION_GT(cache_size, 0);
   CHECK_OPTION_EQ((bounded_cache_compact_rgb && !bounded_cache), false);
   CHECK_OPTION_EQ((bounded_cache_components && !bounded_cache), false);
+  CHECK_OPTION_EQ((bounded_cache_diagnostics && !bounded_cache), false);
   CHECK_OPTION_GE(bounded_cache_normal_tile_size, 0);
   CHECK_OPTION_GT(bounded_cache_normal_tile_slots, 0);
   CHECK_OPTION_GE(bounded_cache_normal_mapped_bytes, 0);
@@ -194,10 +198,55 @@ BoundedWorkspace::MappedNormalStats StereoFusion::GetMappedNormalStats() const {
 StereoFusion::NormalTileRingStats StereoFusion::GetNormalTileRingStats() const {
   NormalTileRingStats stats;
   for (const auto& ring : normal_tile_rings_) {
+    stats.hits += ring.hits;
+    stats.misses += ring.misses;
     stats.indexed_lookups += ring.indexed_lookups;
     stats.hint_checks += ring.hint_checks;
   }
   return stats;
+}
+
+std::optional<std::string> StereoFusion::GetBoundedCacheDiagnosticRow() const {
+  if (!options_.bounded_cache_diagnostics) return std::nullopt;
+
+  std::ostringstream row;
+  row.imbue(std::locale::classic());
+  row << "COLMAP_FUSION_CACHE_DIAGNOSTIC_V1"
+      << " tile_mode=" << (options_.bounded_cache_normal_tile_size > 0);
+  const auto cache = GetBoundedCacheStats();
+  if (cache) {
+    row << " decoded_capacity_bytes=" << cache->capacity_bytes
+        << " decoded_peak_charged_bytes=" << cache->peak_charged_bytes
+        << " decoded_resident_bytes=" << cache->resident_bytes
+        << " decoded_reserved_bytes=" << cache->reserved_bytes
+        << " decoded_loads=" << cache->loads << " decoded_hits=" << cache->hits
+        << " decoded_waits=" << cache->waits
+        << " decoded_evictions=" << cache->evictions
+        << " decoded_normal_tile_loads=" << cache->normal_tile_loads
+        << " decoded_normal_tile_hits=" << cache->normal_tile_hits;
+  } else {
+    row << " decoded_cache=unavailable";
+  }
+
+  if (options_.bounded_cache_normal_tile_size > 0 && cache) {
+    const auto mapped = GetMappedNormalStats();
+    const auto ring = GetNormalTileRingStats();
+    row << " mapped_capacity_bytes=" << mapped.capacity_bytes
+        << " mapped_capacity_files=" << mapped.capacity_files
+        << " mapped_peak_charged_bytes=" << mapped.peak_charged_bytes
+        << " mapped_peak_charged_files=" << mapped.peak_charged_files
+        << " mapped_loads=" << mapped.loads << " mapped_hits=" << mapped.hits
+        << " mapped_waits=" << mapped.waits
+        << " mapped_evictions=" << mapped.evictions
+        << " mapped_active_copies=" << mapped.active_copies
+        << " ring_hits=" << ring.hits << " ring_misses=" << ring.misses
+        << " ring_indexed_lookups=" << ring.indexed_lookups
+        << " ring_hint_checks=" << ring.hint_checks
+        << " ring_hint_hits=unavailable";
+  } else {
+    row << " mapped_normal=unavailable ring=unavailable";
+  }
+  return row.str();
 }
 
 void StereoFusion::Run() {

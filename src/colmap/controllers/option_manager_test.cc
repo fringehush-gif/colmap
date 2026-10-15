@@ -5,6 +5,10 @@
 #include "colmap/controllers/image_reader.h"
 #include "colmap/controllers/incremental_pipeline.h"
 #include "colmap/feature/sift.h"
+
+#if defined(COLMAP_MVS_ENABLED)
+#include "colmap/mvs/fusion.h"
+#endif
 #include "colmap/mvs/patch_match_options.h"
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
@@ -125,6 +129,23 @@ TEST(OptionManager, PatchMatchRotationBufferReuseRoundTrip) {
 #endif
 }
 
+TEST(OptionManager, StereoFusionDiagnosticOptionRoundTrip) {
+  const auto config_path = CreateTestDir() / "fusion-diagnostic.ini";
+  OptionManager writer;
+  writer.AddStereoFusionOptions();
+  EXPECT_FALSE(writer.stereo_fusion->bounded_cache_diagnostics);
+  writer.stereo_fusion->bounded_cache = true;
+  writer.stereo_fusion->bounded_cache_diagnostics = true;
+  writer.Write(config_path);
+
+  OptionManager reader;
+  reader.AddStereoFusionOptions();
+  EXPECT_TRUE(reader.Read(config_path));
+  EXPECT_TRUE(reader.stereo_fusion->bounded_cache);
+  EXPECT_TRUE(reader.stereo_fusion->bounded_cache_diagnostics);
+  reader.ResetOptions(/*reset_paths=*/false);
+  EXPECT_FALSE(reader.stereo_fusion->bounded_cache_diagnostics);
+}
 #endif
 
 TEST(OptionManager, WriteAndRead) {

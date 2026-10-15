@@ -333,6 +333,9 @@ Reconstruction RunStereoFuserImpl(const std::filesystem::path& output_path,
   fuser.Run();
 
   const bool stopped = fuser.CheckIfStopped();
+  if (const auto diagnostic = fuser.GetBoundedCacheDiagnosticRow()) {
+    LOG(INFO) << *diagnostic << " stopped=" << stopped;
+  }
   if (stopped && fuser.GetFusedPoints().empty()) {
     return {};
   }
