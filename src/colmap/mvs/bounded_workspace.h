@@ -147,6 +147,10 @@ class BoundedWorkspace : public Workspace {
                          std::optional<NormalRegion> region);
   std::shared_ptr<CacheState> cache_state_;
   std::shared_ptr<MappedNormalPool> mapped_normal_pool_;
+  // Map files and model paths are immutable for a Workspace lifetime. Publish
+  // both validated shapes together; failed first admission remains retryable.
+  mutable std::vector<std::once_flag> normal_tile_grid_once_;
+  mutable std::vector<std::pair<size_t, size_t>> normal_tile_grids_;
 };
 
 }  // namespace mvs
