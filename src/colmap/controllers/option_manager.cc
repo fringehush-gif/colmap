@@ -1104,6 +1104,11 @@ void OptionManager::AddPatchMatchStereoOptions() {
                    &patch_match_stereo->filter_geom_consistency_max_cost);
   AddDefaultOption("PatchMatchStereo.cache_size",
                    &patch_match_stereo->cache_size);
+  AddDefaultOption(
+      "PatchMatchStereo.direct_source_upload",
+      &patch_match_stereo->direct_source_upload,
+      "Upload source layers without a padded host raster volume. Disable to "
+      "use the legacy padded upload path.");
   AddDefaultOption("PatchMatchStereo.reference_only_normal_materialization",
                    &patch_match_stereo->reference_only_normal_materialization);
   AddDefaultOption("PatchMatchStereo.allow_missing_files",

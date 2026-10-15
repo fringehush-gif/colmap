@@ -50,6 +50,10 @@ struct PatchMatchOptions {
   // of memory, if the consistency graph is dense.
   double cache_size = 32.0;
 
+  // Upload each source image/depth slice directly instead of constructing a
+  // padded host stack. Disabled by default; true selects direct uploads.
+  bool direct_source_upload = false;
+
   // During geometric PatchMatch, source normals are unused by the CUDA path.
   // Validate them without creating decoded CPU arrays; false restores the
   // ordinary materialization path. Reference normals are always materialized.

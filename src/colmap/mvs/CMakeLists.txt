@@ -116,6 +116,25 @@ if(CUDA_ENABLED)
             CUDA::cudart
             CUDA::curand
     )
+        # GNU --wrap must reach CudaSafeCall in the static utility library.
+        if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+           AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT BUILD_SHARED_LIBS)
+            COLMAP_ADD_TEST(
+                NAME cuda_texture_constructor_test
+                SRCS cuda_texture_constructor_test.cc
+                LINK_LIBS colmap_util_cuda
+            )
+            target_link_options(colmap_mvs_cuda_texture_constructor_test PRIVATE
+                "LINKER:--wrap=cudaCreateChannelDesc"
+                "LINKER:--wrap=cudaMalloc3DArray"
+                "LINKER:--wrap=cudaCreateTextureObject"
+                "LINKER:--wrap=cudaFreeArray"
+                "LINKER:--wrap=cudaDestroyTextureObject"
+                "LINKER:--wrap=cudaGetErrorString"
+            )
+            set_tests_properties(mvs/cuda_texture_constructor_test
+                PROPERTIES TIMEOUT 15)
+        endif()
 
     # Work around NVCC miscompilation on Blackwell GPUs (sm_100+).
     # The PatchMatch kernels are miscompiled at -O2/-O3 when generating native
@@ -250,6 +269,11 @@ if(CUDA_ENABLED)
     COLMAP_ADD_TEST(
         NAME gpu_mat_test
         SRCS gpu_mat_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
+    COLMAP_ADD_TEST(
+        NAME cuda_texture_host_slices_test
+        SRCS cuda_texture_host_slices_test.cu
         LINK_LIBS colmap_mvs_cuda
     )
 endif()
