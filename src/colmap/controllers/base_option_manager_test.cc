@@ -6,7 +6,9 @@
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
+#include <cstdint>
 #include <fstream>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -134,6 +136,73 @@ TEST(BaseOptionManager, WriteAndRead) {
   EXPECT_EQ(string_option_read, string_option_write);
   EXPECT_EQ(section_option_read, section_option_write);
   EXPECT_EQ(enum_option_read, enum_option_write);
+}
+
+TEST(BaseOptionManager, Int64CommandLineAndIniRoundTrip) {
+  const auto config_path = CreateTestDir() / "int64-options.ini";
+  int64_t plain = 0;
+  int64_t section = 0;
+  BaseOptionManager options(/*add_project_options=*/false);
+  options.AddDefaultOption("plain_int64", &plain);
+  options.AddDefaultOption("Storage.mapped_bytes", &section);
+
+  const std::vector<std::string> args = {"colmap",
+                                         "--plain_int64=9007199254740993",
+                                         "--Storage.mapped_bytes=-4294967297"};
+  std::vector<char*> argv;
+  for (const auto& arg : args) {
+    argv.push_back(const_cast<char*>(arg.c_str()));
+  }
+  EXPECT_TRUE(options.Parse(argv.size(), argv.data()));
+  EXPECT_EQ(plain, INT64_C(9007199254740993));
+  EXPECT_EQ(section, -INT64_C(4294967297));
+
+  options.Write(config_path);
+  int64_t read_plain = 0;
+  int64_t read_section = 0;
+  BaseOptionManager reread(/*add_project_options=*/false);
+  reread.AddDefaultOption("plain_int64", &read_plain);
+  reread.AddDefaultOption("Storage.mapped_bytes", &read_section);
+  EXPECT_TRUE(reread.Read(config_path));
+  EXPECT_EQ(read_plain, plain);
+  EXPECT_EQ(read_section, section);
+}
+
+TEST(BaseOptionManager, Int64RangeAndReset) {
+  int64_t bytes = 0;
+  BaseOptionManager options(/*add_project_options=*/false);
+  options.AddDefaultOption("mapped_bytes", &bytes);
+
+  auto parse = [&](const std::string& value) {
+    const std::string arg = "--mapped_bytes=" + value;
+    const std::vector<std::string> args = {"colmap", arg};
+    std::vector<char*> argv;
+    for (const auto& item : args) {
+      argv.push_back(const_cast<char*>(item.c_str()));
+    }
+    return options.Parse(argv.size(), argv.data());
+  };
+
+  EXPECT_TRUE(parse("9223372036854775807"));
+  EXPECT_EQ(bytes, std::numeric_limits<int64_t>::max());
+  EXPECT_TRUE(parse("-9223372036854775808"));
+  EXPECT_EQ(bytes, std::numeric_limits<int64_t>::min());
+  EXPECT_FALSE(parse("9223372036854775808"));
+  EXPECT_FALSE(parse("-9223372036854775809"));
+
+  const auto invalid_config = CreateTestDir() / "int64-overflow.ini";
+  {
+    std::ofstream file(invalid_config);
+    file << "mapped_bytes=9223372036854775808\n";
+  }
+  EXPECT_FALSE(options.Read(invalid_config));
+
+  // Reset drops the old registry entry so this name can be registered again.
+  options.Reset();
+  bytes = 0;
+  options.AddDefaultOption("mapped_bytes", &bytes);
+  EXPECT_TRUE(parse("4294967297"));
+  EXPECT_EQ(bytes, INT64_C(4294967297));
 }
 
 TEST(BaseOptionManager, ReadWithUnregisteredOptions) {

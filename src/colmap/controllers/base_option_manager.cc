@@ -120,6 +120,7 @@ void BaseOptionManager::ResetImpl(bool reset_logging) {
 
   options_bool_.clear();
   options_int_.clear();
+  options_int64_.clear();
   options_double_.clear();
   options_string_.clear();
   options_path_.clear();
@@ -318,6 +319,12 @@ void BaseOptionManager::Write(const std::filesystem::path& path) const {
     }
   }
 
+  for (const auto& [key, value] : options_int64_) {
+    if (!StringContains(key, ".")) {
+      pt.put(key, *value);
+    }
+  }
+
   for (const auto& [key, value] : options_double_) {
     if (!StringContains(key, ".")) {
       pt.put(key, *value);
@@ -343,6 +350,12 @@ void BaseOptionManager::Write(const std::filesystem::path& path) const {
   }
 
   for (const auto& [key, value] : options_int_) {
+    if (StringContains(key, ".")) {
+      pt.put(key, *value);
+    }
+  }
+
+  for (const auto& [key, value] : options_int64_) {
     if (StringContains(key, ".")) {
       pt.put(key, *value);
     }
