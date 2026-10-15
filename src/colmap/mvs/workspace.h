@@ -52,6 +52,15 @@ class Workspace {
   virtual const DepthMap& GetDepthMap(int image_idx);
   virtual const NormalMap& GetNormalMap(int image_idx);
 
+  // Cached leases own the image across eviction and Workspace destruction.
+  // Eager leases are non-owning aliases: Workspace must outlive them, and Load
+  // invalidates them. BoundedWorkspace requires AcquireComponent/AcquireImage
+  // instead; neither these wrappers nor the const-ref getters pin its cache.
+  // Legacy const-ref getters remain for serial callers only.
+  virtual std::shared_ptr<const Bitmap> GetBitmapLease(int image_idx);
+  virtual std::shared_ptr<const DepthMap> GetDepthMapLease(int image_idx);
+  virtual std::shared_ptr<const NormalMap> GetNormalMapLease(int image_idx);
+
   // Return true only when a source normal has been validated without a new
   // decoded normal-map allocation. Eager Workspace retains its usual reads.
   virtual bool ValidateSourceNormalWithoutMaterialization(int image_idx) {
@@ -94,6 +103,9 @@ class CachedWorkspace : public Workspace {
   const DepthMap& GetDepthMap(int image_idx) override;
   const NormalMap& GetNormalMap(int image_idx) override;
   bool ValidateSourceNormalWithoutMaterialization(int image_idx) override;
+  std::shared_ptr<const Bitmap> GetBitmapLease(int image_idx) override;
+  std::shared_ptr<const DepthMap> GetDepthMapLease(int image_idx) override;
+  std::shared_ptr<const NormalMap> GetNormalMapLease(int image_idx) override;
 
  private:
   class CachedImage {
