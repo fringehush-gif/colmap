@@ -160,6 +160,11 @@ void BindMVS(py::module& m) {
                          &PMOpts::cache_size,
                          "Cache size in gigabytes for patch match.")
           .def_readwrite(
+              "direct_source_upload",
+              &PMOpts::direct_source_upload,
+              "Upload source image/depth slices directly; false selects "
+              "the legacy padded host upload.")
+          .def_readwrite(
               "reference_only_normal_materialization",
               &PMOpts::reference_only_normal_materialization,
               "Validate source normals without decoding them; reference "

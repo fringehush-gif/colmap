@@ -88,6 +88,23 @@ TEST(OptionManager, AddAllOptions) {
 #endif
 }
 
+#if defined(COLMAP_MVS_ENABLED)
+TEST(OptionManager, PatchMatchSourceUploadRoundTrip) {
+  const auto config_path = CreateTestDir() / "source-upload.ini";
+  OptionManager writer;
+  writer.AddPatchMatchStereoOptions();
+  EXPECT_FALSE(writer.patch_match_stereo->direct_source_upload);
+  writer.patch_match_stereo->direct_source_upload = true;
+  writer.Write(config_path);
+  OptionManager reader;
+  reader.AddPatchMatchStereoOptions();
+  ASSERT_TRUE(reader.Read(config_path));
+  EXPECT_TRUE(reader.patch_match_stereo->direct_source_upload);
+  reader.ResetOptions(/*reset_paths=*/false);
+  EXPECT_FALSE(reader.patch_match_stereo->direct_source_upload);
+}
+#endif
+
 TEST(OptionManager, WriteAndRead) {
   const auto test_dir = CreateTestDir();
   const auto config_path = test_dir / "config.ini";

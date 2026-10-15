@@ -1634,30 +1634,6 @@ void PatchMatchCuda::InitSourceImages() {
 
   // Upload source images to device.
   {
-    // Copy source images to contiguous memory block.
-    const uint8_t kDefaultValue = 0;
-    std::vector<uint8_t> src_images_host_data(
-        static_cast<size_t>(max_width * max_height *
-                            problem_.src_image_idxs.size()),
-        kDefaultValue);
-    for (size_t i = 0; i < problem_.src_image_idxs.size(); ++i) {
-      const Image& image = problem_.images->at(problem_.src_image_idxs[i]);
-      const Bitmap& bitmap = image.GetBitmap();
-      // The texture reads each layer with a row stride of max_width, while
-      // the bitmap rows are packed with the image's own width. Images
-      // narrower than max_width must therefore be copied row by row - a
-      // single contiguous copy would displace row r by r * (max_width -
-      // width) pixels. Example for a 2x2 image in a 3-wide layer:
-      //   bitmap [a b; c d] -> contiguous copy [a b c; d 0 0] (wrong)
-      //                        row-wise copy   [a b 0; c d 0] (correct)
-      const uint8_t* src = bitmap.RowMajorData().data();
-      uint8_t* dest = src_images_host_data.data() + max_width * max_height * i;
-      for (size_t r = 0; r < image.GetHeight(); ++r) {
-        memcpy(dest, src + r * image.GetWidth(), image.GetWidth());
-        dest += max_width;
-      }
-    }
-
     // Create source images texture.
     cudaTextureDesc texture_desc;
     memset(&texture_desc, 0, sizeof(texture_desc));
@@ -1682,34 +1658,54 @@ void PatchMatchCuda::InitSourceImages() {
 #endif
     texture_desc.readMode = cudaReadModeNormalizedFloat;
     texture_desc.normalizedCoords = false;
-    src_images_texture_ = CudaArrayLayeredTexture<uint8_t>::FromHostArray(
-        texture_desc,
-        max_width,
-        max_height,
-        problem_.src_image_idxs.size(),
-        src_images_host_data.data());
+    if (options_.direct_source_upload) {
+      std::vector<CudaArrayLayeredTexture<uint8_t>::HostSlice> image_slices;
+      image_slices.reserve(problem_.src_image_idxs.size());
+      for (const auto image_idx : problem_.src_image_idxs) {
+        const Image& image = problem_.images->at(image_idx);
+        image_slices.push_back({image.GetBitmap().RowMajorData().data(),
+                                image.GetWidth(),
+                                image.GetHeight(),
+                                image.GetWidth()});
+      }
+      src_images_texture_ = CudaArrayLayeredTexture<uint8_t>::FromHostSlices(
+          texture_desc, max_width, max_height, image_slices);
+    } else {
+      // Copy source images to contiguous memory block.
+      const uint8_t kDefaultValue = 0;
+      std::vector<uint8_t> src_images_host_data(
+          static_cast<size_t>(max_width * max_height *
+                              problem_.src_image_idxs.size()),
+          kDefaultValue);
+      for (size_t i = 0; i < problem_.src_image_idxs.size(); ++i) {
+        const Image& image = problem_.images->at(problem_.src_image_idxs[i]);
+        const Bitmap& bitmap = image.GetBitmap();
+        // The texture reads each layer with a row stride of max_width, while
+        // the bitmap rows are packed with the image's own width. Images
+        // narrower than max_width must therefore be copied row by row - a
+        // single contiguous copy would displace row r by r * (max_width -
+        // width) pixels. Example for a 2x2 image in a 3-wide layer:
+        //   bitmap [a b; c d] -> contiguous copy [a b c; d 0 0] (wrong)
+        //                        row-wise copy   [a b 0; c d 0] (correct)
+        const uint8_t* src = bitmap.RowMajorData().data();
+        uint8_t* dest =
+            src_images_host_data.data() + max_width * max_height * i;
+        for (size_t r = 0; r < image.GetHeight(); ++r) {
+          memcpy(dest, src + r * image.GetWidth(), image.GetWidth());
+          dest += max_width;
+        }
+      }
+      src_images_texture_ = CudaArrayLayeredTexture<uint8_t>::FromHostArray(
+          texture_desc,
+          max_width,
+          max_height,
+          problem_.src_image_idxs.size(),
+          src_images_host_data.data());
+    }
   }
 
   // Upload source depth maps to device.
   if (options_.geom_consistency) {
-    const float kDefaultValue = 0.0f;
-    std::vector<float> src_depth_maps_host_data(
-        static_cast<size_t>(max_width * max_height *
-                            problem_.src_image_idxs.size()),
-        kDefaultValue);
-    for (size_t i = 0; i < problem_.src_image_idxs.size(); ++i) {
-      const DepthMap& depth_map =
-          problem_.depth_maps->at(problem_.src_image_idxs[i]);
-      float* dest =
-          src_depth_maps_host_data.data() + max_width * max_height * i;
-      for (size_t r = 0; r < depth_map.GetHeight(); ++r) {
-        memcpy(dest,
-               depth_map.GetPtr() + r * depth_map.GetWidth(),
-               depth_map.GetWidth() * sizeof(float));
-        dest += max_width;
-      }
-    }
-
     // Create source depth maps texture.
     cudaTextureDesc texture_desc;
     memset(&texture_desc, 0, sizeof(texture_desc));
@@ -1719,12 +1715,43 @@ void PatchMatchCuda::InitSourceImages() {
     texture_desc.filterMode = cudaFilterModePoint;
     texture_desc.readMode = cudaReadModeElementType;
     texture_desc.normalizedCoords = false;
-    src_depth_maps_texture_ = CudaArrayLayeredTexture<float>::FromHostArray(
-        texture_desc,
-        max_width,
-        max_height,
-        problem_.src_image_idxs.size(),
-        src_depth_maps_host_data.data());
+    if (options_.direct_source_upload) {
+      std::vector<CudaArrayLayeredTexture<float>::HostSlice> depth_slices;
+      depth_slices.reserve(problem_.src_image_idxs.size());
+      for (const auto image_idx : problem_.src_image_idxs) {
+        const DepthMap& depth_map = problem_.depth_maps->at(image_idx);
+        depth_slices.push_back({depth_map.GetPtr(),
+                                depth_map.GetWidth(),
+                                depth_map.GetHeight(),
+                                depth_map.GetWidth() * sizeof(float)});
+      }
+      src_depth_maps_texture_ = CudaArrayLayeredTexture<float>::FromHostSlices(
+          texture_desc, max_width, max_height, depth_slices);
+    } else {
+      const float kDefaultValue = 0.0f;
+      std::vector<float> src_depth_maps_host_data(
+          static_cast<size_t>(max_width * max_height *
+                              problem_.src_image_idxs.size()),
+          kDefaultValue);
+      for (size_t i = 0; i < problem_.src_image_idxs.size(); ++i) {
+        const DepthMap& depth_map =
+            problem_.depth_maps->at(problem_.src_image_idxs[i]);
+        float* dest =
+            src_depth_maps_host_data.data() + max_width * max_height * i;
+        for (size_t r = 0; r < depth_map.GetHeight(); ++r) {
+          memcpy(dest,
+                 depth_map.GetPtr() + r * depth_map.GetWidth(),
+                 depth_map.GetWidth() * sizeof(float));
+          dest += max_width;
+        }
+      }
+      src_depth_maps_texture_ = CudaArrayLayeredTexture<float>::FromHostArray(
+          texture_desc,
+          max_width,
+          max_height,
+          problem_.src_image_idxs.size(),
+          src_depth_maps_host_data.data());
+    }
   }
 }
 
