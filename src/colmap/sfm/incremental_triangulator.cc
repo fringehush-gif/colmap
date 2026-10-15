@@ -621,11 +621,11 @@ size_t IncrementalTriangulator::Merge(const Options& options,
           const Camera& test_camera = *test_image.CameraPtr();
           const Point2D& test_point2D =
               test_image.Point2D(test_track_el.point2D_idx);
-          if (CalculateSquaredReprojectionError(test_point2D.xy,
-                                                merged_xyz,
-                                                test_image.CamFromWorld(),
-                                                test_camera) >
-              max_squared_reproj_error) {
+          if (!(CalculateSquaredReprojectionError(test_point2D.xy,
+                                                  merged_xyz,
+                                                  test_image.CamFromWorld(),
+                                                  test_camera) <=
+                max_squared_reproj_error)) {
             merge_success = false;
             break;
           }
@@ -720,9 +720,9 @@ size_t IncrementalTriangulator::Complete(const Options& options,
           continue;
         }
 
-        if (CalculateSquaredReprojectionError(
-                point2D.xy, point3D.xyz, image.CamFromWorld(), camera) >
-            max_squared_reproj_error) {
+        if (!(CalculateSquaredReprojectionError(
+                  point2D.xy, point3D.xyz, image.CamFromWorld(), camera) <=
+              max_squared_reproj_error)) {
           continue;
         }
 
