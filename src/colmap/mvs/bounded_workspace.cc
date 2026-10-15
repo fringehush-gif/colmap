@@ -6,6 +6,7 @@
 #include "colmap/util/file.h"
 #include "colmap/util/logging.h"
 #include "colmap/util/oiio_utils.h"
+#include "colmap/util/string.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,9 +16,11 @@
 #include <fstream>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 
 #include <OpenImageIO/imageio.h>
@@ -68,6 +71,7 @@ RasterShape ReadMapShape(const std::filesystem::path& path,
   }
   THROW_CHECK_EQ(separators, 3) << path;
   std::istringstream shape(header);
+  SetFullPrecTextStream(shape);
   size_t width = 0, height = 0, channels = 0;
   char sep1 = 0, sep2 = 0, sep3 = 0;
   shape >> width >> sep1 >> height >> sep2 >> channels >> sep3;
@@ -97,6 +101,19 @@ size_t BoundedWorkspace::ImageData::NumBytes() const {
                       normal_map.GetData().capacity() * sizeof(float)));
 }
 
+Eigen::Vector3f BoundedWorkspace::ImageData::GetNormal(const size_t row,
+                                                       const size_t col) const {
+  THROW_CHECK_GE(row, normal_origin_y);
+  THROW_CHECK_GE(col, normal_origin_x);
+  const size_t local_row = row - normal_origin_y;
+  const size_t local_col = col - normal_origin_x;
+  THROW_CHECK_LT(local_row, normal_map.GetHeight());
+  THROW_CHECK_LT(local_col, normal_map.GetWidth());
+  Eigen::Vector3f normal;
+  normal_map.GetSlice(local_row, local_col, normal.data());
+  return normal;
+}
+
 struct BoundedWorkspace::CacheEntry {
   std::shared_ptr<ImageData> image;
   std::exception_ptr error;
@@ -104,12 +121,13 @@ struct BoundedWorkspace::CacheEntry {
   uint64_t last_access = 0;
   bool loading = true;
   size_t active_index = 0;
+  std::optional<std::tuple<int, size_t, size_t, size_t>> tile_key;
 };
 
 struct BoundedWorkspace::CacheState
     : std::enable_shared_from_this<BoundedWorkspace::CacheState> {
   CacheState(const size_t capacity, const size_t num_images)
-      : entries(num_images), load_bytes(num_images, 0) {
+      : entries(num_images), load_bytes(num_images, 0), base_keys(num_images) {
     stats.capacity_bytes = capacity;
   }
 
@@ -118,8 +136,21 @@ struct BoundedWorkspace::CacheState
   std::vector<std::shared_ptr<CacheEntry>> entries;
   std::vector<size_t> load_bytes;
   std::vector<int> active_keys;
+  std::map<std::tuple<int, size_t, size_t, size_t>, int> tile_keys;
+  std::vector<int> free_tile_keys;
+  size_t base_keys;
   CacheStats stats;
   uint64_t clock = 0;
+  bool fail_next_tile_key_publication_for_testing = false;
+
+  void PublishTileKey(const std::tuple<int, size_t, size_t, size_t>& tile_key,
+                      const int key) {
+    if (std::exchange(fail_next_tile_key_publication_for_testing, false)) {
+      throw std::bad_alloc();
+    }
+    const auto [_, inserted] = tile_keys.emplace(tile_key, key);
+    THROW_CHECK(inserted);
+  }
 
   void Retire(const int key) {
     const auto entry = entries.at(key);
@@ -128,6 +159,10 @@ struct BoundedWorkspace::CacheState
     active_keys[index] = last;
     entries[last]->active_index = index;
     active_keys.pop_back();
+    if (entry->tile_key) {
+      tile_keys.erase(*entry->tile_key);
+      free_tile_keys.push_back(key);
+    }
     entries[key].reset();
   }
 
@@ -212,6 +247,110 @@ void BoundedWorkspace::ImageLease::reset() noexcept {
   }
 }
 
+BoundedWorkspace::MappedNormalPool::Lease::Lease(
+    std::shared_ptr<MappedNormalPool> pool, Entry* entry)
+    : pool(std::move(pool)), entry(entry) {}
+BoundedWorkspace::MappedNormalPool::Lease::Lease(Lease&& other) noexcept
+    : pool(std::move(other.pool)), entry(std::exchange(other.entry, nullptr)) {}
+BoundedWorkspace::MappedNormalPool::Lease::~Lease() {
+  if (!entry) return;
+  std::lock_guard<std::mutex> lock(pool->mutex);
+  --entry->pins;
+  --pool->stats.active_copies;
+  pool->changed.notify_all();
+}
+
+BoundedWorkspace::MappedNormalPool::MappedNormalPool(const size_t bytes,
+                                                     const size_t files) {
+  stats.capacity_bytes = bytes;
+  stats.capacity_files = files;
+}
+
+BoundedWorkspace::MappedNormalPool::Lease
+BoundedWorkspace::MappedNormalPool::Acquire(const int image_idx,
+                                            const std::filesystem::path& path) {
+  // Only FP32 normal files use this pool; image_idx is therefore an exact key.
+  const size_t requested = ImmutableMapRegion::GetMappingReservationBytes(path);
+  std::unique_lock<std::mutex> lock(mutex);
+  THROW_CHECK_LE(requested, stats.capacity_bytes);
+  for (;;) {
+    auto found = entries.find(image_idx);
+    if (found != entries.end()) {
+      if (found->second.loading) {
+        ++stats.waits;
+        changed.wait(lock);
+        continue;
+      }
+      ++found->second.pins;
+      found->second.last_access = ++clock;
+      ++stats.hits;
+      ++stats.active_copies;
+      return Lease(shared_from_this(), &found->second);
+    }
+    while (requested > stats.capacity_bytes - stats.resident_bytes -
+                           stats.reserved_bytes ||
+           stats.resident_files + stats.reserved_files >=
+               stats.capacity_files) {
+      auto victim = entries.end();
+      for (auto it = entries.begin(); it != entries.end(); ++it) {
+        if (!it->second.loading && it->second.pins == 0 &&
+            (victim == entries.end() ||
+             it->second.last_access < victim->second.last_access)) {
+          victim = it;
+        }
+      }
+      if (victim == entries.end()) break;
+      stats.resident_bytes -= victim->second.owner->GetMappingBytes();
+      --stats.resident_files;
+      entries.erase(victim);  // Unmap/close before freeing the charge.
+      ++stats.evictions;
+    }
+    if (requested > stats.capacity_bytes - stats.resident_bytes -
+                        stats.reserved_bytes ||
+        stats.resident_files + stats.reserved_files >= stats.capacity_files) {
+      ++stats.waits;
+      changed.wait(lock);
+      continue;
+    }
+    auto [inserted, fresh] = entries.try_emplace(image_idx);
+    THROW_CHECK(fresh);
+    inserted->second.pins = 1;
+    inserted->second.reserved_bytes = requested;
+    stats.reserved_bytes += requested;
+    ++stats.reserved_files;
+    stats.peak_charged_bytes = std::max(
+        stats.peak_charged_bytes, stats.resident_bytes + stats.reserved_bytes);
+    stats.peak_charged_files = std::max(
+        stats.peak_charged_files, stats.resident_files + stats.reserved_files);
+    lock.unlock();
+    std::unique_ptr<ImmutableMapRegion> owner;
+    try {
+      owner = std::make_unique<ImmutableMapRegion>(path);
+      THROW_CHECK_LE(owner->GetMappingBytes(), requested);
+    } catch (...) {
+      lock.lock();
+      entries.erase(image_idx);
+      stats.reserved_bytes -= requested;
+      --stats.reserved_files;
+      changed.notify_all();
+      throw;
+    }
+    lock.lock();
+    auto& entry = entries.at(image_idx);
+    entry.owner = std::move(owner);
+    entry.loading = false;
+    entry.last_access = ++clock;
+    stats.reserved_bytes -= requested;
+    --stats.reserved_files;
+    stats.resident_bytes += entry.owner->GetMappingBytes();
+    ++stats.resident_files;
+    ++stats.loads;
+    ++stats.active_copies;
+    changed.notify_all();
+    return Lease(shared_from_this(), &entry);
+  }
+}
+
 BoundedWorkspace::BoundedWorkspace(const Options& options)
     : Workspace(options) {
   THROW_CHECK(!options.compact_rgb_to_depth_grid || options.image_as_rgb);
@@ -222,6 +361,13 @@ BoundedWorkspace::BoundedWorkspace(const Options& options)
                  static_cast<double>(std::numeric_limits<size_t>::max()));
   THROW_CHECK_LE(model_.images.size(),
                  static_cast<size_t>(std::numeric_limits<int>::max() / 4));
+  THROW_CHECK_EQ(options.mapped_normal_bytes_limit == 0,
+                 options.mapped_normal_files_limit == 0);
+  if (options.mapped_normal_bytes_limit) {
+    THROW_CHECK(ImmutableMapRegion::Supported());
+    mapped_normal_pool_ = std::make_shared<MappedNormalPool>(
+        options.mapped_normal_bytes_limit, options.mapped_normal_files_limit);
+  }
   cache_state_ = std::make_shared<CacheState>(static_cast<size_t>(bytes),
                                               model_.images.size() * 4);
 }
@@ -377,6 +523,54 @@ size_t BoundedWorkspace::GetResidentBytesEstimate(
   return CheckedAddBytes(rgb_bytes, CheckedAddBytes(depth_bytes, normal_bytes));
 }
 
+std::pair<size_t, size_t> BoundedWorkspace::GetNormalTileGrid(
+    const int image_idx) const {
+  const auto depth = ReadMapShape(GetDepthMapPath(image_idx), 1);
+  const auto normal = ReadMapShape(GetNormalMapPath(image_idx), 3);
+  THROW_CHECK_EQ(depth.width, normal.width);
+  THROW_CHECK_EQ(depth.height, normal.height);
+  const auto& image = model_.images.at(image_idx);
+  THROW_CHECK_LE(depth.width, image.GetWidth())
+      << "FP32 normal tiles cannot resample a stored grid";
+  THROW_CHECK_LE(depth.height, image.GetHeight())
+      << "FP32 normal tiles cannot resample a stored grid";
+  return {depth.width, depth.height};
+}
+
+size_t BoundedWorkspace::GetNormalTileReservationBytes(
+    const int image_idx, const size_t tile_size) const {
+  THROW_CHECK_GT(tile_size, 0);
+  const auto grid = GetNormalTileGrid(image_idx);
+  return CheckedRasterBytes(
+      std::min(tile_size, grid.first), std::min(tile_size, grid.second), 12);
+}
+
+size_t BoundedWorkspace::GetNormalTileResidentBytes(
+    const int image_idx, const size_t tile_size) const {
+  return GetNormalTileReservationBytes(image_idx, tile_size);
+}
+
+BoundedWorkspace::ImageLease BoundedWorkspace::AcquireNormalTile(
+    const int image_idx,
+    const size_t row,
+    const size_t col,
+    const size_t tile_size) {
+  THROW_CHECK_GT(tile_size, 0);
+  THROW_CHECK(mapped_normal_pool_ != nullptr);
+  const auto grid = GetNormalTileGrid(image_idx);
+  THROW_CHECK_LT(row, grid.second);
+  THROW_CHECK_LT(col, grid.first);
+  const size_t x = col - col % tile_size;
+  const size_t y = row - row % tile_size;
+  return AcquireImpl(image_idx,
+                     Component::kNormal,
+                     NormalRegion{x,
+                                  y,
+                                  std::min(tile_size, grid.first - x),
+                                  std::min(tile_size, grid.second - y),
+                                  tile_size});
+}
+
 BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImage(
     const int image_idx) {
   return AcquireComponent(image_idx, Component::kImage);
@@ -384,17 +578,46 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImage(
 
 BoundedWorkspace::ImageLease BoundedWorkspace::AcquireComponent(
     const int image_idx, const Component component) {
-  const int key = ComponentKey(image_idx, component);
+  return AcquireImpl(image_idx, component, std::nullopt);
+}
+
+BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
+    const int image_idx,
+    const Component component,
+    const std::optional<NormalRegion> region) {
   model_.images.at(image_idx);
   const auto state = cache_state_;
+  size_t required_bytes =
+      region ? CheckedRasterBytes(region->width, region->height, 12) : 0;
+  if (region && required_bytes > state->stats.capacity_bytes) {
+    throw std::runtime_error("Normal tile exceeds bounded decoded cache");
+  }
   std::unique_lock<std::mutex> lock(state->mutex);
-  size_t required_bytes = 0;
+  int key = ComponentKey(image_idx, component);
+  std::optional<std::tuple<int, size_t, size_t, size_t>> tile_key;
+  if (region) {
+    tile_key =
+        std::make_tuple(image_idx, region->x, region->y, region->tile_size);
+    auto found = state->tile_keys.find(*tile_key);
+    if (found != state->tile_keys.end()) {
+      key = found->second;
+    } else {
+      key = -1;  // Publish a dynamic key only after capacity admission.
+    }
+  }
   std::shared_ptr<CacheEntry> entry;
   for (;;) {
-    entry = state->entries[key];
+    // A waiter can lose the admission race to another loader of this tile.
+    // Re-resolve after every wake so all callers coalesce on its entry.
+    if (tile_key) {
+      const auto found = state->tile_keys.find(*tile_key);
+      key = found == state->tile_keys.end() ? -1 : found->second;
+    }
+    entry = key < 0 ? nullptr : state->entries[key];
     if (entry) {
       ++entry->pins;
       ++state->stats.hits;
+      if (region) ++state->stats.normal_tile_hits;
       entry->last_access = ++state->clock;
       if (entry->loading) {
         ++state->stats.waits;
@@ -430,6 +653,35 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireComponent(
       continue;
     }
     entry = std::make_shared<CacheEntry>();
+    entry->tile_key = tile_key;
+    // All reserves can fail before logical mutation. Retire may later return
+    // any dynamic key without allocating because free_tile_keys is reserved
+    // for every dynamic slot created here.
+    state->active_keys.reserve(state->active_keys.size() + 1);
+    if (key < 0) {
+      if (state->free_tile_keys.empty()) {
+        THROW_CHECK_LT(state->entries.size(),
+                       static_cast<size_t>(std::numeric_limits<int>::max()));
+        state->entries.reserve(state->entries.size() + 1);
+        state->load_bytes.reserve(state->load_bytes.size() + 1);
+        state->free_tile_keys.reserve(state->entries.size() + 1 -
+                                      state->base_keys);
+        key = static_cast<int>(state->entries.size());
+        state->entries.emplace_back();
+        state->load_bytes.push_back(0);
+        try {
+          state->PublishTileKey(*tile_key, key);
+        } catch (...) {
+          state->load_bytes.pop_back();
+          state->entries.pop_back();
+          throw;
+        }
+      } else {
+        key = state->free_tile_keys.back();
+        state->PublishTileKey(*tile_key, key);
+        state->free_tile_keys.pop_back();
+      }
+    }
     entry->active_index = state->active_keys.size();
     state->active_keys.push_back(key);
     state->entries[key] = entry;
@@ -441,6 +693,7 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireComponent(
                  state->stats.resident_bytes + state->stats.reserved_bytes);
     ++state->stats.loads;
     ++state->stats.component_loads[static_cast<size_t>(component)];
+    if (region) ++state->stats.normal_tile_loads;
     break;
   }
 
@@ -464,11 +717,22 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireComponent(
       data->depth_map.Downsize(width, height);
     }
     if (component == Component::kImage || component == Component::kNormal) {
-      data->normal_map.Read(GetNormalMapPath(image_idx));
-      data->normal_map.Downsize(width, height);
-      const auto grid = GetDepthMapDimensions(image_idx);
-      THROW_CHECK_EQ(data->normal_map.GetWidth(), grid.first);
-      THROW_CHECK_EQ(data->normal_map.GetHeight(), grid.second);
+      if (region) {
+        auto mapped = mapped_normal_pool_->Acquire(image_idx,
+                                                   GetNormalMapPath(image_idx));
+        data->normal_map.ReadRegion(
+            *mapped, region->x, region->y, region->width, region->height);
+        data->normal_origin_x = region->x;
+        data->normal_origin_y = region->y;
+      } else {
+        data->normal_map.Read(GetNormalMapPath(image_idx));
+      }
+      if (!region) {
+        data->normal_map.Downsize(width, height);
+        const auto grid = GetDepthMapDimensions(image_idx);
+        THROW_CHECK_EQ(data->normal_map.GetWidth(), grid.first);
+        THROW_CHECK_EQ(data->normal_map.GetHeight(), grid.second);
+      }
     }
     if (component == Component::kImage) {
       THROW_CHECK_EQ(data->depth_map.GetWidth(), data->normal_map.GetWidth());
@@ -500,7 +764,9 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireComponent(
     }
     THROW_CHECK_LE(data->NumBytes(), required_bytes);
     THROW_CHECK_LE(data->NumBytes(),
-                   GetResidentBytesEstimate(image_idx, component));
+                   region
+                       ? CheckedRasterBytes(region->width, region->height, 12)
+                       : GetResidentBytesEstimate(image_idx, component));
   } catch (...) {
     data.reset();
     lock.lock();
@@ -524,6 +790,26 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireComponent(
 BoundedWorkspace::CacheStats BoundedWorkspace::GetCacheStats() const {
   std::lock_guard<std::mutex> lock(cache_state_->mutex);
   return cache_state_->stats;
+}
+
+BoundedWorkspace::MappedNormalStats BoundedWorkspace::GetMappedNormalStats()
+    const {
+  if (!mapped_normal_pool_) return {};
+  std::lock_guard<std::mutex> lock(mapped_normal_pool_->mutex);
+  return mapped_normal_pool_->stats;
+}
+
+BoundedWorkspace::TileMetadataStats BoundedWorkspace::GetTileMetadataStats()
+    const {
+  std::lock_guard<std::mutex> lock(cache_state_->mutex);
+  return {cache_state_->entries.size() - cache_state_->base_keys,
+          cache_state_->free_tile_keys.size(),
+          cache_state_->tile_keys.size()};
+}
+
+void BoundedWorkspace::FailNextTileKeyPublicationForTesting() {
+  std::lock_guard<std::mutex> lock(cache_state_->mutex);
+  cache_state_->fail_next_tile_key_publication_for_testing = true;
 }
 
 const Bitmap& BoundedWorkspace::GetBitmap(const int) {

@@ -34,6 +34,11 @@ class Workspace {
     // Opt-in bounded fusion: retain nearest-sampled RGB on the depth grid.
     bool compact_rgb_to_depth_grid = false;
 
+    // Independent immutable FP32 normal-file mapping budget for tile copies.
+    // Both limits are zero when tiles are disabled; this is not decoded RSS.
+    size_t mapped_normal_bytes_limit = 0;
+    size_t mapped_normal_files_limit = 0;
+
     // Location and type of workspace.
     std::filesystem::path workspace_path;
     std::string workspace_format;

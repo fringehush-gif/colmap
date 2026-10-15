@@ -407,6 +407,7 @@ TEST(BoundedWorkspaceBase, ReservationCoalescingAndPinnedEviction) {
     }
     NormalMap normal(10, 5);
     normal.Fill(1.0f);
+    if (image_id == 2) normal.Set(1, 3, 2, 2.0f);
     normal.Write(root / "stereo" / "normal_maps" / (name + ".geometric.bin"));
     Bitmap bitmap(10, 5, true);
     bitmap.Fill(BitmapColor<uint8_t>(image_id, image_id, image_id));
@@ -489,6 +490,96 @@ TEST(BoundedWorkspaceBase, ReservationCoalescingAndPinnedEviction) {
       1);
   EXPECT_GE(component_stats.evictions, 2);
   EXPECT_LE(component_stats.peak_charged_bytes, component_stats.capacity_bytes);
+
+  if (ImmutableMapRegion::Supported()) {
+    // The decoded cache can hold only one 2x2 tile. Replacing that tile also
+    // forces the one-file mapped owner to evict, while an old decoded lease
+    // remains valid until its caller releases it.
+    options.cache_size = 49.0 / (1024.0 * 1024.0 * 1024.0);
+    const size_t mapped_file_bytes =
+        ImmutableMapRegion::GetMappingReservationBytes(
+            root / "stereo" / "normal_maps" / (names[0] + ".geometric.bin"));
+    options.mapped_normal_bytes_limit = mapped_file_bytes - 1;
+    options.mapped_normal_files_limit = 1;
+    {
+      BoundedWorkspace denied(options);
+      for (size_t col = 0; col < 6; col += 2) {
+        EXPECT_THROW(denied.AcquireNormalTile(first, 0, col, 2),
+                     std::exception);
+        EXPECT_EQ(denied.GetCacheStats().reserved_bytes, 0);
+        EXPECT_EQ(denied.GetTileMetadataStats().live, 0);
+        EXPECT_LE(denied.GetTileMetadataStats().slot_count, 1);
+      }
+    }
+    options.mapped_normal_bytes_limit = mapped_file_bytes;
+    options.mapped_normal_files_limit = 1;
+    {
+      BoundedWorkspace tiles(options);
+      tiles.FailNextTileKeyPublicationForTesting();
+      EXPECT_THROW(tiles.AcquireNormalTile(first, 1, 1, 2), std::bad_alloc);
+      EXPECT_EQ(tiles.GetTileMetadataStats().slot_count, 0);
+      EXPECT_EQ(tiles.GetTileMetadataStats().free, 0);
+      EXPECT_EQ(tiles.GetTileMetadataStats().live, 0);
+      EXPECT_EQ(tiles.GetCacheStats().reserved_bytes, 0);
+      auto tile = tiles.AcquireNormalTile(first, 1, 1, 2);
+      auto same_tile = tiles.AcquireNormalTile(first, 0, 0, 2);
+      ASSERT_EQ(tile.get(), same_tile.get());
+      EXPECT_EQ(tile->GetNormal(1, 1).z(), 1.0f);
+      auto next_tile = std::async(std::launch::async, [&] {
+        return tiles.AcquireNormalTile(second, 1, 1, 2);
+      });
+      auto coalesced_tile = std::async(std::launch::async, [&] {
+        return tiles.AcquireNormalTile(second, 1, 1, 2);
+      });
+      const auto wait_deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (tiles.GetCacheStats().waits < 2 &&
+             std::chrono::steady_clock::now() < wait_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      EXPECT_GE(tiles.GetCacheStats().waits, 2);
+      EXPECT_EQ(next_tile.wait_for(std::chrono::milliseconds(30)),
+                std::future_status::timeout);
+      EXPECT_EQ(coalesced_tile.wait_for(std::chrono::milliseconds(30)),
+                std::future_status::timeout);
+      tile.reset();
+      same_tile.reset();
+      auto second_tile = next_tile.get();
+      auto second_copy = coalesced_tile.get();
+      ASSERT_TRUE(second_tile);
+      ASSERT_EQ(second_tile.get(), second_copy.get());
+      EXPECT_EQ(second_tile->GetNormal(1, 1).z(), 1.0f);
+      second_tile.reset();
+      second_copy.reset();
+      auto recycled_tile = tiles.AcquireNormalTile(second, 1, 3, 2);
+      EXPECT_EQ(recycled_tile->GetNormal(1, 3).z(), 2.0f);
+      recycled_tile.reset();
+      const auto tile_stats = tiles.GetCacheStats();
+      EXPECT_EQ(tile_stats.normal_tile_loads, 3);
+      EXPECT_GE(tile_stats.normal_tile_hits, 1);
+      EXPECT_GE(tile_stats.evictions, 1);
+      EXPECT_EQ(tile_stats.reserved_bytes, 0);
+      EXPECT_LE(tiles.GetTileMetadataStats().slot_count, 2);
+      EXPECT_LE(tiles.GetTileMetadataStats().live, 1);
+      const auto mapped_stats = tiles.GetMappedNormalStats();
+      EXPECT_EQ(mapped_stats.loads, 2);
+      EXPECT_EQ(mapped_stats.evictions, 1);
+      EXPECT_EQ(mapped_stats.active_copies, 0);
+      EXPECT_EQ(mapped_stats.reserved_bytes, 0);
+      EXPECT_LE(mapped_stats.peak_charged_bytes, mapped_file_bytes);
+    }
+    options.mapped_normal_bytes_limit = 0;
+    options.mapped_normal_files_limit = 0;
+
+    // A tile may not reinterpret a normal map stored on a different grid.
+    NormalMap wrong_grid(9, 5);
+    wrong_grid.Fill(1.0f);
+    wrong_grid.Write(root / "stereo" / "normal_maps" /
+                     (names[1] + ".geometric.bin"));
+    BoundedWorkspace mismatched(options);
+    EXPECT_THROW(mismatched.GetNormalTileGrid(second), std::exception);
+    EXPECT_EQ(mismatched.GetCacheStats().loads, 0);
+  }
 
   options.cache_size = 949.0 / (1024.0 * 1024.0 * 1024.0);
   BoundedWorkspace too_small(options);
