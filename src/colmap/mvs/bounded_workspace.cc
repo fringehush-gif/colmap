@@ -270,9 +270,9 @@ BoundedWorkspace::MappedNormalPool::Lease
 BoundedWorkspace::MappedNormalPool::Acquire(const int image_idx,
                                             const std::filesystem::path& path) {
   // Only FP32 normal files use this pool; image_idx is therefore an exact key.
-  const size_t requested = ImmutableMapRegion::GetMappingReservationBytes(path);
   std::unique_lock<std::mutex> lock(mutex);
-  THROW_CHECK_LE(requested, stats.capacity_bytes);
+  size_t requested = 0;
+  bool reservation_known = false;
   for (;;) {
     auto found = entries.find(image_idx);
     if (found != entries.end()) {
@@ -287,6 +287,17 @@ BoundedWorkspace::MappedNormalPool::Acquire(const int image_idx,
       ++stats.active_copies;
       return Lease(shared_from_this(), &found->second);
     }
+    if (!reservation_known) {
+      // The Workspace input is immutable. A resident owner already pins this
+      // exact image's mapped file, so only a new mapping needs filesystem
+      // reservation metadata. Recheck the key after dropping the lock.
+      lock.unlock();
+      requested = ImmutableMapRegion::GetMappingReservationBytes(path);
+      lock.lock();
+      reservation_known = true;
+      continue;
+    }
+    THROW_CHECK_LE(requested, stats.capacity_bytes);
     while (requested > stats.capacity_bytes - stats.resident_bytes -
                            stats.reserved_bytes ||
            stats.resident_files + stats.reserved_files >=
@@ -352,7 +363,9 @@ BoundedWorkspace::MappedNormalPool::Acquire(const int image_idx,
 }
 
 BoundedWorkspace::BoundedWorkspace(const Options& options)
-    : Workspace(options) {
+    : Workspace(options),
+      normal_tile_grid_once_(model_.images.size()),
+      normal_tile_grids_(model_.images.size()) {
   THROW_CHECK(!options.compact_rgb_to_depth_grid || options.image_as_rgb);
   const double bytes = options.cache_size * 1024.0 * 1024.0 * 1024.0;
   THROW_CHECK(std::isfinite(bytes));
@@ -525,16 +538,19 @@ size_t BoundedWorkspace::GetResidentBytesEstimate(
 
 std::pair<size_t, size_t> BoundedWorkspace::GetNormalTileGrid(
     const int image_idx) const {
-  const auto depth = ReadMapShape(GetDepthMapPath(image_idx), 1);
-  const auto normal = ReadMapShape(GetNormalMapPath(image_idx), 3);
-  THROW_CHECK_EQ(depth.width, normal.width);
-  THROW_CHECK_EQ(depth.height, normal.height);
   const auto& image = model_.images.at(image_idx);
-  THROW_CHECK_LE(depth.width, image.GetWidth())
-      << "FP32 normal tiles cannot resample a stored grid";
-  THROW_CHECK_LE(depth.height, image.GetHeight())
-      << "FP32 normal tiles cannot resample a stored grid";
-  return {depth.width, depth.height};
+  std::call_once(normal_tile_grid_once_.at(image_idx), [&] {
+    const auto depth = ReadMapShape(GetDepthMapPath(image_idx), 1);
+    const auto normal = ReadMapShape(GetNormalMapPath(image_idx), 3);
+    THROW_CHECK_EQ(depth.width, normal.width);
+    THROW_CHECK_EQ(depth.height, normal.height);
+    THROW_CHECK_LE(depth.width, image.GetWidth())
+        << "FP32 normal tiles cannot resample a stored grid";
+    THROW_CHECK_LE(depth.height, image.GetHeight())
+        << "FP32 normal tiles cannot resample a stored grid";
+    normal_tile_grids_.at(image_idx) = {depth.width, depth.height};
+  });
+  return normal_tile_grids_.at(image_idx);
 }
 
 size_t BoundedWorkspace::GetNormalTileReservationBytes(

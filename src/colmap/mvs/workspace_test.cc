@@ -615,6 +615,80 @@ TEST(BoundedWorkspaceBase, ReservationCoalescingAndPinnedEviction) {
   EXPECT_EQ(malformed.GetCacheStats().loads, 0);
 }
 
+TEST(BoundedWorkspaceBase, NormalTileGridValidationRetriesAndCoalesces) {
+  const auto root = CreateTestDir();
+  CreateDirIfNotExists(root / "sparse");
+  CreateDirIfNotExists(root / "images");
+  CreateDirIfNotExists(root / "stereo");
+  CreateDirIfNotExists(root / "stereo" / "depth_maps");
+  CreateDirIfNotExists(root / "stereo" / "normal_maps");
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 1;
+  dataset.camera_width = 10;
+  dataset.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  reconstruction.Write(root / "sparse");
+  const auto name = reconstruction.Image(1).Name();
+  const auto depth_path =
+      root / "stereo" / "depth_maps" / (name + ".geometric.bin");
+  const auto normal_path =
+      root / "stereo" / "normal_maps" / (name + ".geometric.bin");
+  DepthMap depth(10, 5, 1.0f, 10.0f);
+  depth.Fill(2.0f);
+  depth.Write(depth_path);
+  {
+    std::ofstream malformed(normal_path, std::ios::binary);
+    malformed << std::string(129, ' ');
+  }
+  Workspace::Options options;
+  options.workspace_path = root;
+  options.workspace_format = "COLMAP";
+  options.input_type = "geometric";
+  {
+    BoundedWorkspace rejected(options);
+    const int image_idx = rejected.GetModel().GetImageIdx(name);
+    // A thrown first admission must not publish an empty shape or poison the
+    // once flag: both attempts still reject the malformed source.
+    EXPECT_THROW(rejected.GetNormalTileGrid(image_idx), std::exception);
+    EXPECT_THROW(rejected.GetNormalTileGrid(image_idx), std::exception);
+  }
+
+  NormalMap normal(10, 5);
+  normal.Fill(1.0f);
+  normal.Write(normal_path);
+  {
+    BoundedWorkspace valid(options);
+    const int image_idx = valid.GetModel().GetImageIdx(name);
+    std::promise<void> start;
+    const auto ready = start.get_future().share();
+    std::vector<std::future<std::pair<size_t, size_t>>> readers;
+    for (int i = 0; i < 8; ++i) {
+      readers.push_back(std::async(std::launch::async, [&] {
+        ready.wait();
+        return valid.GetNormalTileGrid(image_idx);
+      }));
+    }
+    start.set_value();
+    for (auto& reader : readers) {
+      EXPECT_EQ(reader.get(), std::make_pair(size_t{10}, size_t{5}));
+    }
+    EXPECT_EQ(valid.GetNormalTileGrid(image_idx),
+              std::make_pair(size_t{10}, size_t{5}));
+  }
+
+  // Input files are immutable while a Workspace owns them. A fresh instance
+  // validates a changed source instead of inheriting an earlier shape.
+  NormalMap wrong_grid(9, 5);
+  wrong_grid.Fill(1.0f);
+  wrong_grid.Write(normal_path);
+  BoundedWorkspace changed(options);
+  EXPECT_THROW(changed.GetNormalTileGrid(changed.GetModel().GetImageIdx(name)),
+               std::exception);
+}
+
 TEST(BoundedWorkspaceBase, LeaseOutlivesWorkspace) {
   const auto root = CreateTestDir();
   CreateDirIfNotExists(root / "sparse");
