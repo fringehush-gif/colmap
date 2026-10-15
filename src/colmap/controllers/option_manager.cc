@@ -1115,6 +1115,11 @@ void OptionManager::AddPatchMatchStereoOptions() {
                    &patch_match_stereo->allow_missing_files);
   AddDefaultOption("PatchMatchStereo.write_consistency_graph",
                    &patch_match_stereo->write_consistency_graph);
+  AddDefaultOption(
+      "PatchMatchStereo.rotation_buffer_reuse",
+      &patch_match_stereo->rotation_buffer_reuse,
+      "Retain rotated CUDA buffers between sweeps. Increases GPU memory "
+      "with image size and source count; disable for memory-limited jobs.");
   AddDefaultOption("PatchMatchStereo.num_threads",
                    &patch_match_stereo->num_threads);
 }

@@ -41,11 +41,18 @@ void PatchMatchOptions::Print() const {
   PrintOption(filter_min_num_consistent);
   PrintOption(filter_geom_consistency_max_cost);
   PrintOption(write_consistency_graph);
+  PrintOption(rotation_buffer_reuse);
   PrintOption(allow_missing_files);
   PrintOption(num_threads);
 }
 
 bool PatchMatchOptions::Check() const {
+#ifdef COLMAP_HIP_ENABLED
+  if (rotation_buffer_reuse) {
+    LOG(ERROR) << "PatchMatchStereo.rotation_buffer_reuse requires CUDA";
+    return false;
+  }
+#endif
   if (depth_min != -1.0f || depth_max != -1.0f) {
     CHECK_OPTION_IN(depth_min, 0.0f, depth_max);
   }

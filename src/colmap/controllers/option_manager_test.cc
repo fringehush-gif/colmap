@@ -103,6 +103,28 @@ TEST(OptionManager, PatchMatchSourceUploadRoundTrip) {
   reader.ResetOptions(/*reset_paths=*/false);
   EXPECT_FALSE(reader.patch_match_stereo->direct_source_upload);
 }
+
+TEST(OptionManager, PatchMatchRotationBufferReuseRoundTrip) {
+  const auto config_path = CreateTestDir() / "rotation-buffer-reuse.ini";
+  OptionManager writer;
+  writer.AddPatchMatchStereoOptions();
+  EXPECT_FALSE(writer.patch_match_stereo->rotation_buffer_reuse);
+  EXPECT_TRUE(writer.patch_match_stereo->Check());
+  writer.patch_match_stereo->rotation_buffer_reuse = true;
+#ifdef COLMAP_HIP_ENABLED
+  EXPECT_FALSE(writer.patch_match_stereo->Check());
+#else
+  EXPECT_TRUE(writer.patch_match_stereo->Check());
+  writer.Write(config_path);
+  OptionManager reader;
+  reader.AddPatchMatchStereoOptions();
+  ASSERT_TRUE(reader.Read(config_path));
+  EXPECT_TRUE(reader.patch_match_stereo->rotation_buffer_reuse);
+  reader.ResetOptions(/*reset_paths=*/false);
+  EXPECT_FALSE(reader.patch_match_stereo->rotation_buffer_reuse);
+#endif
+}
+
 #endif
 
 TEST(OptionManager, WriteAndRead) {

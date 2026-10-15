@@ -116,6 +116,17 @@ if(CUDA_ENABLED)
             CUDA::cudart
             CUDA::curand
     )
+
+    if(NOT HIP_ENABLED)
+        COLMAP_ADD_TEST(
+            NAME patch_match_cuda_test
+            SRCS patch_match_cuda_test.cc
+            LINK_LIBS colmap_mvs_cuda
+        )
+        if(TESTS_ENABLED)
+            set_tests_properties(mvs/patch_match_cuda_test PROPERTIES TIMEOUT 120)
+        endif()
+
         # GNU --wrap must reach CudaSafeCall in the static utility library.
         if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
            AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT BUILD_SHARED_LIBS)
@@ -135,6 +146,7 @@ if(CUDA_ENABLED)
             set_tests_properties(mvs/cuda_texture_constructor_test
                 PROPERTIES TIMEOUT 15)
         endif()
+    endif()
 
     # Work around NVCC miscompilation on Blackwell GPUs (sm_100+).
     # The PatchMatch kernels are miscompiled at -O2/-O3 when generating native
