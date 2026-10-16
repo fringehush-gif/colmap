@@ -182,6 +182,7 @@ support (special credits to `Torsten Sattler <https://tsattler.github.io>`_).
 
    install
    tutorial
+   fusion_cache_options
    concepts
    viewer
    features
