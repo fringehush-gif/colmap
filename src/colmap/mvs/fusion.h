@@ -41,6 +41,8 @@ struct StereoFusionOptions {
   // Full-RAM workspace loading can use a separate positive thread count.
   // -1 retains the existing num_threads behavior.
   int full_ram_load_threads = -1;
+  // Approximate, opt-in full-RAM normal storage; original FP32 files.
+  std::string full_ram_normal_storage = "fp32";
 
   // Maximum image size in either dimension.
   int max_image_size = -1;

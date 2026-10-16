@@ -20,6 +20,20 @@ def test_stereo_fusion_options_init() -> None:
     assert options is not None
 
 
+def test_stereo_fusion_full_ram_normal_storage_api() -> None:
+    options = pycolmap.StereoFusionOptions()
+    assert options.full_ram_normal_storage == "fp32"
+    assert options.check()
+    options.full_ram_normal_storage = "oct2x16"
+    assert options.check()
+    copied = pycolmap.StereoFusionOptions(options.todict())
+    assert copied.full_ram_normal_storage == "oct2x16"
+    assert copied.check()
+    for withdrawn in ("snorm16x3", "oct2x16-mag16"):
+        options.full_ram_normal_storage = withdrawn
+        assert not options.check()
+
+
 def test_stereo_fusion_fp32_normal_tile_policy() -> None:
     options = pycolmap.StereoFusionOptions()
     assert options.bounded_cache_normal_tile_size == 0
@@ -50,6 +64,7 @@ def test_stereo_fusion_signed_normal_guard_policy() -> None:
     assert options.check() == options.supports_normal_precision_guard()
     options.bounded_cache_normal_snorm16_guard = False
     assert options.check()
+
 
 @pytest.mark.parametrize(
     "name",

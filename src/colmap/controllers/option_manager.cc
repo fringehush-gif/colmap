@@ -1153,6 +1153,12 @@ void OptionManager::AddStereoFusionOptions() {
   AddDefaultOption("StereoFusion.use_cache", &stereo_fusion->use_cache);
   AddDefaultOption("StereoFusion.full_ram_load_threads",
                    &stereo_fusion->full_ram_load_threads);
+  AddDefaultOption(
+      "StereoFusion.full_ram_normal_storage",
+      &stereo_fusion->full_ram_normal_storage,
+      "Resident normals: fp32 (12 bytes) or oct2x16 (4 bytes). Octahedral "
+      "storage discards magnitude and may change Fusion output. Requires "
+      "full-RAM loading.");
   AddDefaultOption("StereoFusion.bounded_cache", &stereo_fusion->bounded_cache);
   AddDefaultOption("StereoFusion.bounded_cache_components",
                    &stereo_fusion->bounded_cache_components);

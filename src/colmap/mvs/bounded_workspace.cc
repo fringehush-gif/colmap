@@ -541,6 +541,7 @@ BoundedWorkspace::BoundedWorkspace(const Options& options)
     : Workspace(options),
       normal_tile_grid_once_(model_.images.size()),
       normal_tile_grids_(model_.images.size()) {
+  THROW_CHECK(options.full_ram_normal_storage == NormalStorage::kFp32);
   THROW_CHECK(!options.compact_rgb_to_depth_grid || options.image_as_rgb);
   THROW_CHECK(!options.exact_depth_state ||
               (options.mapped_normal_bytes_limit > 0 &&
