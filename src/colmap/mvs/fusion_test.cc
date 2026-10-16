@@ -512,22 +512,47 @@ TEST(StereoFusion, Integration) {
     EXPECT_GT(vis.size(), 0);
   }
 
-  // Exercise the actual opt-in loader with a duplicate cfg row. Fusion still
-  // sees the original roster; loading the same model slot twice would race.
-  {
-    std::ofstream duplicate_cfg(temp_dir / "stereo" / "fusion.cfg",
-                                std::ios::app);
-    duplicate_cfg << image_names.front() << '\n';
+  // Row bands execute on pool workers. Exercise worker-local fusion state
+  // with more than one worker; output order may differ with scheduling.
+  auto two_worker_options = options;
+  two_worker_options.num_threads = 2;
+  StereoFusion two_workers(
+      two_worker_options, temp_dir, "COLMAP", "", "geometric");
+  two_workers.Run();
+  const auto& parallel_points = two_workers.GetFusedPoints();
+  const auto& parallel_visibility = two_workers.GetFusedPointsVisibility();
+  ASSERT_FALSE(parallel_points.empty());
+  ASSERT_EQ(parallel_points.size(), parallel_visibility.size());
+  for (size_t i = 0; i < parallel_points.size(); ++i) {
+    const auto& point = parallel_points[i];
+    EXPECT_GT(point.x, -10.0f);
+    EXPECT_LT(point.x, 10.0f);
+    EXPECT_GT(point.y, -10.0f);
+    EXPECT_LT(point.y, 10.0f);
+    EXPECT_GT(point.z, -10.0f);
+    EXPECT_LT(point.z, 10.0f);
+    EXPECT_EQ(point.r, 0);
+    EXPECT_EQ(point.g, 64);
+    EXPECT_EQ(point.b, 128);
+    EXPECT_FLOAT_EQ(
+        point.nx * point.nx + point.ny * point.ny + point.nz * point.nz, 1.0f);
+    ASSERT_FALSE(parallel_visibility[i].empty());
+    for (const auto image_idx : parallel_visibility[i]) {
+      EXPECT_GE(image_idx, 0);
+      EXPECT_LT(image_idx, static_cast<int>(model.images.size()));
+    }
   }
-  options.full_ram_load_threads = 2;
-  StereoFusion parallel_load(options, temp_dir, "COLMAP", "", "geometric");
-  parallel_load.Run();
-  const auto& parallel_points = parallel_load.GetFusedPoints();
-  ASSERT_EQ(parallel_points.size(), fused_points.size());
-  EXPECT_EQ(parallel_load.GetFusedPointsVisibility(), visibility);
-  for (size_t i = 0; i < fused_points.size(); ++i) {
-    const auto& a = fused_points[i];
-    const auto& b = parallel_points[i];
+
+  // Aggregation consumes worker visibility buffers. A second run must
+  // reconstruct the complete ordered output after those buffers were moved.
+  const auto first_points = fused_points;
+  const auto first_visibility = visibility;
+  fusion.Run();
+  ASSERT_EQ(fusion.GetFusedPoints().size(), first_points.size());
+  EXPECT_EQ(fusion.GetFusedPointsVisibility(), first_visibility);
+  for (size_t i = 0; i < first_points.size(); ++i) {
+    const auto& a = first_points[i];
+    const auto& b = fusion.GetFusedPoints()[i];
     EXPECT_FLOAT_EQ(a.x, b.x);
     EXPECT_FLOAT_EQ(a.y, b.y);
     EXPECT_FLOAT_EQ(a.z, b.z);
@@ -537,6 +562,36 @@ TEST(StereoFusion, Integration) {
     EXPECT_EQ(a.r, b.r);
     EXPECT_EQ(a.g, b.g);
     EXPECT_EQ(a.b, b.b);
+  }
+
+  // Exercise default and explicit loaders with a duplicate cfg row. Fusion
+  // retains the original roster, while common Workspace loading deduplicates.
+  {
+    std::ofstream duplicate_cfg(temp_dir / "stereo" / "fusion.cfg",
+                                std::ios::app);
+    duplicate_cfg << image_names.front() << '\n';
+  }
+  for (const int load_threads : {-1, 2}) {
+    SCOPED_TRACE(load_threads);
+    options.full_ram_load_threads = load_threads;
+    StereoFusion parallel_load(options, temp_dir, "COLMAP", "", "geometric");
+    parallel_load.Run();
+    const auto& parallel_points = parallel_load.GetFusedPoints();
+    ASSERT_EQ(parallel_points.size(), fused_points.size());
+    EXPECT_EQ(parallel_load.GetFusedPointsVisibility(), visibility);
+    for (size_t i = 0; i < fused_points.size(); ++i) {
+      const auto& a = fused_points[i];
+      const auto& b = parallel_points[i];
+      EXPECT_FLOAT_EQ(a.x, b.x);
+      EXPECT_FLOAT_EQ(a.y, b.y);
+      EXPECT_FLOAT_EQ(a.z, b.z);
+      EXPECT_FLOAT_EQ(a.nx, b.nx);
+      EXPECT_FLOAT_EQ(a.ny, b.ny);
+      EXPECT_FLOAT_EQ(a.nz, b.nz);
+      EXPECT_EQ(a.r, b.r);
+      EXPECT_EQ(a.g, b.g);
+      EXPECT_EQ(a.b, b.b);
+    }
   }
   {
     std::ofstream original_cfg(temp_dir / "stereo" / "fusion.cfg",
@@ -590,23 +645,27 @@ TEST(StereoFusion, Integration) {
     }
   };
 
-  // The guarded codec preserves ordered geometry and visibility. This
-  // fixture uses exactly representable 0/1 normal components.
-  StereoFusionOptions guarded_options = options;
-  guarded_options.bounded_cache_components = true;
-  guarded_options.bounded_cache_normal_tile_size = 8;
-  guarded_options.bounded_cache_normal_tile_slots = 2;
-  guarded_options.bounded_cache_normal_mapped_bytes = 1 << 20;
-  guarded_options.bounded_cache_normal_mapped_files = 2;
-  guarded_options.bounded_cache_normal_snorm16 = true;
-  guarded_options.bounded_cache_normal_snorm16_guard = true;
-  StereoFusion guarded(guarded_options, temp_dir, "COLMAP", "", "geometric");
-  guarded.Run();
-  expect_same_fusion(guarded, "guarded");
-  guarded.Run();
-  expect_same_fusion(guarded, "guarded repeated successful run");
-  ASSERT_TRUE(guarded.GetBoundedCacheStats());
-  EXPECT_GT(guarded.GetBoundedCacheStats()->normal_tile_loads, 0);
+  if (ImmutableMapRegion::Supported() &&
+      normal_precision_guard::SupportedBuild()) {
+    // The guarded codec preserves ordered geometry and visibility. This
+    // fixture uses exactly representable 0/1 normal components.
+    StereoFusionOptions guarded_options = options;
+    guarded_options.bounded_cache_components = true;
+    guarded_options.bounded_cache_normal_tile_size = 8;
+    guarded_options.bounded_cache_normal_tile_slots = 2;
+    guarded_options.bounded_cache_normal_mapped_bytes = 1 << 20;
+    guarded_options.bounded_cache_normal_mapped_files = 2;
+    guarded_options.bounded_cache_normal_snorm16 = true;
+    guarded_options.bounded_cache_normal_snorm16_guard = true;
+    StereoFusion guarded(guarded_options, temp_dir, "COLMAP", "", "geometric");
+    guarded.Run();
+    expect_same_fusion(guarded, "guarded");
+    guarded.Run();
+    expect_same_fusion(guarded, "guarded repeated successful run");
+    ASSERT_TRUE(guarded.GetBoundedCacheStats());
+    EXPECT_GT(guarded.GetBoundedCacheStats()->normal_tile_loads, 0);
+    EXPECT_GT(guarded.GetNormalTileRingStats().hits, 0);
+  }
 
   options.bounded_cache_neighborhood = true;
   options.cache_size = 50000.0 / (1024.0 * 1024.0 * 1024.0);
@@ -926,14 +985,16 @@ TEST(StereoFusion, Integration) {
     options.bounded_cache_normal_mapped_files = 0;
     EXPECT_FALSE(options.Check());
     options.bounded_cache_normal_mapped_files = 2;
-    options.bounded_cache_normal_tile_size = 0;
-    options.bounded_cache_normal_mapped_bytes = 0;
-    options.bounded_cache_normal_mapped_files = 0;
   }
+
+  options.bounded_cache_normal_tile_size = 0;
+  options.bounded_cache_normal_mapped_bytes = 0;
+  options.bounded_cache_normal_mapped_files = 0;
 
   options.bounded_cache_components = false;
   options.bounded_cache_neighborhood = false;
 
+  options.bounded_cache_diagnostics = true;
   bool stop_checked = false;
   StereoFusion cancelled_fusion(options, temp_dir, "COLMAP", "", "geometric");
   cancelled_fusion.SetCheckIfStoppedFunc([&stop_checked]() {
@@ -943,27 +1004,6 @@ TEST(StereoFusion, Integration) {
   cancelled_fusion.Run();
   EXPECT_TRUE(stop_checked);
   EXPECT_TRUE(cancelled_fusion.GetFusedPoints().empty());
-  // Aggregation consumes worker visibility buffers. A second run must
-  // reconstruct the complete ordered output after those buffers were moved.
-  const auto first_points = fused_points;
-  const auto first_visibility = visibility;
-  fusion.Run();
-  ASSERT_EQ(fusion.GetFusedPoints().size(), first_points.size());
-  EXPECT_EQ(fusion.GetFusedPointsVisibility(), first_visibility);
-  for (size_t i = 0; i < first_points.size(); ++i) {
-    const auto& a = first_points[i];
-    const auto& b = fusion.GetFusedPoints()[i];
-    EXPECT_FLOAT_EQ(a.x, b.x);
-    EXPECT_FLOAT_EQ(a.y, b.y);
-    EXPECT_FLOAT_EQ(a.z, b.z);
-    EXPECT_FLOAT_EQ(a.nx, b.nx);
-    EXPECT_FLOAT_EQ(a.ny, b.ny);
-    EXPECT_FLOAT_EQ(a.nz, b.nz);
-    EXPECT_EQ(a.r, b.r);
-    EXPECT_EQ(a.g, b.g);
-    EXPECT_EQ(a.b, b.b);
-  }
-
   const auto no_tile_row = cancelled_fusion.GetBoundedCacheDiagnosticRow();
   ASSERT_TRUE(no_tile_row);
   EXPECT_NE(no_tile_row->find("mapped_normal=unavailable ring=unavailable"),
@@ -1733,6 +1773,160 @@ TEST(StereoFusion, SignedNormalDecisionFallsBackAtBoundary) {
 }
 
 // Compare compact resident maps with their decoded FP32 equivalents.
+TEST(StereoFusion, FullRamNormalStorageDecodedFileOracle) {
+  const auto root = CreateTestDir() / "fusion";
+  const int num_clusters = 1;
+  ASSERT_TRUE(!std::filesystem::exists(root))
+      << "plane fixture root must be fresh";
+  for (const auto& dir : {root / "sparse",
+                          root / "images",
+                          root / "stereo" / "depth_maps",
+                          root / "stereo" / "normal_maps"}) {
+    std::filesystem::create_directories(dir);
+  }
+  std::ofstream cameras(root / "sparse" / "cameras.txt");
+  cameras << "1 PINHOLE 96 96 96 96 48 48\n";
+  cameras.close();
+  std::ofstream images(root / "sparse" / "images.txt");
+  std::ofstream points(root / "sparse" / "points3D.txt");
+  std::ofstream roster(root / "stereo" / "fusion.cfg");
+  const int map_dimensions[] = {96, 48, 96, 72, 96};
+  const int num_views = 5 * num_clusters;
+  for (int i = 0; i < num_views; ++i) {
+    const int cluster = i / 5;
+    const int local_view = i % 5;
+    const double cluster_base = 4 * cluster;
+    const double local_center = (local_view - 2) * 0.04;
+    const double center_x = cluster_base + local_center;
+    const std::string name = "plane-" + std::to_string(i) + ".png";
+    images << i + 1 << " 1 0 0 0 " << -center_x << " 0 0 1 " << name << '\n';
+    for (int k = 0; k < 9; ++k) {
+      const double x = cluster_base + (k % 3 - 1) * 0.2;
+      const double y = (k / 3 - 1) * 0.2;
+      images << 48 + 48 * (x - center_x) << ' ' << 48 + 48 * y << ' '
+             << cluster * 9 + k + 1 << ' ';
+    }
+    images << '\n';
+    roster << name << '\n';
+    colmap::Bitmap bitmap(96, 96, true);
+    for (int row = 0; row < 96; ++row) {
+      for (int col = 0; col < 96; ++col) {
+        bitmap.SetPixel(col,
+                        row,
+                        colmap::BitmapColor<uint8_t>(
+                            std::round(col + 80 + 48 * local_center),
+                            row + 80,
+                            32 + 16 * local_view + cluster));
+      }
+    }
+    ASSERT_TRUE(bitmap.Write(root / "images" / name)) << "plane bitmap write";
+    const size_t map_size = num_clusters == 1 ? map_dimensions[i] : 96;
+    Mat<float> depth(map_size, map_size, 1);
+    depth.Fill(2.0f);
+    depth.Write(root / "stereo" / "depth_maps" / (name + ".geometric.bin"));
+    Mat<float> normal(map_size, map_size, 3);
+    normal.Fill(0.0f);
+    for (size_t row = 0; row < map_size; ++row) {
+      for (size_t col = 0; col < map_size; ++col)
+        normal.Set(row, col, 2, -1.0f);
+    }
+    normal.Write(root / "stereo" / "normal_maps" / (name + ".geometric.bin"));
+  }
+  for (int cluster = 0; cluster < num_clusters; ++cluster) {
+    for (int k = 0; k < 9; ++k) {
+      points << cluster * 9 + k + 1 << ' ' << 4 * cluster + (k % 3 - 1) * 0.2
+             << ' ' << (k / 3 - 1) * 0.2 << " 2 12 34 56 0";
+      for (int i = 0; i < 5; ++i)
+        points << ' ' << cluster * 5 + i + 1 << ' ' << k;
+      points << '\n';
+    }
+  }
+  images.close();
+  points.close();
+  roster.close();
+  Workspace::Options workspace_options;
+  workspace_options.workspace_path = root;
+  workspace_options.workspace_format = "COLMAP";
+  workspace_options.input_type = "geometric";
+  Workspace descriptor(workspace_options);
+  std::vector<Mat<float>> originals;
+  std::vector<std::string> names;
+  for (size_t view = 0; view < descriptor.GetModel().images.size(); ++view) {
+    names.push_back(descriptor.GetModel().GetImageName(view));
+    Mat<float> normal;
+    normal.Read(descriptor.GetNormalMapPath(view));
+    for (size_t row = 0; row < normal.GetHeight(); ++row)
+      for (size_t col = 0; col < normal.GetWidth(); ++col) {
+        normal.Set(row, col, 0, 0.00017f * col + 0.00031f * view);
+        normal.Set(row, col, 1, -0.00013f * row);
+        normal.Set(row, col, 2, -0.995f);
+      }
+    // Explicit zero rejection is part of the complete-fusion oracle.
+    for (size_t channel = 0; channel < 3; ++channel)
+      normal.Set(0, 0, channel, 0);
+    normal.Write(descriptor.GetNormalMapPath(view));
+    originals.push_back(normal);
+  }
+  colmap::mvs::StereoFusionOptions options;
+  options.num_threads = 1;
+  options.full_ram_load_threads = 4;
+  options.min_num_pixels = 2;
+  // Also exercise the native full-RAM resize-before-encode route.
+  options.max_image_size = 48;
+  for (const auto* name : {"oct2x16"}) {
+    options.full_ram_normal_storage = name;
+    colmap::mvs::StereoFusion candidate(
+        options, root, "COLMAP", "", "geometric");
+    candidate.Run();
+    ASSERT_TRUE(!candidate.GetFusedPoints().empty() &&
+                !candidate.GetBoundedCacheStats())
+        << "full-RAM codec produced no points or selected cache machinery";
+    // Explicit decoded files use existing scalar codec primitives, independent
+    // of Workspace's pack/publication branch. Resize once before encoding.
+    auto consumed_options = workspace_options;
+    consumed_options.max_image_size = options.max_image_size;
+    Workspace consumed(consumed_options);
+    consumed.Load(names);
+    for (size_t view = 0; view < originals.size(); ++view) {
+      const auto& source = consumed.GetNormalMap(view);
+      Mat<float> decoded(source.GetWidth(), source.GetHeight(), 3);
+      for (size_t row = 0; row < source.GetHeight(); ++row)
+        for (size_t col = 0; col < source.GetWidth(); ++col) {
+          Eigen::Vector3f value(source.Get(row, col, 0),
+                                source.Get(row, col, 1),
+                                source.Get(row, col, 2));
+          OctNormalPair encoded;
+          EncodeNormalOct2x16Unchecked(value, &encoded);
+          value = DecodeNormalOct2x16(encoded.x, encoded.y);
+          for (size_t channel = 0; channel < 3; ++channel)
+            decoded.Set(row, col, channel, value[channel]);
+        }
+      decoded.Write(descriptor.GetNormalMapPath(view));
+    }
+    auto reference_options = options;
+    reference_options.full_ram_normal_storage = "fp32";
+    colmap::mvs::StereoFusion reference(
+        reference_options, root, "COLMAP", "", "geometric");
+    reference.Run();
+    ASSERT_TRUE(reference.GetFusedPointsVisibility() ==
+                    candidate.GetFusedPointsVisibility() &&
+                reference.GetFusedPoints().size() ==
+                    candidate.GetFusedPoints().size())
+        << "full-RAM compact fusion differs from decoded-file contributor "
+           "oracle";
+    for (size_t index = 0; index < reference.GetFusedPoints().size(); ++index) {
+      const auto& a = reference.GetFusedPoints()[index];
+      const auto& b = candidate.GetFusedPoints()[index];
+      ASSERT_TRUE(a.x == b.x && a.y == b.y && a.z == b.z && a.nx == b.nx &&
+                  a.ny == b.ny && a.nz == b.nz && a.r == b.r && a.g == b.g &&
+                  a.b == b.b)
+          << "full-RAM compact fusion differs from decoded-file FP32 "
+             "arithmetic";
+    }
+    for (size_t view = 0; view < originals.size(); ++view)
+      originals[view].Write(descriptor.GetNormalMapPath(view));
+  }
+}
 
 }  // namespace
 }  // namespace mvs

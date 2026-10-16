@@ -608,18 +608,19 @@ TEST(BoundedWorkspaceBase, ReservationCoalescingAndPinnedEviction) {
       EXPECT_LE(direct_stats.peak_charged_bytes, mapped_file_bytes);
       EXPECT_EQ(mapped.GetTileMetadataStats().slot_count, 0);
     }
-    options.mapped_normal_bytes_limit = 0;
-    options.mapped_normal_files_limit = 0;
-
-    // A tile may not reinterpret a normal map stored on a different grid.
-    NormalMap wrong_grid(9, 5);
-    wrong_grid.Fill(1.0f);
-    wrong_grid.Write(root / "stereo" / "normal_maps" /
-                     (names[1] + ".geometric.bin"));
-    BoundedWorkspace mismatched(options);
-    EXPECT_THROW(mismatched.GetNormalTileGrid(second), std::exception);
-    EXPECT_EQ(mismatched.GetCacheStats().loads, 0);
   }
+
+  options.mapped_normal_bytes_limit = 0;
+  options.mapped_normal_files_limit = 0;
+
+  // A tile may not reinterpret a normal map stored on a different grid.
+  NormalMap wrong_grid(9, 5);
+  wrong_grid.Fill(1.0f);
+  wrong_grid.Write(root / "stereo" / "normal_maps" /
+                   (names[1] + ".geometric.bin"));
+  BoundedWorkspace mismatched(options);
+  EXPECT_THROW(mismatched.GetNormalTileGrid(second), std::exception);
+  EXPECT_EQ(mismatched.GetCacheStats().loads, 0);
 
   options.cache_size = 949.0 / (1024.0 * 1024.0 * 1024.0);
   BoundedWorkspace too_small(options);
@@ -687,8 +688,6 @@ TEST(BoundedWorkspaceBase, NormalTileGridValidationRetriesAndCoalesces) {
   options.workspace_path = root;
   options.workspace_format = "COLMAP";
   options.input_type = "geometric";
-  options.mapped_normal_bytes_limit = 1 << 20;
-  options.mapped_normal_files_limit = 2;
   {
     BoundedWorkspace rejected(options);
     const int image_idx = rejected.GetModel().GetImageIdx(name);
@@ -721,19 +720,25 @@ TEST(BoundedWorkspaceBase, NormalTileGridValidationRetriesAndCoalesces) {
     }
     EXPECT_EQ(valid.GetNormalTileGrid(image_idx),
               std::make_pair(size_t{10}, size_t{5}));
-    std::vector<std::future<BoundedWorkspace::MappedNormalLease>> owners;
-    for (int i = 0; i < 8; ++i) {
-      owners.push_back(std::async(std::launch::async, [&] {
-        return valid.AcquireMappedNormal(image_idx);
-      }));
+    if (ImmutableMapRegion::Supported()) {
+      auto mapped_options = options;
+      mapped_options.mapped_normal_bytes_limit = 1 << 20;
+      mapped_options.mapped_normal_files_limit = 2;
+      BoundedWorkspace mapped(mapped_options);
+      std::vector<std::future<BoundedWorkspace::MappedNormalLease>> owners;
+      for (int i = 0; i < 8; ++i) {
+        owners.push_back(std::async(std::launch::async, [&] {
+          return mapped.AcquireMappedNormal(image_idx);
+        }));
+      }
+      const auto first_owner = owners.front().get();
+      for (size_t i = 1; i < owners.size(); ++i) {
+        EXPECT_EQ(owners[i].get().get(), first_owner.get());
+      }
+      EXPECT_EQ(first_owner->ReadFloat3(0, 0).z(), 1.0f);
+      EXPECT_EQ(mapped.GetMappedNormalStats().loads, 1);
+      EXPECT_EQ(mapped.GetMappedNormalStats().source_loads, 1);
     }
-    const auto first_owner = owners.front().get();
-    for (size_t i = 1; i < owners.size(); ++i) {
-      EXPECT_EQ(owners[i].get().get(), first_owner.get());
-    }
-    EXPECT_EQ(first_owner->ReadFloat3(0, 0).z(), 1.0f);
-    EXPECT_EQ(valid.GetMappedNormalStats().loads, 1);
-    EXPECT_EQ(valid.GetMappedNormalStats().source_loads, 1);
   }
 
   // Input files are immutable while a Workspace owns them. A fresh instance
@@ -1096,7 +1101,8 @@ TEST(BoundedWorkspaceBase, MappedNormalStripeKeysPinAcrossBands) {
 }
 
 TEST(BoundedWorkspaceBase, SignedNormalTileValidationAndExactFallback) {
-  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  if (!ImmutableMapRegion::Supported())
+    GTEST_SKIP() << "Immutable FP32 map owners are unsupported on this host";
   const auto root = CreateTestDir();
   CreateDirIfNotExists(root / "sparse");
   CreateDirIfNotExists(root / "stereo");
@@ -1139,6 +1145,20 @@ TEST(BoundedWorkspaceBase, SignedNormalTileValidationAndExactFallback) {
     EXPECT_EQ(tile->snorm_normals.size(), 4u * 4u * 3u);
     EXPECT_NE(tile->GetNormal(1, 1).x(), 0.5f);
     EXPECT_EQ(workspace.ReadOriginalNormal(image, 1, 1).x(), 0.5f);
+    EXPECT_EQ(workspace.GetMappedNormalStats().active_copies, 0);
+    for (size_t row = 0; row < 5; ++row) {
+      for (size_t col = 0; col < 8; ++col) {
+        const auto original = workspace.ReadOriginalNormal(image, row, col);
+        for (int channel = 0; channel < 3; ++channel) {
+          EXPECT_EQ(original[channel], 0.5f);
+        }
+        EXPECT_EQ(workspace.GetMappedNormalStats().active_copies, 0);
+      }
+    }
+    EXPECT_THROW(workspace.ReadOriginalNormal(image, 5, 0), std::exception);
+    EXPECT_EQ(workspace.GetMappedNormalStats().active_copies, 0);
+    EXPECT_THROW(workspace.ReadOriginalNormal(image, 0, 8), std::exception);
+    EXPECT_EQ(workspace.GetMappedNormalStats().active_copies, 0);
     tile.reset();
     EXPECT_EQ(workspace.GetMappedNormalStats().active_copies, 0);
   }
@@ -1154,6 +1174,183 @@ TEST(BoundedWorkspaceBase, SignedNormalTileValidationAndExactFallback) {
 }
 
 // Full-RAM normal-storage contracts.
+TEST(Workspace, FullRamNormalStorageContracts) {
+  const auto root = CreateTestDir() / "storage";
+  for (const auto& dir : {root / "sparse",
+                          root / "images",
+                          root / "stereo" / "depth_maps",
+                          root / "stereo" / "normal_maps"}) {
+    std::filesystem::create_directories(dir);
+  }
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 3;
+  dataset.camera_width = 10;
+  dataset.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  reconstruction.Write(root / "sparse");
+  for (const auto& [image_id, image] : reconstruction.Images()) {
+    Mat<float> depth(10, 5, 1);
+    depth.Fill(2.0f);
+    depth.Write(root / "stereo" / "depth_maps" /
+                (image.Name() + ".geometric.bin"));
+    Bitmap bitmap(10, 5, true);
+    bitmap.Fill(BitmapColor<uint8_t>(
+        12 + image_id, 34 + 2 * image_id, 56 + 3 * image_id));
+    ASSERT_TRUE(bitmap.Write(root / "images" / image.Name()));
+  }
+  Workspace::Options fixture;
+  fixture.workspace_path = root;
+  fixture.workspace_format = "COLMAP";
+  fixture.input_type = "geometric";
+  Workspace descriptor(fixture);
+  std::vector<std::string> names;
+  const std::vector<Eigen::Vector3f> samples{{0, 0, 0},
+                                             {1, 0, 0},
+                                             {0, 0, -1},
+                                             {-0.4f, 0.3f, -0.2f},
+                                             {1, -1, 1},
+                                             {1e-8f, 0, 0},
+                                             {-0.00017f, 0.71f, 0.1f}};
+  std::vector<Mat<float>> originals;
+  for (size_t view = 0; view < descriptor.GetModel().images.size(); ++view) {
+    names.push_back(descriptor.GetModel().GetImageName(view));
+    Mat<float> map(10, 5, 3);
+    for (size_t row = 0; row < 5; ++row)
+      for (size_t col = 0; col < 10; ++col) {
+        const auto& value = samples[(row * 10 + col + view) % samples.size()];
+        for (size_t channel = 0; channel < 3; ++channel)
+          map.Set(row, col, channel, value[channel]);
+      }
+    map.Write(descriptor.GetNormalMapPath(view));
+    originals.push_back(map);
+  }
+  EXPECT_EQ(fixture.full_ram_normal_storage, NormalStorage::kFp32);
+  for (const auto* name : {"snorm16x3", "oct2x16-mag16"}) {
+    NormalStorage codec = NormalStorage::kFp32;
+    EXPECT_FALSE(ParseFullRamNormalStorage(name, &codec));
+    EXPECT_EQ(codec, NormalStorage::kFp32);
+  }
+  for (const int value : {-1, 1, 3, 4}) {
+    auto invalid = fixture;
+    invalid.full_ram_normal_storage = static_cast<NormalStorage>(value);
+    EXPECT_THROW(Workspace{invalid}, std::exception);
+  }
+  for (const auto* name : {"oct2x16"}) {
+    SCOPED_TRACE(name);
+    NormalStorage codec = NormalStorage::kFp32;
+    ASSERT_TRUE(ParseFullRamNormalStorage(name, &codec));
+    auto options = fixture;
+    options.full_ram_normal_storage = codec;
+    EXPECT_THROW(CachedWorkspace{options}, std::exception);
+    EXPECT_THROW(BoundedWorkspace{options}, std::exception);
+    for (const auto conflict :
+         {&Workspace::Options::normal_tiles_snorm16,
+          &Workspace::Options::exact_depth_state,
+          &Workspace::Options::compact_rgb_to_depth_grid}) {
+      auto invalid = options;
+      invalid.*conflict = true;
+      EXPECT_THROW(Workspace{invalid}, std::exception);
+    }
+    auto invalid = options;
+    invalid.mapped_normal_bytes_limit = 1000;
+    EXPECT_THROW(Workspace{invalid}, std::exception);
+    invalid = options;
+    invalid.mapped_normal_files_limit = 1;
+    EXPECT_THROW(Workspace{invalid}, std::exception);
+    invalid = options;
+    invalid.full_ram_normal_storage = static_cast<NormalStorage>(-1);
+    EXPECT_THROW(Workspace{invalid}, std::exception);
+    for (const int max_size : {-1, 6}) {
+      options.max_image_size = max_size;
+      options.num_threads = 4;
+      auto raw_options = options;
+      raw_options.full_ram_normal_storage = NormalStorage::kFp32;
+      Workspace raw(raw_options);
+      raw.Load(names);
+      CachedWorkspace cached(raw_options);
+      Workspace compact(options);
+      compact.Load(names);
+      for (size_t view = 0; view < names.size(); ++view) {
+        const auto& normal = raw.GetNormalMap(view);
+        EXPECT_EQ(cached.GetNormalMap(view).GetData(), normal.GetData());
+        EXPECT_EQ(compact.GetStoredNormalDimensions(view),
+                  std::make_pair(normal.GetWidth(), normal.GetHeight()));
+        NormalMapStorage expected;
+        expected.normal_map = normal;
+        expected.Pack(codec);
+        constexpr size_t bytes = 4;
+        EXPECT_TRUE(expected.normal_map.GetData().empty());
+        EXPECT_EQ(compact.GetStoredNormalNumBytes(view),
+                  normal.GetWidth() * normal.GetHeight() * bytes);
+        for (size_t row = 0; row < normal.GetHeight(); ++row)
+          for (size_t col = 0; col < normal.GetWidth(); ++col)
+            EXPECT_TRUE((compact.GetStoredNormal(view, row, col).array() ==
+                         expected.GetNormal(row, col).array())
+                            .all());
+        EXPECT_THROW(compact.GetNormalMap(view), std::exception);
+        EXPECT_THROW(compact.GetNormalMapLease(view), std::exception);
+      }
+      const size_t before_bytes = compact.GetStoredNormalNumBytes(0);
+      const auto before_sample = compact.GetStoredNormal(0, 0, 0);
+      compact.Load(names);
+      EXPECT_EQ(compact.GetStoredNormalNumBytes(0), before_bytes);
+      EXPECT_TRUE(
+          (compact.GetStoredNormal(0, 0, 0).array() == before_sample.array())
+              .all());
+    }
+    options.max_image_size = -1;
+    Workspace reload(options);
+    reload.Load(names);
+    const auto bad_path = descriptor.GetNormalMapPath(0);
+    for (const float bad : {std::numeric_limits<float>::quiet_NaN(),
+                            std::numeric_limits<float>::infinity(),
+                            1.01f,
+                            -1.01f}) {
+      Mat<float> invalid = originals[0];
+      invalid.Set(0, 0, 0, bad);
+      invalid.Write(bad_path);
+      EXPECT_THROW(reload.Load(names), std::exception);
+      EXPECT_THROW(reload.GetStoredNormal(0, 0, 0), std::exception);
+      originals[0].Write(bad_path);
+      reload.Load(names);
+      EXPECT_TRUE(reload.GetStoredNormal(0, 0, 0).isZero());
+    }
+  }
+}
+
+TEST(Workspace, FullRamPackPrevalidatesBeforeAllocatingOrReleasing) {
+  for (const auto codec : {NormalStorage::kOct2x16}) {
+    for (const float bad : {std::numeric_limits<float>::quiet_NaN(),
+                            std::numeric_limits<float>::infinity(),
+                            1.01f,
+                            -1.01f}) {
+      NormalMapStorage storage;
+      storage.normal_map = NormalMap(2, 2);
+      storage.normal_map.Fill(0.5f);
+      storage.normal_map.Set(1, 1, 2, bad);
+      EXPECT_THROW(storage.Pack(codec), std::exception);
+      EXPECT_EQ(storage.normal_map.GetData().size(), 12);
+      EXPECT_TRUE(storage.oct_normals.empty());
+    }
+  }
+  for (const int value : {-1, 1, 3, 4}) {
+    NormalMapStorage storage;
+    storage.normal_map = NormalMap(2, 2);
+    storage.normal_map.Fill(0.5f);
+    const auto original = storage.normal_map.GetData();
+    EXPECT_THROW(storage.Pack(static_cast<NormalStorage>(value)),
+                 std::exception);
+    EXPECT_EQ(storage.normal_map.GetData(), original);
+    EXPECT_TRUE(storage.oct_normals.empty());
+  }
+  NormalMapStorage invalid;
+  EXPECT_THROW(invalid.Pack(NormalStorage::kOct2x16), std::exception);
+  static_cast<Mat<float>&>(invalid.normal_map) = Mat<float>(2, 2, 1);
+  EXPECT_THROW(invalid.Pack(NormalStorage::kOct2x16), std::exception);
+}
 
 }  // namespace
 }  // namespace mvs

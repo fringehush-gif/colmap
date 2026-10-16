@@ -12,15 +12,53 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <utility>
 
 namespace colmap {
 namespace mvs {
+
+enum class NormalStorage { kFp32 = 0, kOct2x16 = 2 };
+
+// Exact selector spelling is shared by option validation and workspace binding.
+bool ParseFullRamNormalStorage(const std::string& name, NormalStorage* storage);
+
+// Immutable full-RAM normal payload; bounded storage remains independent.
+// No cache, lease or FP32 shadow is attached to this immutable decoded storage.
+struct NormalMapStorage {
+  NormalMap normal_map;
+  std::vector<OctNormalPair> oct_normals;
+  size_t normal_width = 0;
+  size_t normal_height = 0;
+
+  // Validate and pack the consumed FP32 grid, releasing it only on success.
+  void Pack(NormalStorage storage);
+  size_t NormalNumBytes() const;
+  size_t NormalWidth() const {
+    return oct_normals.empty() ? normal_map.GetWidth() : normal_width;
+  }
+  size_t NormalHeight() const {
+    return oct_normals.empty() ? normal_map.GetHeight() : normal_height;
+  }
+  Eigen::Vector3f GetNormal(size_t row, size_t col) const {
+    if (!oct_normals.empty()) {
+      const size_t index = row * normal_width + col;
+      const auto& encoded = oct_normals[index];
+      return DecodeNormalOct2x16(encoded.x, encoded.y);
+    }
+    return {normal_map.Get(row, col, 0),
+            normal_map.Get(row, col, 1),
+            normal_map.Get(row, col, 2)};
+  }
+};
 
 class Workspace {
  public:
   struct Options {
     // The maximum cache size in gigabytes.
     double cache_size = 32.0;
+
+    // Full-RAM only; pack after normal-map resizing. FP32 remains the default.
+    NormalStorage full_ram_normal_storage = NormalStorage::kFp32;
 
     // The number of threads to use when pre-loading workspace.
     int num_threads = -1;
@@ -65,6 +103,9 @@ class Workspace {
   virtual const Bitmap& GetBitmap(int image_idx);
   virtual const DepthMap& GetDepthMap(int image_idx);
   virtual const NormalMap& GetNormalMap(int image_idx);
+  Eigen::Vector3f GetStoredNormal(int image_idx, size_t row, size_t col) const;
+  std::pair<size_t, size_t> GetStoredNormalDimensions(int image_idx) const;
+  size_t GetStoredNormalNumBytes(int image_idx) const;
 
   // Cached leases own the image across eviction and Workspace destruction.
   // Eager leases are non-owning aliases: Workspace must outlive them, and Load
@@ -102,7 +143,7 @@ class Workspace {
   std::filesystem::path normal_map_path_;
   std::vector<std::unique_ptr<Bitmap>> bitmaps_;
   std::vector<std::unique_ptr<DepthMap>> depth_maps_;
-  std::vector<std::unique_ptr<NormalMap>> normal_maps_;
+  std::vector<std::unique_ptr<NormalMapStorage>> normal_maps_;
 };
 
 class CachedWorkspace : public Workspace {

@@ -119,6 +119,7 @@ void StereoFusionOptions::Print() const {
   LOG_HEADING2("StereoFusion::Options");
   PrintOption(mask_path);
   PrintOption(full_ram_load_threads);
+  PrintOption(full_ram_normal_storage);
   PrintOption(max_image_size);
   PrintOption(min_num_pixels);
   PrintOption(max_num_pixels);
@@ -156,6 +157,20 @@ bool StereoFusionOptions::SupportsNormalPrecisionGuard() {
 
 bool StereoFusionOptions::Check() const {
   CHECK_OPTION_EQ((use_cache && bounded_cache), false);
+  NormalStorage storage;
+  CHECK_OPTION_EQ(ParseFullRamNormalStorage(full_ram_normal_storage, &storage),
+                  true);
+  CHECK_OPTION_EQ(
+      (storage != NormalStorage::kFp32 &&
+       (use_cache || bounded_cache || bounded_cache_components ||
+        bounded_cache_diagnostics || bounded_cache_neighborhood ||
+        bounded_cache_compact_rgb || bounded_cache_normal_snorm16 ||
+        bounded_cache_normal_snorm16_guard || bounded_cache_exact_depth ||
+        bounded_cache_normal_tile_size != 0 ||
+        bounded_cache_normal_mapped_bytes != 0 ||
+        bounded_cache_normal_mapped_files != 0 ||
+        bounded_cache_prefill_threads != -1)),
+      false);
   CHECK_OPTION_IN(min_num_pixels, 0, max_num_pixels);
   CHECK_OPTION_GT(max_traversal_depth, 0);
   CHECK_OPTION_GE(max_reproj_error, 0);
@@ -404,6 +419,9 @@ void StereoFusion::Run() {
   LOG(INFO) << "Reading workspace...";
 
   Workspace::Options workspace_options;
+  THROW_CHECK(
+      ParseFullRamNormalStorage(options_.full_ram_normal_storage,
+                                &workspace_options.full_ram_normal_storage));
 
   auto workspace_format_lower_case = workspace_format_;
   StringToLower(&workspace_format_lower_case);
@@ -1406,15 +1424,19 @@ void StereoFusion::Fuse(const int thread_id,
     const auto* normal_image = tile_image     ? tile_image
                                : normal_lease ? normal_lease.get()
                                               : image_data;
-    const auto normal_map = normal_image || mapped_normal
+    const bool compact_full_ram =
+        workspace_->GetOptions().full_ram_normal_storage !=
+        NormalStorage::kFp32;
+    const auto normal_map = normal_image || mapped_normal || compact_full_ram
                                 ? std::shared_ptr<const NormalMap>()
                                 : workspace_->GetNormalMapLease(image_idx);
     const Eigen::Vector3f local_normal =
-        mapped_normal  ? mapped_normal->ReadFloat3(row, col)
-        : normal_image ? normal_image->GetNormal(row, col)
-                       : Eigen::Vector3f(normal_map->Get(row, col, 0),
-                                         normal_map->Get(row, col, 1),
-                                         normal_map->Get(row, col, 2));
+        mapped_normal      ? mapped_normal->ReadFloat3(row, col)
+        : normal_image     ? normal_image->GetNormal(row, col)
+        : compact_full_ram ? workspace_->GetStoredNormal(image_idx, row, col)
+                           : Eigen::Vector3f(normal_map->Get(row, col, 0),
+                                             normal_map->Get(row, col, 1),
+                                             normal_map->Get(row, col, 2));
     const Eigen::Vector3f normal = inv_R_.at(image_idx) * local_normal;
     normal_lease.reset();
 

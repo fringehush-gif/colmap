@@ -216,6 +216,12 @@ void BindMVS(py::module& m) {
               "Full-RAM workspace preload workers; -1 follows num_threads. "
               "Positive values require use_cache and bounded_cache to be "
               "false.")
+          .def_readwrite(
+              "full_ram_normal_storage",
+              &SFOpts::full_ram_normal_storage,
+              "Resident normal representation: fp32 or oct2x16. Octahedral "
+              "storage is approximate, discards magnitude and requires "
+              "full-RAM mode; input files stay FP32.")
           .def_readwrite("max_image_size",
                          &SFOpts::max_image_size,
                          "Maximum image size in either dimension.")
