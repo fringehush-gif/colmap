@@ -2,6 +2,7 @@
 
 #include "colmap/mvs/workspace.h"
 
+#include "colmap/mvs/normal_pack.h"
 #include "colmap/sensor/bitmap_reader.h"
 #include "colmap/util/file.h"
 #include "colmap/util/threading.h"
@@ -15,9 +16,21 @@
 #include <string>
 #include <system_error>
 
+#ifndef COLMAP_NORMAL_PACK_BOUNDED_CPP
+#define COLMAP_NORMAL_PACK_BOUNDED_CPP 0
+#endif
+#if COLMAP_NORMAL_PACK_BOUNDED_CPP != 0 && COLMAP_NORMAL_PACK_BOUNDED_CPP != 1
+#error COLMAP_NORMAL_PACK_BOUNDED_CPP must be 0 or 1
+#endif
+
 namespace colmap {
 namespace mvs {
 namespace {
+#if COLMAP_NORMAL_PACK_BOUNDED_CPP
+constexpr auto kNormalPackBackend = normal_pack::Backend::kBoundedCpp;
+#else
+constexpr auto kNormalPackBackend = normal_pack::Backend::kAutomatic;
+#endif
 
 // A conservative FP32 map admission check. The ordinary reader remains the
 // fallback for every uncertain header, missing payload, or non-normal map.
@@ -101,16 +114,12 @@ void NormalMapStorage::Pack(const NormalStorage storage) {
   THROW_CHECK_EQ(source.size(), 3 * plane);
   // Validate the complete consumed grid before allocating/publishing compact
   // data. Full RAM downsizes before encoding the consumed grid.
-  for (const float value : source) {
-    THROW_CHECK(std::isfinite(value) && value >= -1.0f && value <= 1.0f)
-        << "Compact normals require finite components in [-1,1]";
-  }
+  THROW_CHECK(
+      normal_pack::Validate(source.data(), source.size(), kNormalPackBackend))
+      << "Compact normals require finite components in [-1,1]";
   oct_normals.resize(plane);
-  for (size_t index = 0; index < plane; ++index) {
-    const Eigen::Vector3f normal(
-        source[index], source[plane + index], source[2 * plane + index]);
-    EncodeNormalOct2x16Unchecked(normal, &oct_normals[index]);
-  }
+  normal_pack::OctUnchecked(
+      source.data(), plane, oct_normals.data(), nullptr, kNormalPackBackend);
   normal_width = width;
   normal_height = height;
   normal_map = NormalMap();

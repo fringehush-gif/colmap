@@ -17,6 +17,7 @@ COLMAP_ADD_LIBRARY(
         model.h model.cc
         poisson_meshing.h poisson_meshing.cc
         normal_map.h normal_map.cc
+        normal_pack.h normal_pack.cc
         patch_match_options.h patch_match_options.cc
         texture_mapping.h texture_mapping.cc
         workspace.h workspace.cc
@@ -31,6 +32,7 @@ COLMAP_ADD_LIBRARY(
         colmap_poisson_recon
         Eigen3::Eigen
 )
+include("${CMAKE_CURRENT_SOURCE_DIR}/normal_pack.cmake")
 if(CGAL_ENABLED)
     target_link_libraries(colmap_mvs PRIVATE CGAL)
 endif()
@@ -338,4 +340,17 @@ if(HIP_ENABLED)
         LINK_LIBS colmap_mvs_cuda
     )
     set_source_files_properties(gpu_mat_test.cu PROPERTIES LANGUAGE HIP)
+endif()
+
+COLMAP_ADD_TEST(
+    NAME normal_pack_test
+    SRCS normal_pack_test.cc
+    LINK_LIBS colmap_mvs
+)
+
+# Test-only visibility, after COLMAP_ADD_TEST creates the concrete target.
+if(TARGET colmap_mvs_normal_pack_test AND TARGET colmap_normal_pack_ispc_codegen)
+    add_dependencies(colmap_mvs_normal_pack_test colmap_normal_pack_ispc_codegen)
+    target_include_directories(colmap_mvs_normal_pack_test PRIVATE "${normal_pack_generated}")
+    target_compile_definitions(colmap_mvs_normal_pack_test PRIVATE COLMAP_HAVE_ISPC_NORMAL_PACK=1)
 endif()
