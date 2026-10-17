@@ -332,6 +332,8 @@ class StereoFusion : public BaseController {
   std::vector<Eigen::Matrix<float, 3, 3, Eigen::RowMajor>> inv_R_;
   std::vector<normal_precision_guard::PreparedRotation>
       prepared_normal_rotations_;
+  std::vector<normal_precision_guard::PreparedCodecRotation>
+      prepared_codec_rotations_;
 
   struct FusionData {
     int image_idx = kInvalidImageId;

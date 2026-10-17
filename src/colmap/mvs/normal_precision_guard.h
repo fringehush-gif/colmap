@@ -221,6 +221,80 @@ inline Operand CompressedOperandFromRotated(const Rot& r,
   return result;
 }
 
+// Image-local certificate terms. Private fields prevent a caller from mixing
+// cached deltas with another source/error certificate. A stale/default cache
+// falls back to the ordinary constructor; it never relaxes its interval.
+class PreparedCodecRotation {
+ public:
+  PreparedCodecRotation() = default;
+  bool valid() const { return terms_.valid; }
+
+ private:
+  Rot rotation_ = Rot::Zero();
+  Error local_error_ = Error::Zero();
+  PreparedRotation terms_;
+  friend PreparedCodecRotation PrepareCodecRotation(const Rot&, const Error&);
+  friend Operand BoundedOperandFromRotated(const Rot&,
+                                           const Error&,
+                                           const PreparedCodecRotation&,
+                                           const Vec&,
+                                           const Vec&);
+};
+inline PreparedCodecRotation PrepareCodecRotation(const Rot& r,
+                                                  const Error& local_error) {
+  PreparedCodecRotation prepared;
+  prepared.rotation_ = r;
+  prepared.local_error_ = local_error;
+  if (!SupportedArithmetic() || !r.allFinite() || !local_error.allFinite() ||
+      local_error.minCoeff() < 0)
+    return prepared;
+  for (int i = 0; i < 3; ++i) {
+    double delta = 0;
+    for (int j = 0; j < 3; ++j) {
+      prepared.terms_.absolute(i, j) = std::abs(double(r(i, j)));
+      delta = Add(delta, Mul(prepared.terms_.absolute(i, j), local_error(j)));
+    }
+    prepared.terms_.delta(i) = delta;
+  }
+  prepared.terms_.valid = prepared.terms_.delta.allFinite();
+  return prepared;
+}
+inline Operand BoundedOperandFromRotated(const Rot& r,
+                                         const Error& local_error,
+                                         const PreparedCodecRotation& prepared,
+                                         const Vec& decoded,
+                                         const Vec& rotated) {
+  // Compare actual coefficient bytes, including signed zero. Controls can
+  // change after image preparation; never cache this per-call admission.
+  if (!prepared.valid() || !SupportedArithmetic() ||
+      std::memcmp(r.data(), prepared.rotation_.data(), 9 * sizeof(float)) !=
+          0 ||
+      std::memcmp(local_error.data(),
+                  prepared.local_error_.data(),
+                  3 * sizeof(double)) != 0)
+    return BoundedOperandFromRotated(r, local_error, decoded, rotated);
+  Operand result{rotated, Error::Zero(), false};
+  const bool finite_value = result.value.allFinite();
+  const double gamma = Gamma();
+  for (int i = 0; i < 3; ++i) {
+    double magnitudes = 0;
+    for (int j = 0; j < 3; ++j)
+      magnitudes = Add(
+          magnitudes,
+          Mul(prepared.terms_.absolute(i, j), std::abs(double(decoded(j)))));
+    const double delta = prepared.terms_.delta(i);
+    result.error(i) =
+        Add(Add(delta, Mul(gamma, Add(2 * magnitudes, delta))),
+            32 * double(std::numeric_limits<float>::denorm_min()));
+    if (!finite_value || !std::isfinite(result.error(i)) ||
+        magnitudes + delta > double(std::numeric_limits<float>::max()) / 16) {
+      result.error.setConstant(std::numeric_limits<double>::infinity());
+      break;
+    }
+  }
+  return result;
+}
+
 enum class Screen { kAccept, kReject, kExact };
 inline Screen ScreenNormal(const Operand& a,
                            const Operand& b,
