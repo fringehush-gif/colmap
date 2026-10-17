@@ -21,6 +21,7 @@
 #if defined(__linux__)
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
+#include <sys/stat.h>
 #endif
 
 namespace colmap {
@@ -79,9 +80,28 @@ MappedFloatShape ReadMappedFloatShape(std::ifstream& file,
 
 }  // namespace
 
+#if defined(__linux__)
+namespace {
+std::array<uint64_t, 7> SourceIdentity(const struct stat& value) {
+  THROW_CHECK(S_ISREG(value.st_mode));
+  THROW_CHECK_GE(value.st_size, 0);
+  return {uint64_t(value.st_dev),
+          uint64_t(value.st_ino),
+          uint64_t(value.st_size),
+          uint64_t(value.st_mtim.tv_sec),
+          uint64_t(value.st_mtim.tv_nsec),
+          uint64_t(value.st_ctim.tv_sec),
+          uint64_t(value.st_ctim.tv_nsec)};
+}
+}  // namespace
+#endif
+
 struct ImmutableMapSource::Impl {
   MappedFloatShape shape;
   size_t file_bytes = 0;
+  bool bind_identity = false;
+  std::filesystem::path path;
+  std::array<uint64_t, 7> identity{};
 #if defined(__linux__)
   std::unique_ptr<boost::interprocess::file_mapping> file;
 #endif
@@ -215,6 +235,71 @@ ImmutableMapSource::ImmutableMapSource(const std::filesystem::path& path)
                  std::numeric_limits<size_t>::max() - start);
   THROW_CHECK_GE(static_cast<size_t>(file_bytes), start + impl_->shape.bytes);
   impl_->file_bytes = static_cast<size_t>(file_bytes);
+#endif
+}
+
+ImmutableMapSource::ImmutableMapSource(const std::filesystem::path& path,
+                                       BindIdentity)
+    : impl_(std::make_unique<Impl>()) {
+  THROW_CHECK(ImmutableMapRegion::Supported());
+#if defined(__linux__)
+  impl_->path = std::filesystem::absolute(path);
+  impl_->bind_identity = true;
+  impl_->file = std::make_unique<boost::interprocess::file_mapping>(
+      path.c_str(), boost::interprocess::read_only);
+  struct stat info;
+  const int fd = impl_->file->get_mapping_handle().handle;
+  THROW_CHECK_EQ(::fstat(fd, &info), 0);
+  impl_->identity = SourceIdentity(info);
+  ValidateUnchanged();
+  std::ifstream input(GetPinnedReadPath(), std::ios::binary);
+  THROW_CHECK_FILE_OPEN(input, path);
+  impl_->shape = ReadMappedFloatShape(input, path);
+  input.close();
+  THROW_CHECK(input);
+  impl_->file_bytes = impl_->identity[2];
+  THROW_CHECK_LE(
+      impl_->shape.bytes,
+      std::numeric_limits<size_t>::max() - impl_->shape.payload_start);
+  THROW_CHECK_GE(impl_->file_bytes,
+                 impl_->shape.payload_start + impl_->shape.bytes);
+  ValidateUnchanged();
+  return;
+#else
+  THROW_CHECK(false) << "Held-FD normal source requires Linux";
+#endif
+}
+
+std::filesystem::path ImmutableMapSource::GetPinnedReadPath() const {
+  THROW_CHECK(impl_->bind_identity);
+#if defined(__linux__)
+  const int fd = impl_->file->get_mapping_handle().handle;
+  return std::filesystem::path("/proc/self/fd") / std::to_string(fd);
+#else
+  THROW_CHECK(false) << "Held-FD normal source requires Linux";
+  return {};
+#endif
+}
+std::array<size_t, 3> ImmutableMapSource::GetShape() const {
+  return {impl_->shape.width, impl_->shape.height, impl_->shape.depth};
+}
+void ImmutableMapSource::ValidateUnchanged() const {
+  THROW_CHECK(impl_->bind_identity);
+#if defined(__linux__)
+  struct stat descriptor, name;
+  THROW_CHECK_EQ(::fstat(impl_->file->get_mapping_handle().handle, &descriptor),
+                 0);
+  THROW_CHECK_EQ(::stat(impl_->path.c_str(), &name), 0);
+  THROW_CHECK(SourceIdentity(descriptor) == impl_->identity)
+      << "Original normal descriptor changed";
+  THROW_CHECK(SourceIdentity(name) == impl_->identity)
+      << "Original normal path changed";
+  // This check also refuses an unavailable or substituted proc descriptor path.
+  struct stat proc;
+  THROW_CHECK_EQ(::stat(GetPinnedReadPath().c_str(), &proc), 0);
+  THROW_CHECK(SourceIdentity(proc) == impl_->identity);
+#else
+  THROW_CHECK(false) << "Held-FD normal source requires Linux";
 #endif
 }
 

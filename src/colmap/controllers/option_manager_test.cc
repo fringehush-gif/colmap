@@ -185,6 +185,48 @@ TEST(OptionManager, StereoFusionFullRamNormalStorage) {
   }
 }
 
+TEST(OptionManager, StereoFusionResidentGuardAdmission) {
+  mvs::StereoFusionOptions defaults;
+  EXPECT_EQ(defaults.full_ram_normal_storage, "fp32");
+  EXPECT_FALSE(defaults.full_ram_normal_guard);
+  EXPECT_EQ(defaults.full_ram_normal_guard_bytes, 0);
+  EXPECT_EQ(defaults.full_ram_normal_guard_files, 0);
+  auto options = defaults;
+  options.full_ram_normal_storage = "oct2x16";
+  options.full_ram_normal_guard = true;
+  options.full_ram_normal_guard_bytes = 1 << 20;
+  options.full_ram_normal_guard_files = 2;
+  options.num_threads = 1;
+  options.full_ram_load_threads = 1;
+  EXPECT_EQ(options.Check(),
+            mvs::StereoFusionOptions::SupportsNormalPrecisionGuard());
+  for (const int conflict : {0, 1, 2, 3, 4, 5}) {
+    auto invalid = options;
+    if (conflict == 0) invalid.num_threads = 25;
+    if (conflict == 1) invalid.full_ram_load_threads = 24;
+    if (conflict == 2) invalid.full_ram_normal_guard_bytes = 0;
+    if (conflict == 3) invalid.full_ram_normal_guard_files = 0;
+    if (conflict == 4) invalid.full_ram_normal_storage = "fp32";
+    if (conflict == 5) invalid.bounded_cache = true;
+    EXPECT_FALSE(invalid.Check());
+  }
+  if (!mvs::StereoFusionOptions::SupportsNormalPrecisionGuard()) return;
+  const auto path = CreateTestDir() / "resident-guard.ini";
+  OptionManager writer;
+  writer.AddStereoFusionOptions();
+  *writer.stereo_fusion = options;
+  writer.stereo_fusion->full_ram_normal_guard = true;
+  writer.stereo_fusion->full_ram_normal_guard_bytes = 123456;
+  writer.stereo_fusion->full_ram_normal_guard_files = 24;
+  writer.Write(path);
+  OptionManager reader;
+  reader.AddStereoFusionOptions();
+  ASSERT_TRUE(reader.Read(path));
+  EXPECT_TRUE(reader.stereo_fusion->full_ram_normal_guard);
+  EXPECT_EQ(reader.stereo_fusion->full_ram_normal_guard_bytes, 123456);
+  EXPECT_EQ(reader.stereo_fusion->full_ram_normal_guard_files, 24);
+}
+
 TEST(OptionManager, StereoFusionDiagnosticOptionRoundTrip) {
   const auto config_path = CreateTestDir() / "fusion-diagnostic.ini";
   OptionManager writer;

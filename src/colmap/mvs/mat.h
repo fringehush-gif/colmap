@@ -3,6 +3,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -81,11 +82,17 @@ inline float DecodeNormalMagnitudeUnorm16(const uint16_t value) {
 class ImmutableMapSource {
  public:
   explicit ImmutableMapSource(const std::filesystem::path& path);
+  struct BindIdentity {};
+  ImmutableMapSource(const std::filesystem::path& path, BindIdentity);
   ~ImmutableMapSource();
   ImmutableMapSource(const ImmutableMapSource&) = delete;
   ImmutableMapSource& operator=(const ImmutableMapSource&) = delete;
   size_t GetWindowReservationBytes(size_t row_begin, size_t row_count) const;
   size_t GetMappingReservationBytes() const;
+  // Guard-only Linux descriptor bridge. No mutable pathname re-open for reads.
+  std::filesystem::path GetPinnedReadPath() const;
+  std::array<size_t, 3> GetShape() const;
+  void ValidateUnchanged() const;
 
  private:
   friend class ImmutableMapRegion;

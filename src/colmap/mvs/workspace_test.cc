@@ -10,6 +10,7 @@
 #include "colmap/util/testing.h"
 
 #include <atomic>
+#include <cfenv>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -1173,6 +1174,142 @@ TEST(BoundedWorkspaceBase, SignedNormalTileValidationAndExactFallback) {
   EXPECT_EQ(invalid.GetCacheStats().reserved_bytes, 0);
 }
 
+TEST_F(WorkspaceTests, ResidentGuardCertificateAndIdentityRefusal) {
+  ASSERT_TRUE(ImmutableMapRegion::Supported());
+  ASSERT_TRUE(normal_precision_guard::SupportedBuild());
+  auto options = GetOptions();
+  options.num_threads = 1;
+  options.full_ram_normal_storage = NormalStorage::kOct2x16;
+  options.full_ram_normal_guard = true;
+  options.full_ram_normal_guard_bytes = 1 << 20;
+  options.full_ram_normal_guard_files = 1;
+  Workspace workspace(options);
+  const int image = workspace.GetModel().GetImageIdx(image_name_);
+  workspace.Load({image_name_});
+  const auto error = workspace.GetStoredNormalError(image);
+  const auto decoded = workspace.GetStoredNormal(image, 0, 0);
+  const Eigen::Vector3f original = Eigen::Vector3f::Ones();
+  EXPECT_EQ(workspace.GetOriginalNormalMappingStats().loads, 0);
+  for (int channel = 0; channel < 3; ++channel)
+    EXPECT_GE(error(channel),
+              std::abs(double(original(channel)) - decoded(channel)));
+  EXPECT_EQ(workspace.GetOriginalNormalMappingStats().active_copies, 0);
+
+  // Replacement after eager pack must refuse; same dimensions do not establish
+  // identity.
+  const auto path = workspace.GetNormalMapPath(image);
+  const auto saved = path.string() + ".saved";
+  std::filesystem::rename(path, saved);
+  NormalMap replacement(10, 5);
+  replacement.Fill(0.25f);
+  replacement.Write(path);
+  EXPECT_THROW(workspace.ReadOriginalStoredNormal(image, 0, 0), std::exception);
+  EXPECT_THROW(workspace.ValidateOriginalNormalSources(), std::exception);
+  workspace.ReleaseOriginalNormalSources();
+  EXPECT_THROW(workspace.GetStoredNormalError(image), std::exception);
+  std::filesystem::remove(path);
+  std::filesystem::rename(saved, path);
+
+  // A new generation admits the restored inode, then detects in-place payload
+  // change.
+  workspace.Load({image_name_});
+  EXPECT_TRUE((workspace.ReadOriginalStoredNormal(image, 0, 0).array() ==
+               Eigen::Vector3f::Ones().array())
+                  .all());
+  {
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    ASSERT_TRUE(file);
+    file.seekp(-static_cast<std::streamoff>(sizeof(float)), std::ios::end);
+    const float changed = 0.125f;
+    file.write(reinterpret_cast<const char*>(&changed), sizeof(changed));
+    file.flush();
+    ASSERT_TRUE(file);
+  }
+  EXPECT_THROW(workspace.ReadOriginalStoredNormal(image, 0, 0), std::exception);
+}
+
+TEST_F(WorkspaceTests, ResidentGuardGridAndByteAdmissionRefuse) {
+  ASSERT_TRUE(ImmutableMapRegion::Supported());
+  ASSERT_TRUE(normal_precision_guard::SupportedBuild());
+  auto options = GetOptions();
+  options.num_threads = 1;
+  options.full_ram_normal_storage = NormalStorage::kOct2x16;
+  options.full_ram_normal_guard = true;
+  options.full_ram_normal_guard_bytes = 1;
+  options.full_ram_normal_guard_files = 1;
+  Workspace too_small(options);
+  EXPECT_THROW(too_small.Load({image_name_}), std::exception);
+  options.full_ram_normal_guard_bytes = 1 << 20;
+  options.max_image_size = 6;
+  Workspace resized(options);
+  EXPECT_THROW(resized.Load({image_name_}), std::exception);
+  options.max_image_size = -1;
+  Workspace descriptor(options);
+  Mat<float> depth(9, 5, 1);
+  depth.Fill(1);
+  depth.Write(descriptor.GetDepthMapPath(0));
+  EXPECT_THROW(descriptor.Load({image_name_}), std::exception);
+  // A genuinely smaller original normal+depth grid is unchanged by native
+  // Downsize.
+  NormalMap normal(9, 5);
+  normal.Fill(0.5f);
+  normal.Write(descriptor.GetNormalMapPath(0));
+  descriptor.Load({image_name_});
+  EXPECT_EQ(descriptor.GetStoredNormalDimensions(0),
+            (std::pair<size_t, size_t>{9, 5}));
+  EXPECT_TRUE((descriptor.ReadOriginalStoredNormal(0, 0, 0).array() ==
+               Eigen::Vector3f::Constant(0.5f).array())
+                  .all());
+}
+
+TEST(Workspace, ResidentGuardPackRollbackAndIncompleteCertificate) {
+  ASSERT_TRUE(ImmutableMapRegion::Supported());
+  ASSERT_TRUE(normal_precision_guard::SupportedBuild());
+  const auto path = CreateTestDir() / "normal.bin";
+  NormalMap original(2, 1);
+  original.Fill(0.5f);
+  original.Write(path);
+  NormalMapStorage storage;
+  const auto source = std::make_shared<ImmutableMapSource>(
+      path, ImmutableMapSource::BindIdentity{});
+  storage.normal_map = original;
+  const auto before = storage.normal_map.GetData();
+  normal_precision_guard::CodecErrorCertificate incomplete(2);
+  incomplete.AddDecoded(Eigen::Vector3f::Zero(), Eigen::Vector3f::Zero());
+  EXPECT_THROW(incomplete.Seal(), std::exception);
+  const int rounding = std::fegetround();
+  ASSERT_EQ(std::fesetround(FE_UPWARD), 0);
+  EXPECT_THROW(storage.ReadAndPackOriginal(source, 2, 1), std::exception);
+  EXPECT_EQ(std::fesetround(rounding), 0);
+  EXPECT_EQ(storage.normal_map.GetData(), before);
+  EXPECT_TRUE(storage.oct_normals.empty());
+  EXPECT_FALSE(storage.normal_error_valid);
+  storage.ReadAndPackOriginal(source, 2, 1);
+  EXPECT_TRUE(storage.normal_map.GetData().empty());
+  EXPECT_TRUE(storage.normal_error_valid);
+}
+
+TEST(Workspace, ResidentOriginalSourceAndRowLeaseLifetime) {
+  ASSERT_TRUE(ImmutableMapRegion::Supported());
+  const auto path = CreateTestDir() / "normal.bin";
+  NormalMap original(2, 2);
+  original.Fill(0.5f);
+  original.Write(path);
+  auto pool = std::make_shared<MappedNormalPool>(1 << 20, 1, true);
+  auto source = pool->AcquireSource(0, path);
+  source->ValidateUnchanged();
+  // Read uses the actual held FD even before any row mapping exists.
+  NormalMap eager;
+  eager.Read(source->GetPinnedReadPath());
+  EXPECT_EQ(eager.GetData(), original.GetData());
+  auto lease = pool->Acquire(0, path, 0, 1);
+  pool.reset();
+  source.reset();
+  EXPECT_TRUE(((*lease).ReadFloat3(0, 1).array() ==
+               Eigen::Vector3f::Constant(0.5f).array())
+                  .all());
+}
+
 // Full-RAM normal-storage contracts.
 TEST(Workspace, FullRamNormalStorageContracts) {
   const auto root = CreateTestDir() / "storage";
@@ -1226,6 +1363,22 @@ TEST(Workspace, FullRamNormalStorageContracts) {
       }
     map.Write(descriptor.GetNormalMapPath(view));
     originals.push_back(map);
+  }
+  if (ImmutableMapRegion::Supported() &&
+      normal_precision_guard::SupportedBuild()) {
+    auto guarded = fixture;
+    guarded.num_threads = 1;
+    guarded.full_ram_normal_storage = NormalStorage::kOct2x16;
+    guarded.full_ram_normal_guard = true;
+    guarded.full_ram_normal_guard_bytes = 1 << 20;
+    guarded.full_ram_normal_guard_files = 1;
+    Workspace insufficient_files(guarded);
+    EXPECT_THROW(insufficient_files.Load(names), std::exception);
+    guarded.full_ram_normal_guard_files = 3;
+    Workspace admitted(guarded);
+    admitted.Load(names);
+    EXPECT_EQ(admitted.GetOriginalNormalMappingStats().source_live_files, 3);
+    EXPECT_EQ(admitted.GetOriginalNormalMappingStats().active_copies, 0);
   }
   EXPECT_EQ(fixture.full_ram_normal_storage, NormalStorage::kFp32);
   for (const auto* name : {"snorm16x3", "oct2x16-mag16"}) {
@@ -1350,6 +1503,146 @@ TEST(Workspace, FullRamPackPrevalidatesBeforeAllocatingOrReleasing) {
   EXPECT_THROW(invalid.Pack(NormalStorage::kOct2x16), std::exception);
   static_cast<Mat<float>&>(invalid.normal_map) = Mat<float>(2, 2, 1);
   EXPECT_THROW(invalid.Pack(NormalStorage::kOct2x16), std::exception);
+}
+
+TEST_F(WorkspaceTests, ResidentGuard24WorkerAdmissionAndSourceRefusal) {
+  ASSERT_TRUE(ImmutableMapRegion::Supported());
+  ASSERT_TRUE(normal_precision_guard::SupportedBuild());
+  auto options = GetOptions();
+  options.num_threads = 1;  // Loader count, independent of row concurrency.
+  options.full_ram_normal_storage = NormalStorage::kOct2x16;
+  options.full_ram_normal_guard = true;
+  options.full_ram_normal_guard_concurrency = 24;
+  options.full_ram_normal_guard_files = 24;
+  const auto path =
+      temp_dir_ / "stereo/normal_maps" / (image_name_ + ".geometric.bin");
+  auto source = std::make_shared<ImmutableMapSource>(
+      path, ImmutableMapSource::BindIdentity{});
+  size_t maximum = 0;
+  for (size_t row = 0; row < 5; ++row)
+    maximum = std::max(maximum, source->GetWindowReservationBytes(row, 1));
+  options.full_ram_normal_guard_bytes = 24 * maximum;
+  const std::vector<std::string> names{image_name_};
+  auto insufficient = options;
+  --insufficient.full_ram_normal_guard_bytes;
+  Workspace low_bytes(insufficient);
+  EXPECT_THROW(low_bytes.Load(names), std::exception);
+  EXPECT_THROW(low_bytes.GetStoredNormal(0, 0, 0), std::exception);
+  insufficient = options;
+  --insufficient.full_ram_normal_guard_files;
+  Workspace low_files(insufficient);
+  EXPECT_THROW(low_files.Load(names), std::exception);
+  insufficient = options;
+  insufficient.full_ram_normal_guard_concurrency =
+      std::numeric_limits<size_t>::max() / 3;
+  insufficient.full_ram_normal_guard_files =
+      std::numeric_limits<size_t>::max() / 3;
+  Workspace overflow(insufficient);
+  EXPECT_THROW(overflow.Load(names), std::exception);
+  Workspace admitted(options);
+  admitted.Load(names);
+  std::atomic<int> passed{0};
+  std::vector<std::thread> threads;
+  for (size_t worker = 0; worker < 24; ++worker)
+    threads.emplace_back([&, worker] {
+      try {
+        for (size_t i = 0; i < 20; ++i)
+          if (!admitted.ReadOriginalStoredNormal(0, worker % 5, worker % 10)
+                   .isApprox(Eigen::Vector3f::Ones(), 0.0f))
+            return;
+        ++passed;
+      } catch (...) {
+      }
+    });
+  for (auto& thread : threads) thread.join();
+  EXPECT_EQ(passed.load(), 24);
+  EXPECT_EQ(admitted.GetOriginalNormalMappingStats().active_copies, 0);
+  // Preserve the held inode, replace its logical name, and refuse all readers.
+  std::filesystem::rename(path, path.string() + ".original");
+  NormalMap replacement(10, 5);
+  replacement.Fill(0.5f);
+  replacement.Write(path);
+  passed = 0;
+  threads.clear();
+  for (size_t worker = 0; worker < 24; ++worker)
+    threads.emplace_back([&] {
+      try {
+        admitted.ReadOriginalStoredNormal(0, 0, 0);
+      } catch (const std::exception&) {
+        ++passed;
+      }
+    });
+  for (auto& thread : threads) thread.join();
+  EXPECT_EQ(passed.load(), 24);
+  EXPECT_THROW(admitted.ValidateOriginalNormalSources(), std::exception);
+  EXPECT_EQ(admitted.GetOriginalNormalMappingStats().active_copies, 0);
+  admitted.ReleaseOriginalNormalSources();
+  EXPECT_EQ(admitted.GetOriginalNormalMappingStats().source_live_files, 0);
+}
+
+TEST(Workspace, ResidentRowPool24ConcurrentOwnersAndLifetime) {
+  ASSERT_TRUE(ImmutableMapRegion::Supported());
+  const auto path = CreateTestDir() / "normal.bin";
+  NormalMap original(10, 24);
+  original.Fill(0.5f);
+  original.Write(path);
+  auto source = std::make_shared<ImmutableMapSource>(
+      path, ImmutableMapSource::BindIdentity{});
+  size_t maximum = 0;
+  for (size_t row = 0; row < 24; ++row)
+    maximum = std::max(maximum, source->GetWindowReservationBytes(row, 1));
+  source.reset();
+  for (const bool same_row : {false, true}) {
+    auto pool = std::make_shared<MappedNormalPool>(24 * maximum, 24, true);
+    auto retained = pool->AcquireSource(0, path);
+    std::mutex mutex;
+    std::condition_variable changed;
+    size_t acquired = 0;
+    bool release = false;
+    std::atomic<size_t> passed{0};
+    std::vector<std::thread> threads;
+    for (size_t worker = 0; worker < 24; ++worker)
+      threads.emplace_back([&, worker, owned_pool = pool]() mutable {
+        try {
+          const size_t row = same_row ? 0 : worker;
+          auto lease = owned_pool->Acquire(0, path, row, 1);
+          owned_pool
+              .reset();  // Lease owns the pool for the remaining lifetime.
+          {
+            std::unique_lock<std::mutex> lock(mutex);
+            ++acquired;
+            changed.notify_all();
+            changed.wait(lock, [&] { return release; });
+          }
+          if (((*lease).ReadFloat3(row, 9).array() == 0.5f).all()) ++passed;
+        } catch (...) {
+        }
+      });
+    bool complete;
+    {
+      std::unique_lock<std::mutex> lock(mutex);
+      complete = changed.wait_for(
+          lock, std::chrono::seconds(5), [&] { return acquired == 24; });
+    }
+    EXPECT_TRUE(complete);
+    if (complete) {
+      std::lock_guard<std::mutex> lock(pool->mutex);
+      EXPECT_EQ(pool->stats.active_copies, 24);
+      EXPECT_EQ(pool->stats.reserved_bytes, 0);
+      EXPECT_EQ(pool->stats.resident_files, same_row ? 1 : 24);
+      EXPECT_LE(pool->stats.peak_charged_bytes, 24 * maximum);
+      EXPECT_LE(pool->stats.peak_charged_regions, 72);
+    }
+    retained.reset();
+    pool.reset();  // All owners still held solely by the 24 leases.
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      release = true;
+    }
+    changed.notify_all();
+    for (auto& thread : threads) thread.join();
+    EXPECT_EQ(passed.load(), 24);
+  }
 }
 
 }  // namespace
