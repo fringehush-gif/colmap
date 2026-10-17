@@ -2116,7 +2116,8 @@ TEST(StereoFusion, ResidentOct4Guard24WorkersOriginalFileDecision) {
     EXPECT_EQ(capture(guarded), expected);
     EXPECT_FALSE(guarded.GetBoundedCacheStats());
     const auto stats = guarded.GetResidentNormalMappingStatsSnapshot();
-    EXPECT_GT(stats.loads, 0);
+    EXPECT_EQ(stats.loads, 0);
+    EXPECT_EQ(stats.resident_bytes, 0);
     EXPECT_EQ(stats.active_copies, 0);
     EXPECT_EQ(stats.reserved_bytes, 0);
     EXPECT_EQ(stats.reserved_files, 0);

@@ -370,9 +370,7 @@ Eigen::Vector3f Workspace::ReadOriginalStoredNormal(const int image_idx,
   THROW_CHECK_LT(row, shape[1]);
   THROW_CHECK_LT(col, shape[0]);
   source->ValidateUnchanged();
-  const auto owner = original_normal_pool_->Acquire(
-      image_idx, GetNormalMapPath(image_idx), row, 1);
-  const Eigen::Vector3f value = (*owner).ReadFloat3(row, col);
+  const Eigen::Vector3f value = source->ReadFloat3Sample(row, col);
   source->ValidateUnchanged();
   return value;  // Owning value; row lease dies before another callback
                  // acquires.

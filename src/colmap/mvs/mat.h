@@ -93,6 +93,9 @@ class ImmutableMapSource {
   std::filesystem::path GetPinnedReadPath() const;
   std::array<size_t, 3> GetShape() const;
   void ValidateUnchanged() const;
+  // Owning FP32 sample from the already held descriptor; no mapping or reopen.
+  // Caller must bracket the read with ValidateUnchanged (Workspace does so).
+  Eigen::Vector3f ReadFloat3Sample(size_t row, size_t col) const;
 
  private:
   friend class ImmutableMapRegion;
