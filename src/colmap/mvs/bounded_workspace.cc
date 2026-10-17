@@ -275,12 +275,12 @@ void BoundedWorkspace::ImageLease::reset() noexcept {
   }
 }
 
-BoundedWorkspace::MappedNormalPool::Lease::Lease(
-    std::shared_ptr<MappedNormalPool> pool, Entry* entry)
+MappedNormalPool::Lease::Lease(std::shared_ptr<MappedNormalPool> pool,
+                               Entry* entry)
     : pool(std::move(pool)), entry(entry) {}
-BoundedWorkspace::MappedNormalPool::Lease::Lease(Lease&& other) noexcept
+MappedNormalPool::Lease::Lease(Lease&& other) noexcept
     : pool(std::move(other.pool)), entry(std::exchange(other.entry, nullptr)) {}
-BoundedWorkspace::MappedNormalPool::Lease::~Lease() {
+MappedNormalPool::Lease::~Lease() {
   if (!entry) return;
   std::lock_guard<std::mutex> lock(pool->mutex);
   --entry->pins;
@@ -288,31 +288,31 @@ BoundedWorkspace::MappedNormalPool::Lease::~Lease() {
   pool->changed.notify_all();
 }
 
-BoundedWorkspace::MappedNormalPool::MappedNormalPool(const size_t bytes,
-                                                     const size_t files) {
+MappedNormalPool::MappedNormalPool(const size_t bytes,
+                                   const size_t files,
+                                   const bool bind_sources)
+    : bind_sources(bind_sources) {
   THROW_CHECK_LE(files, std::numeric_limits<size_t>::max() / 3);
   stats.capacity_bytes = bytes;
   stats.capacity_files = files;
   stats.capacity_regions = files * 3;
 }
 
-BoundedWorkspace::MappedNormalPool::Lease
-BoundedWorkspace::MappedNormalPool::Acquire(const int image_idx,
-                                            const std::filesystem::path& path) {
+MappedNormalPool::Lease MappedNormalPool::Acquire(
+    const int image_idx, const std::filesystem::path& path) {
   return AcquireImpl(Key{image_idx, 0, 0}, path);
 }
 
-BoundedWorkspace::MappedNormalPool::Lease
-BoundedWorkspace::MappedNormalPool::Acquire(const int image_idx,
-                                            const std::filesystem::path& path,
-                                            const size_t row_begin,
-                                            const size_t row_count) {
+MappedNormalPool::Lease MappedNormalPool::Acquire(
+    const int image_idx,
+    const std::filesystem::path& path,
+    const size_t row_begin,
+    const size_t row_count) {
   THROW_CHECK_GT(row_count, 0);
   return AcquireImpl(Key{image_idx, row_begin, row_count}, path);
 }
 
-std::shared_ptr<const ImmutableMapSource>
-BoundedWorkspace::MappedNormalPool::AcquireSource(
+std::shared_ptr<const ImmutableMapSource> MappedNormalPool::AcquireSource(
     const int image_idx, const std::filesystem::path& path) {
   std::unique_lock<std::mutex> lock(mutex);
   for (;;) {
@@ -394,7 +394,9 @@ BoundedWorkspace::MappedNormalPool::AcquireSource(
     lock.unlock();
     std::shared_ptr<const ImmutableMapSource> source;
     try {
-      source = std::make_shared<ImmutableMapSource>(path);
+      source = bind_sources ? std::make_shared<ImmutableMapSource>(
+                                  path, ImmutableMapSource::BindIdentity{})
+                            : std::make_shared<ImmutableMapSource>(path);
     } catch (...) {
       lock.lock();
       sources.erase(image_idx);
@@ -416,8 +418,7 @@ BoundedWorkspace::MappedNormalPool::AcquireSource(
   }
 }
 
-BoundedWorkspace::MappedNormalPool::Lease
-BoundedWorkspace::MappedNormalPool::AcquireImpl(
+MappedNormalPool::Lease MappedNormalPool::AcquireImpl(
     const Key key, const std::filesystem::path& path) {
   // The third key component distinguishes a full owner from every stripe.
   const bool window = std::get<2>(key) != 0;

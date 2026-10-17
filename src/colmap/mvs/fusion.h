@@ -43,6 +43,10 @@ struct StereoFusionOptions {
   int full_ram_load_threads = -1;
   // Approximate, opt-in full-RAM normal storage; original FP32 files.
   std::string full_ram_normal_storage = "fp32";
+  // Default-off resident oct4 exact predicate guard; 1-24 Fusion workers.
+  bool full_ram_normal_guard = false;
+  int64_t full_ram_normal_guard_bytes = 0;
+  int full_ram_normal_guard_files = 0;
 
   // Maximum image size in either dimension.
   int max_image_size = -1;
@@ -217,6 +221,8 @@ class StereoFusion : public BaseController {
   GetDepthMappedNeighborhoodStats() const;
   size_t GetMaxBoundedPrefillLanesScheduled() const;
   BoundedWorkspace::MappedNormalStats GetMappedNormalStats() const;
+  // Explicit pre-release peak/live snapshot, read only after Run joins workers.
+  MappedNormalStats GetResidentNormalMappingStatsSnapshot() const;
   struct NormalTileRingStats {
     size_t hits = 0;
     size_t misses = 0;
@@ -257,6 +263,7 @@ class StereoFusion : public BaseController {
   const float min_cos_normal_error_;
 
   std::unique_ptr<Workspace> workspace_;
+  MappedNormalStats resident_normal_mapping_stats_;
   BoundedWorkspace* bounded_workspace_ = nullptr;
   std::vector<const BoundedWorkspace::ImageData*> neighborhood_data_;
   std::vector<BoundedWorkspace::ImageLease> neighborhood_leases_;

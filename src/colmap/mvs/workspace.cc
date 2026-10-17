@@ -9,6 +9,7 @@
 #include <array>
 #include <charconv>
 #include <cstdint>
+#include <exception>
 #include <fstream>
 #include <limits>
 #include <numeric>
@@ -86,8 +87,30 @@ bool ParseFullRamNormalStorage(const std::string& name,
 }
 
 void NormalMapStorage::Pack(const NormalStorage storage) {
+  Pack(storage, false);
+}
+void NormalMapStorage::ReadAndPackOriginal(
+    std::shared_ptr<const ImmutableMapSource> source,
+    const size_t width,
+    const size_t height) {
+  THROW_CHECK(source != nullptr);
+  THROW_CHECK(oct_normals.empty() && !normal_error_valid);
+  source->ValidateUnchanged();
+  const auto shape = source->GetShape();
+  THROW_CHECK_EQ(shape[0], width);
+  THROW_CHECK_EQ(shape[1], height);
+  THROW_CHECK_EQ(shape[2], size_t{3});
+  normal_map.Read(source->GetPinnedReadPath());  // Existing native reader.
+  source->ValidateUnchanged();
+  THROW_CHECK_EQ(normal_map.GetWidth(), width);
+  THROW_CHECK_EQ(normal_map.GetHeight(), height);
+  original_normal_source = std::move(source);
+  Pack(NormalStorage::kOct2x16, true);
+}
+void NormalMapStorage::Pack(const NormalStorage storage, const bool certify) {
   THROW_CHECK(storage == NormalStorage::kFp32 ||
               storage == NormalStorage::kOct2x16);
+  THROW_CHECK(!certify || storage == NormalStorage::kOct2x16);
   if (storage == NormalStorage::kFp32) return;
   THROW_CHECK(oct_normals.empty());
   const size_t width = normal_map.GetWidth(), height = normal_map.GetHeight();
@@ -104,6 +127,33 @@ void NormalMapStorage::Pack(const NormalStorage storage) {
   for (const float value : source) {
     THROW_CHECK(std::isfinite(value) && value >= -1.0f && value <= 1.0f)
         << "Compact normals require finite components in [-1,1]";
+  }
+  if (certify) {
+    THROW_CHECK(original_normal_source != nullptr);
+    original_normal_source->ValidateUnchanged();
+    const auto shape = original_normal_source->GetShape();
+    THROW_CHECK_EQ(shape[0], width);
+    THROW_CHECK_EQ(shape[1], height);
+    THROW_CHECK_EQ(shape[2], size_t{3});
+    std::vector<OctNormalPair> packed(plane);
+    normal_precision_guard::CodecErrorCertificate certificate(plane);
+    for (size_t index = 0; index < plane; ++index) {
+      const Eigen::Vector3f original(
+          source[index], source[plane + index], source[2 * plane + index]);
+      EncodeNormalOct2x16Unchecked(original, &packed[index]);
+      certificate.AddDecoded(
+          original, DecodeNormalOct2x16(packed[index].x, packed[index].y));
+    }
+    const auto error = certificate.Seal();
+    original_normal_source->ValidateUnchanged();
+    // Everything that can refuse runs before the transaction publishes.
+    oct_normals.swap(packed);
+    normal_error = error;
+    normal_error_valid = true;
+    normal_width = width;
+    normal_height = height;
+    normal_map = NormalMap();
+    return;
   }
   oct_normals.resize(plane);
   for (size_t index = 0; index < plane; ++index) {
@@ -126,6 +176,20 @@ Workspace::Workspace(const Options& options) : options_(options) {
                 options_.mapped_normal_files_limit == 0)
         << "Full-RAM compact normals require FP32 backing and no bounded "
            "treatments";
+  }
+  THROW_CHECK_EQ(options_.full_ram_normal_guard_bytes == 0,
+                 options_.full_ram_normal_guard_files == 0);
+  if (options_.full_ram_normal_guard) {
+    THROW_CHECK(options_.full_ram_normal_storage == NormalStorage::kOct2x16);
+    THROW_CHECK(normal_precision_guard::SupportedBuild());
+    THROW_CHECK_GT(options_.full_ram_normal_guard_bytes, 0);
+    THROW_CHECK_GT(options_.full_ram_normal_guard_concurrency, 0);
+    THROW_CHECK_EQ(options_.num_threads,
+                   1);  // Keep guarded preload serial; Fusion has separate row
+                        // concurrency.
+  } else {
+    THROW_CHECK_EQ(options_.full_ram_normal_guard_bytes, 0);
+    THROW_CHECK_EQ(options_.full_ram_normal_guard_files, 0);
   }
   StringToLower(&options_.input_type);
   model_.Read(options_.workspace_path, options_.workspace_format);
@@ -157,6 +221,11 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
     for (auto& normal : normal_maps_) normal.reset();
   }
 
+  if (options_.full_ram_normal_guard) {
+    ReleaseOriginalNormalSources();
+    PrepareOriginalNormalSources(image_names);
+  }
+
   auto LoadWorkspaceData = [&, this](const int image_idx) {
     const size_t width = model_.images.at(image_idx).GetWidth();
     const size_t height = model_.images.at(image_idx).GetHeight();
@@ -173,21 +242,30 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
     // Read and rescale depth map
     auto depth_map = std::make_unique<DepthMap>();
     depth_map->Read(GetDepthMapPath(image_idx));
-    if (depth_map->GetWidth() != width || depth_map->GetHeight() != height) {
+    if (options_.full_ram_normal_guard) {
+      const auto shape = original_normal_sources_.at(image_idx)->GetShape();
+      THROW_CHECK_EQ(depth_map->GetWidth(), shape[0]);
+      THROW_CHECK_EQ(depth_map->GetHeight(), shape[1]);
+    } else if (depth_map->GetWidth() != width ||
+               depth_map->GetHeight() != height) {
       depth_map->Downsize(width, height);
     }
     depth_maps_[image_idx] = std::move(depth_map);
 
-    // Read and rescale normal map
+    // Guarded packing reads the held inode and certifies in one operation.
     auto normal = std::make_unique<NormalMapStorage>();
-    normal->normal_map.Read(GetNormalMapPath(image_idx));
-    if (normal->normal_map.GetWidth() != width ||
-        normal->normal_map.GetHeight() != height) {
-      normal->normal_map.Downsize(width, height);
+    if (options_.full_ram_normal_guard) {
+      normal->ReadAndPackOriginal(original_normal_sources_.at(image_idx),
+                                  depth_maps_[image_idx]->GetWidth(),
+                                  depth_maps_[image_idx]->GetHeight());
+    } else {
+      normal->normal_map.Read(GetNormalMapPath(image_idx));
+      if (normal->normal_map.GetWidth() != width ||
+          normal->normal_map.GetHeight() != height) {
+        normal->normal_map.Downsize(width, height);
+      }
+      normal->Pack(options_.full_ram_normal_storage);
     }
-    // Preserve resize-before-quantize and publish only after successful
-    // packing.
-    normal->Pack(options_.full_ram_normal_storage);
     normal_maps_[image_idx] = std::move(normal);
   };
 
@@ -212,8 +290,112 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
           image_names[i].c_str());
     }
   }
-  thread_pool.Wait();
+  try {
+    thread_pool.Wait();
+    ValidateOriginalNormalSources();
+  } catch (...) {
+    const auto failure = std::current_exception();
+    try {
+      thread_pool.Wait();
+    } catch (...) {
+    }
+    if (options_.full_ram_normal_guard) {
+      for (auto& normal : normal_maps_) normal.reset();
+      ReleaseOriginalNormalSources();
+    }
+    std::rethrow_exception(failure);
+  }
   timer.PrintMinutes();
+}
+
+void Workspace::PrepareOriginalNormalSources(
+    const std::vector<std::string>& image_names) {
+  THROW_CHECK_LE(model_.images.size(), size_t{std::numeric_limits<int>::max()});
+  std::vector<uint8_t> selected(model_.images.size(), 0);
+  size_t count = 0;
+  for (const auto& name : image_names) {
+    const int image = model_.GetImageIdx(name);
+    if (!HasBitmap(image) || !HasDepthMap(image)) continue;
+    if (!selected.at(image)) {
+      selected.at(image) = 1;
+      ++count;
+    }
+  }
+  THROW_CHECK_LE(std::max(count, options_.full_ram_normal_guard_concurrency),
+                 options_.full_ram_normal_guard_files);
+  auto pool =
+      std::make_shared<MappedNormalPool>(options_.full_ram_normal_guard_bytes,
+                                         options_.full_ram_normal_guard_files,
+                                         true);
+  std::vector<std::shared_ptr<const ImmutableMapSource>> sources(
+      selected.size());
+  size_t maximum = 0;
+  for (size_t image = 0; image < selected.size(); ++image) {
+    if (!selected[image]) continue;
+    sources[image] = pool->AcquireSource(
+        static_cast<int>(image), GetNormalMapPath(static_cast<int>(image)));
+    const auto shape = sources[image]->GetShape();
+    THROW_CHECK_EQ(shape[2], size_t{3});
+    // A smaller stored grid is a native no-op Downsize, not a resample.
+    THROW_CHECK_LE(shape[0], model_.images[image].GetWidth());
+    THROW_CHECK_LE(shape[1], model_.images[image].GetHeight());
+    for (size_t row = 0; row < shape[1]; ++row)
+      maximum =
+          std::max(maximum, sources[image]->GetWindowReservationBytes(row, 1));
+    sources[image]->ValidateUnchanged();
+  }
+  const size_t concurrency = options_.full_ram_normal_guard_concurrency;
+  THROW_CHECK_LE(maximum, std::numeric_limits<size_t>::max() / concurrency);
+  THROW_CHECK_LE(maximum * concurrency, options_.full_ram_normal_guard_bytes);
+  original_normal_pool_ = std::move(pool);
+  original_normal_sources_ = std::move(sources);
+}
+const normal_precision_guard::Error& Workspace::GetStoredNormalError(
+    const int image_idx) const {
+  const auto* normal = THROW_CHECK_NOTNULL(normal_maps_.at(image_idx).get());
+  THROW_CHECK(options_.full_ram_normal_guard && normal->normal_error_valid);
+  THROW_CHECK(original_normal_pool_ != nullptr);
+  THROW_CHECK(normal->original_normal_source ==
+              original_normal_sources_.at(image_idx));
+  return normal->normal_error;
+}
+Eigen::Vector3f Workspace::ReadOriginalStoredNormal(const int image_idx,
+                                                    const size_t row,
+                                                    const size_t col) {
+  GetStoredNormalError(image_idx);
+  const auto& source = original_normal_sources_.at(image_idx);
+  const auto shape = source->GetShape();
+  THROW_CHECK_EQ(shape[0], normal_maps_[image_idx]->NormalWidth());
+  THROW_CHECK_EQ(shape[1], normal_maps_[image_idx]->NormalHeight());
+  THROW_CHECK_LT(row, shape[1]);
+  THROW_CHECK_LT(col, shape[0]);
+  source->ValidateUnchanged();
+  const auto owner = original_normal_pool_->Acquire(
+      image_idx, GetNormalMapPath(image_idx), row, 1);
+  const Eigen::Vector3f value = (*owner).ReadFloat3(row, col);
+  source->ValidateUnchanged();
+  return value;  // Owning value; row lease dies before another callback
+                 // acquires.
+}
+void Workspace::ValidateOriginalNormalSources() const {
+  if (!options_.full_ram_normal_guard) return;
+  THROW_CHECK(original_normal_pool_ != nullptr);
+  for (const auto& source : original_normal_sources_)
+    if (source) source->ValidateUnchanged();
+}
+MappedNormalStats Workspace::GetOriginalNormalMappingStats() const {
+  if (!original_normal_pool_) return {};
+  std::lock_guard<std::mutex> lock(original_normal_pool_->mutex);
+  return original_normal_pool_->stats;
+}
+void Workspace::ReleaseOriginalNormalSources() {
+  for (auto& normal : normal_maps_)
+    if (normal) {
+      normal->normal_error_valid = false;
+      normal->original_normal_source.reset();
+    }
+  original_normal_sources_.clear();
+  original_normal_pool_.reset();
 }
 
 const Bitmap& Workspace::GetBitmap(const int image_idx) {
