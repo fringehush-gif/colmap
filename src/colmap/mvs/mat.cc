@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -22,6 +23,7 @@
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace colmap {
@@ -283,6 +285,60 @@ std::filesystem::path ImmutableMapSource::GetPinnedReadPath() const {
 std::array<size_t, 3> ImmutableMapSource::GetShape() const {
   return {impl_->shape.width, impl_->shape.height, impl_->shape.depth};
 }
+Eigen::Vector3f ImmutableMapSource::ReadFloat3Sample(const size_t row,
+                                                     const size_t col) const {
+  THROW_CHECK(impl_->bind_identity);
+  THROW_CHECK(ImmutableMapRegion::Supported());
+  const auto& shape = impl_->shape;
+  THROW_CHECK_EQ(shape.depth, 3);
+  THROW_CHECK_GT(shape.width, 0);
+  THROW_CHECK_GT(shape.height, 0);
+  THROW_CHECK_LT(row, shape.height);
+  THROW_CHECK_LT(col, shape.width);
+  THROW_CHECK_LE(shape.width,
+                 std::numeric_limits<size_t>::max() / shape.height);
+  const size_t plane_samples = shape.width * shape.height;
+  THROW_CHECK_LE(plane_samples,
+                 std::numeric_limits<size_t>::max() / (3 * sizeof(float)));
+  const size_t plane_bytes = plane_samples * sizeof(float);
+  THROW_CHECK_EQ(shape.bytes, 3 * plane_bytes);
+  THROW_CHECK_LE(shape.payload_start, impl_->file_bytes);
+  THROW_CHECK_LE(shape.bytes, impl_->file_bytes - shape.payload_start);
+  const size_t sample_bytes = (row * shape.width + col) * sizeof(float);
+  std::array<float, 3> values{};
+#if defined(__linux__)
+  const int fd = impl_->file->get_mapping_handle().handle;
+  for (size_t channel = 0; channel < values.size(); ++channel) {
+    // The checked complete three-plane extent bounds every addition below.
+    const size_t begin =
+        shape.payload_start + channel * plane_bytes + sample_bytes;
+    THROW_CHECK_LE(begin, impl_->file_bytes);
+    THROW_CHECK_LE(sizeof(float), impl_->file_bytes - begin);
+    THROW_CHECK_LE(
+        begin,
+        static_cast<size_t>(std::numeric_limits<off_t>::max()) - sizeof(float));
+    size_t consumed = 0;
+    while (consumed < sizeof(float)) {
+      const ssize_t count =
+          ::pread(fd,
+                  reinterpret_cast<char*>(&values[channel]) + consumed,
+                  sizeof(float) - consumed,
+                  static_cast<off_t>(begin + consumed));
+      const int read_errno = errno;
+      if (count < 0 && read_errno == EINTR) continue;
+      THROW_CHECK_GE(count, 0)
+          << "Held-FD normal pread failed, errno=" << read_errno;
+      THROW_CHECK_GT(count, 0) << "Held-FD normal sample truncated";
+      consumed += static_cast<size_t>(count);
+    }
+  }
+  return Eigen::Vector3f(values[0], values[1], values[2]);
+#else
+  THROW_CHECK(false) << "Held-FD normal sample requires Linux";
+  return Eigen::Vector3f::Zero();
+#endif
+}
+
 void ImmutableMapSource::ValidateUnchanged() const {
   THROW_CHECK(impl_->bind_identity);
 #if defined(__linux__)

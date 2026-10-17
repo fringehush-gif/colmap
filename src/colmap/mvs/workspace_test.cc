@@ -9,10 +9,13 @@
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
+#include <array>
 #include <atomic>
 #include <cfenv>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -1287,6 +1290,128 @@ TEST(Workspace, ResidentGuardPackRollbackAndIncompleteCertificate) {
   storage.ReadAndPackOriginal(source, 2, 1);
   EXPECT_TRUE(storage.normal_map.GetData().empty());
   EXPECT_TRUE(storage.normal_error_valid);
+}
+
+// Held-FD positional read prototype: generated files only, no real-map inputs.
+TEST(Workspace, ResidentPositionalReadPreservesFloatBitsAndEdges) {
+  ASSERT_TRUE(ImmutableMapRegion::Supported());
+  const auto path = CreateTestDir() / "normal.bin";
+  Mat<float> original(3, 2, 3);
+  const std::array<uint32_t, 8> bits = {0x00000000u,
+                                        0x80000000u,
+                                        0x00000001u,
+                                        0x80000001u,
+                                        0x3f800000u,
+                                        0xbf800000u,
+                                        0x3eaaaaabu,
+                                        0x7f7fffffu};
+  for (size_t channel = 0; channel < 3; ++channel) {
+    for (size_t row = 0; row < 2; ++row) {
+      for (size_t col = 0; col < 3; ++col) {
+        const uint32_t expected =
+            bits[(channel * 6 + row * 3 + col) % bits.size()];
+        float value;
+        std::memcpy(&value, &expected, sizeof(value));
+        original.Set(row, col, channel, value);
+      }
+    }
+  }
+  original.Write(path);
+  auto source = std::make_shared<ImmutableMapSource>(
+      path, ImmutableMapSource::BindIdentity{});
+  for (size_t row = 0; row < 2; ++row) {
+    ImmutableMapRegion mapped(source, row, 1);
+    for (size_t col = 0; col < 3; ++col) {
+      source->ValidateUnchanged();
+      const Eigen::Vector3f direct = source->ReadFloat3Sample(row, col);
+      source->ValidateUnchanged();
+      const Eigen::Vector3f previous = mapped.ReadFloat3(row, col);
+      for (size_t channel = 0; channel < 3; ++channel) {
+        const float expected = original.Get(row, col, channel);
+        EXPECT_EQ(std::memcmp(&direct[channel], &expected, sizeof(float)), 0);
+        EXPECT_EQ(
+            std::memcmp(&direct[channel], &previous[channel], sizeof(float)),
+            0);
+      }
+    }
+  }
+  EXPECT_THROW(source->ReadFloat3Sample(2, 0), std::exception);
+  EXPECT_THROW(source->ReadFloat3Sample(0, 3), std::exception);
+  EXPECT_THROW(source->ReadFloat3Sample(std::numeric_limits<size_t>::max(), 0),
+               std::exception);
+}
+
+TEST(Workspace, ResidentPositionalReadRefusesUnboundAndWrongShape) {
+  ASSERT_TRUE(ImmutableMapRegion::Supported());
+  const auto path = CreateTestDir() / "depth.bin";
+  Mat<float> depth(3, 2, 1);
+  depth.Fill(1.0f);
+  depth.Write(path);
+  ImmutableMapSource wrong_shape(path, ImmutableMapSource::BindIdentity{});
+  EXPECT_THROW(wrong_shape.ReadFloat3Sample(0, 0), std::exception);
+  ImmutableMapSource unbound(path);
+  EXPECT_THROW(unbound.ReadFloat3Sample(0, 0), std::exception);
+  const auto malformed = path.string() + ".malformed";
+  {
+    std::ofstream file(malformed, std::ios::binary);
+    file << "3&2&3&";
+  }
+  EXPECT_THROW(
+      (ImmutableMapSource(malformed, ImmutableMapSource::BindIdentity{})),
+      std::exception);
+}
+
+TEST(Workspace, ResidentPositionalReadRefusesPartialSampleAndMutation) {
+  ASSERT_TRUE(ImmutableMapRegion::Supported());
+  const auto path = CreateTestDir() / "normal.bin";
+  NormalMap original(3, 2);
+  original.Fill(0.5f);
+  original.Write(path);
+  ImmutableMapSource source(path, ImmutableMapSource::BindIdentity{});
+  const auto bytes = std::filesystem::file_size(path);
+  // A two-byte final component makes pread return partial progress then EOF.
+  // Deliberately call the leaf method without the caller's precheck to exercise
+  // its short-read refusal; production Workspace always has both identity
+  // checks.
+  std::filesystem::resize_file(path, bytes - 2);
+  EXPECT_THROW(source.ReadFloat3Sample(1, 2), std::exception);
+  EXPECT_THROW(source.ValidateUnchanged(), std::exception);
+  std::filesystem::resize_file(path, bytes - sizeof(float));
+  EXPECT_THROW(source.ReadFloat3Sample(1, 2), std::exception);
+}
+
+TEST_F(WorkspaceTests, ResidentPositionalReadUsesSameGuardTransaction) {
+  ASSERT_TRUE(ImmutableMapRegion::Supported());
+  auto options = GetOptions();
+  options.num_threads = 1;
+  options.full_ram_normal_storage = NormalStorage::kOct2x16;
+  options.full_ram_normal_guard = true;
+  options.full_ram_normal_guard_bytes = 1 << 20;
+  options.full_ram_normal_guard_files = 1;
+  Workspace workspace(options);
+  workspace.Load({image_name_});
+  const int image = workspace.GetModel().GetImageIdx(image_name_);
+  for (size_t row : {size_t(0), size_t(4)}) {
+    for (size_t col : {size_t(0), size_t(9)}) {
+      const auto value = workspace.ReadOriginalStoredNormal(image, row, col);
+      const float one = 1.0f;
+      for (int channel = 0; channel < 3; ++channel)
+        EXPECT_EQ(std::memcmp(&value[channel], &one, sizeof(float)), 0);
+    }
+  }
+  const auto stats = workspace.GetOriginalNormalMappingStats();
+  EXPECT_EQ(stats.active_copies, 0);
+  EXPECT_EQ(stats.reserved_bytes, 0);
+  EXPECT_EQ(stats.loads, 0);
+  EXPECT_EQ(stats.resident_bytes, 0);
+  EXPECT_EQ(stats.source_live_files, 1);
+  EXPECT_THROW(workspace.ReadOriginalStoredNormal(image, 5, 0), std::exception);
+  const auto path = workspace.GetNormalMapPath(image);
+  std::filesystem::resize_file(path, std::filesystem::file_size(path) - 1);
+  EXPECT_THROW(workspace.ReadOriginalStoredNormal(image, 0, 0), std::exception);
+  EXPECT_THROW(workspace.ValidateOriginalNormalSources(), std::exception);
+  workspace.ReleaseOriginalNormalSources();
+  EXPECT_THROW(workspace.ReadOriginalStoredNormal(image, 0, 0), std::exception);
 }
 
 TEST(Workspace, ResidentOriginalSourceAndRowLeaseLifetime) {
