@@ -2128,6 +2128,213 @@ TEST(StereoFusion, ResidentOct4Guard24WorkersOriginalFileDecision) {
   }
 }
 
+TEST(StereoFusion, PreparedCodecRotationPreservesBoundsAndExactCallbacks) {
+  ASSERT_TRUE(normal_precision_guard::SupportedArithmetic());
+  using namespace normal_precision_guard;
+  const auto check = [](const Rot& r, const Error& error, const Vec& decoded) {
+    const Vec rotated = r * decoded;
+    const auto ordinary = BoundedOperandFromRotated(r, error, decoded, rotated);
+    const auto cached = BoundedOperandFromRotated(
+        r, error, PrepareCodecRotation(r, error), decoded, rotated);
+    EXPECT_EQ(
+        std::memcmp(
+            ordinary.value.data(), cached.value.data(), 3 * sizeof(float)),
+        0);
+    EXPECT_EQ(
+        std::memcmp(
+            ordinary.error.data(), cached.error.data(), 3 * sizeof(double)),
+        0);
+    EXPECT_EQ(ordinary.exact, cached.exact);
+    const float dot = ordinary.value.dot(ordinary.value);
+    for (const float threshold :
+         {-1.0f,
+          0.0f,
+          0.984807753f,
+          1.0f,
+          dot,
+          std::nextafter(dot, -std::numeric_limits<float>::infinity()),
+          std::nextafter(dot, std::numeric_limits<float>::infinity())}) {
+      EXPECT_EQ(ScreenNormal(ordinary, ordinary, threshold),
+                ScreenNormal(cached, cached, threshold));
+      if (!rotated.allFinite() || !std::isfinite(dot)) continue;
+      auto a = ordinary, b = cached;
+      int reads_a = 0, reads_b = 0;
+      bool exact_a = false, exact_b = false;
+      const bool decision_a = NormalAccept(
+          a,
+          ordinary,
+          threshold,
+          [&]() -> Vec {
+            ++reads_a;
+            return rotated;
+          },
+          [&]() -> Vec {
+            ++reads_a;
+            return rotated;
+          },
+          &exact_a);
+      const bool decision_b = NormalAccept(
+          b,
+          cached,
+          threshold,
+          [&]() -> Vec {
+            ++reads_b;
+            return rotated;
+          },
+          [&]() -> Vec {
+            ++reads_b;
+            return rotated;
+          },
+          &exact_b);
+      EXPECT_EQ(decision_a, decision_b);
+      EXPECT_EQ(reads_a, reads_b);
+      EXPECT_EQ(exact_a, exact_b);
+      EXPECT_EQ(a.exact, b.exact);
+    }
+  };
+  for (int sample = 0; sample < 128; ++sample) {
+    Rot r;
+    Vec decoded;
+    Error error;
+    for (int i = 0; i < 9; ++i)
+      r.data()[i] = float((sample * 31 + i * 17) % 257 - 128) / 128;
+    for (int i = 0; i < 3; ++i) {
+      decoded(i) = float((sample * 43 + i * 19) % 251 - 125) / 125;
+      error(i) = (sample % 4 == 0)
+                     ? 0.0
+                     : std::ldexp(double((sample * 7 + i * 13) % 101), -20 - i);
+    }
+    check(r, error, decoded);
+  }
+  const std::vector<Vec> originals{{0.0f, 0.0f, 0.0f},
+                                   {0.2f, -0.3f, 0.7f},
+                                   {-0.4f, 0.1f, -0.2f},
+                                   {1.0f, -1.0f, 1.0f}};
+  CodecErrorCertificate certificate(originals.size());
+  std::vector<Vec> actual_decodes;
+  for (const auto& original : originals) {
+    OctNormalPair pair;
+    EncodeNormalOct2x16Unchecked(original, &pair);
+    const Vec decoded = DecodeNormalOct2x16(pair.x, pair.y);
+    certificate.AddDecoded(original, decoded);
+    actual_decodes.push_back(decoded);
+  }
+  const Error certified_error = certificate.Seal();
+  for (const auto& decoded : actual_decodes)
+    check(Rot::Identity(), certified_error, decoded);
+  for (const double e : {0.0,
+                         std::numeric_limits<double>::denorm_min(),
+                         0x1p-24,
+                         1.0,
+                         std::numeric_limits<double>::max()}) {
+    check(Rot::Identity(), Error::Constant(e), Vec(0.0f, -0.0f, 1.0f));
+    check(Rot::Identity(),
+          Error::Constant(e),
+          Vec(std::numeric_limits<float>::denorm_min(), 0.0f, 1.0f));
+    check(Rot::Identity(),
+          Error::Constant(e),
+          Vec::Constant(std::numeric_limits<float>::max()));
+  }
+}
+
+TEST(StereoFusion, PreparedCodecRotationRefusesStaleOrInvalidTerms) {
+  ASSERT_TRUE(normal_precision_guard::SupportedArithmetic());
+  using namespace normal_precision_guard;
+  const Rot r = Rot::Identity();
+  const Error error(0x1p-20, 0x1p-21, 0x1p-22);
+  const auto prepared = PrepareCodecRotation(r, error);
+  ASSERT_TRUE(prepared.valid());
+  const Vec decoded(0.2f, -0.3f, 0.7f);
+  const auto check = [&](const Rot& actual_r,
+                         const Error& actual_error,
+                         const PreparedCodecRotation& cache) {
+    const Vec rotated = actual_r * decoded;
+    const auto ordinary =
+        BoundedOperandFromRotated(actual_r, actual_error, decoded, rotated);
+    const auto cached = BoundedOperandFromRotated(
+        actual_r, actual_error, cache, decoded, rotated);
+    EXPECT_EQ(
+        std::memcmp(
+            ordinary.error.data(), cached.error.data(), 3 * sizeof(double)),
+        0);
+  };
+  Rot changed_r = r;
+  changed_r(0, 1) = 0.25f;
+  check(changed_r, error, prepared);
+  changed_r = r;
+  changed_r(0, 1) = -0.0f;  // Bitwise binding also covers signed zero.
+  check(changed_r, error, prepared);
+  Error changed_error = error;
+  changed_error(1) *= 1024;
+  check(r, changed_error, prepared);
+  check(r, error, PreparedCodecRotation{});
+  for (const double bad : {-1.0,
+                           std::numeric_limits<double>::infinity(),
+                           std::numeric_limits<double>::quiet_NaN()}) {
+    const Error invalid = Error::Constant(bad);
+    const auto refused = PrepareCodecRotation(r, invalid);
+    EXPECT_FALSE(refused.valid());
+    check(r, invalid, refused);
+  }
+  changed_r(0, 0) = std::numeric_limits<float>::infinity();
+  EXPECT_FALSE(PrepareCodecRotation(changed_r, error).valid());
+  check(changed_r, error, prepared);
+}
+
+TEST(StereoFusion, PreparedCodecRotationRechecksAllArithmeticControls) {
+  ASSERT_TRUE(normal_precision_guard::SupportedArithmetic());
+  using namespace normal_precision_guard;
+  struct Restore {
+    int rounding = std::fegetround();
+#if defined(__SSE__)
+    unsigned int sse = _mm_getcsr();
+#endif
+    ~Restore() {
+      std::fesetround(rounding);
+#if defined(__SSE__)
+      _mm_setcsr(sse);
+#endif
+    }
+  } restore;
+  const Rot r = Rot::Identity();
+  const Error error = Error::Constant(0x1p-20);
+  const auto prepared = PrepareCodecRotation(r, error);
+  const Vec decoded(0.2f, -0.3f, 0.7f), rotated = r * decoded;
+  const auto check = [&](const PreparedCodecRotation& cache) {
+    const auto ordinary = BoundedOperandFromRotated(r, error, decoded, rotated);
+    const auto cached =
+        BoundedOperandFromRotated(r, error, cache, decoded, rotated);
+    EXPECT_EQ(
+        std::memcmp(
+            ordinary.error.data(), cached.error.data(), 3 * sizeof(double)),
+        0);
+    EXPECT_EQ(ScreenNormal(ordinary, ordinary, 1.0f),
+              ScreenNormal(cached, cached, 1.0f));
+  };
+  for (const int mode : {FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO}) {
+    ASSERT_EQ(std::fesetround(mode), 0);
+    EXPECT_FALSE(SupportedArithmetic());
+    check(prepared);
+    const auto unavailable = PrepareCodecRotation(r, error);
+    EXPECT_FALSE(unavailable.valid());
+    ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+    check(unavailable);  // Invalid preparation remains the ordinary path.
+  }
+#if defined(__SSE__)
+  const unsigned int nearest =
+      _mm_getcsr() & ~((1u << 15) | (3u << 13) | (1u << 6));
+  for (const unsigned int bits :
+       {1u << 15, 1u << 6, 1u << 13, 2u << 13, 3u << 13}) {
+    _mm_setcsr(nearest | bits);
+    EXPECT_FALSE(SupportedArithmetic());
+    check(prepared);
+    EXPECT_FALSE(PrepareCodecRotation(r, error).valid());
+    _mm_setcsr(nearest);
+  }
+#endif
+  check(prepared);
+}
+
 }  // namespace
 }  // namespace mvs
 }  // namespace colmap

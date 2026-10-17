@@ -565,6 +565,9 @@ void StereoFusion::Run() {
   inv_P_.resize(model.images.size());
   inv_R_.resize(model.images.size());
   prepared_normal_rotations_.clear();
+  prepared_codec_rotations_.clear();
+  if (options_.full_ram_normal_guard)
+    prepared_codec_rotations_.resize(model.images.size());
   if (options_.bounded_cache_normal_snorm16_guard) {
     prepared_normal_rotations_.resize(model.images.size());
   }
@@ -627,6 +630,12 @@ void StereoFusion::Run() {
     if (options_.bounded_cache_normal_snorm16_guard) {
       prepared_normal_rotations_.at(image_idx) =
           normal_precision_guard::PrepareRotation(inv_R_.at(image_idx));
+    }
+    if (options_.full_ram_normal_guard) {
+      prepared_codec_rotations_.at(image_idx) =
+          normal_precision_guard::PrepareCodecRotation(
+              inv_R_.at(image_idx),
+              workspace_->GetStoredNormalError(image_idx));
     }
   }
 
@@ -1501,6 +1510,7 @@ void StereoFusion::Fuse(const int thread_id,
                 ? normal_precision_guard::BoundedOperandFromRotated(
                       inv_R_.at(image_idx),
                       workspace_->GetStoredNormalError(image_idx),
+                      prepared_codec_rotations_.at(image_idx),
                       local_normal,
                       normal)
                 : normal_precision_guard::CompressedOperandFromRotated(
@@ -1626,6 +1636,7 @@ void StereoFusion::Fuse(const int thread_id,
                 ? normal_precision_guard::BoundedOperandFromRotated(
                       inv_R_.at(image_idx),
                       workspace_->GetStoredNormalError(image_idx),
+                      prepared_codec_rotations_.at(image_idx),
                       local_normal,
                       normal)
                 : normal_precision_guard::CompressedOperandFromRotated(
