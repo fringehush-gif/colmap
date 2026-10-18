@@ -442,6 +442,10 @@ GraphSolver::GraphSolver(
   if (params.diag_init < 0.0f) {
     throw std::runtime_error("params.diag_init must be positive");
   }
+  if (params.pcg_iter_max < 1) {
+    throw std::runtime_error("params.pcg_iter_max must be at least 1");
+  }
+
   allocation_size_ = get_nbytes();
 
   if (device_id_ < 0) {
@@ -1902,8 +1906,8 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
   float score_best;
   float score_best_pcg;
   float diag = params_.diag_init;
-  cudaMemcpy(solver__current_diag_, &diag, sizeof(float),
-             cudaMemcpyHostToDevice);
+  cudaMemcpy(
+      solver__current_diag_, &diag, sizeof(float), cudaMemcpyHostToDevice);
 
   float up_scale = params_.diag_scaling_up;
   float quality;
@@ -1919,10 +1923,12 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
 
   for (solver_iter_ = 0; solver_iter_ < params_.solver_iter_max;
        solver_iter_++) {
-    if (solver_iter_ != 0 && solver_iter_ < params_.solver_iter_max - 1) {
+    if (solver_iter_ != 0) {
       DoResJac();
     }
     score_best_pcg = score_best;
+    // The inner loop can break before storing a proposal in storage_new_best_.
+    bool have_pcg_proposal = false;
     for (pcg_iter_ = 0; pcg_iter_ < params_.pcg_iter_max; pcg_iter_++) {
       DoNormalize();
 
@@ -1966,6 +1972,7 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
         std::swap(nodes__SimpleRadialPrincipalPoint__storage_check_,
                   nodes__SimpleRadialPrincipalPoint__storage_new_best_);
         score_best_pcg = score_new_pcg;
+        have_pcg_proposal = true;
         if (params_.pcg_rel_score_exit != -1.0f &&
             score_best_pcg < score_best * params_.pcg_rel_score_exit) {
           break;
@@ -1997,20 +2004,23 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
                 nodes__SimpleRadialPose__storage_new_best_);
       std::swap(nodes__SimpleRadialPrincipalPoint__storage_check_,
                 nodes__SimpleRadialPrincipalPoint__storage_new_best_);
+      have_pcg_proposal = true;
     }
 
     const float diag_current = diag;
     bool step_accepted = false;
-    if (score_best_pcg < score_best * params_.solver_rel_decrease_min) {
+    if (have_pcg_proposal &&
+        score_best_pcg < score_best * params_.solver_rel_decrease_min) {
       quality = (score_best - score_best_pcg) / GetPredDecrease();
       const float quality_tmp = 2 * quality - 1;
       float scale = std::max(params_.diag_scaling_down,
                              1.0f - quality_tmp * quality_tmp * quality_tmp);
       diag = std::max(params_.diag_min, diag * scale);
-      cudaMemcpy(solver__current_diag_, &diag, sizeof(float),
-                 cudaMemcpyHostToDevice);
+      cudaMemcpy(
+          solver__current_diag_, &diag, sizeof(float), cudaMemcpyHostToDevice);
       up_scale = params_.diag_scaling_up;
       score_best = score_best_pcg;
+      step_accepted = true;
       std::swap(nodes__PinholeCalib__storage_current_,
                 nodes__PinholeCalib__storage_new_best_);
       std::swap(nodes__PinholeFocal__storage_current_,
@@ -2037,8 +2047,8 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
         result.exit_reason = ExitReason::CONVERGED_DIAG_EXIT;
         break;
       }
-      cudaMemcpy(solver__current_diag_, &diag, sizeof(float),
-                 cudaMemcpyHostToDevice);
+      cudaMemcpy(
+          solver__current_diag_, &diag, sizeof(float), cudaMemcpyHostToDevice);
       up_scale *= 2;
     }
     const auto t_now = std::chrono::steady_clock::now();
