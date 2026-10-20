@@ -8,6 +8,7 @@
 
 #include <array>
 #include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <tuple>
 
@@ -1224,6 +1225,34 @@ TEST_P(ParameterizedBitmapFormatTests, ReadGreyAlpha) {
   EXPECT_EQ(rgb_bitmap.Width(), kWidth);
   EXPECT_EQ(rgb_bitmap.Height(), kHeight);
   EXPECT_EQ(rgb_bitmap.Channels(), 3);
+}
+
+TEST(Bitmap, ReadTruncatedPixelData) {
+  const auto filename = CreateTestDir() / "truncated.png";
+  const std::array<uint8_t, 12> pixels = {};
+  WriteImageOIIO(2, 2, 3, filename, pixels.data());
+
+  std::ifstream file(filename, std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(file)),
+                          std::istreambuf_iterator<char>());
+  file.close();
+  const auto idat = bytes.find("IDAT");
+  ASSERT_NE(idat, std::string::npos);
+  // Retain the PNG header and first byte of the compressed pixel data.
+  std::filesystem::resize_file(filename, idat + 5);
+
+  auto input = OIIO::ImageInput::open(filename.string());
+  ASSERT_NE(input, nullptr);
+  EXPECT_EQ(input->spec().width, 2);
+  EXPECT_EQ(input->spec().height, 2);
+  std::array<uint8_t, 12> decoded = {};
+  EXPECT_FALSE(
+      input->read_image(0, 0, 0, 3, OIIO::TypeDesc::UINT8, decoded.data()));
+  input->geterror();
+  input->close();
+
+  Bitmap bitmap;
+  EXPECT_FALSE(bitmap.Read(filename));
 }
 
 TEST(Bitmap, ReadNonImageFile) {
