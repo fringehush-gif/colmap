@@ -803,6 +803,20 @@ void StereoFusion::Run() {
     // Direct component pins are acquired before row tasks can borrow them.
     // A failed admission leaves no published raw pointer or retained pin.
     PrepareDirectComponentPins();
+    // Destination eligibility changes only after the row-task join. Keep the
+    // ordered live adjacency here rather than checking both flags per pixel.
+    std::vector<std::vector<int>> incoming_images(overlapping_images_.size());
+    for (size_t source = 0; source < overlapping_images_.size(); ++source) {
+      auto& views = overlapping_images_[source];
+      views.erase(std::remove_if(
+                      views.begin(),
+                      views.end(),
+                      [&](const int view) { return !used_images_.at(view); }),
+                  views.end());
+      for (const int view : views) {
+        incoming_images.at(view).push_back(static_cast<int>(source));
+      }
+    }
     size_t num_fused_images = 0;
     size_t total_fused_points = 0;
     for (int image_idx = 0; image_idx >= 0;
@@ -854,6 +868,11 @@ void StereoFusion::Run() {
 
       num_fused_images += 1;
       fused_images_.at(image_idx) = true;
+      for (const int source : incoming_images.at(image_idx)) {
+        auto& views = overlapping_images_.at(source);
+        views.erase(std::remove(views.begin(), views.end(), image_idx),
+                    views.end());
+      }
 
       total_fused_points = 0;
       for (const auto& task_fused_points : task_fused_points_) {
@@ -1777,11 +1796,6 @@ void StereoFusion::Fuse(const int thread_id,
     }
 
     for (const auto next_image_idx : overlapping_images_.at(image_idx)) {
-      if (!used_images_.at(next_image_idx) ||
-          fused_images_.at(next_image_idx)) {
-        continue;
-      }
-
       const Eigen::Vector3f next_proj =
           P_.at(next_image_idx) * xyz.homogeneous();
       const int next_col =
