@@ -1563,39 +1563,47 @@ void StereoFusion::Fuse(const int thread_id,
     }
 
     // Determine normal direction in global reference frame.
-    const auto* tile_image =
-        options_.bounded_cache_normal_tile_size > 0
-            ? AcquireWorkerNormalTile(thread_id, image_idx, row, col)
-            : nullptr;
-    const auto* mapped_normal = direct_mapped_normals_
-                                    ? AcquireWorkerMappedNormal(image_idx, row)
-                                    : nullptr;
     std::optional<BoundedWorkspace::ImageLease> normal_lease;
-    if (bounded_workspace_ && options_.bounded_cache_components &&
-        !tile_image && !mapped_normal &&
-        (!image_data || image_data->normal_map.GetWidth() == 0)) {
-      normal_lease.emplace(bounded_workspace_->AcquireComponent(
-          image_idx, BoundedWorkspace::Component::kNormal));
+    std::shared_ptr<const NormalMap> normal_map;
+    Eigen::Vector3f local_normal;
+    if (resident) {
+      // Eager FP32 owners cannot use optional normal-source routes.
+      local_normal = Eigen::Vector3f(resident->normal->Get(row, col, 0),
+                                     resident->normal->Get(row, col, 1),
+                                     resident->normal->Get(row, col, 2));
+    } else {
+      const auto* tile_image =
+          options_.bounded_cache_normal_tile_size > 0
+              ? AcquireWorkerNormalTile(thread_id, image_idx, row, col)
+              : nullptr;
+      const auto* mapped_normal =
+          direct_mapped_normals_ ? AcquireWorkerMappedNormal(image_idx, row)
+                                 : nullptr;
+      if (bounded_workspace_ && options_.bounded_cache_components &&
+          !tile_image && !mapped_normal &&
+          (!image_data || image_data->normal_map.GetWidth() == 0)) {
+        normal_lease.emplace(bounded_workspace_->AcquireComponent(
+            image_idx, BoundedWorkspace::Component::kNormal));
+      }
+      const auto* normal_image = tile_image ? tile_image
+                                 : normal_lease && *normal_lease
+                                     ? normal_lease->get()
+                                     : image_data;
+      const bool compact_full_ram =
+          workspace_->GetOptions().full_ram_normal_storage !=
+          NormalStorage::kFp32;
+      normal_map = normal_image || mapped_normal || compact_full_ram
+                       ? std::shared_ptr<const NormalMap>()
+                       : workspace_->GetNormalMapLease(image_idx);
+      const auto* fp32_normal = normal_map.get();
+      local_normal = mapped_normal  ? mapped_normal->ReadFloat3(row, col)
+                     : normal_image ? normal_image->GetNormal(row, col)
+                     : compact_full_ram
+                         ? workspace_->GetStoredNormal(image_idx, row, col)
+                         : Eigen::Vector3f(fp32_normal->Get(row, col, 0),
+                                           fp32_normal->Get(row, col, 1),
+                                           fp32_normal->Get(row, col, 2));
     }
-    const auto* normal_image = tile_image ? tile_image
-                               : normal_lease && *normal_lease
-                                   ? normal_lease->get()
-                                   : image_data;
-    const bool compact_full_ram =
-        workspace_->GetOptions().full_ram_normal_storage !=
-        NormalStorage::kFp32;
-    const auto normal_map =
-        normal_image || mapped_normal || compact_full_ram || resident
-            ? std::shared_ptr<const NormalMap>()
-            : workspace_->GetNormalMapLease(image_idx);
-    const auto* fp32_normal = resident ? resident->normal : normal_map.get();
-    const Eigen::Vector3f local_normal =
-        mapped_normal      ? mapped_normal->ReadFloat3(row, col)
-        : normal_image     ? normal_image->GetNormal(row, col)
-        : compact_full_ram ? workspace_->GetStoredNormal(image_idx, row, col)
-                           : Eigen::Vector3f(fp32_normal->Get(row, col, 0),
-                                             fp32_normal->Get(row, col, 1),
-                                             fp32_normal->Get(row, col, 2));
     const Eigen::Vector3f normal = inv_R_.at(image_idx) * local_normal;
     normal_lease.reset();
 
