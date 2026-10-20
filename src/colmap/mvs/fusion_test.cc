@@ -1045,6 +1045,25 @@ TEST(StereoFusion, Integration) {
   ASSERT_TRUE(no_tile_row);
   EXPECT_NE(no_tile_row->find("mapped_normal=unavailable ring=unavailable"),
             std::string::npos);
+
+  // An unused initial view still leads to the configured overlapping view.
+  // Its depth and normal maps must never enter the fusion traversal.
+  {
+    std::ofstream config(temp_dir / "stereo" / "fusion.cfg");
+    config << model.images[1].GetPath().filename().string() << '\n';
+  }
+  StereoFusionOptions single_view_options;
+  single_view_options.min_num_pixels = 1;
+  single_view_options.num_threads = 1;
+  StereoFusion single_view(
+      single_view_options, temp_dir, "COLMAP", "", "geometric");
+  single_view.Run();
+  ASSERT_FALSE(single_view.GetFusedPoints().empty());
+  ASSERT_EQ(single_view.GetFusedPoints().size(),
+            single_view.GetFusedPointsVisibility().size());
+  for (const auto& visible : single_view.GetFusedPointsVisibility()) {
+    EXPECT_EQ(visible, std::vector<int>{1});
+  }
 }
 
 TEST(StereoFusion, CompactResidentRgbMatchesDiskFusion) {
