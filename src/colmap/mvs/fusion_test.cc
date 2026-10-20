@@ -1311,6 +1311,81 @@ std::filesystem::path CreateTwoViewNormalDecisionFixture() {
   return root;
 }
 
+TEST(StereoFusion, RoundedByteMedianColors) {
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  Model model;
+  model.Read(root, "COLMAP");
+  ASSERT_EQ(model.images.size(), 2);
+  const std::vector<BitmapColor<uint8_t>> colors = {
+      BitmapColor<uint8_t>(0, 0, 254), BitmapColor<uint8_t>(255, 1, 255)};
+  for (size_t image_idx = 0; image_idx < model.images.size(); ++image_idx) {
+    Bitmap bitmap(30, 20, true);
+    bitmap.Fill(colors[image_idx]);
+    ASSERT_TRUE(bitmap.Write(root / "images" / model.GetImageName(image_idx)));
+  }
+
+  for (const int num_samples : {2, 1}) {
+    SCOPED_TRACE(num_samples);
+    StereoFusionOptions options;
+    options.num_threads = 1;
+    options.use_cache = false;
+    options.min_num_pixels = num_samples;
+    options.max_num_pixels = num_samples;
+    StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+    fusion.Run();
+
+    const auto& points = fusion.GetFusedPoints();
+    const auto& visibility = fusion.GetFusedPointsVisibility();
+    ASSERT_EQ(points.size(), num_samples == 2 ? 600 : 1200);
+    ASSERT_EQ(visibility.size(), points.size());
+    std::vector<std::vector<int>> seen(2, std::vector<int>(600, 0));
+    for (size_t point_idx = 0; point_idx < points.size(); ++point_idx) {
+      const auto& point = points[point_idx];
+      ASSERT_TRUE(std::isfinite(point.x) && std::isfinite(point.y) &&
+                  std::isfinite(point.z));
+      const int col = static_cast<int>(std::lround(point.x * 6 + 15 - 0.5f));
+      const int row = static_cast<int>(std::lround(point.y * 6 + 10 - 0.5f));
+      ASSERT_GE(col, 0);
+      ASSERT_LT(col, 30);
+      ASSERT_GE(row, 0);
+      ASSERT_LT(row, 20);
+      EXPECT_NEAR(point.x, (col + 0.5f - 15) / 6.0f, 1e-6f);
+      EXPECT_NEAR(point.y, (row + 0.5f - 10) / 6.0f, 1e-6f);
+      EXPECT_FLOAT_EQ(point.z, 5.0f);
+      EXPECT_FLOAT_EQ(point.nx, 0.0f);
+      EXPECT_FLOAT_EQ(point.ny, 0.0f);
+      EXPECT_FLOAT_EQ(point.nz, 1.0f);
+
+      auto visible = visibility[point_idx];
+      ASSERT_EQ(visible.size(), num_samples);
+      std::sort(visible.begin(), visible.end());
+      if (num_samples == 2) {
+        EXPECT_EQ(visible, (std::vector<int>{0, 1}));
+        // Extreme averaging and half-integer medians round upward.
+        EXPECT_EQ(point.r, 128);
+        EXPECT_EQ(point.g, 1);
+        EXPECT_EQ(point.b, 255);
+      } else {
+        ASSERT_GE(visible.front(), 0);
+        ASSERT_LT(visible.front(), 2);
+        const auto& expected = colors[visible.front()];
+        EXPECT_EQ(point.r, expected.r);
+        EXPECT_EQ(point.g, expected.g);
+        EXPECT_EQ(point.b, expected.b);
+      }
+      for (const int image_idx : visible) {
+        ASSERT_GE(image_idx, 0);
+        ASSERT_LT(image_idx, 2);
+        ++seen[image_idx][row * 30 + col];
+      }
+    }
+    // Every input pixel contributes exactly once in both arms.
+    for (const auto& image_seen : seen) {
+      for (const int count : image_seen) EXPECT_EQ(count, 1);
+    }
+  }
+}
+
 TEST(StereoFusion, SignedNormalGuardRestoresLossyTwoViewDecision) {
   if (!ImmutableMapRegion::Supported())
     GTEST_SKIP() << "Immutable FP32 map owners are unsupported on this host";
