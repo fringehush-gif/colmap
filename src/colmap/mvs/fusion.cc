@@ -1353,8 +1353,53 @@ void StereoFusion::Fuse(const int thread_id,
                         const int image_idx,
                         const int row,
                         const int col) {
+  struct Scratch {
+    std::vector<FusionData> queue;
+    std::vector<float> x, y, z, nx, ny, nz;
+    std::vector<uint8_t> r, g, b;
+    bool in_use = false;
+
+    void Clear() {
+      queue.clear();
+      x.clear();
+      y.clear();
+      z.clear();
+      nx.clear();
+      ny.clear();
+      nz.clear();
+      r.clear();
+      g.clear();
+      b.clear();
+    }
+
+    size_t CapacityBytes() const {
+      return queue.capacity() * sizeof(FusionData) +
+             (x.capacity() + y.capacity() + z.capacity() + nx.capacity() +
+              ny.capacity() + nz.capacity()) *
+                 sizeof(float) +
+             (r.capacity() + g.capacity() + b.capacity()) * sizeof(uint8_t);
+    }
+  };
+  thread_local Scratch worker_scratch;
+  // A bitmap reader can reenter Fusion; never lend its caller's scratch.
+  Scratch nested_scratch;
+  auto& scratch = worker_scratch.in_use ? nested_scratch : worker_scratch;
+  struct ScratchLease {
+    Scratch& scratch;
+    ~ScratchLease() {
+      // Bound retained capacity without limiting the current traversal.
+      if (scratch.CapacityBytes() > 256 * 1024) {
+        scratch = Scratch();
+      } else {
+        scratch.in_use = false;
+      }
+    }
+  } lease{scratch};
+  scratch.in_use = true;
+  scratch.Clear();
+
   // Next points to fuse.
-  std::vector<FusionData> fusion_queue;
+  auto& fusion_queue = scratch.queue;
   fusion_queue.emplace_back(image_idx, row, col, 0);
 
   Eigen::Vector4f fused_ref_point = Eigen::Vector4f::Zero();
@@ -1365,15 +1410,15 @@ void StereoFusion::Fuse(const int thread_id,
   size_t guarded_ref_row = 0, guarded_ref_col = 0;
 
   // Points of different pixels of the currently point to be fused.
-  std::vector<float> fused_point_x;
-  std::vector<float> fused_point_y;
-  std::vector<float> fused_point_z;
-  std::vector<float> fused_point_nx;
-  std::vector<float> fused_point_ny;
-  std::vector<float> fused_point_nz;
-  std::vector<uint8_t> fused_point_r;
-  std::vector<uint8_t> fused_point_g;
-  std::vector<uint8_t> fused_point_b;
+  auto& fused_point_x = scratch.x;
+  auto& fused_point_y = scratch.y;
+  auto& fused_point_z = scratch.z;
+  auto& fused_point_nx = scratch.nx;
+  auto& fused_point_ny = scratch.ny;
+  auto& fused_point_nz = scratch.nz;
+  auto& fused_point_r = scratch.r;
+  auto& fused_point_g = scratch.g;
+  auto& fused_point_b = scratch.b;
   FlatHashSet<int> fused_point_visibility;
 
   while (!fusion_queue.empty()) {
