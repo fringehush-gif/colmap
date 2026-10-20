@@ -30,6 +30,26 @@ namespace colmap {
 namespace mvs {
 // Inspect ring ownership through the Fusion test peer.
 struct StereoFusionExactDepthTestPeer {
+  static bool FullRamInputsMatchWorkspace(StereoFusion& fusion) {
+    if (fusion.full_ram_inputs_.size() != fusion.used_images_.size())
+      return false;
+    for (size_t index = 0; index < fusion.used_images_.size(); ++index) {
+      const auto& input = fusion.full_ram_inputs_[index];
+      if (!fusion.used_images_[index]) {
+        if (input.depth || input.normal || input.bitmap) return false;
+        continue;
+      }
+      const int view = static_cast<int>(index);
+      if (input.depth != &fusion.workspace_->GetDepthMap(view) ||
+          input.normal != &fusion.workspace_->GetNormalMap(view) ||
+          input.bitmap != &fusion.workspace_->GetBitmap(view))
+        return false;
+    }
+    return !fusion.full_ram_inputs_.empty();
+  }
+  static bool HasFullRamInputs(const StereoFusion& fusion) {
+    return !fusion.full_ram_inputs_.empty();
+  }
   static void PrepareRing(StereoFusion& fusion,
                           const Workspace::Options& options,
                           size_t slots,
@@ -519,6 +539,8 @@ TEST(StereoFusion, Integration) {
   StereoFusion two_workers(
       two_worker_options, temp_dir, "COLMAP", "", "geometric");
   two_workers.Run();
+  EXPECT_TRUE(
+      StereoFusionExactDepthTestPeer::FullRamInputsMatchWorkspace(two_workers));
   const auto& parallel_points = two_workers.GetFusedPoints();
   const auto& parallel_visibility = two_workers.GetFusedPointsVisibility();
   ASSERT_FALSE(parallel_points.empty());
@@ -549,6 +571,8 @@ TEST(StereoFusion, Integration) {
   const auto first_visibility = visibility;
   fusion.Run();
   ASSERT_EQ(fusion.GetFusedPoints().size(), first_points.size());
+  EXPECT_TRUE(
+      StereoFusionExactDepthTestPeer::FullRamInputsMatchWorkspace(fusion));
   EXPECT_EQ(fusion.GetFusedPointsVisibility(), first_visibility);
   for (size_t i = 0; i < first_points.size(); ++i) {
     const auto& a = first_points[i];
@@ -606,6 +630,7 @@ TEST(StereoFusion, Integration) {
   options.cache_size = 12000.0 / (1024.0 * 1024.0 * 1024.0);
   StereoFusion bounded(options, temp_dir, "COLMAP", "", "geometric");
   bounded.Run();
+  EXPECT_FALSE(StereoFusionExactDepthTestPeer::HasFullRamInputs(bounded));
   const auto& bounded_points = bounded.GetFusedPoints();
   const auto& bounded_visibility = bounded.GetFusedPointsVisibility();
   ASSERT_EQ(bounded_points.size(), fused_points.size());
