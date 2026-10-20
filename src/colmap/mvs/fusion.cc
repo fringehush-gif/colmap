@@ -1372,6 +1372,7 @@ void StereoFusion::Fuse(const int thread_id,
     std::vector<FusionData> queue;
     std::vector<float> x, y, z, nx, ny, nz;
     std::vector<uint8_t> r, g, b;
+    std::vector<int> visibility;
     bool in_use = false;
 
     void Clear() {
@@ -1385,6 +1386,7 @@ void StereoFusion::Fuse(const int thread_id,
       r.clear();
       g.clear();
       b.clear();
+      visibility.clear();
     }
 
     size_t CapacityBytes() const {
@@ -1392,7 +1394,8 @@ void StereoFusion::Fuse(const int thread_id,
              (x.capacity() + y.capacity() + z.capacity() + nx.capacity() +
               ny.capacity() + nz.capacity()) *
                  sizeof(float) +
-             (r.capacity() + g.capacity() + b.capacity()) * sizeof(uint8_t);
+             (r.capacity() + g.capacity() + b.capacity()) * sizeof(uint8_t) +
+             visibility.capacity() * sizeof(int);
     }
   };
   thread_local Scratch worker_scratch;
@@ -1434,7 +1437,7 @@ void StereoFusion::Fuse(const int thread_id,
   auto& fused_point_r = scratch.r;
   auto& fused_point_g = scratch.g;
   auto& fused_point_b = scratch.b;
-  FlatHashSet<int> fused_point_visibility;
+  auto& fused_point_visibility = scratch.visibility;
 
   while (!fusion_queue.empty()) {
     const auto data = fusion_queue.back();
@@ -1683,7 +1686,7 @@ void StereoFusion::Fuse(const int thread_id,
     fused_point_r.push_back(color.r);
     fused_point_g.push_back(color.g);
     fused_point_b.push_back(color.b);
-    fused_point_visibility.insert(image_idx);
+    fused_point_visibility.push_back(image_idx);
 
     // Remember the first pixel as the reference.
     if (traversal_depth == 0) {
@@ -1766,9 +1769,15 @@ void StereoFusion::Fuse(const int thread_id,
     fused_point.g = RoundedByteMedian(fused_point_g);
     fused_point.b = RoundedByteMedian(fused_point_b);
 
+    // Preserve every insertion, including duplicates, so the fresh table has
+    // the same iteration order. Rejected roots need no visibility table.
+    FlatHashSet<int> visibility;
+    for (const int visible_image_idx : fused_point_visibility) {
+      visibility.insert(visible_image_idx);
+    }
     task_fused_points_[thread_id].push_back(fused_point);
-    task_fused_points_visibility_[thread_id].emplace_back(
-        fused_point_visibility.begin(), fused_point_visibility.end());
+    task_fused_points_visibility_[thread_id].emplace_back(visibility.begin(),
+                                                          visibility.end());
   }
 }
 

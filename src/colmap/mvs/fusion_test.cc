@@ -1311,6 +1311,44 @@ std::filesystem::path CreateTwoViewNormalDecisionFixture() {
   return root;
 }
 
+TEST(StereoFusion, RejectedRootsDoNotLeakVisibility) {
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  for (const int num_samples : {3, 1, 2}) {
+    SCOPED_TRACE(num_samples);
+    StereoFusionOptions options;
+    options.num_threads = 1;
+    options.use_cache = false;
+    options.min_num_pixels = num_samples;
+    options.max_num_pixels = num_samples;
+    StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+    fusion.Run();
+
+    const auto& points = fusion.GetFusedPoints();
+    const auto& visibility = fusion.GetFusedPointsVisibility();
+    if (num_samples == 3) {
+      EXPECT_TRUE(points.empty());
+      EXPECT_TRUE(visibility.empty());
+      continue;
+    }
+    ASSERT_EQ(points.size(), num_samples == 1 ? 1200 : 600);
+    ASSERT_EQ(visibility.size(), points.size());
+    std::vector<size_t> counts(2, 0);
+    for (auto visible : visibility) {
+      ASSERT_EQ(visible.size(), num_samples);
+      std::sort(visible.begin(), visible.end());
+      if (num_samples == 2) {
+        EXPECT_EQ(visible, (std::vector<int>{0, 1}));
+      }
+      for (const int image_idx : visible) {
+        ASSERT_GE(image_idx, 0);
+        ASSERT_LT(image_idx, 2);
+        ++counts[image_idx];
+      }
+    }
+    EXPECT_EQ(counts, (std::vector<size_t>{600, 600}));
+  }
+}
+
 TEST(StereoFusion, RoundedByteMedianColors) {
   const auto root = CreateTwoViewNormalDecisionFixture();
   Model model;
