@@ -263,6 +263,13 @@ class StereoFusion : public BaseController {
   const float min_cos_normal_error_;
 
   std::unique_ptr<Workspace> workspace_;
+  struct FullRamInput {
+    const DepthMap* depth = nullptr;
+    const NormalMap* normal = nullptr;
+    const Bitmap* bitmap = nullptr;
+  };
+  // Borrowed only from the eager FP32 workspace, which outlives joined rows.
+  std::vector<FullRamInput> full_ram_inputs_;
   MappedNormalStats resident_normal_mapping_stats_;
   BoundedWorkspace* bounded_workspace_ = nullptr;
   std::vector<const BoundedWorkspace::ImageData*> neighborhood_data_;

@@ -432,6 +432,7 @@ void StereoFusion::Run() {
   Timer run_timer;
   run_timer.Start();
 
+  full_ram_inputs_.clear();
   ClearDirectComponentPins();
   direct_component_pins_admitted_ = false;
   direct_depth_borrows_ = 0;
@@ -550,6 +551,11 @@ void StereoFusion::Run() {
   LOG(INFO) << "Reading configuration...";
 
   const auto& model = workspace_->GetModel();
+  if (!options_.use_cache && !options_.bounded_cache &&
+      workspace_->GetOptions().full_ram_normal_storage ==
+          NormalStorage::kFp32) {
+    full_ram_inputs_.resize(model.images.size());
+  }
   neighborhood_data_.assign(model.images.size(), nullptr);
   neighborhood_leases_.clear();
   task_neighborhood_reads_.resize(num_threads);
@@ -615,6 +621,12 @@ void StereoFusion::Run() {
     }
 
     used_images_.at(image_idx) = true;
+
+    if (!full_ram_inputs_.empty()) {
+      full_ram_inputs_.at(image_idx) = {&workspace_->GetDepthMap(image_idx),
+                                        &workspace_->GetNormalMap(image_idx),
+                                        &workspace_->GetBitmap(image_idx)};
+    }
 
     InitFusedPixelMask(image_idx, depth_width, depth_height);
 
@@ -1477,14 +1489,18 @@ void StereoFusion::Fuse(const int thread_id,
       ++task_neighborhood_reads_[thread_id].demand_acquires;
     }
     const auto* image_data = pinned ? pinned : image_lease.get();
-    const auto depth_map = image_data ? std::shared_ptr<const DepthMap>()
-                                      : workspace_->GetDepthMapLease(image_idx);
+    const auto* resident =
+        full_ram_inputs_.empty() ? nullptr : &full_ram_inputs_.at(image_idx);
+    const auto depth_map = image_data || resident
+                               ? std::shared_ptr<const DepthMap>()
+                               : workspace_->GetDepthMapLease(image_idx);
     const bool exact_depth = options_.bounded_cache_exact_depth;
     const bool exact_nonpositive =
         exact_depth && !image_data->HasPositiveDepth(row, col);
     float depth = exact_depth
                       ? 0.0f
                       : (image_data ? image_data->depth_map.Get(row, col)
+                         : resident ? resident->depth->Get(row, col)
                                     : depth_map->Get(row, col));
     if (options_.bounded_cache_components && image_lease) {
       image_lease.reset();
@@ -1551,16 +1567,18 @@ void StereoFusion::Fuse(const int thread_id,
     const bool compact_full_ram =
         workspace_->GetOptions().full_ram_normal_storage !=
         NormalStorage::kFp32;
-    const auto normal_map = normal_image || mapped_normal || compact_full_ram
-                                ? std::shared_ptr<const NormalMap>()
-                                : workspace_->GetNormalMapLease(image_idx);
+    const auto normal_map =
+        normal_image || mapped_normal || compact_full_ram || resident
+            ? std::shared_ptr<const NormalMap>()
+            : workspace_->GetNormalMapLease(image_idx);
+    const auto* fp32_normal = resident ? resident->normal : normal_map.get();
     const Eigen::Vector3f local_normal =
         mapped_normal      ? mapped_normal->ReadFloat3(row, col)
         : normal_image     ? normal_image->GetNormal(row, col)
         : compact_full_ram ? workspace_->GetStoredNormal(image_idx, row, col)
-                           : Eigen::Vector3f(normal_map->Get(row, col, 0),
-                                             normal_map->Get(row, col, 1),
-                                             normal_map->Get(row, col, 2));
+                           : Eigen::Vector3f(fp32_normal->Get(row, col, 0),
+                                             fp32_normal->Get(row, col, 1),
+                                             fp32_normal->Get(row, col, 2));
     const Eigen::Vector3f normal = inv_R_.at(image_idx) * local_normal;
     normal_lease.reset();
 
@@ -1651,9 +1669,12 @@ void StereoFusion::Fuse(const int thread_id,
     const auto* bitmap_image = borrowed_bitmap ? borrowed_bitmap
                                : bitmap_lease  ? bitmap_lease.get()
                                                : image_data;
-    const auto bitmap = bitmap_image ? std::shared_ptr<const Bitmap>()
-                                     : workspace_->GetBitmapLease(image_idx);
-    const Bitmap& bitmap_data = bitmap_image ? bitmap_image->bitmap : *bitmap;
+    const auto bitmap = bitmap_image || resident
+                            ? std::shared_ptr<const Bitmap>()
+                            : workspace_->GetBitmapLease(image_idx);
+    const Bitmap& bitmap_data = bitmap_image ? bitmap_image->bitmap
+                                : resident   ? *resident->bitmap
+                                             : *bitmap;
     const auto color =
         bitmap_image && bitmap_image->bitmap_on_depth_grid
             ? bitmap_data.GetPixel(col, row).value_or(BitmapColor<uint8_t>(0))
