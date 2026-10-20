@@ -1159,6 +1159,20 @@ void OptionManager::AddStereoFusionOptions() {
       "Resident normals: fp32 (12 bytes) or oct2x16 (4 bytes). Octahedral "
       "storage discards magnitude and may change Fusion output. Requires "
       "full-RAM loading.");
+  AddDefaultOption("StereoFusion.full_ram_normal_guard",
+                   &stereo_fusion->full_ram_normal_guard,
+                   "Default-off exact predicate for full-RAM oct2x16. Requires "
+                   "sealed immutable "
+                   "same-grid FP32 originals, 1-24 Fusion workers, one preload "
+                   "worker and paired budgets.");
+  AddDefaultOption(
+      "StereoFusion.full_ram_normal_guard_bytes",
+      &stereo_fusion->full_ram_normal_guard_bytes,
+      "Independent page-rounded original normal row-mapping budget.");
+  AddDefaultOption(
+      "StereoFusion.full_ram_normal_guard_files",
+      &stereo_fusion->full_ram_normal_guard_files,
+      "Original source descriptor/row-owner slots; admit every used map.");
   AddDefaultOption("StereoFusion.bounded_cache", &stereo_fusion->bounded_cache);
   AddDefaultOption("StereoFusion.bounded_cache_components",
                    &stereo_fusion->bounded_cache_components);

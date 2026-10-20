@@ -29,6 +29,21 @@ namespace {
 // A source hypothesis: one immutable row band per owner. This is not a
 // measured optimum and does not alter any sampled FP32 value.
 constexpr size_t kMappedNormalStripeRows = 256;
+
+// Return the rounded median directly for nonnegative byte samples.
+uint8_t RoundedByteMedian(std::vector<uint8_t>& elems) {
+  THROW_CHECK(!elems.empty());
+  const size_t middle = elems.size() / 2;
+  std::nth_element(elems.begin(), elems.begin() + middle, elems.end());
+  const unsigned int upper = elems[middle];
+  if (elems.size() % 2 != 0) {
+    return static_cast<uint8_t>(upper);
+  }
+  const unsigned int lower =
+      *std::max_element(elems.begin(), elems.begin() + middle);
+  return static_cast<uint8_t>((lower + upper + 1) / 2);
+}
+
 }  // namespace
 namespace internal {
 
@@ -120,6 +135,9 @@ void StereoFusionOptions::Print() const {
   PrintOption(mask_path);
   PrintOption(full_ram_load_threads);
   PrintOption(full_ram_normal_storage);
+  PrintOption(full_ram_normal_guard);
+  PrintOption(full_ram_normal_guard_bytes);
+  PrintOption(full_ram_normal_guard_files);
   PrintOption(max_image_size);
   PrintOption(min_num_pixels);
   PrintOption(max_num_pixels);
@@ -171,6 +189,27 @@ bool StereoFusionOptions::Check() const {
         bounded_cache_normal_mapped_files != 0 ||
         bounded_cache_prefill_threads != -1)),
       false);
+  CHECK_OPTION_EQ(full_ram_normal_guard_bytes == 0,
+                  full_ram_normal_guard_files == 0);
+  CHECK_OPTION_GE(full_ram_normal_guard_files, 0);
+  CHECK_OPTION_GE(full_ram_normal_guard_bytes, int64_t{0});
+  CHECK_OPTION_LE(static_cast<uint64_t>(full_ram_normal_guard_bytes),
+                  std::numeric_limits<size_t>::max());
+  if (full_ram_normal_guard) {
+    CHECK_OPTION_EQ(storage == NormalStorage::kOct2x16, true);
+    CHECK_OPTION_EQ(SupportsNormalPrecisionGuard(), true);
+    CHECK_OPTION_GT(full_ram_normal_guard_bytes, 0);
+    // Bound row concurrency explicitly. Keep preload serial: -1 inherits
+    // num_threads, so parallel guard profiles must select one loader lane.
+    CHECK_OPTION_GE(num_threads, 1);
+    CHECK_OPTION_LE(num_threads, 24);
+    CHECK_OPTION_EQ(full_ram_load_threads == 1 ||
+                        (num_threads == 1 && full_ram_load_threads == -1),
+                    true);
+  } else {
+    CHECK_OPTION_EQ(full_ram_normal_guard_bytes, int64_t{0});
+    CHECK_OPTION_EQ(full_ram_normal_guard_files, 0);
+  }
   CHECK_OPTION_IN(min_num_pixels, 0, max_num_pixels);
   CHECK_OPTION_GT(max_traversal_depth, 0);
   CHECK_OPTION_GE(max_reproj_error, 0);
@@ -278,6 +317,10 @@ StereoFusion::GetDepthMappedNeighborhoodStats() const {
   return bounded_workspace_
              ? bounded_workspace_->GetDepthMappedNeighborhoodStats()
              : BoundedWorkspace::DepthMappedNeighborhoodStats{};
+}
+
+MappedNormalStats StereoFusion::GetResidentNormalMappingStatsSnapshot() const {
+  return resident_normal_mapping_stats_;
 }
 
 size_t StereoFusion::GetMaxBoundedPrefillLanesScheduled() const {
@@ -397,6 +440,14 @@ void StereoFusion::Run() {
   neighborhood_bitmap_admitted_views_ = 0;
   neighborhood_bitmap_carried_views_ = 0;
   task_neighborhood_reads_.clear();
+  resident_normal_mapping_stats_ = {};
+  // Declared before the row pool: unwinding destroys/joins workers first.
+  struct OriginalNormalExit {
+    Workspace* workspace = nullptr;
+    ~OriginalNormalExit() {
+      if (workspace) workspace->ReleaseOriginalNormalSources();
+    }
+  } original_normal_exit;
   fused_points_.clear();
   fused_points_visibility_.clear();
   // A failed row may have appended points before the joined exception.
@@ -430,6 +481,13 @@ void StereoFusion::Run() {
         StringPrintf("stereo-%s", pmvs_option_name_.c_str());
   }
 
+  workspace_options.full_ram_normal_guard = options_.full_ram_normal_guard;
+  workspace_options.full_ram_normal_guard_bytes =
+      static_cast<size_t>(options_.full_ram_normal_guard_bytes);
+  workspace_options.full_ram_normal_guard_files =
+      static_cast<size_t>(options_.full_ram_normal_guard_files);
+  workspace_options.full_ram_normal_guard_concurrency =
+      static_cast<size_t>(GetEffectiveNumThreads(options_.num_threads));
   workspace_options.num_threads = options_.num_threads;
   workspace_options.max_image_size = options_.max_image_size;
   workspace_options.image_as_rgb = true;
@@ -472,9 +530,13 @@ void StereoFusion::Run() {
       workspace_options.num_threads = static_cast<int>(std::min(
           static_cast<size_t>(options_.full_ram_load_threads), roster_size));
       workspace_ = std::make_unique<Workspace>(workspace_options);
+      if (options_.full_ram_normal_guard)
+        original_normal_exit.workspace = workspace_.get();
       workspace_->Load(unique_names);
     } else {
       workspace_ = std::make_unique<Workspace>(workspace_options);
+      if (options_.full_ram_normal_guard)
+        original_normal_exit.workspace = workspace_.get();
       workspace_->Load(image_names);
     }
     num_threads = GetEffectiveNumThreads(options_.num_threads);
@@ -518,6 +580,9 @@ void StereoFusion::Run() {
   inv_P_.resize(model.images.size());
   inv_R_.resize(model.images.size());
   prepared_normal_rotations_.clear();
+  prepared_codec_rotations_.clear();
+  if (options_.full_ram_normal_guard)
+    prepared_codec_rotations_.resize(model.images.size());
   if (options_.bounded_cache_normal_snorm16_guard) {
     prepared_normal_rotations_.resize(model.images.size());
   }
@@ -580,6 +645,12 @@ void StereoFusion::Run() {
     if (options_.bounded_cache_normal_snorm16_guard) {
       prepared_normal_rotations_.at(image_idx) =
           normal_precision_guard::PrepareRotation(inv_R_.at(image_idx));
+    }
+    if (options_.full_ram_normal_guard) {
+      prepared_codec_rotations_.at(image_idx) =
+          normal_precision_guard::PrepareCodecRotation(
+              inv_R_.at(image_idx),
+              workspace_->GetStoredNormalError(image_idx));
     }
   }
 
@@ -774,6 +845,11 @@ void StereoFusion::Run() {
     std::fill(neighborhood_data_.begin(), neighborhood_data_.end(), nullptr);
     neighborhood_leases_.clear();
 
+    if (options_.full_ram_normal_guard) {
+      workspace_->ValidateOriginalNormalSources();
+      resident_normal_mapping_stats_ =
+          workspace_->GetOriginalNormalMappingStats();
+    }
     fused_points_.reserve(total_fused_points);
     fused_points_visibility_.reserve(total_fused_points);
     for (size_t thread_id = 0; thread_id < task_fused_points_.size();
@@ -1292,8 +1368,56 @@ void StereoFusion::Fuse(const int thread_id,
                         const int image_idx,
                         const int row,
                         const int col) {
+  struct Scratch {
+    std::vector<FusionData> queue;
+    std::vector<float> x, y, z, nx, ny, nz;
+    std::vector<uint8_t> r, g, b;
+    std::vector<int> visibility;
+    bool in_use = false;
+
+    void Clear() {
+      queue.clear();
+      x.clear();
+      y.clear();
+      z.clear();
+      nx.clear();
+      ny.clear();
+      nz.clear();
+      r.clear();
+      g.clear();
+      b.clear();
+      visibility.clear();
+    }
+
+    size_t CapacityBytes() const {
+      return queue.capacity() * sizeof(FusionData) +
+             (x.capacity() + y.capacity() + z.capacity() + nx.capacity() +
+              ny.capacity() + nz.capacity()) *
+                 sizeof(float) +
+             (r.capacity() + g.capacity() + b.capacity()) * sizeof(uint8_t) +
+             visibility.capacity() * sizeof(int);
+    }
+  };
+  thread_local Scratch worker_scratch;
+  // A bitmap reader can reenter Fusion; never lend its caller's scratch.
+  Scratch nested_scratch;
+  auto& scratch = worker_scratch.in_use ? nested_scratch : worker_scratch;
+  struct ScratchLease {
+    Scratch& scratch;
+    ~ScratchLease() {
+      // Bound retained capacity without limiting the current traversal.
+      if (scratch.CapacityBytes() > 256 * 1024) {
+        scratch = Scratch();
+      } else {
+        scratch.in_use = false;
+      }
+    }
+  } lease{scratch};
+  scratch.in_use = true;
+  scratch.Clear();
+
   // Next points to fuse.
-  std::vector<FusionData> fusion_queue;
+  auto& fusion_queue = scratch.queue;
   fusion_queue.emplace_back(image_idx, row, col, 0);
 
   Eigen::Vector4f fused_ref_point = Eigen::Vector4f::Zero();
@@ -1304,16 +1428,16 @@ void StereoFusion::Fuse(const int thread_id,
   size_t guarded_ref_row = 0, guarded_ref_col = 0;
 
   // Points of different pixels of the currently point to be fused.
-  std::vector<float> fused_point_x;
-  std::vector<float> fused_point_y;
-  std::vector<float> fused_point_z;
-  std::vector<float> fused_point_nx;
-  std::vector<float> fused_point_ny;
-  std::vector<float> fused_point_nz;
-  std::vector<uint8_t> fused_point_r;
-  std::vector<uint8_t> fused_point_g;
-  std::vector<uint8_t> fused_point_b;
-  FlatHashSet<int> fused_point_visibility;
+  auto& fused_point_x = scratch.x;
+  auto& fused_point_y = scratch.y;
+  auto& fused_point_z = scratch.z;
+  auto& fused_point_nx = scratch.nx;
+  auto& fused_point_ny = scratch.ny;
+  auto& fused_point_nz = scratch.nz;
+  auto& fused_point_r = scratch.r;
+  auto& fused_point_g = scratch.g;
+  auto& fused_point_b = scratch.b;
+  auto& fused_point_visibility = scratch.visibility;
 
   while (!fusion_queue.empty()) {
     const auto data = fusion_queue.back();
@@ -1442,18 +1566,35 @@ void StereoFusion::Fuse(const int thread_id,
 
     // Check for consistent normal direction with reference normal.
     if (traversal_depth > 0) {
-      if (options_.bounded_cache_normal_snorm16_guard) {
+      if (options_.bounded_cache_normal_snorm16_guard ||
+          options_.full_ram_normal_guard) {
         const auto candidate =
-            normal_precision_guard::CompressedOperandFromRotated(
-                inv_R_.at(image_idx),
-                prepared_normal_rotations_.at(image_idx),
-                local_normal,
-                normal);
+            options_.full_ram_normal_guard
+                ? normal_precision_guard::BoundedOperandFromRotated(
+                      inv_R_.at(image_idx),
+                      workspace_->GetStoredNormalError(image_idx),
+                      prepared_codec_rotations_.at(image_idx),
+                      local_normal,
+                      normal)
+                : normal_precision_guard::CompressedOperandFromRotated(
+                      inv_R_.at(image_idx),
+                      prepared_normal_rotations_.at(image_idx),
+                      local_normal,
+                      normal);
         if (!normal_precision_guard::NormalAccept(
                 guarded_ref_normal,
                 candidate,
                 min_cos_normal_error_,
                 [&]() -> Eigen::Vector3f {
+                  if (options_.full_ram_normal_guard) {
+                    const Eigen::Vector3f original =
+                        workspace_->ReadOriginalStoredNormal(guarded_ref_image,
+                                                             guarded_ref_row,
+                                                             guarded_ref_col);
+                    const Eigen::Vector3f rotated =
+                        inv_R_.at(guarded_ref_image) * original;
+                    return rotated;
+                  }
                   return inv_R_.at(guarded_ref_image) *
                          bounded_workspace_->ReadOriginalNormal(
                              guarded_ref_image,
@@ -1461,6 +1602,14 @@ void StereoFusion::Fuse(const int thread_id,
                              guarded_ref_col);
                 },
                 [&]() -> Eigen::Vector3f {
+                  if (options_.full_ram_normal_guard) {
+                    const Eigen::Vector3f original =
+                        workspace_->ReadOriginalStoredNormal(
+                            image_idx, row, col);
+                    const Eigen::Vector3f rotated =
+                        inv_R_.at(image_idx) * original;
+                    return rotated;
+                  }
                   return inv_R_.at(image_idx) *
                          bounded_workspace_->ReadOriginalNormal(
                              image_idx, row, col);
@@ -1537,19 +1686,27 @@ void StereoFusion::Fuse(const int thread_id,
     fused_point_r.push_back(color.r);
     fused_point_g.push_back(color.g);
     fused_point_b.push_back(color.b);
-    fused_point_visibility.insert(image_idx);
+    fused_point_visibility.push_back(image_idx);
 
     // Remember the first pixel as the reference.
     if (traversal_depth == 0) {
       fused_ref_point = Eigen::Vector4f(xyz(0), xyz(1), xyz(2), 1.0f);
       fused_ref_normal = normal;
-      if (options_.bounded_cache_normal_snorm16_guard) {
+      if (options_.bounded_cache_normal_snorm16_guard ||
+          options_.full_ram_normal_guard) {
         guarded_ref_normal =
-            normal_precision_guard::CompressedOperandFromRotated(
-                inv_R_.at(image_idx),
-                prepared_normal_rotations_.at(image_idx),
-                local_normal,
-                normal);
+            options_.full_ram_normal_guard
+                ? normal_precision_guard::BoundedOperandFromRotated(
+                      inv_R_.at(image_idx),
+                      workspace_->GetStoredNormalError(image_idx),
+                      prepared_codec_rotations_.at(image_idx),
+                      local_normal,
+                      normal)
+                : normal_precision_guard::CompressedOperandFromRotated(
+                      inv_R_.at(image_idx),
+                      prepared_normal_rotations_.at(image_idx),
+                      local_normal,
+                      normal);
         guarded_ref_image = image_idx;
         guarded_ref_row = row;
         guarded_ref_col = col;
@@ -1608,16 +1765,19 @@ void StereoFusion::Fuse(const int thread_id,
     fused_point.ny = fused_normal.y() / fused_normal_norm;
     fused_point.nz = fused_normal.z() / fused_normal_norm;
 
-    fused_point.r =
-        TruncateCast<float, uint8_t>(std::round(Median(fused_point_r)));
-    fused_point.g =
-        TruncateCast<float, uint8_t>(std::round(Median(fused_point_g)));
-    fused_point.b =
-        TruncateCast<float, uint8_t>(std::round(Median(fused_point_b)));
+    fused_point.r = RoundedByteMedian(fused_point_r);
+    fused_point.g = RoundedByteMedian(fused_point_g);
+    fused_point.b = RoundedByteMedian(fused_point_b);
 
+    // Preserve every insertion, including duplicates, so the fresh table has
+    // the same iteration order. Rejected roots need no visibility table.
+    FlatHashSet<int> visibility;
+    for (const int visible_image_idx : fused_point_visibility) {
+      visibility.insert(visible_image_idx);
+    }
     task_fused_points_[thread_id].push_back(fused_point);
-    task_fused_points_visibility_[thread_id].emplace_back(
-        fused_point_visibility.begin(), fused_point_visibility.end());
+    task_fused_points_visibility_[thread_id].emplace_back(visibility.begin(),
+                                                          visibility.end());
   }
 }
 

@@ -7,6 +7,7 @@ COLMAP_ADD_LIBRARY(
     SRCS
         advancing_front_meshing.h advancing_front_meshing.cc
         bounded_workspace.h bounded_workspace.cc
+        immutable_map_pool.h
         consistency_graph.h consistency_graph.cc
         delaunay_meshing.h delaunay_meshing.cc
         depth_map.h depth_map.cc

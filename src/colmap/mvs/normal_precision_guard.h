@@ -5,6 +5,7 @@
 
 #include <cfenv>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -85,11 +86,17 @@ struct Operand {
 // Reuse the concrete FP32 rotation already computed by Fusion; the value
 // under unchanged controls across internal lease release, never normalized
 // or an exact fallback. All accepted interval/control checks remain here.
-inline Operand CompressedOperandFromRotated(const Rot& r,
-                                            const Vec& decoded,
-                                            const Vec& rotated) {
+// Caller supplies a complete consumed-grid certificate for this codec.
+// No unit-length assumption: errors include original magnitude and decode math.
+inline Operand BoundedOperandFromRotated(const Rot& r,
+                                         const Error& local_error,
+                                         const Vec& decoded,
+                                         const Vec& rotated) {
   Operand result{rotated, Error::Zero(), false};
-  const double e = Up(1.0 / 65534.0 + 0x1p-24);
+  if (!local_error.allFinite() || local_error.minCoeff() < 0) {
+    result.error.setConstant(std::numeric_limits<double>::infinity());
+    return result;
+  }
   // No callbacks or FP-control writes occur within this component loop.
   const bool arithmetic_supported = SupportedArithmetic();
   const bool finite_value = result.value.allFinite();
@@ -97,7 +104,7 @@ inline Operand CompressedOperandFromRotated(const Rot& r,
   for (int i = 0; i < 3; ++i) {
     double delta = 0, magnitudes = 0;
     for (int j = 0; j < 3; ++j) {
-      delta = Add(delta, Mul(std::abs(double(r(i, j))), e));
+      delta = Add(delta, Mul(std::abs(double(r(i, j))), local_error(j)));
       magnitudes =
           Add(magnitudes,
               Mul(std::abs(double(r(i, j))), std::abs(double(decoded(j)))));
@@ -115,6 +122,47 @@ inline Operand CompressedOperandFromRotated(const Rot& r,
   }
   return result;
 }
+
+// Preserve the existing SNORM constructor and its original numerical bound.
+inline Operand CompressedOperandFromRotated(const Rot& r,
+                                            const Vec& decoded,
+                                            const Vec& rotated) {
+  const double e = Up(1.0 / 65534.0 + 0x1p-24);
+  return BoundedOperandFromRotated(r, Error::Constant(e), decoded, rotated);
+}
+
+// Temporary pack-time accumulator. Publish its 24-byte Error only after every
+// consumed FP32 pixel and the ACTUAL codec decode have been checked. Retaining
+// the FP32 source, dimensions, codec identity and fallback lease is caller
+// work.
+class CodecErrorCertificate {
+ public:
+  explicit CodecErrorCertificate(std::size_t expected) : expected_(expected) {
+    if (expected == 0) throw std::runtime_error("empty codec certificate");
+  }
+  void AddDecoded(const Vec& original, const Vec& decoded) {
+    if (!SupportedArithmetic() || seen_ >= expected_ || !original.allFinite() ||
+        !decoded.allFinite())
+      throw std::runtime_error("invalid codec certificate input/control");
+    for (int i = 0; i < 3; ++i) {
+      // Float operands are exact in double; one outward step covers subtraction
+      // rounding even when their exponents differ by more than 53 bits.
+      const double error =
+          Up(std::abs(double(original(i)) - double(decoded(i))));
+      if (error > error_(i)) error_(i) = error;
+    }
+    ++seen_;
+  }
+  Error Seal() const {
+    if (seen_ != expected_ || !SupportedArithmetic())
+      throw std::runtime_error("incomplete codec certificate");
+    return error_;
+  }
+
+ private:
+  std::size_t expected_, seen_ = 0;
+  Error error_ = Error::Zero();
+};
 
 inline Operand CompressedOperand(const Rot& r, const Vec& decoded) {
   return CompressedOperandFromRotated(r, decoded, r * decoded);
@@ -161,6 +209,80 @@ inline Operand CompressedOperandFromRotated(const Rot& r,
               Mul(prepared.absolute(i, j), std::abs(double(decoded(j)))));
     }
     const double delta = prepared.delta(i);
+    result.error(i) =
+        Add(Add(delta, Mul(gamma, Add(2 * magnitudes, delta))),
+            32 * double(std::numeric_limits<float>::denorm_min()));
+    if (!finite_value || !std::isfinite(result.error(i)) ||
+        magnitudes + delta > double(std::numeric_limits<float>::max()) / 16) {
+      result.error.setConstant(std::numeric_limits<double>::infinity());
+      break;
+    }
+  }
+  return result;
+}
+
+// Image-local certificate terms. Private fields prevent a caller from mixing
+// cached deltas with another source/error certificate. A stale/default cache
+// falls back to the ordinary constructor; it never relaxes its interval.
+class PreparedCodecRotation {
+ public:
+  PreparedCodecRotation() = default;
+  bool valid() const { return terms_.valid; }
+
+ private:
+  Rot rotation_ = Rot::Zero();
+  Error local_error_ = Error::Zero();
+  PreparedRotation terms_;
+  friend PreparedCodecRotation PrepareCodecRotation(const Rot&, const Error&);
+  friend Operand BoundedOperandFromRotated(const Rot&,
+                                           const Error&,
+                                           const PreparedCodecRotation&,
+                                           const Vec&,
+                                           const Vec&);
+};
+inline PreparedCodecRotation PrepareCodecRotation(const Rot& r,
+                                                  const Error& local_error) {
+  PreparedCodecRotation prepared;
+  prepared.rotation_ = r;
+  prepared.local_error_ = local_error;
+  if (!SupportedArithmetic() || !r.allFinite() || !local_error.allFinite() ||
+      local_error.minCoeff() < 0)
+    return prepared;
+  for (int i = 0; i < 3; ++i) {
+    double delta = 0;
+    for (int j = 0; j < 3; ++j) {
+      prepared.terms_.absolute(i, j) = std::abs(double(r(i, j)));
+      delta = Add(delta, Mul(prepared.terms_.absolute(i, j), local_error(j)));
+    }
+    prepared.terms_.delta(i) = delta;
+  }
+  prepared.terms_.valid = prepared.terms_.delta.allFinite();
+  return prepared;
+}
+inline Operand BoundedOperandFromRotated(const Rot& r,
+                                         const Error& local_error,
+                                         const PreparedCodecRotation& prepared,
+                                         const Vec& decoded,
+                                         const Vec& rotated) {
+  // Compare actual coefficient bytes, including signed zero. Controls can
+  // change after image preparation; never cache this per-call admission.
+  if (!prepared.valid() || !SupportedArithmetic() ||
+      std::memcmp(r.data(), prepared.rotation_.data(), 9 * sizeof(float)) !=
+          0 ||
+      std::memcmp(local_error.data(),
+                  prepared.local_error_.data(),
+                  3 * sizeof(double)) != 0)
+    return BoundedOperandFromRotated(r, local_error, decoded, rotated);
+  Operand result{rotated, Error::Zero(), false};
+  const bool finite_value = result.value.allFinite();
+  const double gamma = Gamma();
+  for (int i = 0; i < 3; ++i) {
+    double magnitudes = 0;
+    for (int j = 0; j < 3; ++j)
+      magnitudes = Add(
+          magnitudes,
+          Mul(prepared.terms_.absolute(i, j), std::abs(double(decoded(j)))));
+    const double delta = prepared.terms_.delta(i);
     result.error(i) =
         Add(Add(delta, Mul(gamma, Add(2 * magnitudes, delta))),
             32 * double(std::numeric_limits<float>::denorm_min()));

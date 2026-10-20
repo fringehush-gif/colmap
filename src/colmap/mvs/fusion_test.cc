@@ -1262,9 +1262,7 @@ TEST(StereoFusion, Rotation180Invariance) {
   EXPECT_NEAR(points1[0].z, points2[0].z, 1e-5f);
 }
 
-TEST(StereoFusion, SignedNormalGuardRestoresLossyTwoViewDecision) {
-  if (!ImmutableMapRegion::Supported())
-    GTEST_SKIP() << "Immutable FP32 map owners are unsupported on this host";
+std::filesystem::path CreateTwoViewNormalDecisionFixture() {
   const auto root = CreateTestDir();
   CreateDirIfNotExists(root / "sparse");
   CreateDirIfNotExists(root / "images");
@@ -1305,11 +1303,131 @@ TEST(StereoFusion, SignedNormalGuardRestoresLossyTwoViewDecision) {
     bitmap.Fill(BitmapColor<uint8_t>(0, 64, 128));
     bitmap.Write(root / "images" / image.Name());
   }
-  ASSERT_EQ(names.size(), 2);
+  THROW_CHECK_EQ(names.size(), 2);
   {
     std::ofstream config(root / "stereo" / "fusion.cfg");
     for (const auto& name : names) config << name << '\n';
   }
+  return root;
+}
+
+TEST(StereoFusion, RejectedRootsDoNotLeakVisibility) {
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  for (const int num_samples : {3, 1, 2}) {
+    SCOPED_TRACE(num_samples);
+    StereoFusionOptions options;
+    options.num_threads = 1;
+    options.use_cache = false;
+    options.min_num_pixels = num_samples;
+    options.max_num_pixels = num_samples;
+    StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+    fusion.Run();
+
+    const auto& points = fusion.GetFusedPoints();
+    const auto& visibility = fusion.GetFusedPointsVisibility();
+    if (num_samples == 3) {
+      EXPECT_TRUE(points.empty());
+      EXPECT_TRUE(visibility.empty());
+      continue;
+    }
+    ASSERT_EQ(points.size(), num_samples == 1 ? 1200 : 600);
+    ASSERT_EQ(visibility.size(), points.size());
+    std::vector<size_t> counts(2, 0);
+    for (auto visible : visibility) {
+      ASSERT_EQ(visible.size(), num_samples);
+      std::sort(visible.begin(), visible.end());
+      if (num_samples == 2) {
+        EXPECT_EQ(visible, (std::vector<int>{0, 1}));
+      }
+      for (const int image_idx : visible) {
+        ASSERT_GE(image_idx, 0);
+        ASSERT_LT(image_idx, 2);
+        ++counts[image_idx];
+      }
+    }
+    EXPECT_EQ(counts, (std::vector<size_t>{600, 600}));
+  }
+}
+
+TEST(StereoFusion, RoundedByteMedianColors) {
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  Model model;
+  model.Read(root, "COLMAP");
+  ASSERT_EQ(model.images.size(), 2);
+  const std::vector<BitmapColor<uint8_t>> colors = {
+      BitmapColor<uint8_t>(0, 0, 254), BitmapColor<uint8_t>(255, 1, 255)};
+  for (size_t image_idx = 0; image_idx < model.images.size(); ++image_idx) {
+    Bitmap bitmap(30, 20, true);
+    bitmap.Fill(colors[image_idx]);
+    ASSERT_TRUE(bitmap.Write(root / "images" / model.GetImageName(image_idx)));
+  }
+
+  for (const int num_samples : {2, 1}) {
+    SCOPED_TRACE(num_samples);
+    StereoFusionOptions options;
+    options.num_threads = 1;
+    options.use_cache = false;
+    options.min_num_pixels = num_samples;
+    options.max_num_pixels = num_samples;
+    StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+    fusion.Run();
+
+    const auto& points = fusion.GetFusedPoints();
+    const auto& visibility = fusion.GetFusedPointsVisibility();
+    ASSERT_EQ(points.size(), num_samples == 2 ? 600 : 1200);
+    ASSERT_EQ(visibility.size(), points.size());
+    std::vector<std::vector<int>> seen(2, std::vector<int>(600, 0));
+    for (size_t point_idx = 0; point_idx < points.size(); ++point_idx) {
+      const auto& point = points[point_idx];
+      ASSERT_TRUE(std::isfinite(point.x) && std::isfinite(point.y) &&
+                  std::isfinite(point.z));
+      const int col = static_cast<int>(std::lround(point.x * 6 + 15 - 0.5f));
+      const int row = static_cast<int>(std::lround(point.y * 6 + 10 - 0.5f));
+      ASSERT_GE(col, 0);
+      ASSERT_LT(col, 30);
+      ASSERT_GE(row, 0);
+      ASSERT_LT(row, 20);
+      EXPECT_NEAR(point.x, (col + 0.5f - 15) / 6.0f, 1e-6f);
+      EXPECT_NEAR(point.y, (row + 0.5f - 10) / 6.0f, 1e-6f);
+      EXPECT_FLOAT_EQ(point.z, 5.0f);
+      EXPECT_FLOAT_EQ(point.nx, 0.0f);
+      EXPECT_FLOAT_EQ(point.ny, 0.0f);
+      EXPECT_FLOAT_EQ(point.nz, 1.0f);
+
+      auto visible = visibility[point_idx];
+      ASSERT_EQ(visible.size(), num_samples);
+      std::sort(visible.begin(), visible.end());
+      if (num_samples == 2) {
+        EXPECT_EQ(visible, (std::vector<int>{0, 1}));
+        // Extreme averaging and half-integer medians round upward.
+        EXPECT_EQ(point.r, 128);
+        EXPECT_EQ(point.g, 1);
+        EXPECT_EQ(point.b, 255);
+      } else {
+        ASSERT_GE(visible.front(), 0);
+        ASSERT_LT(visible.front(), 2);
+        const auto& expected = colors[visible.front()];
+        EXPECT_EQ(point.r, expected.r);
+        EXPECT_EQ(point.g, expected.g);
+        EXPECT_EQ(point.b, expected.b);
+      }
+      for (const int image_idx : visible) {
+        ASSERT_GE(image_idx, 0);
+        ASSERT_LT(image_idx, 2);
+        ++seen[image_idx][row * 30 + col];
+      }
+    }
+    // Every input pixel contributes exactly once in both arms.
+    for (const auto& image_seen : seen) {
+      for (const int count : image_seen) EXPECT_EQ(count, 1);
+    }
+  }
+}
+
+TEST(StereoFusion, SignedNormalGuardRestoresLossyTwoViewDecision) {
+  if (!ImmutableMapRegion::Supported())
+    GTEST_SKIP() << "Immutable FP32 map owners are unsupported on this host";
+  const auto root = CreateTwoViewNormalDecisionFixture();
   StereoFusionOptions options;
   options.min_num_pixels = 1;
   options.max_num_pixels = 100;
@@ -1356,6 +1474,93 @@ TEST(StereoFusion, SignedNormalGuardRestoresLossyTwoViewDecision) {
   ASSERT_TRUE(guarded.GetBoundedCacheStats());
   EXPECT_EQ(guarded.GetBoundedCacheStats()->reserved_bytes, 0);
   EXPECT_EQ(guarded.GetMappedNormalStats().active_copies, 0);
+}
+
+TEST(StereoFusion, ResidentOct4GuardRestoresOriginalFileDecision) {
+  ASSERT_TRUE(ImmutableMapRegion::Supported());
+  ASSERT_TRUE(normal_precision_guard::SupportedBuild());
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  StereoFusionOptions options;
+  options.min_num_pixels = 1;
+  options.max_num_pixels = 100;
+  options.max_traversal_depth = 10;
+  options.check_num_images = 10;
+  options.num_threads = 1;
+  options.full_ram_load_threads = 1;
+  options.max_normal_error = 0;
+  StereoFusion exact(options, root, "COLMAP", "", "geometric");
+  exact.Run();
+  ASSERT_FALSE(exact.GetFusedPoints().empty());
+  options.full_ram_normal_storage = "oct2x16";
+  StereoFusion lossy(options, root, "COLMAP", "", "geometric");
+  lossy.Run();
+  ASSERT_LT(lossy.GetFusedPoints().size(), exact.GetFusedPoints().size());
+  options.full_ram_normal_guard = true;
+  options.full_ram_normal_guard_bytes = 1 << 20;
+  options.full_ram_normal_guard_files = 2;
+  StereoFusion guarded(options, root, "COLMAP", "", "geometric");
+  guarded.Run();
+  ASSERT_EQ(guarded.GetFusedPoints().size(), exact.GetFusedPoints().size());
+  EXPECT_EQ(guarded.GetFusedPointsVisibility(),
+            exact.GetFusedPointsVisibility());
+  for (size_t i = 0; i < exact.GetFusedPoints().size(); ++i) {
+    const auto& actual = guarded.GetFusedPoints()[i];
+    const auto& expected = exact.GetFusedPoints()[i];
+    EXPECT_FLOAT_EQ(actual.x, expected.x);
+    EXPECT_FLOAT_EQ(actual.y, expected.y);
+    EXPECT_FLOAT_EQ(actual.z, expected.z);
+    EXPECT_EQ(actual.r, expected.r);
+    EXPECT_EQ(actual.g, expected.g);
+    EXPECT_EQ(actual.b, expected.b);
+  }
+  EXPECT_FALSE(guarded.GetBoundedCacheStats());
+  EXPECT_EQ(guarded.GetResidentNormalMappingStatsSnapshot().active_copies, 0);
+  EXPECT_EQ(
+      guarded.GetResidentNormalMappingStatsSnapshot().source_peak_live_files,
+      2);
+}
+
+TEST(StereoFusion, ResidentCodecCertificateBoundsBothOperands) {
+  ASSERT_TRUE(normal_precision_guard::SupportedBuild());
+  using namespace normal_precision_guard;
+  const Eigen::Vector3f original(0, 0, 0.5f);
+  OctNormalPair packed;
+  EncodeNormalOct2x16Unchecked(original, &packed);
+  const auto decoded = DecodeNormalOct2x16(packed.x, packed.y);
+  CodecErrorCertificate certificate(1);
+  certificate.AddDecoded(original, decoded);
+  const auto error = certificate.Seal();
+  const Eigen::Matrix3f rotation = Eigen::Matrix3f::Identity();
+  const auto operand =
+      BoundedOperandFromRotated(rotation, error, decoded, decoded);
+  const auto missing =
+      BoundedOperandFromRotated(rotation, Error::Zero(), decoded, decoded);
+  EXPECT_EQ(ScreenNormal(missing, operand, 0.4f), Screen::kAccept);
+  EXPECT_EQ(ScreenNormal(operand, missing, 0.4f), Screen::kAccept);
+  EXPECT_EQ(ScreenNormal(operand, operand, 0.4f), Screen::kExact);
+  for (const float threshold :
+       {std::nextafter(0.25f, 0.f), 0.25f, std::nextafter(0.25f, 1.f), 0.4f}) {
+    auto reference = operand;
+    size_t root_reads = 0, candidate_reads = 0;
+    const auto read_root = [&]() -> Eigen::Vector3f {
+      ++root_reads;
+      return original;
+    };
+    const auto read_candidate = [&]() -> Eigen::Vector3f {
+      ++candidate_reads;
+      return original;
+    };
+    EXPECT_EQ(
+        NormalAccept(reference, operand, threshold, read_root, read_candidate),
+        !(original.dot(original) < threshold));
+    EXPECT_EQ(root_reads, 1);
+    EXPECT_EQ(candidate_reads, 1);
+    EXPECT_EQ(
+        NormalAccept(reference, operand, threshold, read_root, read_candidate),
+        !(original.dot(original) < threshold));
+    EXPECT_EQ(root_reads, 1);
+    EXPECT_EQ(candidate_reads, 2);
+  }
 }
 
 TEST(StereoFusion, GuardFastUpMatchesLibmOnBoundaries) {
@@ -1926,6 +2131,322 @@ TEST(StereoFusion, FullRamNormalStorageDecodedFileOracle) {
     for (size_t view = 0; view < originals.size(); ++view)
       originals[view].Write(descriptor.GetNormalMapPath(view));
   }
+}
+
+TEST(StereoFusionOptions, ResidentOct4GuardBoundedWorkerPolicy) {
+  StereoFusionOptions options;
+  EXPECT_FALSE(options.full_ram_normal_guard);
+  options.full_ram_normal_storage = "oct2x16";
+  options.full_ram_normal_guard = true;
+  options.full_ram_normal_guard_bytes = 1 << 20;
+  options.full_ram_normal_guard_files = 24;
+  options.full_ram_load_threads = 1;
+  for (const int workers : {1, 2, 24}) {
+    options.num_threads = workers;
+    EXPECT_EQ(options.Check(), normal_precision_guard::SupportedBuild());
+  }
+  for (const int workers : {-1, 0, 25}) {
+    options.num_threads = workers;
+    EXPECT_FALSE(options.Check());
+  }
+  options.num_threads = 24;
+  for (const int loaders : {-1, 2, 24}) {
+    options.full_ram_load_threads = loaders;
+    EXPECT_FALSE(options.Check());
+  }
+  options.full_ram_load_threads = 1;
+  options.full_ram_normal_storage = "fp32";
+  EXPECT_FALSE(options.Check());
+}
+
+TEST(StereoFusion, ResidentOct4Guard24WorkersOriginalFileDecision) {
+  ASSERT_TRUE(ImmutableMapRegion::Supported());
+  ASSERT_TRUE(normal_precision_guard::SupportedBuild());
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  // Height 240 supplies 24 native ten-row tasks; every pixel requires the
+  // exact two-view boundary decision. Distinct rows have no competing pixels.
+  Reconstruction reconstruction;
+  reconstruction.Read(root / "sparse");
+  for (const auto& [camera_id, camera] : reconstruction.Cameras())
+    reconstruction.Camera(camera_id).height = 240;
+  reconstruction.Write(root / "sparse");
+  int view = 0;
+  for (const auto& [image_id, image] : reconstruction.Images()) {
+    Mat<float> depth(30, 240, 1);
+    depth.Fill(5.0f);
+    depth.Write(root / "stereo/depth_maps" / (image.Name() + ".geometric.bin"));
+    Mat<float> normal(30, 240, 3);
+    normal.Fill(0.0f);
+    for (size_t row = 0; row < 240; ++row)
+      for (size_t col = 0; col < 30; ++col)
+        normal.Set(row, col, 2, view == 0 ? 1.0f : 0.99999f);
+    normal.Write(root / "stereo/normal_maps" /
+                 (image.Name() + ".geometric.bin"));
+    Bitmap bitmap(30, 240, true);
+    bitmap.Fill(BitmapColor<uint8_t>(0, 64, 128));
+    ASSERT_TRUE(bitmap.Write(root / "images" / image.Name()));
+    ++view;
+  }
+  using Record = std::
+      tuple<float, float, float, uint8_t, uint8_t, uint8_t, std::vector<int>>;
+  const auto capture = [](const StereoFusion& fusion) {
+    std::vector<Record> records;
+    const auto& points = fusion.GetFusedPoints();
+    const auto& vis = fusion.GetFusedPointsVisibility();
+    for (size_t i = 0; i < points.size(); ++i) {
+      const auto& p = points[i];
+      EXPECT_TRUE(std::isfinite(p.x) && std::isfinite(p.y) &&
+                  std::isfinite(p.z) && std::isfinite(p.nx) &&
+                  std::isfinite(p.ny) && std::isfinite(p.nz));
+      records.emplace_back(p.x, p.y, p.z, p.r, p.g, p.b, vis.at(i));
+    }
+    std::sort(records.begin(), records.end());
+    return records;
+  };
+  StereoFusionOptions options;
+  options.num_threads = 24;
+  options.full_ram_load_threads = 1;
+  options.min_num_pixels = 1;
+  options.max_normal_error = 0;
+  StereoFusion exact(options, root, "COLMAP", "", "geometric");
+  exact.Run();
+  ASSERT_EQ(exact.GetFusedPoints().size(), 2 * 30 * 240);
+  const auto expected = capture(exact);
+  options.full_ram_normal_storage = "oct2x16";
+  options.full_ram_normal_guard = true;
+  options.full_ram_normal_guard_files = 24;
+  auto source = std::make_shared<ImmutableMapSource>(
+      root / "stereo/normal_maps" /
+          (reconstruction.Images().begin()->second.Name() + ".geometric.bin"),
+      ImmutableMapSource::BindIdentity{});
+  size_t maximum = 0;
+  for (size_t row = 0; row < 240; ++row)
+    maximum = std::max(maximum, source->GetWindowReservationBytes(row, 1));
+  options.full_ram_normal_guard_bytes = static_cast<int64_t>(24 * maximum);
+  StereoFusion guarded(options, root, "COLMAP", "", "geometric");
+  for (int run = 0; run < 2; ++run) {
+    guarded.Run();
+    EXPECT_EQ(capture(guarded), expected);
+    EXPECT_FALSE(guarded.GetBoundedCacheStats());
+    const auto stats = guarded.GetResidentNormalMappingStatsSnapshot();
+    EXPECT_EQ(stats.loads, 0);
+    EXPECT_EQ(stats.resident_bytes, 0);
+    EXPECT_EQ(stats.active_copies, 0);
+    EXPECT_EQ(stats.reserved_bytes, 0);
+    EXPECT_EQ(stats.reserved_files, 0);
+    EXPECT_EQ(stats.reserved_regions, 0);
+    EXPECT_LE(stats.peak_charged_bytes, 24 * maximum);
+    EXPECT_LE(stats.peak_charged_files, 24);
+    EXPECT_LE(stats.peak_charged_regions, 72);
+    EXPECT_EQ(stats.source_peak_live_files, 2);
+  }
+}
+
+TEST(StereoFusion, PreparedCodecRotationPreservesBoundsAndExactCallbacks) {
+  ASSERT_TRUE(normal_precision_guard::SupportedArithmetic());
+  using namespace normal_precision_guard;
+  const auto check = [](const Rot& r, const Error& error, const Vec& decoded) {
+    const Vec rotated = r * decoded;
+    const auto ordinary = BoundedOperandFromRotated(r, error, decoded, rotated);
+    const auto cached = BoundedOperandFromRotated(
+        r, error, PrepareCodecRotation(r, error), decoded, rotated);
+    EXPECT_EQ(
+        std::memcmp(
+            ordinary.value.data(), cached.value.data(), 3 * sizeof(float)),
+        0);
+    EXPECT_EQ(
+        std::memcmp(
+            ordinary.error.data(), cached.error.data(), 3 * sizeof(double)),
+        0);
+    EXPECT_EQ(ordinary.exact, cached.exact);
+    const float dot = ordinary.value.dot(ordinary.value);
+    for (const float threshold :
+         {-1.0f,
+          0.0f,
+          0.984807753f,
+          1.0f,
+          dot,
+          std::nextafter(dot, -std::numeric_limits<float>::infinity()),
+          std::nextafter(dot, std::numeric_limits<float>::infinity())}) {
+      EXPECT_EQ(ScreenNormal(ordinary, ordinary, threshold),
+                ScreenNormal(cached, cached, threshold));
+      if (!rotated.allFinite() || !std::isfinite(dot)) continue;
+      auto a = ordinary, b = cached;
+      int reads_a = 0, reads_b = 0;
+      bool exact_a = false, exact_b = false;
+      const bool decision_a = NormalAccept(
+          a,
+          ordinary,
+          threshold,
+          [&]() -> Vec {
+            ++reads_a;
+            return rotated;
+          },
+          [&]() -> Vec {
+            ++reads_a;
+            return rotated;
+          },
+          &exact_a);
+      const bool decision_b = NormalAccept(
+          b,
+          cached,
+          threshold,
+          [&]() -> Vec {
+            ++reads_b;
+            return rotated;
+          },
+          [&]() -> Vec {
+            ++reads_b;
+            return rotated;
+          },
+          &exact_b);
+      EXPECT_EQ(decision_a, decision_b);
+      EXPECT_EQ(reads_a, reads_b);
+      EXPECT_EQ(exact_a, exact_b);
+      EXPECT_EQ(a.exact, b.exact);
+    }
+  };
+  for (int sample = 0; sample < 128; ++sample) {
+    Rot r;
+    Vec decoded;
+    Error error;
+    for (int i = 0; i < 9; ++i)
+      r.data()[i] = float((sample * 31 + i * 17) % 257 - 128) / 128;
+    for (int i = 0; i < 3; ++i) {
+      decoded(i) = float((sample * 43 + i * 19) % 251 - 125) / 125;
+      error(i) = (sample % 4 == 0)
+                     ? 0.0
+                     : std::ldexp(double((sample * 7 + i * 13) % 101), -20 - i);
+    }
+    check(r, error, decoded);
+  }
+  const std::vector<Vec> originals{{0.0f, 0.0f, 0.0f},
+                                   {0.2f, -0.3f, 0.7f},
+                                   {-0.4f, 0.1f, -0.2f},
+                                   {1.0f, -1.0f, 1.0f}};
+  CodecErrorCertificate certificate(originals.size());
+  std::vector<Vec> actual_decodes;
+  for (const auto& original : originals) {
+    OctNormalPair pair;
+    EncodeNormalOct2x16Unchecked(original, &pair);
+    const Vec decoded = DecodeNormalOct2x16(pair.x, pair.y);
+    certificate.AddDecoded(original, decoded);
+    actual_decodes.push_back(decoded);
+  }
+  const Error certified_error = certificate.Seal();
+  for (const auto& decoded : actual_decodes)
+    check(Rot::Identity(), certified_error, decoded);
+  for (const double e : {0.0,
+                         std::numeric_limits<double>::denorm_min(),
+                         0x1p-24,
+                         1.0,
+                         std::numeric_limits<double>::max()}) {
+    check(Rot::Identity(), Error::Constant(e), Vec(0.0f, -0.0f, 1.0f));
+    check(Rot::Identity(),
+          Error::Constant(e),
+          Vec(std::numeric_limits<float>::denorm_min(), 0.0f, 1.0f));
+    check(Rot::Identity(),
+          Error::Constant(e),
+          Vec::Constant(std::numeric_limits<float>::max()));
+  }
+}
+
+TEST(StereoFusion, PreparedCodecRotationRefusesStaleOrInvalidTerms) {
+  ASSERT_TRUE(normal_precision_guard::SupportedArithmetic());
+  using namespace normal_precision_guard;
+  const Rot r = Rot::Identity();
+  const Error error(0x1p-20, 0x1p-21, 0x1p-22);
+  const auto prepared = PrepareCodecRotation(r, error);
+  ASSERT_TRUE(prepared.valid());
+  const Vec decoded(0.2f, -0.3f, 0.7f);
+  const auto check = [&](const Rot& actual_r,
+                         const Error& actual_error,
+                         const PreparedCodecRotation& cache) {
+    const Vec rotated = actual_r * decoded;
+    const auto ordinary =
+        BoundedOperandFromRotated(actual_r, actual_error, decoded, rotated);
+    const auto cached = BoundedOperandFromRotated(
+        actual_r, actual_error, cache, decoded, rotated);
+    EXPECT_EQ(
+        std::memcmp(
+            ordinary.error.data(), cached.error.data(), 3 * sizeof(double)),
+        0);
+  };
+  Rot changed_r = r;
+  changed_r(0, 1) = 0.25f;
+  check(changed_r, error, prepared);
+  changed_r = r;
+  changed_r(0, 1) = -0.0f;  // Bitwise binding also covers signed zero.
+  check(changed_r, error, prepared);
+  Error changed_error = error;
+  changed_error(1) *= 1024;
+  check(r, changed_error, prepared);
+  check(r, error, PreparedCodecRotation{});
+  for (const double bad : {-1.0,
+                           std::numeric_limits<double>::infinity(),
+                           std::numeric_limits<double>::quiet_NaN()}) {
+    const Error invalid = Error::Constant(bad);
+    const auto refused = PrepareCodecRotation(r, invalid);
+    EXPECT_FALSE(refused.valid());
+    check(r, invalid, refused);
+  }
+  changed_r(0, 0) = std::numeric_limits<float>::infinity();
+  EXPECT_FALSE(PrepareCodecRotation(changed_r, error).valid());
+  check(changed_r, error, prepared);
+}
+
+TEST(StereoFusion, PreparedCodecRotationRechecksAllArithmeticControls) {
+  ASSERT_TRUE(normal_precision_guard::SupportedArithmetic());
+  using namespace normal_precision_guard;
+  struct Restore {
+    int rounding = std::fegetround();
+#if defined(__SSE__)
+    unsigned int sse = _mm_getcsr();
+#endif
+    ~Restore() {
+      std::fesetround(rounding);
+#if defined(__SSE__)
+      _mm_setcsr(sse);
+#endif
+    }
+  } restore;
+  const Rot r = Rot::Identity();
+  const Error error = Error::Constant(0x1p-20);
+  const auto prepared = PrepareCodecRotation(r, error);
+  const Vec decoded(0.2f, -0.3f, 0.7f), rotated = r * decoded;
+  const auto check = [&](const PreparedCodecRotation& cache) {
+    const auto ordinary = BoundedOperandFromRotated(r, error, decoded, rotated);
+    const auto cached =
+        BoundedOperandFromRotated(r, error, cache, decoded, rotated);
+    EXPECT_EQ(
+        std::memcmp(
+            ordinary.error.data(), cached.error.data(), 3 * sizeof(double)),
+        0);
+    EXPECT_EQ(ScreenNormal(ordinary, ordinary, 1.0f),
+              ScreenNormal(cached, cached, 1.0f));
+  };
+  for (const int mode : {FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO}) {
+    ASSERT_EQ(std::fesetround(mode), 0);
+    EXPECT_FALSE(SupportedArithmetic());
+    check(prepared);
+    const auto unavailable = PrepareCodecRotation(r, error);
+    EXPECT_FALSE(unavailable.valid());
+    ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+    check(unavailable);  // Invalid preparation remains the ordinary path.
+  }
+#if defined(__SSE__)
+  const unsigned int nearest =
+      _mm_getcsr() & ~((1u << 15) | (3u << 13) | (1u << 6));
+  for (const unsigned int bits :
+       {1u << 15, 1u << 6, 1u << 13, 2u << 13, 3u << 13}) {
+    _mm_setcsr(nearest | bits);
+    EXPECT_FALSE(SupportedArithmetic());
+    check(prepared);
+    EXPECT_FALSE(PrepareCodecRotation(r, error).valid());
+    _mm_setcsr(nearest);
+  }
+#endif
+  check(prepared);
 }
 
 }  // namespace
