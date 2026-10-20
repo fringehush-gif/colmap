@@ -1442,7 +1442,7 @@ void StereoFusion::Fuse(const int thread_id,
 
   // Next points to fuse.
   auto& fusion_queue = scratch.queue;
-  fusion_queue.emplace_back(image_idx, row, col, 0);
+  fusion_queue.push_back({image_idx, row, col, 0});
 
   Eigen::Vector4f fused_ref_point = Eigen::Vector4f::Zero();
   Eigen::Vector3f fused_ref_normal = Eigen::Vector3f::Zero();
@@ -1777,8 +1777,8 @@ void StereoFusion::Fuse(const int thread_id,
           next_row >= depth_map_size.second) {
         continue;
       }
-      fusion_queue.emplace_back(
-          next_image_idx, next_row, next_col, traversal_depth + 1);
+      fusion_queue.push_back(
+          {next_image_idx, next_row, next_col, traversal_depth + 1});
     }
   }
 
