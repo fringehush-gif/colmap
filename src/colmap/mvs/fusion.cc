@@ -18,6 +18,7 @@
 #include <iterator>
 #include <limits>
 #include <locale>
+#include <optional>
 #include <sstream>
 #include <tuple>
 
@@ -1478,17 +1479,21 @@ void StereoFusion::Fuse(const int thread_id,
     if (pinned && options_.bounded_cache_neighborhood) {
       ++task_neighborhood_reads_[thread_id].pointer_reads;
     }
-    auto image_lease = bounded_workspace_ && !pinned
-                           ? bounded_workspace_->AcquireComponent(
-                                 image_idx,
-                                 options_.bounded_cache_components
-                                     ? BoundedWorkspace::Component::kDepth
-                                     : BoundedWorkspace::Component::kImage)
-                           : BoundedWorkspace::ImageLease();
-    if (image_lease && options_.bounded_cache_neighborhood) {
+    // Ordinary workspaces need no bounded-cache lease, even an empty one.
+    std::optional<BoundedWorkspace::ImageLease> image_lease;
+    if (bounded_workspace_ && !pinned) {
+      image_lease.emplace(bounded_workspace_->AcquireComponent(
+          image_idx,
+          options_.bounded_cache_components
+              ? BoundedWorkspace::Component::kDepth
+              : BoundedWorkspace::Component::kImage));
+    }
+    if (image_lease && *image_lease && options_.bounded_cache_neighborhood) {
       ++task_neighborhood_reads_[thread_id].demand_acquires;
     }
-    const auto* image_data = pinned ? pinned : image_lease.get();
+    const auto* image_data = pinned        ? pinned
+                             : image_lease ? image_lease->get()
+                                           : nullptr;
     const auto* resident =
         full_ram_inputs_.empty() ? nullptr : &full_ram_inputs_.at(image_idx);
     const auto depth_map = image_data || resident
@@ -1502,7 +1507,7 @@ void StereoFusion::Fuse(const int thread_id,
                       : (image_data ? image_data->depth_map.Get(row, col)
                          : resident ? resident->depth->Get(row, col)
                                     : depth_map->Get(row, col));
-    if (options_.bounded_cache_components && image_lease) {
+    if (options_.bounded_cache_components && image_lease && *image_lease) {
       image_lease.reset();
       image_data = nullptr;
     }
@@ -1554,16 +1559,17 @@ void StereoFusion::Fuse(const int thread_id,
     const auto* mapped_normal = direct_mapped_normals_
                                     ? AcquireWorkerMappedNormal(image_idx, row)
                                     : nullptr;
-    auto normal_lease =
-        bounded_workspace_ && options_.bounded_cache_components &&
-                !tile_image && !mapped_normal &&
-                (!image_data || image_data->normal_map.GetWidth() == 0)
-            ? bounded_workspace_->AcquireComponent(
-                  image_idx, BoundedWorkspace::Component::kNormal)
-            : BoundedWorkspace::ImageLease();
-    const auto* normal_image = tile_image     ? tile_image
-                               : normal_lease ? normal_lease.get()
-                                              : image_data;
+    std::optional<BoundedWorkspace::ImageLease> normal_lease;
+    if (bounded_workspace_ && options_.bounded_cache_components &&
+        !tile_image && !mapped_normal &&
+        (!image_data || image_data->normal_map.GetWidth() == 0)) {
+      normal_lease.emplace(bounded_workspace_->AcquireComponent(
+          image_idx, BoundedWorkspace::Component::kNormal));
+    }
+    const auto* normal_image = tile_image ? tile_image
+                               : normal_lease && *normal_lease
+                                   ? normal_lease->get()
+                                   : image_data;
     const bool compact_full_ram =
         workspace_->GetOptions().full_ram_normal_storage !=
         NormalStorage::kFp32;
@@ -1655,20 +1661,20 @@ void StereoFusion::Fuse(const int thread_id,
     if (borrowed_bitmap && direct_component_pins_admitted_) {
       ++direct_bitmap_borrows_;
     }
-    auto bitmap_lease =
-        bounded_workspace_ && options_.bounded_cache_components &&
-                !borrowed_bitmap &&
-                (!image_data || image_data->bitmap.Width() == 0)
-            ? bounded_workspace_->AcquireComponent(
-                  image_idx, BoundedWorkspace::Component::kBitmap)
-            : BoundedWorkspace::ImageLease();
-    if (bitmap_lease && options_.bounded_cache_neighborhood &&
+    std::optional<BoundedWorkspace::ImageLease> bitmap_lease;
+    if (bounded_workspace_ && options_.bounded_cache_components &&
+        !borrowed_bitmap && (!image_data || image_data->bitmap.Width() == 0)) {
+      bitmap_lease.emplace(bounded_workspace_->AcquireComponent(
+          image_idx, BoundedWorkspace::Component::kBitmap));
+    }
+    if (bitmap_lease && *bitmap_lease && options_.bounded_cache_neighborhood &&
         options_.bounded_cache_normal_tile_size > 0) {
       ++task_neighborhood_reads_[thread_id].rgb_demand_acquires;
     }
     const auto* bitmap_image = borrowed_bitmap ? borrowed_bitmap
-                               : bitmap_lease  ? bitmap_lease.get()
-                                               : image_data;
+                               : bitmap_lease && *bitmap_lease
+                                   ? bitmap_lease->get()
+                                   : image_data;
     const auto bitmap = bitmap_image || resident
                             ? std::shared_ptr<const Bitmap>()
                             : workspace_->GetBitmapLease(image_idx);
