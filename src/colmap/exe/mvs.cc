@@ -269,6 +269,21 @@ int RunPoissonMesher(int argc, char** argv) {
   return EXIT_SUCCESS;
 }
 
+namespace {
+
+Reconstruction RunStereoFuserInternal(
+    bool return_reconstruction,
+    const std::filesystem::path& output_path,
+    const std::filesystem::path& workspace_path,
+    std::string workspace_format,
+    const std::string& pmvs_option_name,
+    std::string input_type,
+    const mvs::StereoFusionOptions& options,
+    std::string output_type,
+    std::function<bool()> check_if_stopped);
+
+}  // namespace
+
 int RunStereoFuser(int argc, char** argv) {
   std::filesystem::path workspace_path;
   std::string input_type = "geometric";
@@ -291,25 +306,31 @@ int RunStereoFuser(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  RunStereoFuserImpl(output_path,
-                     workspace_path,
-                     workspace_format,
-                     pmvs_option_name,
-                     input_type,
-                     *options.stereo_fusion,
-                     output_type);
+  RunStereoFuserInternal(false,
+                         output_path,
+                         workspace_path,
+                         workspace_format,
+                         pmvs_option_name,
+                         input_type,
+                         *options.stereo_fusion,
+                         output_type,
+                         {});
 
   return EXIT_SUCCESS;
 }
 
-Reconstruction RunStereoFuserImpl(const std::filesystem::path& output_path,
-                                  const std::filesystem::path& workspace_path,
-                                  std::string workspace_format,
-                                  const std::string& pmvs_option_name,
-                                  std::string input_type,
-                                  const mvs::StereoFusionOptions& options,
-                                  std::string output_type,
-                                  std::function<bool()> check_if_stopped) {
+namespace {
+
+Reconstruction RunStereoFuserInternal(
+    bool return_reconstruction,
+    const std::filesystem::path& output_path,
+    const std::filesystem::path& workspace_path,
+    std::string workspace_format,
+    const std::string& pmvs_option_name,
+    std::string input_type,
+    const mvs::StereoFusionOptions& options,
+    std::string output_type,
+    std::function<bool()> check_if_stopped) {
   StringToLower(&workspace_format);
   THROW_CHECK(workspace_format == "colmap" || workspace_format == "pmvs")
       << "Invalid `workspace_format` " << workspace_format
@@ -342,13 +363,15 @@ Reconstruction RunStereoFuserImpl(const std::filesystem::path& output_path,
 
   Reconstruction reconstruction;
 
-  // read data from sparse reconstruction
-  if (workspace_format == "colmap") {
-    reconstruction.Read(workspace_path / "sparse");
-  }
+  // PLY writers consume fused points directly. Only materialize a dense
+  // reconstruction when returning it to an API caller or writing BIN/TXT.
+  if (return_reconstruction || output_type != "ply") {
+    if (workspace_format == "colmap") {
+      reconstruction.Read(workspace_path / "sparse");
+    }
 
-  // overwrite sparse point cloud with dense point cloud from fuser
-  reconstruction.ImportPLY(fuser.GetFusedPoints());
+    reconstruction.ImportPLY(fuser.GetFusedPoints());
+  }
 
   std::filesystem::path write_path = output_path;
   if (stopped) {
@@ -385,6 +408,27 @@ Reconstruction RunStereoFuserImpl(const std::filesystem::path& output_path,
   }
 
   return reconstruction;
+}
+
+}  // namespace
+
+Reconstruction RunStereoFuserImpl(const std::filesystem::path& output_path,
+                                  const std::filesystem::path& workspace_path,
+                                  std::string workspace_format,
+                                  const std::string& pmvs_option_name,
+                                  std::string input_type,
+                                  const mvs::StereoFusionOptions& options,
+                                  std::string output_type,
+                                  std::function<bool()> check_if_stopped) {
+  return RunStereoFuserInternal(true,
+                                output_path,
+                                workspace_path,
+                                std::move(workspace_format),
+                                pmvs_option_name,
+                                std::move(input_type),
+                                options,
+                                std::move(output_type),
+                                std::move(check_if_stopped));
 }
 
 }  // namespace colmap
