@@ -1,0 +1,353 @@
+{
+  "benchmark": "Fountain P11",
+  "images": 11,
+  "cpu": "AMD Ryzen 9 3900X 12-Core Processor",
+  "kernel": "6.18.54.1-microsoft-standard-WSL2",
+  "settings": {
+    "inputType": "geometric",
+    "normalStorage": "FP32",
+    "numThreads": 1,
+    "useCache": false,
+    "minNumPixels": 2
+  },
+  "cleanOrder": [
+    "baseline",
+    "scratch",
+    "median",
+    "median",
+    "scratch",
+    "baseline"
+  ],
+  "cleanObservationsPerArmPerResolution": 2,
+  "diagnosticObservationsPerArmPerResolution": 1,
+  "sources": {
+    "baseline": "6e10bd877669614d87c5145574bb951b2300f7e6",
+    "scratch": "9fe9b28652c393010d6a169e42d505b13f0191b1",
+    "medianIncrementalBase": "9fe9b28652c393010d6a169e42d505b13f0191b1"
+  },
+  "quality": {
+    "completeOrderedPlyAndVisibilityEqual": true,
+    "nativeCalls": 18,
+    "existingFusionTestsPassed": 31,
+    "expectedSkipped": 1,
+    "newRgbIntegrationTestPassed": true,
+    "exhaustiveAndSeededLocalByteCases": 66902
+  },
+  "resolutions": [
+    {
+      "maxImageSize": 1536,
+      "width": 1536,
+      "height": 1024,
+      "arms": {
+        "baseline": {
+          "wallSeconds": 15.532983431999128,
+          "wallObservationsSeconds": [
+            15.708378096998786,
+            15.35758876699947
+          ],
+          "fusedPoints": 1262279,
+          "cpuSeconds": 11.565000000000001,
+          "maxRssKiB": 1055602.0,
+          "counters": {
+            "context-switches": {
+              "count": 28855.0,
+              "runningPercent": 100.0
+            },
+            "page-faults": {
+              "count": 651269.0,
+              "runningPercent": 100.0
+            },
+            "cycles:u": {
+              "count": 38707002978.0,
+              "runningPercent": 46.0
+            },
+            "instructions:u": {
+              "count": 77643626805.0,
+              "runningPercent": 46.0
+            },
+            "cache-references:u": {
+              "count": 648710594.0,
+              "runningPercent": 46.0
+            },
+            "cache-misses:u": {
+              "count": 131799538.0,
+              "runningPercent": 46.0
+            },
+            "branches:u": {
+              "count": 13594333673.0,
+              "runningPercent": 46.0
+            },
+            "branch-misses:u": {
+              "count": 230355868.0,
+              "runningPercent": 46.0
+            }
+          }
+        },
+        "scratch": {
+          "wallSeconds": 14.054449346500405,
+          "wallObservationsSeconds": [
+            14.003263928001616,
+            14.105634764999195
+          ],
+          "fusedPoints": 1262279,
+          "cpuSeconds": 10.125,
+          "maxRssKiB": 1052450.0,
+          "counters": {
+            "context-switches": {
+              "count": 29245.0,
+              "runningPercent": 100.0
+            },
+            "page-faults": {
+              "count": 651440.0,
+              "runningPercent": 100.0
+            },
+            "cycles:u": {
+              "count": 33613756903.0,
+              "runningPercent": 46.0
+            },
+            "instructions:u": {
+              "count": 62717135037.0,
+              "runningPercent": 45.0
+            },
+            "cache-references:u": {
+              "count": 533778642.0,
+              "runningPercent": 45.0
+            },
+            "cache-misses:u": {
+              "count": 124576127.0,
+              "runningPercent": 45.0
+            },
+            "branches:u": {
+              "count": 9993911082.0,
+              "runningPercent": 45.0
+            },
+            "branch-misses:u": {
+              "count": 215894802.0,
+              "runningPercent": 46.0
+            }
+          }
+        },
+        "median": {
+          "wallSeconds": 13.802796110500822,
+          "wallObservationsSeconds": [
+            13.802316503000839,
+            13.803275718000805
+          ],
+          "fusedPoints": 1262279,
+          "cpuSeconds": 9.925,
+          "maxRssKiB": 1052218.0,
+          "counters": {
+            "context-switches": {
+              "count": 29251.0,
+              "runningPercent": 100.0
+            },
+            "page-faults": {
+              "count": 651438.0,
+              "runningPercent": 100.0
+            },
+            "cycles:u": {
+              "count": 33556363719.0,
+              "runningPercent": 46.0
+            },
+            "instructions:u": {
+              "count": 62114459161.0,
+              "runningPercent": 46.0
+            },
+            "cache-references:u": {
+              "count": 527299471.0,
+              "runningPercent": 46.0
+            },
+            "cache-misses:u": {
+              "count": 127788642.0,
+              "runningPercent": 46.0
+            },
+            "branches:u": {
+              "count": 10147963795.0,
+              "runningPercent": 46.0
+            },
+            "branch-misses:u": {
+              "count": 221719527.0,
+              "runningPercent": 46.0
+            }
+          }
+        }
+      },
+      "incrementalComparisons": {
+        "scratch": {
+          "baseArm": "baseline",
+          "wallReductionPercent": 9.518674193991794,
+          "cpuReductionPercent": 12.451361867704291,
+          "instructionReductionPercent": 19.2243618468358,
+          "cyclesReductionPercent": 13.15846147503299,
+          "cacheMissReductionPercent": 5.480604188460814
+        },
+        "median": {
+          "baseArm": "scratch",
+          "wallReductionPercent": 1.7905592015402982,
+          "cpuReductionPercent": 1.975308641975304,
+          "instructionReductionPercent": 0.9609429315361018,
+          "cyclesReductionPercent": 0.17074313997575974,
+          "cacheMissReductionPercent": -2.5787565221063513
+        }
+      }
+    },
+    {
+      "maxImageSize": 3072,
+      "width": 3072,
+      "height": 2048,
+      "arms": {
+        "baseline": {
+          "wallSeconds": 65.38507610000033,
+          "wallObservationsSeconds": [
+            65.38563518900082,
+            65.38451701099984
+          ],
+          "fusedPoints": 6287110,
+          "cpuSeconds": 54.205,
+          "maxRssKiB": 3632672.0,
+          "counters": {
+            "context-switches": {
+              "count": 107967.0,
+              "runningPercent": 100.0
+            },
+            "page-faults": {
+              "count": 4423223.0,
+              "runningPercent": 100.0
+            },
+            "cycles:u": {
+              "count": 176385540144.0,
+              "runningPercent": 45.0
+            },
+            "instructions:u": {
+              "count": 343247866647.0,
+              "runningPercent": 45.0
+            },
+            "cache-references:u": {
+              "count": 3123094277.0,
+              "runningPercent": 45.0
+            },
+            "cache-misses:u": {
+              "count": 614325471.0,
+              "runningPercent": 45.0
+            },
+            "branches:u": {
+              "count": 60925750385.0,
+              "runningPercent": 46.0
+            },
+            "branch-misses:u": {
+              "count": 787992251.0,
+              "runningPercent": 46.0
+            }
+          }
+        },
+        "scratch": {
+          "wallSeconds": 58.64262761600003,
+          "wallObservationsSeconds": [
+            58.36677718499959,
+            58.91847804700046
+          ],
+          "fusedPoints": 6287110,
+          "cpuSeconds": 46.745000000000005,
+          "maxRssKiB": 3629494.0,
+          "counters": {
+            "context-switches": {
+              "count": 110601.0,
+              "runningPercent": 100.0
+            },
+            "page-faults": {
+              "count": 4423392.0,
+              "runningPercent": 100.0
+            },
+            "cycles:u": {
+              "count": 147261593493.0,
+              "runningPercent": 46.0
+            },
+            "instructions:u": {
+              "count": 257420957753.0,
+              "runningPercent": 46.0
+            },
+            "cache-references:u": {
+              "count": 2625990049.0,
+              "runningPercent": 46.0
+            },
+            "cache-misses:u": {
+              "count": 576309672.0,
+              "runningPercent": 46.0
+            },
+            "branches:u": {
+              "count": 41900070355.0,
+              "runningPercent": 46.0
+            },
+            "branch-misses:u": {
+              "count": 754871651.0,
+              "runningPercent": 46.0
+            }
+          }
+        },
+        "median": {
+          "wallSeconds": 58.01662438200037,
+          "wallObservationsSeconds": [
+            58.06608445799975,
+            57.967164306000996
+          ],
+          "fusedPoints": 6287110,
+          "cpuSeconds": 46.345,
+          "maxRssKiB": 3628506.0,
+          "counters": {
+            "context-switches": {
+              "count": 108275.0,
+              "runningPercent": 100.0
+            },
+            "page-faults": {
+              "count": 4423399.0,
+              "runningPercent": 100.0
+            },
+            "cycles:u": {
+              "count": 150358404447.0,
+              "runningPercent": 45.0
+            },
+            "instructions:u": {
+              "count": 256809045405.0,
+              "runningPercent": 45.0
+            },
+            "cache-references:u": {
+              "count": 2621375434.0,
+              "runningPercent": 46.0
+            },
+            "cache-misses:u": {
+              "count": 606380849.0,
+              "runningPercent": 46.0
+            },
+            "branches:u": {
+              "count": 41859080580.0,
+              "runningPercent": 46.0
+            },
+            "branch-misses:u": {
+              "count": 750228526.0,
+              "runningPercent": 46.0
+            }
+          }
+        }
+      },
+      "incrementalComparisons": {
+        "scratch": {
+          "baseArm": "baseline",
+          "wallReductionPercent": 10.311907374227669,
+          "cpuReductionPercent": 13.76256802877962,
+          "instructionReductionPercent": 25.004353190129326,
+          "cyclesReductionPercent": 16.511527320903628,
+          "cacheMissReductionPercent": 6.188217938956331
+        },
+        "median": {
+          "baseArm": "scratch",
+          "wallReductionPercent": 1.0674883773946986,
+          "cpuReductionPercent": 0.8557064926730251,
+          "instructionReductionPercent": 0.23770883044694768,
+          "cyclesReductionPercent": -2.1029318510988437,
+          "cacheMissReductionPercent": -5.217885185865834
+        }
+      }
+    }
+  ],
+  "counterNote": "Single diagnostic per arm/size; scaled multiplexed hardware events. Cycles/cache misses rise for median at3072 despite lower clean wall/CPU."
+}
