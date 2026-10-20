@@ -1170,6 +1170,28 @@ TEST(ReadPointsVisibility, RoundTrip) {
   }
 }
 
+TEST(ReadPointsVisibility, LargeRoundTrip) {
+  const auto vis_path = CreateTestDir() / "large.vis";
+  // Variable records exceed 1 MiB and leave a partial final output buffer.
+  std::vector<std::vector<int>> expected(32771);
+  for (size_t i = 0; i < expected.size(); ++i) {
+    auto& visibility = expected[i];
+    visibility.resize(i % 17);
+    for (size_t j = 0; j < visibility.size(); ++j) {
+      // Retain repeated image indices and their order, as well as empty lists.
+      visibility[j] = static_cast<int>((i * 13 + (j % 5) * 7) % 1024);
+    }
+  }
+
+  WritePointsVisibility(vis_path, expected);
+  ASSERT_GT(std::filesystem::file_size(vis_path), 1024 * 1024);
+  const auto actual = ReadPointsVisibility(vis_path, expected.size());
+  ASSERT_EQ(actual.size(), expected.size());
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(actual[i], expected[i]) << "point index: " << i;
+  }
+}
+
 TEST(ReadPointsVisibility, SizeMismatch) {
   const auto test_dir = CreateTestDir();
   const auto vis_path = test_dir / "test.vis";
