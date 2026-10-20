@@ -21,6 +21,8 @@
 #include <optional>
 #include <sstream>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 #include <Eigen/Geometry>
 
@@ -781,13 +783,15 @@ void StereoFusion::Run() {
                                     const int height,
                                     const int width,
                                     const int image_idx,
-                                    const Mat<char>& fused_pixel_mask) {
+                                    const std::vector<char>& fused_pixel_mask) {
     const int row_end = std::min(height, row_start + kRowStride);
     // One row-band callback stays on its executing pool worker.
     const int thread_id = thread_pool.GetThreadIndex();
     for (int row = row_start; row < row_end; ++row) {
       for (int col = 0; col < width; ++col) {
-        if (fused_pixel_mask.Get(row, col) > 0) {
+        const size_t offset =
+            static_cast<size_t>(row - row_start) * width + col;
+        if (fused_pixel_mask.at(offset) > 0) {
           continue;
         }
         Fuse(thread_id, image_idx, row, col);
@@ -827,12 +831,19 @@ void StereoFusion::Run() {
       }
 
       for (int row_start = 0; row_start < height; row_start += kRowStride) {
+        const int row_end = std::min(height, row_start + kRowStride);
+        const size_t first = static_cast<size_t>(row_start) * width;
+        const size_t last = static_cast<size_t>(row_end) * width;
+        // A task reads only its own rows. Move that snapshot into the bound
+        // task rather than copying the entire image mask for every band.
+        std::vector<char> row_mask(fused_pixel_mask.GetData().begin() + first,
+                                   fused_pixel_mask.GetData().begin() + last);
         thread_pool.AddTask(ProcessImageRows,
                             row_start,
                             height,
                             width,
                             image_idx,
-                            fused_pixel_mask);
+                            std::move(row_mask));
       }
       thread_pool.Wait();
       if (depth_pin_exit.workspace) {

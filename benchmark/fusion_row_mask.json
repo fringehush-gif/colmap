@@ -1,0 +1,899 @@
+{
+  "schema": "colmap.fusionRowMaskBenchmark/v1",
+  "sourceBase": "c6e6be272eb4f52b92eb17f35ed8aef32936a80f",
+  "extendsOptimization": {
+    "commit": "fb7eb02fefba5c6bd31129964a991bb3ccac1c33",
+    "title": "Reuse the Fusion worker index for each row band",
+    "relationship": "Continue optimizing joined row tasks by reducing their owned mask snapshots; preserve worker-index reuse."
+  },
+  "scene": "Fountain P11",
+  "images": 11,
+  "cpu": "AMD Ryzen 9 3900X 12-Core Processor",
+  "platform": "Linux/WSL; outputs on a Windows-mounted volume",
+  "settings": "Default settings except image resolution and 12 Fusion workers. Same retained geometric maps in both arms; map preparation excluded.",
+  "design": {
+    "nativeCalls": 18,
+    "timedObservationsPerArmPerRow": 4,
+    "order": "ABBABAAB",
+    "excludedBaselineWarmupsPerResolution": 1,
+    "counterObservationsPerArmPerRow": 4,
+    "separateCounterOnlyCalls": 0,
+    "counterScope": "Small perf stat set collected during each timed call. Hardware events 100% running; no multiplexing. cycles:u and instructions:u exclude kernel work.",
+    "wallScope": "Native GNU time elapsed; counter supervisor outside native timer",
+    "cpuScope": "Native process user plus system time",
+    "memoryScope": "Mean native peak RSS"
+  },
+  "resultInterpretation": "Elapsed time and RSS decrease at both resolutions. User-mode cycles increase5.20%/10.11%, while system CPU time and page faults decrease sharply; total CPU time still decreases. Results describe this two-resolution Fountain workload.",
+  "rows": [
+    {
+      "maxImageSize": 1536,
+      "workers": 12,
+      "arms": {
+        "baseline": {
+          "controllerWallObservationsSeconds": [
+            5.2334113660035655,
+            5.082082606997574,
+            4.730447134999849,
+            4.8819007630008855
+          ],
+          "cpuSeconds": 10.73,
+          "userSeconds": 8.305,
+          "systemSeconds": 2.425,
+          "meanPeakRssKiB": 850985.0,
+          "fusionImageStageObservationsSeconds": [
+            1.2590000000000001,
+            1.2770000000000001,
+            1.206,
+            1.248
+          ],
+          "fusionImageStageSeconds": 1.2475,
+          "wallObservationsSeconds": [
+            5.16,
+            5.02,
+            4.71,
+            4.83
+          ],
+          "wallSeconds": 4.93,
+          "counters": {
+            "task-clock": {
+              "count": 10936172912.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 11346145010.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 11382615288.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 10275222374.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 10740708976.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "context-switches": {
+              "count": 24864.25,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 25563.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 25417.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 24307.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 24170.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cpu-migrations": {
+              "count": 190.25,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 169.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 180.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 261.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 151.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "page-faults": {
+              "count": 624701.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 624893.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 625316.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 623731.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 624864.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cycles:u": {
+              "count": 32193477295.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 33154835173.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 32960458509.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 30600385736.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 32058229762.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "instructions:u": {
+              "count": 49235342609.25,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 49237442754.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 49234533776.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 49236373679.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 49233020228.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-references:u": {
+              "count": 655250045.75,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 695951378.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 678043370.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 605695642.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 641309793.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-misses:u": {
+              "count": 116272066.25,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 122739286.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 123477552.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 109182228.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 109689199.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            }
+          },
+          "unsupportedEvents": []
+        },
+        "candidate": {
+          "controllerWallObservationsSeconds": [
+            4.43023687099776,
+            4.531355742001324,
+            4.330482306002523,
+            4.329878469994583
+          ],
+          "cpuSeconds": 10.4225,
+          "userSeconds": 8.7875,
+          "systemSeconds": 1.635,
+          "meanPeakRssKiB": 794514.0,
+          "fusionImageStageObservationsSeconds": [
+            0.678,
+            0.727,
+            0.6869999999999999,
+            0.6849999999999999
+          ],
+          "fusionImageStageSeconds": 0.69425,
+          "wallObservationsSeconds": [
+            4.4,
+            4.49,
+            4.27,
+            4.26
+          ],
+          "wallSeconds": 4.355,
+          "counters": {
+            "task-clock": {
+              "count": 10622376454.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 10454161348.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 11079339171.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 10524353631.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 10431651668.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "context-switches": {
+              "count": 24407.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 24711.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 24687.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 24445.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 23787.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cpu-migrations": {
+              "count": 166.25,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 182.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 227.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 112.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 144.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "page-faults": {
+              "count": 192452.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 192457.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 192445.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 192452.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 192454.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cycles:u": {
+              "count": 33867230396.25,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 33430212982.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 34709341020.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 33517563315.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 33811804268.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "instructions:u": {
+              "count": 49050699663.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 49051545203.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 49052014741.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 49052298445.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 49046940265.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-references:u": {
+              "count": 625626925.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 588869856.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 653972594.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 591798856.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 667866394.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-misses:u": {
+              "count": 109409464.75,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 104282091.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 119441246.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 105287783.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 108626739.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            }
+          },
+          "unsupportedEvents": []
+        }
+      },
+      "candidateChangePercent": {
+        "wallSeconds": -11.663286004056783,
+        "cpuSeconds": -2.8657968313140825,
+        "userSeconds": 5.809753160746545,
+        "systemSeconds": -32.577319587628864,
+        "meanPeakRssKiB": -6.6359571555315355,
+        "fusionImageStageSeconds": -44.34869739478958,
+        "instructions:u": -0.37502114530896247,
+        "cycles:u": 5.199044160134747,
+        "cache-misses:u": -5.902192780546722
+      }
+    },
+    {
+      "maxImageSize": 3072,
+      "workers": 12,
+      "arms": {
+        "baseline": {
+          "controllerWallObservationsSeconds": [
+            19.068522845002008,
+            18.767527994001284,
+            18.86812728800578,
+            18.96846384499804
+          ],
+          "cpuSeconds": 40.8225,
+          "userSeconds": 29.3075,
+          "systemSeconds": 11.515,
+          "meanPeakRssKiB": 3142277.0,
+          "fusionImageStageObservationsSeconds": [
+            7.852,
+            7.847,
+            7.877,
+            7.9959999999999996
+          ],
+          "fusionImageStageSeconds": 7.893,
+          "wallObservationsSeconds": [
+            19.01,
+            18.75,
+            18.82,
+            18.91
+          ],
+          "wallSeconds": 18.872500000000002,
+          "counters": {
+            "task-clock": {
+              "count": 41424719675.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 41661388436.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 41303279155.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 40817090528.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 41917120581.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "context-switches": {
+              "count": 74189.25,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 75321.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 73507.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 73878.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 74051.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cpu-migrations": {
+              "count": 521.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 472.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 454.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 540.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 618.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "page-faults": {
+              "count": 4060361.25,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 4059986.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 4061511.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 4059973.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 4059975.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cycles:u": {
+              "count": 116917144402.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 117629561446.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 116780958413.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 114946816584.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 118311241165.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "instructions:u": {
+              "count": 187548283360.75,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 187552662667.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 187541355734.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 187548452821.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 187550662221.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-references:u": {
+              "count": 2630367316.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 2690602227.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 2621060144.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 2530611873.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 2679195020.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-misses:u": {
+              "count": 493562963.75,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 486506860.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 488732048.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 497478669.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 501534278.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            }
+          },
+          "unsupportedEvents": []
+        },
+        "candidate": {
+          "controllerWallObservationsSeconds": [
+            13.754854399994656,
+            13.754816103995836,
+            13.65491161600221,
+            13.804929733996687
+          ],
+          "cpuSeconds": 37.735,
+          "userSeconds": 32.8725,
+          "systemSeconds": 4.8625,
+          "meanPeakRssKiB": 2190220.0,
+          "fusionImageStageObservationsSeconds": [
+            2.5660000000000003,
+            2.528,
+            2.5220000000000002,
+            2.558
+          ],
+          "fusionImageStageSeconds": 2.5435,
+          "wallObservationsSeconds": [
+            13.73,
+            13.73,
+            13.63,
+            13.76
+          ],
+          "wallSeconds": 13.7125,
+          "counters": {
+            "task-clock": {
+              "count": 38346205119.75,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 38694386101.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 38171055912.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 37988150540.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 38531227926.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "context-switches": {
+              "count": 74067.25,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 73857.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 74668.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 74252.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 73492.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cpu-migrations": {
+              "count": 468.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 512.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 415.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 480.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 467.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "page-faults": {
+              "count": 613619.75,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 613846.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 613810.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 612148.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 614675.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cycles:u": {
+              "count": 128740822741.75,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 129587416849.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 127902750861.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 127666642242.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 129806481015.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "instructions:u": {
+              "count": 186152497959.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 186153873675.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 186152052589.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 186152308372.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 186151757202.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-references:u": {
+              "count": 2372120155.25,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 2409731427.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 2272680859.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 2374360490.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 2431707845.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-misses:u": {
+              "count": 447196415.25,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 453405243.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 438506402.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 448079887.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 448794129.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            }
+          },
+          "unsupportedEvents": []
+        }
+      },
+      "candidateChangePercent": {
+        "wallSeconds": -27.341369717843435,
+        "cpuSeconds": -7.563231061301979,
+        "userSeconds": 12.164121811822914,
+        "systemSeconds": -57.772470690403836,
+        "meanPeakRssKiB": -30.29831552087865,
+        "fusionImageStageSeconds": -67.77524388698848,
+        "instructions:u": -0.7442272337759515,
+        "cycles:u": 10.112869588309703,
+        "cache-misses:u": -9.394251981087798
+      }
+    }
+  ],
+  "quality": {
+    "passed": true,
+    "comparisons": 6,
+    "clouds": 8,
+    "scope": "Frozen parallel geometry, normal, RGB and visibility content/repeat comparisons at both resolutions; full-scene byte identity is not claimed."
+  },
+  "tests": {
+    "fusionPassed": 33,
+    "fusionExpectedSkips": 1,
+    "cpuSourceCompiles": 1,
+    "cliLinks": 1,
+    "testLinks": 1,
+    "cudaCompiles": 0,
+    "configureCalls": 0
+  },
+  "counterInterpretation": "1536 cache-miss ranges overlap; 3072 candidate cache-miss observations are below all controls. Page-fault counts are total faults, not major-fault counts."
+}
