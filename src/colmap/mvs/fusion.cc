@@ -29,6 +29,21 @@ namespace {
 // A source hypothesis: one immutable row band per owner. This is not a
 // measured optimum and does not alter any sampled FP32 value.
 constexpr size_t kMappedNormalStripeRows = 256;
+
+// Return the rounded median directly for nonnegative byte samples.
+uint8_t RoundedByteMedian(std::vector<uint8_t>& elems) {
+  THROW_CHECK(!elems.empty());
+  const size_t middle = elems.size() / 2;
+  std::nth_element(elems.begin(), elems.begin() + middle, elems.end());
+  const unsigned int upper = elems[middle];
+  if (elems.size() % 2 != 0) {
+    return static_cast<uint8_t>(upper);
+  }
+  const unsigned int lower =
+      *std::max_element(elems.begin(), elems.begin() + middle);
+  return static_cast<uint8_t>((lower + upper + 1) / 2);
+}
+
 }  // namespace
 namespace internal {
 
@@ -1747,12 +1762,9 @@ void StereoFusion::Fuse(const int thread_id,
     fused_point.ny = fused_normal.y() / fused_normal_norm;
     fused_point.nz = fused_normal.z() / fused_normal_norm;
 
-    fused_point.r =
-        TruncateCast<float, uint8_t>(std::round(Median(fused_point_r)));
-    fused_point.g =
-        TruncateCast<float, uint8_t>(std::round(Median(fused_point_g)));
-    fused_point.b =
-        TruncateCast<float, uint8_t>(std::round(Median(fused_point_b)));
+    fused_point.r = RoundedByteMedian(fused_point_r);
+    fused_point.g = RoundedByteMedian(fused_point_g);
+    fused_point.b = RoundedByteMedian(fused_point_b);
 
     task_fused_points_[thread_id].push_back(fused_point);
     task_fused_points_visibility_[thread_id].emplace_back(
