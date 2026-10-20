@@ -1692,8 +1692,15 @@ void StereoFusion::Fuse(const int thread_id,
     const Bitmap& bitmap_data = bitmap_image ? bitmap_image->bitmap
                                 : resident   ? *resident->bitmap
                                              : *bitmap;
+    // Unit-scale float coordinates preserve these integer pixel positions.
+    constexpr int kMaxExactFloatInteger = 1 << 24;
+    const bool resident_on_depth_grid =
+        resident && bitmap_scale.first == 1.0f && bitmap_scale.second == 1.0f &&
+        col >= 0 && col <= kMaxExactFloatInteger && row >= 0 &&
+        row <= kMaxExactFloatInteger;
     const auto color =
-        bitmap_image && bitmap_image->bitmap_on_depth_grid
+        ((bitmap_image && bitmap_image->bitmap_on_depth_grid) ||
+         resident_on_depth_grid)
             ? bitmap_data.GetPixel(col, row).value_or(BitmapColor<uint8_t>(0))
             : bitmap_data
                   .InterpolateNearestNeighbor(col / bitmap_scale.first,
