@@ -1481,58 +1481,60 @@ void StereoFusion::Fuse(const int thread_id,
     // Root pointers are borrowed only until the row-task join. Demand leases
     // keep one component pinned while its value is copied, then release it
     // before another component acquisition can wait for capacity.
-    const auto* pinned =
-        direct_component_pins_admitted_ ? direct_depth_data_.at(image_idx)
-        : bounded_workspace_ && options_.bounded_cache_neighborhood
-            ? neighborhood_data_.at(image_idx)
-            : nullptr;
-    if (direct_component_pins_admitted_) ++direct_depth_borrows_;
-    if (pinned && options_.bounded_cache_neighborhood) {
-      ++task_neighborhood_reads_[thread_id].pointer_reads;
-    }
     // Ordinary workspaces need no bounded-cache lease, even an empty one.
     std::optional<BoundedWorkspace::ImageLease> image_lease;
-    if (bounded_workspace_ && !pinned) {
-      image_lease.emplace(bounded_workspace_->AcquireComponent(
-          image_idx,
-          options_.bounded_cache_components
-              ? BoundedWorkspace::Component::kDepth
-              : BoundedWorkspace::Component::kImage));
-    }
-    if (image_lease && *image_lease && options_.bounded_cache_neighborhood) {
-      ++task_neighborhood_reads_[thread_id].demand_acquires;
-    }
-    const auto* image_data = pinned        ? pinned
-                             : image_lease ? image_lease->get()
-                                           : nullptr;
+    std::shared_ptr<const DepthMap> depth_map;
+    const BoundedWorkspace::ImageData* image_data = nullptr;
     const auto* resident =
         full_ram_inputs_.empty() ? nullptr : &full_ram_inputs_.at(image_idx);
-    const auto depth_map = image_data || resident
-                               ? std::shared_ptr<const DepthMap>()
-                               : workspace_->GetDepthMapLease(image_idx);
-    const bool exact_depth = options_.bounded_cache_exact_depth;
-    const bool exact_nonpositive =
-        exact_depth && !image_data->HasPositiveDepth(row, col);
-    float depth = exact_depth
-                      ? 0.0f
-                      : (image_data ? image_data->depth_map.Get(row, col)
-                         : resident ? resident->depth->Get(row, col)
-                                    : depth_map->Get(row, col));
-    if (options_.bounded_cache_components && image_lease && *image_lease) {
-      image_lease.reset();
-      image_data = nullptr;
-    }
+    float depth;
+    if (resident) {
+      depth = resident->depth->Get(row, col);
+    } else {
+      const auto* pinned =
+          direct_component_pins_admitted_ ? direct_depth_data_.at(image_idx)
+          : bounded_workspace_ && options_.bounded_cache_neighborhood
+              ? neighborhood_data_.at(image_idx)
+              : nullptr;
+      if (direct_component_pins_admitted_) ++direct_depth_borrows_;
+      if (pinned && options_.bounded_cache_neighborhood) {
+        ++task_neighborhood_reads_[thread_id].pointer_reads;
+      }
+      if (bounded_workspace_ && !pinned) {
+        image_lease.emplace(bounded_workspace_->AcquireComponent(
+            image_idx,
+            options_.bounded_cache_components
+                ? BoundedWorkspace::Component::kDepth
+                : BoundedWorkspace::Component::kImage));
+      }
+      if (image_lease && *image_lease && options_.bounded_cache_neighborhood) {
+        ++task_neighborhood_reads_[thread_id].demand_acquires;
+      }
+      image_data = pinned ? pinned : image_lease ? image_lease->get() : nullptr;
+      depth_map = image_data ? std::shared_ptr<const DepthMap>()
+                             : workspace_->GetDepthMapLease(image_idx);
+      const bool exact_depth = options_.bounded_cache_exact_depth;
+      const bool exact_nonpositive =
+          exact_depth && !image_data->HasPositiveDepth(row, col);
+      depth = exact_depth ? 0.0f
+                          : (image_data ? image_data->depth_map.Get(row, col)
+                                        : depth_map->Get(row, col));
+      if (options_.bounded_cache_components && image_lease && *image_lease) {
+        image_lease.reset();
+        image_data = nullptr;
+      }
 
-    if (exact_depth) {
-      if (exact_nonpositive) continue;
-      auto& scratch = exact_depth_scratch_.at(thread_id);
-      depth = bounded_workspace_->ReadOriginalDepth(
-          image_idx, row, col, scratch.scalar);
-      THROW_CHECK_GT(depth, 0.0f) << "Original depth/positive mask disagree";
-      if (traversal_depth == 0)
-        ++scratch.root_reads;
-      else
-        ++scratch.candidate_reads;
+      if (exact_depth) {
+        if (exact_nonpositive) continue;
+        auto& scratch = exact_depth_scratch_.at(thread_id);
+        depth = bounded_workspace_->ReadOriginalDepth(
+            image_idx, row, col, scratch.scalar);
+        THROW_CHECK_GT(depth, 0.0f) << "Original depth/positive mask disagree";
+        if (traversal_depth == 0)
+          ++scratch.root_reads;
+        else
+          ++scratch.candidate_reads;
+      }
     }
     // Original FP32 now feeds every unchanged predicate and output operation.
     // Pixels with negative depth are filtered.
