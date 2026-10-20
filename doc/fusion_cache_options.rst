@@ -78,6 +78,14 @@ rounding controls are checked at each decision.
 SNORM tiles require finite normal components in the range [-1, 1]; other
 values are rejected when loading the tile.
 
+With normal tiles, ``bounded_cache_neighborhood=1`` can prefill and pin depth
+maps selected for the current image's neighborhood. Fusion can then borrow
+those depth pointers instead of acquiring a cache lease for each sample. RGB
+components are admitted separately on demand. Admission retains per-worker
+headroom; components outside the admitted subset still load on demand. Compare
+this option with the same worker count and cache budgets before choosing it
+for a workspace.
+
 The original-depth diagnostic is separate: ``bounded_cache_exact_depth=1`` uses
 original FP32 depth values. It requires ``bounded_cache=1``,
 ``bounded_cache_components=1``, ``num_threads=1``, and positive values for both
