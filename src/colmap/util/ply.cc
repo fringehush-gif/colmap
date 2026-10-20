@@ -31,7 +31,11 @@ T ReadFromBuffer(const char* buffer, size_t offset) {
 }  // namespace
 
 std::vector<PlyPoint> ReadPly(const std::filesystem::path& path) {
-  std::ifstream file(path, std::ios::binary);
+  // Coalesce record reads; the buffer must outlive the stream.
+  std::vector<char> file_buffer(256 * 1024);
+  std::ifstream file;
+  file.rdbuf()->pubsetbuf(file_buffer.data(), file_buffer.size());
+  file.open(path, std::ios::binary);
   THROW_CHECK_FILE_OPEN(file, path);
 
   std::vector<PlyPoint> points;

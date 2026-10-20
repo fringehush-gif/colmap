@@ -1841,7 +1841,11 @@ void WritePointsVisibility(
 
 std::vector<std::vector<int>> ReadPointsVisibility(
     const std::filesystem::path& path, size_t num_points) {
-  std::fstream file(path, std::ios::in | std::ios::binary);
+  // Coalesce scalar reads; the buffer must outlive the stream.
+  std::vector<char> file_buffer(256 * 1024);
+  std::fstream file;
+  file.rdbuf()->pubsetbuf(file_buffer.data(), file_buffer.size());
+  file.open(path, std::ios::in | std::ios::binary);
   THROW_CHECK_FILE_OPEN(file, path);
 
   const size_t file_num_points = ReadBinaryLittleEndian<uint64_t>(&file);
