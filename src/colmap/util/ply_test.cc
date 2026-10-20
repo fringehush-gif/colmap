@@ -183,6 +183,43 @@ TEST(Ply, RoundTripBinaryPlyPointsFullData) {
   }
 }
 
+TEST(Ply, RoundTripLargeBinaryPlyPointsFullData) {
+  const auto test_file = CreateTestDir() / "large.ply";
+  // Full records exceed 1 MiB and leave a partial final output buffer.
+  std::vector<PlyPoint> original_points(40001);
+  for (size_t i = 0; i < original_points.size(); ++i) {
+    const float value = static_cast<float>(static_cast<int>(i % 2048) - 1024);
+    auto& point = original_points[i];
+    point.x = value / 8.0f;
+    point.y = -value / 16.0f;
+    point.z = static_cast<float>(i) / 32.0f;
+    point.nx = value / 1024.0f;
+    point.ny = -value / 2048.0f;
+    point.nz = static_cast<float>(i % 513) / 512.0f;
+    point.r = static_cast<uint8_t>(i % 256);
+    point.g = static_cast<uint8_t>((i * 7 + 31) % 256);
+    point.b = static_cast<uint8_t>((i * 13 + 127) % 256);
+  }
+
+  WriteBinaryPlyPoints(test_file, original_points, true, true);
+  ASSERT_GT(std::filesystem::file_size(test_file), 1024 * 1024);
+  const auto loaded_points = ReadPly(test_file);
+  ASSERT_EQ(loaded_points.size(), original_points.size());
+  for (size_t i = 0; i < original_points.size(); ++i) {
+    const auto& expected = original_points[i];
+    const auto& actual = loaded_points[i];
+    EXPECT_EQ(actual.x, expected.x);
+    EXPECT_EQ(actual.y, expected.y);
+    EXPECT_EQ(actual.z, expected.z);
+    EXPECT_EQ(actual.nx, expected.nx);
+    EXPECT_EQ(actual.ny, expected.ny);
+    EXPECT_EQ(actual.nz, expected.nz);
+    EXPECT_EQ(actual.r, expected.r);
+    EXPECT_EQ(actual.g, expected.g);
+    EXPECT_EQ(actual.b, expected.b);
+  }
+}
+
 TEST(Ply, RoundTripBinaryPlyPointsXYZOnly) {
   const auto test_dir = CreateTestDir();
   const auto test_file = test_dir / "test.ply";

@@ -1822,7 +1822,11 @@ void StereoFusion::Fuse(const int thread_id,
 void WritePointsVisibility(
     const std::filesystem::path& path,
     const std::vector<std::vector<int>>& points_visibility) {
-  std::fstream file(path, std::ios::out | std::ios::binary);
+  // Coalesce scalar writes; the buffer must outlive the stream's final flush.
+  std::vector<char> file_buffer(256 * 1024);
+  std::fstream file;
+  file.rdbuf()->pubsetbuf(file_buffer.data(), file_buffer.size());
+  file.open(path, std::ios::out | std::ios::binary);
   THROW_CHECK_FILE_OPEN(file, path);
 
   WriteBinaryLittleEndian<uint64_t>(&file, points_visibility.size());

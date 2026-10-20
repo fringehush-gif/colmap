@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 #include <Eigen/Core>
 
@@ -380,8 +381,11 @@ void WriteBinaryPlyPoints(const std::filesystem::path& path,
   text_file << "end_header\n";
   text_file.close();
 
-  std::fstream binary_file(path,
-                           std::ios::out | std::ios::binary | std::ios::app);
+  // Coalesce scalar writes; the buffer must outlive the stream's final flush.
+  std::vector<char> file_buffer(256 * 1024);
+  std::fstream binary_file;
+  binary_file.rdbuf()->pubsetbuf(file_buffer.data(), file_buffer.size());
+  binary_file.open(path, std::ios::out | std::ios::binary | std::ios::app);
   THROW_CHECK_FILE_OPEN(binary_file, path);
 
   for (const auto& point : points) {
