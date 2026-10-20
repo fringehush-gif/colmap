@@ -333,7 +333,12 @@ TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
   }
   normal.Write(root / "stereo/normal_maps" / (name + ".geometric.bin"));
   Bitmap image(30, 40, true);
-  image.Fill(BitmapColor<uint8_t>(0, 64, 128));
+  for (int row = 0; row < 40; ++row) {
+    for (int col = 0; col < 30; ++col) {
+      image.SetPixel(
+          col, row, BitmapColor<uint8_t>(col * 7, row * 5, col + row));
+    }
+  }
   ASSERT_TRUE(image.Write(root / "images" / name));
   {
     std::ofstream config(root / "stereo/fusion.cfg");
@@ -397,6 +402,13 @@ TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
   ASSERT_EQ(serial.GetFusedPoints().size(), 30 * 40);
   ASSERT_EQ(serial.GetFusedPointsVisibility().size(), 30 * 40);
   const auto expected = capture(serial);
+  // Cached inputs retain nearest-neighbor sampling rather than the resident
+  // unit-grid shortcut. Compare all pixel attributes and visibility exactly.
+  options.use_cache = true;
+  StereoFusion cached(options, root, "COLMAP", "", "geometric");
+  cached.Run();
+  EXPECT_EQ(capture(cached), expected);
+  options.use_cache = false;
   options.num_threads = 2;
   StereoFusion parallel(options, root, "COLMAP", "", "geometric");
   for (int run = 0; run < 2; ++run) {
