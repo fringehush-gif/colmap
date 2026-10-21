@@ -252,6 +252,13 @@ class MappedNormalRingIndex {
   std::vector<Hint> hints_;
 };
 
+// Preserve each fresh visibility set's iteration order in bounded worker
+// blocks. Merge materializes the public lists and releases consumed blocks.
+void AppendFusionVisibilityBlock(std::vector<std::vector<int>>& blocks,
+                                 const FlatHashSet<int>& visibility);
+size_t MergeFusionVisibilityBlocks(std::vector<std::vector<int>>& blocks,
+                                   std::vector<std::vector<int>>& output);
+
 struct FusionPinIndices {
   std::vector<size_t> depth;
   std::vector<size_t> bitmap;
@@ -429,6 +436,7 @@ class StereoFusion : public BaseController {
   std::vector<std::vector<int>> fused_points_visibility_;
 
   std::vector<std::vector<PlyPoint>> task_fused_points_;
+  // Per-worker blocks of [count, image indices...] records until final merge.
   std::vector<std::vector<std::vector<int>>> task_fused_points_visibility_;
 };
 

@@ -33,6 +33,50 @@
 
 namespace colmap {
 namespace mvs {
+TEST(StereoFusion, VisibilityBlocksPreserveListsAcrossBoundariesAndReuse) {
+  const FlatHashSet<int> visibility = {9, -3, 4};
+  const std::vector<int> expected(visibility.begin(), visibility.end());
+  std::vector<std::vector<int>> blocks, output;
+  constexpr size_t kBlockWords = 64 * 1024 / sizeof(int);
+  const size_t records = kBlockWords / (visibility.size() + 1) + 1;
+  for (size_t index = 0; index < records; ++index) {
+    internal::AppendFusionVisibilityBlock(blocks, visibility);
+  }
+  ASSERT_EQ(blocks.size(), 2);
+  EXPECT_EQ(blocks.front().size(), kBlockWords);
+  EXPECT_EQ(internal::MergeFusionVisibilityBlocks(blocks, output), records);
+  EXPECT_TRUE(blocks.empty());
+  ASSERT_EQ(output.size(), records);
+  for (const auto& values : output) EXPECT_EQ(values, expected);
+
+  internal::AppendFusionVisibilityBlock(blocks, FlatHashSet<int>());
+  EXPECT_EQ(internal::MergeFusionVisibilityBlocks(blocks, output), 1);
+  EXPECT_TRUE(output.back().empty());
+  EXPECT_EQ(internal::MergeFusionVisibilityBlocks(blocks, output), 0);
+
+  FlatHashSet<int> large;
+  for (size_t index = 0; index < kBlockWords + 1; ++index) {
+    large.insert(static_cast<int>(index));
+  }
+  const std::vector<int> large_expected(large.begin(), large.end());
+  internal::AppendFusionVisibilityBlock(blocks, large);
+  internal::AppendFusionVisibilityBlock(blocks, visibility);
+  ASSERT_EQ(blocks.size(), 2);
+  EXPECT_EQ(blocks.front().size(), large.size() + 1);
+  EXPECT_EQ(internal::MergeFusionVisibilityBlocks(blocks, output), 2);
+  EXPECT_EQ(output[output.size() - 2], large_expected);
+  EXPECT_EQ(output.back(), expected);
+}
+
+TEST(StereoFusion, VisibilityBlocksRejectTruncatedOrNegativeCounts) {
+  for (const auto& malformed : std::vector<std::vector<int>>{{-1}, {2, 9}}) {
+    std::vector<std::vector<int>> blocks = {malformed}, output;
+    EXPECT_THROW(internal::MergeFusionVisibilityBlocks(blocks, output),
+                 std::invalid_argument);
+    EXPECT_TRUE(output.empty());
+  }
+}
+
 TEST(StereoFusion, FloatMapViewPreservesValuesAndFlatBounds) {
   const std::array<float, 8> values = {0.0f,
                                        -0.0f,
