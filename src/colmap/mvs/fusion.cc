@@ -3,7 +3,6 @@
 #include "colmap/mvs/fusion.h"
 
 #include "colmap/math/math.h"
-#include "colmap/mvs/normal_precision_guard.h"
 #include "colmap/util/eigen_alignment.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/file.h"
@@ -215,10 +214,6 @@ void StereoFusionOptions::Print() const {
   LOG_HEADING2("StereoFusion::Options");
   PrintOption(mask_path);
   PrintOption(full_ram_load_threads);
-  PrintOption(full_ram_normal_storage);
-  PrintOption(full_ram_normal_guard);
-  PrintOption(full_ram_normal_guard_bytes);
-  PrintOption(full_ram_normal_guard_files);
   PrintOption(max_image_size);
   PrintOption(min_num_pixels);
   PrintOption(max_num_pixels);
@@ -234,8 +229,6 @@ void StereoFusionOptions::Print() const {
   PrintOption(bounded_cache_normal_tile_size);
   PrintOption(bounded_cache_normal_tile_slots);
   PrintOption(bounded_cache_normal_tile_hints);
-  PrintOption(bounded_cache_normal_snorm16);
-  PrintOption(bounded_cache_normal_snorm16_guard);
   PrintOption(bounded_cache_exact_depth);
   PrintOption(bounded_cache_normal_mapped_bytes);
   PrintOption(bounded_cache_normal_mapped_files);
@@ -250,47 +243,8 @@ void StereoFusionOptions::Print() const {
 #undef PrintOption
 }
 
-bool StereoFusionOptions::SupportsNormalPrecisionGuard() {
-  return normal_precision_guard::SupportedBuild();
-}
-
 bool StereoFusionOptions::Check() const {
   CHECK_OPTION_EQ((use_cache && bounded_cache), false);
-  NormalStorage storage;
-  CHECK_OPTION_EQ(ParseFullRamNormalStorage(full_ram_normal_storage, &storage),
-                  true);
-  CHECK_OPTION_EQ(
-      (storage != NormalStorage::kFp32 &&
-       (use_cache || bounded_cache || bounded_cache_components ||
-        bounded_cache_diagnostics || bounded_cache_neighborhood ||
-        bounded_cache_compact_rgb || bounded_cache_normal_snorm16 ||
-        bounded_cache_normal_snorm16_guard || bounded_cache_exact_depth ||
-        bounded_cache_normal_tile_size != 0 ||
-        bounded_cache_normal_mapped_bytes != 0 ||
-        bounded_cache_normal_mapped_files != 0 ||
-        bounded_cache_prefill_threads != -1)),
-      false);
-  CHECK_OPTION_EQ(full_ram_normal_guard_bytes == 0,
-                  full_ram_normal_guard_files == 0);
-  CHECK_OPTION_GE(full_ram_normal_guard_files, 0);
-  CHECK_OPTION_GE(full_ram_normal_guard_bytes, int64_t{0});
-  CHECK_OPTION_LE(static_cast<uint64_t>(full_ram_normal_guard_bytes),
-                  std::numeric_limits<size_t>::max());
-  if (full_ram_normal_guard) {
-    CHECK_OPTION_EQ(storage == NormalStorage::kOct2x16, true);
-    CHECK_OPTION_EQ(SupportsNormalPrecisionGuard(), true);
-    CHECK_OPTION_GT(full_ram_normal_guard_bytes, 0);
-    // Bound row concurrency explicitly. Keep preload serial: -1 inherits
-    // num_threads, so parallel guard profiles must select one loader lane.
-    CHECK_OPTION_GE(num_threads, 1);
-    CHECK_OPTION_LE(num_threads, 24);
-    CHECK_OPTION_EQ(full_ram_load_threads == 1 ||
-                        (num_threads == 1 && full_ram_load_threads == -1),
-                    true);
-  } else {
-    CHECK_OPTION_EQ(full_ram_normal_guard_bytes, int64_t{0});
-    CHECK_OPTION_EQ(full_ram_normal_guard_files, 0);
-  }
   CHECK_OPTION_IN(min_num_pixels, 0, max_num_pixels);
   CHECK_OPTION_GT(max_traversal_depth, 0);
   CHECK_OPTION_GE(max_reproj_error, 0);
@@ -303,18 +257,6 @@ bool StereoFusionOptions::Check() const {
   CHECK_OPTION_EQ((bounded_cache_diagnostics && !bounded_cache), false);
   CHECK_OPTION_GE(bounded_cache_normal_tile_size, 0);
   CHECK_OPTION_GT(bounded_cache_normal_tile_slots, 0);
-  CHECK_OPTION_EQ((bounded_cache_normal_snorm16 &&
-                   (bounded_cache_normal_tile_size == 0 ||
-                    bounded_cache_normal_mapped_bytes == 0)),
-                  false);
-  CHECK_OPTION_EQ(
-      (bounded_cache_normal_snorm16_guard && !bounded_cache_normal_snorm16),
-      false);
-  // Unsupported compiler math must never silently activate an approximate
-  // screen under the exact guard option. Ordinary Fusion remains available.
-  CHECK_OPTION_EQ(
-      (bounded_cache_normal_snorm16_guard && !SupportsNormalPrecisionGuard()),
-      false);
   CHECK_OPTION_GE(bounded_cache_normal_mapped_bytes, 0);
   CHECK_OPTION_GE(bounded_cache_normal_mapped_files, 0);
   CHECK_OPTION_LE(static_cast<uint64_t>(bounded_cache_normal_mapped_bytes),
@@ -332,14 +274,12 @@ bool StereoFusionOptions::Check() const {
         bounded_cache_neighborhood || num_threads != 1 ||
         bounded_cache_normal_mapped_files < 2)),
       false);
-  CHECK_OPTION_EQ(
-      (bounded_cache_exact_depth &&
-       (!bounded_cache || !bounded_cache_components ||
-        bounded_cache_normal_snorm16 || bounded_cache_normal_snorm16_guard ||
-        bounded_cache_normal_tile_size != 0 || num_threads != 1 ||
-        bounded_cache_normal_mapped_bytes == 0 ||
-        bounded_cache_normal_mapped_files == 0)),
-      false);
+  CHECK_OPTION_EQ((bounded_cache_exact_depth &&
+                   (!bounded_cache || !bounded_cache_components ||
+                    bounded_cache_normal_tile_size != 0 || num_threads != 1 ||
+                    bounded_cache_normal_mapped_bytes == 0 ||
+                    bounded_cache_normal_mapped_files == 0)),
+                  false);
   CHECK_OPTION_EQ((bounded_cache_neighborhood && !bounded_cache), false);
   CHECK_OPTION_GE(bounded_cache_prefill_threads, -1);
   CHECK_OPTION_NE(bounded_cache_prefill_threads, 0);
@@ -398,10 +338,6 @@ StereoFusion::GetDepthMappedNeighborhoodStats() const {
   return bounded_workspace_
              ? bounded_workspace_->GetDepthMappedNeighborhoodStats()
              : BoundedWorkspace::DepthMappedNeighborhoodStats{};
-}
-
-MappedNormalStats StereoFusion::GetResidentNormalMappingStatsSnapshot() const {
-  return resident_normal_mapping_stats_;
 }
 
 size_t StereoFusion::GetMaxBoundedPrefillLanesScheduled() const {
@@ -522,14 +458,6 @@ void StereoFusion::Run() {
   neighborhood_bitmap_admitted_views_ = 0;
   neighborhood_bitmap_carried_views_ = 0;
   task_neighborhood_reads_.clear();
-  resident_normal_mapping_stats_ = {};
-  // Declared before the row pool: unwinding destroys/joins workers first.
-  struct OriginalNormalExit {
-    Workspace* workspace = nullptr;
-    ~OriginalNormalExit() {
-      if (workspace) workspace->ReleaseOriginalNormalSources();
-    }
-  } original_normal_exit;
   fused_points_.clear();
   fused_points_visibility_.clear();
   // A failed row may have appended points before the joined exception.
@@ -552,10 +480,6 @@ void StereoFusion::Run() {
   LOG(INFO) << "Reading workspace...";
 
   Workspace::Options workspace_options;
-  THROW_CHECK(
-      ParseFullRamNormalStorage(options_.full_ram_normal_storage,
-                                &workspace_options.full_ram_normal_storage));
-
   auto workspace_format_lower_case = workspace_format_;
   StringToLower(&workspace_format_lower_case);
   if (workspace_format_lower_case == "pmvs") {
@@ -563,21 +487,12 @@ void StereoFusion::Run() {
         StringPrintf("stereo-%s", pmvs_option_name_.c_str());
   }
 
-  workspace_options.full_ram_normal_guard = options_.full_ram_normal_guard;
-  workspace_options.full_ram_normal_guard_bytes =
-      static_cast<size_t>(options_.full_ram_normal_guard_bytes);
-  workspace_options.full_ram_normal_guard_files =
-      static_cast<size_t>(options_.full_ram_normal_guard_files);
-  workspace_options.full_ram_normal_guard_concurrency =
-      static_cast<size_t>(GetEffectiveNumThreads(options_.num_threads));
   workspace_options.num_threads = options_.num_threads;
   workspace_options.max_image_size = options_.max_image_size;
   workspace_options.image_as_rgb = true;
   workspace_options.compact_rgb_to_depth_grid =
       options_.bounded_cache_compact_rgb;
   workspace_options.exact_depth_state = options_.bounded_cache_exact_depth;
-  workspace_options.normal_tiles_snorm16 =
-      options_.bounded_cache_normal_snorm16;
   workspace_options.mapped_normal_bytes_limit =
       static_cast<size_t>(options_.bounded_cache_normal_mapped_bytes);
   workspace_options.mapped_normal_files_limit =
@@ -612,13 +527,9 @@ void StereoFusion::Run() {
       workspace_options.num_threads = static_cast<int>(std::min(
           static_cast<size_t>(options_.full_ram_load_threads), roster_size));
       workspace_ = std::make_unique<Workspace>(workspace_options);
-      if (options_.full_ram_normal_guard)
-        original_normal_exit.workspace = workspace_.get();
       workspace_->Load(unique_names);
     } else {
       workspace_ = std::make_unique<Workspace>(workspace_options);
-      if (options_.full_ram_normal_guard)
-        original_normal_exit.workspace = workspace_.get();
       workspace_->Load(image_names);
     }
     num_threads = GetEffectiveNumThreads(options_.num_threads);
@@ -632,9 +543,7 @@ void StereoFusion::Run() {
   LOG(INFO) << "Reading configuration...";
 
   const auto& model = workspace_->GetModel();
-  if (!options_.use_cache && !options_.bounded_cache &&
-      workspace_->GetOptions().full_ram_normal_storage ==
-          NormalStorage::kFp32) {
+  if (!options_.use_cache && !options_.bounded_cache) {
     full_ram_inputs_.resize(model.images.size());
   }
   neighborhood_data_.assign(model.images.size(), nullptr);
@@ -666,14 +575,6 @@ void StereoFusion::Run() {
   P_.resize(model.images.size());
   inv_P_.resize(model.images.size());
   inv_R_.resize(model.images.size());
-  prepared_normal_rotations_.clear();
-  prepared_codec_rotations_.clear();
-  if (options_.full_ram_normal_guard)
-    prepared_codec_rotations_.resize(model.images.size());
-  if (options_.bounded_cache_normal_snorm16_guard) {
-    prepared_normal_rotations_.resize(model.images.size());
-  }
-
   for (const auto& image_name : image_names) {
     const int image_idx = model.GetImageIdx(image_name);
 
@@ -740,16 +641,6 @@ void StereoFusion::Run() {
         Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>>(
             image.GetR())
             .transpose();
-    if (options_.bounded_cache_normal_snorm16_guard) {
-      prepared_normal_rotations_.at(image_idx) =
-          normal_precision_guard::PrepareRotation(inv_R_.at(image_idx));
-    }
-    if (options_.full_ram_normal_guard) {
-      prepared_codec_rotations_.at(image_idx) =
-          normal_precision_guard::PrepareCodecRotation(
-              inv_R_.at(image_idx),
-              workspace_->GetStoredNormalError(image_idx));
-    }
   }
 
   if (direct_mapped_normals_) {
@@ -977,11 +868,6 @@ void StereoFusion::Run() {
     std::fill(neighborhood_data_.begin(), neighborhood_data_.end(), nullptr);
     neighborhood_leases_.clear();
 
-    if (options_.full_ram_normal_guard) {
-      workspace_->ValidateOriginalNormalSources();
-      resident_normal_mapping_stats_ =
-          workspace_->GetOriginalNormalMappingStats();
-    }
     fused_points_.reserve(total_fused_points);
     fused_points_visibility_.reserve(total_fused_points);
     for (size_t thread_id = 0; thread_id < task_fused_points_.size();
@@ -1191,11 +1077,9 @@ const BoundedWorkspace::ImageData* StereoFusion::AcquireWorkerNormalTile(
     return data && static_cast<size_t>(col) >= data->normal_origin_x &&
            static_cast<size_t>(row) >= data->normal_origin_y &&
            static_cast<size_t>(col) - data->normal_origin_x <
-               (data->snorm_normals.empty() ? data->normal_map.GetWidth()
-                                            : data->snorm_width) &&
+               data->normal_map.GetWidth() &&
            static_cast<size_t>(row) - data->normal_origin_y <
-               (data->snorm_normals.empty() ? data->normal_map.GetHeight()
-                                            : data->snorm_height);
+               data->normal_map.GetHeight();
   };
   if (!ring.last_slot_by_image.empty()) {
     ++ring.hint_checks;
@@ -1549,11 +1433,6 @@ void StereoFusion::Fuse(const int thread_id,
 
   Eigen::Vector4f fused_ref_point = Eigen::Vector4f::Zero();
   Eigen::Vector3f fused_ref_normal = Eigen::Vector3f::Zero();
-  normal_precision_guard::Operand guarded_ref_normal{
-      Eigen::Vector3f::Zero(), Eigen::Vector3d::Zero(), false};
-  int guarded_ref_image = -1;
-  size_t guarded_ref_row = 0, guarded_ref_col = 0;
-
   // Points of different pixels of the currently point to be fused.
   auto& fused_point_x = scratch.x;
   auto& fused_point_y = scratch.y;
@@ -1702,17 +1581,13 @@ void StereoFusion::Fuse(const int thread_id,
                                    : normal_lease && *normal_lease
                                        ? normal_lease->get()
                                        : image_data;
-        const bool compact_full_ram =
-            workspace_->GetOptions().full_ram_normal_storage !=
-            NormalStorage::kFp32;
-        normal_map = normal_image || mapped_normal || compact_full_ram
+        normal_map = normal_image || mapped_normal
                          ? std::shared_ptr<const NormalMap>()
                          : workspace_->GetNormalMapLease(image_idx);
         const auto* fp32_normal = normal_map.get();
-        local_normal = mapped_normal  ? mapped_normal->ReadFloat3(row, col)
-                       : normal_image ? normal_image->GetNormal(row, col)
-                       : compact_full_ram
-                           ? workspace_->GetStoredNormal(image_idx, row, col)
+        local_normal = mapped_normal ? mapped_normal->ReadFloat3(row, col)
+                       : normal_image
+                           ? normal_image->GetNormal(row, col)
                            : Eigen::Vector3f(fp32_normal->Get(row, col, 0),
                                              fp32_normal->Get(row, col, 1),
                                              fp32_normal->Get(row, col, 2));
@@ -1722,60 +1597,8 @@ void StereoFusion::Fuse(const int thread_id,
 
       // Check for consistent normal direction with reference normal.
       if (traversal_depth > 0) {
-        if (!kResident && (options_.bounded_cache_normal_snorm16_guard ||
-                           options_.full_ram_normal_guard)) {
-          const auto candidate =
-              options_.full_ram_normal_guard
-                  ? normal_precision_guard::BoundedOperandFromRotated(
-                        inv_R_.at(image_idx),
-                        workspace_->GetStoredNormalError(image_idx),
-                        prepared_codec_rotations_.at(image_idx),
-                        local_normal,
-                        normal)
-                  : normal_precision_guard::CompressedOperandFromRotated(
-                        inv_R_.at(image_idx),
-                        prepared_normal_rotations_.at(image_idx),
-                        local_normal,
-                        normal);
-          if (!normal_precision_guard::NormalAccept(
-                  guarded_ref_normal,
-                  candidate,
-                  min_cos_normal_error_,
-                  [&]() -> Eigen::Vector3f {
-                    if (options_.full_ram_normal_guard) {
-                      const Eigen::Vector3f original =
-                          workspace_->ReadOriginalStoredNormal(
-                              guarded_ref_image,
-                              guarded_ref_row,
-                              guarded_ref_col);
-                      const Eigen::Vector3f rotated =
-                          inv_R_.at(guarded_ref_image) * original;
-                      return rotated;
-                    }
-                    return inv_R_.at(guarded_ref_image) *
-                           bounded_workspace_->ReadOriginalNormal(
-                               guarded_ref_image,
-                               guarded_ref_row,
-                               guarded_ref_col);
-                  },
-                  [&]() -> Eigen::Vector3f {
-                    if (options_.full_ram_normal_guard) {
-                      const Eigen::Vector3f original =
-                          workspace_->ReadOriginalStoredNormal(
-                              image_idx, row, col);
-                      const Eigen::Vector3f rotated =
-                          inv_R_.at(image_idx) * original;
-                      return rotated;
-                    }
-                    return inv_R_.at(image_idx) *
-                           bounded_workspace_->ReadOriginalNormal(
-                               image_idx, row, col);
-                  }))
-            continue;
-        } else {
-          const float cos_normal_error = fused_ref_normal.dot(normal);
-          if (cos_normal_error < min_cos_normal_error_) continue;
-        }
+        const float cos_normal_error = fused_ref_normal.dot(normal);
+        if (cos_normal_error < min_cos_normal_error_) continue;
       }
 
       // Determine 3D location of current depth value.
@@ -1863,25 +1686,6 @@ void StereoFusion::Fuse(const int thread_id,
       if (traversal_depth == 0) {
         fused_ref_point = Eigen::Vector4f(xyz(0), xyz(1), xyz(2), 1.0f);
         fused_ref_normal = normal;
-        if (!kResident && (options_.bounded_cache_normal_snorm16_guard ||
-                           options_.full_ram_normal_guard)) {
-          guarded_ref_normal =
-              options_.full_ram_normal_guard
-                  ? normal_precision_guard::BoundedOperandFromRotated(
-                        inv_R_.at(image_idx),
-                        workspace_->GetStoredNormalError(image_idx),
-                        prepared_codec_rotations_.at(image_idx),
-                        local_normal,
-                        normal)
-                  : normal_precision_guard::CompressedOperandFromRotated(
-                        inv_R_.at(image_idx),
-                        prepared_normal_rotations_.at(image_idx),
-                        local_normal,
-                        normal);
-          guarded_ref_image = image_idx;
-          guarded_ref_row = row;
-          guarded_ref_col = col;
-        }
       }
 
       if (fused_point_x.size() >=
