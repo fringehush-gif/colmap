@@ -28,6 +28,7 @@
 #include <thread>
 #include <tuple>
 #include <type_traits>
+#include <vector>
 
 #include <gtest/gtest.h>
 

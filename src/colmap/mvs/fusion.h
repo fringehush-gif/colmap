@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cfloat>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
