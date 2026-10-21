@@ -4,7 +4,6 @@
 
 #include "colmap/mvs/bounded_workspace.h"
 #include "colmap/mvs/mat.h"
-#include "colmap/mvs/normal_precision_guard.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/base_controller.h"
 #include "colmap/util/eigen_alignment.h"
@@ -43,13 +42,6 @@ struct StereoFusionOptions {
   // Full-RAM workspace loading can use a separate positive thread count.
   // -1 retains the existing num_threads behavior.
   int full_ram_load_threads = -1;
-  // Approximate, opt-in full-RAM normal storage; original FP32 files.
-  std::string full_ram_normal_storage = "fp32";
-  // Default-off resident oct4 exact predicate guard; 1-24 Fusion workers.
-  bool full_ram_normal_guard = false;
-  int64_t full_ram_normal_guard_bytes = 0;
-  int full_ram_normal_guard_files = 0;
-
   // Maximum image size in either dimension.
   int max_image_size = -1;
 
@@ -94,11 +86,6 @@ struct StereoFusionOptions {
   int bounded_cache_normal_tile_size = 0;
   int bounded_cache_normal_tile_slots = 4;
   bool bounded_cache_normal_tile_hints = true;
-  // Approximate signed-normalized tiles, default off. The separate guard
-  // enables conservative decision screening with exact original FP32 fallback
-  // only on supported compiler arithmetic; unsupported builds reject it.
-  bool bounded_cache_normal_snorm16 = false;
-  bool bounded_cache_normal_snorm16_guard = false;
   // Default-off serial exact-depth state, independent of lossy codecs.
   // Retain only finite-positive bits; use original FP32 for every predicate.
   bool bounded_cache_exact_depth = false;
@@ -129,10 +116,6 @@ struct StereoFusionOptions {
 
   // Emit one bounded, cold-path cache diagnostic row after CLI Fusion.
   bool bounded_cache_diagnostics = false;
-
-  // Whether this build supports conservative SNORM decision screening.
-  // Runtime floating-point controls are checked separately at each decision.
-  static bool SupportsNormalPrecisionGuard();
 
   // Check the options for validity.
   bool Check() const;
@@ -341,8 +324,6 @@ class StereoFusion : public BaseController {
   GetDepthMappedNeighborhoodStats() const;
   size_t GetMaxBoundedPrefillLanesScheduled() const;
   BoundedWorkspace::MappedNormalStats GetMappedNormalStats() const;
-  // Explicit pre-release peak/live snapshot, read only after Run joins workers.
-  MappedNormalStats GetResidentNormalMappingStatsSnapshot() const;
   struct NormalTileRingStats {
     size_t hits = 0;
     size_t misses = 0;
@@ -390,7 +371,6 @@ class StereoFusion : public BaseController {
   };
   // Borrowed only from the eager FP32 workspace, which outlives joined rows.
   std::vector<FullRamInput> full_ram_inputs_;
-  MappedNormalStats resident_normal_mapping_stats_;
   BoundedWorkspace* bounded_workspace_ = nullptr;
   std::vector<const BoundedWorkspace::ImageData*> neighborhood_data_;
   std::vector<BoundedWorkspace::ImageLease> neighborhood_leases_;
@@ -457,11 +437,6 @@ class StereoFusion : public BaseController {
   std::vector<Eigen::Matrix<float, 3, 4, Eigen::RowMajor>> P_;
   std::vector<Eigen::Matrix<float, 3, 4, Eigen::RowMajor>> inv_P_;
   std::vector<Eigen::Matrix<float, 3, 3, Eigen::RowMajor>> inv_R_;
-  std::vector<normal_precision_guard::PreparedRotation>
-      prepared_normal_rotations_;
-  std::vector<normal_precision_guard::PreparedCodecRotation>
-      prepared_codec_rotations_;
-
   struct FusionData {
     int image_idx = kInvalidImageId;
     int row = 0;

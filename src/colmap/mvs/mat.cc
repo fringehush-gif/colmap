@@ -22,8 +22,6 @@
 #if defined(__linux__)
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
-#include <sys/stat.h>
-#include <unistd.h>
 #endif
 
 namespace colmap {
@@ -82,28 +80,9 @@ MappedFloatShape ReadMappedFloatShape(std::ifstream& file,
 
 }  // namespace
 
-#if defined(__linux__)
-namespace {
-std::array<uint64_t, 7> SourceIdentity(const struct stat& value) {
-  THROW_CHECK(S_ISREG(value.st_mode));
-  THROW_CHECK_GE(value.st_size, 0);
-  return {uint64_t(value.st_dev),
-          uint64_t(value.st_ino),
-          uint64_t(value.st_size),
-          uint64_t(value.st_mtim.tv_sec),
-          uint64_t(value.st_mtim.tv_nsec),
-          uint64_t(value.st_ctim.tv_sec),
-          uint64_t(value.st_ctim.tv_nsec)};
-}
-}  // namespace
-#endif
-
 struct ImmutableMapSource::Impl {
   MappedFloatShape shape;
   size_t file_bytes = 0;
-  bool bind_identity = false;
-  std::filesystem::path path;
-  std::array<uint64_t, 7> identity{};
 #if defined(__linux__)
   std::unique_ptr<boost::interprocess::file_mapping> file;
 #endif
@@ -240,125 +219,9 @@ ImmutableMapSource::ImmutableMapSource(const std::filesystem::path& path)
 #endif
 }
 
-ImmutableMapSource::ImmutableMapSource(const std::filesystem::path& path,
-                                       BindIdentity)
-    : impl_(std::make_unique<Impl>()) {
-  THROW_CHECK(ImmutableMapRegion::Supported());
-#if defined(__linux__)
-  impl_->path = std::filesystem::absolute(path);
-  impl_->bind_identity = true;
-  impl_->file = std::make_unique<boost::interprocess::file_mapping>(
-      path.c_str(), boost::interprocess::read_only);
-  struct stat info;
-  const int fd = impl_->file->get_mapping_handle().handle;
-  THROW_CHECK_EQ(::fstat(fd, &info), 0);
-  impl_->identity = SourceIdentity(info);
-  ValidateUnchanged();
-  std::ifstream input(GetPinnedReadPath(), std::ios::binary);
-  THROW_CHECK_FILE_OPEN(input, path);
-  impl_->shape = ReadMappedFloatShape(input, path);
-  input.close();
-  THROW_CHECK(input);
-  impl_->file_bytes = impl_->identity[2];
-  THROW_CHECK_LE(
-      impl_->shape.bytes,
-      std::numeric_limits<size_t>::max() - impl_->shape.payload_start);
-  THROW_CHECK_GE(impl_->file_bytes,
-                 impl_->shape.payload_start + impl_->shape.bytes);
-  ValidateUnchanged();
-  return;
-#else
-  THROW_CHECK(false) << "Held-FD normal source requires Linux";
-#endif
-}
-
-std::filesystem::path ImmutableMapSource::GetPinnedReadPath() const {
-  THROW_CHECK(impl_->bind_identity);
-#if defined(__linux__)
-  const int fd = impl_->file->get_mapping_handle().handle;
-  return std::filesystem::path("/proc/self/fd") / std::to_string(fd);
-#else
-  THROW_CHECK(false) << "Held-FD normal source requires Linux";
-  return {};
-#endif
-}
 std::array<size_t, 3> ImmutableMapSource::GetShape() const {
   return {impl_->shape.width, impl_->shape.height, impl_->shape.depth};
 }
-Eigen::Vector3f ImmutableMapSource::ReadFloat3Sample(const size_t row,
-                                                     const size_t col) const {
-  THROW_CHECK(impl_->bind_identity);
-  THROW_CHECK(ImmutableMapRegion::Supported());
-  const auto& shape = impl_->shape;
-  THROW_CHECK_EQ(shape.depth, 3);
-  THROW_CHECK_GT(shape.width, 0);
-  THROW_CHECK_GT(shape.height, 0);
-  THROW_CHECK_LT(row, shape.height);
-  THROW_CHECK_LT(col, shape.width);
-  THROW_CHECK_LE(shape.width,
-                 std::numeric_limits<size_t>::max() / shape.height);
-  const size_t plane_samples = shape.width * shape.height;
-  THROW_CHECK_LE(plane_samples,
-                 std::numeric_limits<size_t>::max() / (3 * sizeof(float)));
-  const size_t plane_bytes = plane_samples * sizeof(float);
-  THROW_CHECK_EQ(shape.bytes, 3 * plane_bytes);
-  THROW_CHECK_LE(shape.payload_start, impl_->file_bytes);
-  THROW_CHECK_LE(shape.bytes, impl_->file_bytes - shape.payload_start);
-  const size_t sample_bytes = (row * shape.width + col) * sizeof(float);
-  std::array<float, 3> values{};
-#if defined(__linux__)
-  const int fd = impl_->file->get_mapping_handle().handle;
-  for (size_t channel = 0; channel < values.size(); ++channel) {
-    // The checked complete three-plane extent bounds every addition below.
-    const size_t begin =
-        shape.payload_start + channel * plane_bytes + sample_bytes;
-    THROW_CHECK_LE(begin, impl_->file_bytes);
-    THROW_CHECK_LE(sizeof(float), impl_->file_bytes - begin);
-    THROW_CHECK_LE(
-        begin,
-        static_cast<size_t>(std::numeric_limits<off_t>::max()) - sizeof(float));
-    size_t consumed = 0;
-    while (consumed < sizeof(float)) {
-      const ssize_t count =
-          ::pread(fd,
-                  reinterpret_cast<char*>(&values[channel]) + consumed,
-                  sizeof(float) - consumed,
-                  static_cast<off_t>(begin + consumed));
-      const int read_errno = errno;
-      if (count < 0 && read_errno == EINTR) continue;
-      THROW_CHECK_GE(count, 0)
-          << "Held-FD normal pread failed, errno=" << read_errno;
-      THROW_CHECK_GT(count, 0) << "Held-FD normal sample truncated";
-      consumed += static_cast<size_t>(count);
-    }
-  }
-  return Eigen::Vector3f(values[0], values[1], values[2]);
-#else
-  THROW_CHECK(false) << "Held-FD normal sample requires Linux";
-  return Eigen::Vector3f::Zero();
-#endif
-}
-
-void ImmutableMapSource::ValidateUnchanged() const {
-  THROW_CHECK(impl_->bind_identity);
-#if defined(__linux__)
-  struct stat descriptor, name;
-  THROW_CHECK_EQ(::fstat(impl_->file->get_mapping_handle().handle, &descriptor),
-                 0);
-  THROW_CHECK_EQ(::stat(impl_->path.c_str(), &name), 0);
-  THROW_CHECK(SourceIdentity(descriptor) == impl_->identity)
-      << "Original normal descriptor changed";
-  THROW_CHECK(SourceIdentity(name) == impl_->identity)
-      << "Original normal path changed";
-  // This check also refuses an unavailable or substituted proc descriptor path.
-  struct stat proc;
-  THROW_CHECK_EQ(::stat(GetPinnedReadPath().c_str(), &proc), 0);
-  THROW_CHECK(SourceIdentity(proc) == impl_->identity);
-#else
-  THROW_CHECK(false) << "Held-FD normal source requires Linux";
-#endif
-}
-
 ImmutableMapSource::~ImmutableMapSource() = default;
 size_t ImmutableMapSource::GetMappingReservationBytes() const {
   return MappingPageCharge(impl_->file_bytes);

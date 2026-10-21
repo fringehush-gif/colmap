@@ -1153,26 +1153,6 @@ void OptionManager::AddStereoFusionOptions() {
   AddDefaultOption("StereoFusion.use_cache", &stereo_fusion->use_cache);
   AddDefaultOption("StereoFusion.full_ram_load_threads",
                    &stereo_fusion->full_ram_load_threads);
-  AddDefaultOption(
-      "StereoFusion.full_ram_normal_storage",
-      &stereo_fusion->full_ram_normal_storage,
-      "Resident normals: fp32 (12 bytes) or oct2x16 (4 bytes). Octahedral "
-      "storage discards magnitude and may change Fusion output. Requires "
-      "full-RAM loading.");
-  AddDefaultOption("StereoFusion.full_ram_normal_guard",
-                   &stereo_fusion->full_ram_normal_guard,
-                   "Default-off exact predicate for full-RAM oct2x16. Requires "
-                   "sealed immutable "
-                   "same-grid FP32 originals, 1-24 Fusion workers, one preload "
-                   "worker and paired budgets.");
-  AddDefaultOption(
-      "StereoFusion.full_ram_normal_guard_bytes",
-      &stereo_fusion->full_ram_normal_guard_bytes,
-      "Independent page-rounded original normal row-mapping budget.");
-  AddDefaultOption(
-      "StereoFusion.full_ram_normal_guard_files",
-      &stereo_fusion->full_ram_normal_guard_files,
-      "Original source descriptor/row-owner slots; admit every used map.");
   AddDefaultOption("StereoFusion.bounded_cache", &stereo_fusion->bounded_cache);
   AddDefaultOption("StereoFusion.bounded_cache_components",
                    &stereo_fusion->bounded_cache_components);
@@ -1185,23 +1165,12 @@ void OptionManager::AddStereoFusionOptions() {
   AddDefaultOption("StereoFusion.bounded_cache_normal_tile_hints",
                    &stereo_fusion->bounded_cache_normal_tile_hints);
   AddDefaultOption(
-      "StereoFusion.bounded_cache_normal_snorm16",
-      &stereo_fusion->bounded_cache_normal_snorm16,
-      "Quantize bounded normal tiles to SNORM16. Decisions are approximate "
-      "unless bounded_cache_normal_snorm16_guard is also enabled.");
-  AddDefaultOption(
       "StereoFusion.bounded_cache_exact_depth",
       &stereo_fusion->bounded_cache_exact_depth,
       "Optional serial exact-depth diagnostic: finite-positive mask, "
       "original FP32 for every native decision and XYZ output. Requires "
       "bounded components, unchanged grids, FP32 backing/normals, tiles "
       "off, and explicit mapped-owner byte/file limits.");
-  AddDefaultOption(
-      "StereoFusion.bounded_cache_normal_snorm16_guard",
-      &stereo_fusion->bounded_cache_normal_snorm16_guard,
-      "Use original FP32 normals for uncertain compact-normal decisions. "
-      "Requires supported strict floating-point arithmetic and bounded "
-      "SNORM16 tiles.");
   AddDefaultOption("StereoFusion.bounded_cache_normal_mapped_bytes",
                    &stereo_fusion->bounded_cache_normal_mapped_bytes);
   AddDefaultOption("StereoFusion.bounded_cache_normal_mapped_files",

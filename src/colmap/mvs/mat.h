@@ -16,86 +16,17 @@
 namespace colmap {
 namespace mvs {
 
-// Encode validated finite [-1, 1] components with the signed-normal codec,
-// without clipping or vector renormalization.
-inline int16_t EncodeNormalSnorm16Unchecked(const float value) {
-  return static_cast<int16_t>(std::round(static_cast<double>(value) * 32767.0));
-}
-inline float DecodeNormalSnorm16(const int16_t value) {
-  return static_cast<float>(value) / 32767.0f;
-}
-
-// Compact full-RAM direction and optional magnitude, approximate.
-struct OctNormalPair {
-  int16_t x;
-  int16_t y;
-};
-static_assert(sizeof(OctNormalPair) == 4);
-
-inline void EncodeNormalOct2x16Unchecked(const Eigen::Vector3f& normal,
-                                         OctNormalPair* encoded) {
-  const double nx = normal.x(), ny = normal.y(), nz = normal.z();
-  const double l1 = std::abs(nx) + std::abs(ny) + std::abs(nz);
-  if (l1 == 0.0) {
-    encoded->x = encoded->y = std::numeric_limits<int16_t>::min();
-    return;
-  }
-  double u = nx / l1, v = ny / l1;
-  if (nz < 0.0) {
-    const double old_u = u;
-    u = (1.0 - std::abs(v)) * (u >= 0.0 ? 1.0 : -1.0);
-    v = (1.0 - std::abs(old_u)) * (v >= 0.0 ? 1.0 : -1.0);
-  }
-  encoded->x = static_cast<int16_t>(std::round(u * 32767.0));
-  encoded->y = static_cast<int16_t>(std::round(v * 32767.0));
-}
-
-inline Eigen::Vector3f DecodeNormalOct2x16(const int16_t x, const int16_t y) {
-  if (x == std::numeric_limits<int16_t>::min() &&
-      y == std::numeric_limits<int16_t>::min())
-    return Eigen::Vector3f::Zero();
-  float u = DecodeNormalSnorm16(x), v = DecodeNormalSnorm16(y);
-  const float z = 1.0f - std::abs(u) - std::abs(v);
-  if (z < 0.0f) {
-    const float old_u = u;
-    u = (1.0f - std::abs(v)) * (u >= 0.0f ? 1.0f : -1.0f);
-    v = (1.0f - std::abs(old_u)) * (v >= 0.0f ? 1.0f : -1.0f);
-  }
-  Eigen::Vector3f direction(u, v, z);
-  return direction.normalized();
-}
-
-inline uint16_t EncodeNormalMagnitudeUnorm16Unchecked(
-    const Eigen::Vector3f& normal) {
-  constexpr double kMaximum = 1.7320508075688772935;  // sqrt(3)
-  const double x = normal.x(), y = normal.y(), z = normal.z();
-  return static_cast<uint16_t>(
-      std::round(std::sqrt(x * x + y * y + z * z) * 65535.0 / kMaximum));
-}
-inline float DecodeNormalMagnitudeUnorm16(const uint16_t value) {
-  constexpr double kMaximum = 1.7320508075688772935;
-  return static_cast<float>(static_cast<double>(value) * kMaximum / 65535.0);
-}
-
 // Validated immutable FP32 backing shared by row-window owners. The caller
 // budgets its open file separately from each owner's mapped VMAs.
 class ImmutableMapSource {
  public:
   explicit ImmutableMapSource(const std::filesystem::path& path);
-  struct BindIdentity {};
-  ImmutableMapSource(const std::filesystem::path& path, BindIdentity);
   ~ImmutableMapSource();
   ImmutableMapSource(const ImmutableMapSource&) = delete;
   ImmutableMapSource& operator=(const ImmutableMapSource&) = delete;
   size_t GetWindowReservationBytes(size_t row_begin, size_t row_count) const;
   size_t GetMappingReservationBytes() const;
-  // Guard-only Linux descriptor bridge. No mutable pathname re-open for reads.
-  std::filesystem::path GetPinnedReadPath() const;
   std::array<size_t, 3> GetShape() const;
-  void ValidateUnchanged() const;
-  // Owning FP32 sample from the already held descriptor; no mapping or reopen.
-  // Caller must bracket the read with ValidateUnchanged (Workspace does so).
-  Eigen::Vector3f ReadFloat3Sample(size_t row, size_t col) const;
 
  private:
   friend class ImmutableMapRegion;

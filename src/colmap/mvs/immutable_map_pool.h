@@ -52,7 +52,7 @@ struct MappedNormalPool : std::enable_shared_from_this<MappedNormalPool> {
     std::shared_ptr<MappedNormalPool> pool;
     Entry* entry;
   };
-  MappedNormalPool(size_t bytes, size_t files, bool bind_sources = false);
+  MappedNormalPool(size_t bytes, size_t files);
   Lease Acquire(int image_idx, const std::filesystem::path& path);
   Lease Acquire(int image_idx,
                 const std::filesystem::path& path,
@@ -66,7 +66,6 @@ struct MappedNormalPool : std::enable_shared_from_this<MappedNormalPool> {
   std::condition_variable changed;
   std::map<Key, Entry> entries;
   std::map<int, SourceEntry> sources;
-  bool bind_sources = false;
   size_t sources_closing = 0;
   MappedNormalStats stats;
   uint64_t clock = 0;

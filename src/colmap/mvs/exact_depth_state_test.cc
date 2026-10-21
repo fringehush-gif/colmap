@@ -241,8 +241,6 @@ Workspace::Options WorkspaceOptions(const fs::path& root) {
   o.cache_size = 0.001;
   o.num_threads = 1;
   o.exact_depth_state = true;
-  o.normal_tiles_snorm16 =
-      true;  // Direct helper test only: fusion mode refuses it.
   o.mapped_normal_bytes_limit = 1024 * 1024;
   o.mapped_normal_files_limit = 1;
   return o;
@@ -252,12 +250,8 @@ void VerifyScalarReaderAdmissionAndLifetime(const Fixture& f) {
   Mat<float> scratch(1, 1, 1);
   ws.PrepareOriginalDepth(0, 8, 2);
   for (int repeat = 0; repeat < 3; ++repeat) {
-    const auto normal = ws.ReadOriginalNormal(0, 0, 2);
-    Require(Bits(normal[0]) == Bits(0.0f) && Bits(normal[1]) == Bits(0.0f) &&
-                Bits(normal[2]) == Bits(-1.0f),
-            "normal sentinel wrong");
     Require(Bits(ws.ReadOriginalDepth(0, 0, 2, scratch)) == Bits(f.depths[2]),
-            "depth/normal mapping key aliased");
+            "exact depth changed across repeated scalar reads");
     Require(scratch.GetWidth() == 1 && scratch.GetHeight() == 1 &&
                 scratch.GetDepth() == 1,
             "scalar scratch shape differs");
@@ -267,9 +261,9 @@ void VerifyScalarReaderAdmissionAndLifetime(const Fixture& f) {
   Refuses([&] { ws.ReadOriginalDepth(1, 0, 0, scratch); },
           "unadmitted image read accepted");
   const auto stats = ws.GetMappedNormalStats();
-  Require(stats.peak_charged_files == 1 && stats.evictions >= 6 &&
-              stats.active_copies == 0 && stats.reserved_files == 0,
-          "one-file owner interleave/lifetime proof failed");
+  Require(stats.peak_charged_files == 1 && stats.active_copies == 0 &&
+              stats.reserved_files == 0,
+          "one-file scalar owner lifetime proof failed");
   Refuses([&] { ws.PrepareOriginalDepth(0, 4, 1); }, "grid mismatch admitted");
   for (int variant = 0; variant < 2; ++variant) {
     auto o = WorkspaceOptions(f.root);
@@ -282,7 +276,7 @@ void VerifyScalarReaderAdmissionAndLifetime(const Fixture& f) {
         },
         "invalid backing/domain/budget admitted");
   }
-  std::cout << "reader_interleaves=3 scalar_bits=exact receiver_shape=1x1x1"
+  std::cout << "scalar_reads=3 scalar_bits=exact receiver_shape=1x1x1"
             << " owner_evictions=" << stats.evictions << '\n';
 }
 void VerifyInvalidDepthSourceRefusal(const fs::path& base) {
@@ -317,35 +311,12 @@ void VerifyInvalidDepthSourceRefusal(const fs::path& base) {
         "exception leaked pin/reservation");
   }
 }
-void NormalTileKeyRegression(const fs::path& root) {
-  const auto f =
-      MakeFixture(root / "normal-key-regression", 2.0f, false, false, 3);
-  auto o = WorkspaceOptions(f.root);
-  o.exact_depth_state =
-      false;  // Existing normal guard route must remain correct.
-  BoundedWorkspace ws(o);
-  const auto original = ws.ReadOriginalNormal(0, 0, 2);
-  Require(Bits(original[2]) == Bits(-1.0f), "normal 0 sentinel wrong");
-  auto tile = ws.AcquireNormalTile(2, 0, 2, 4);
-  const auto decoded = tile->GetNormal(0, 2);
-  Require(Bits(decoded[0]) == Bits(8192.0f / 32767.0f) &&
-              Bits(decoded[2]) == Bits(-24575.0f / 32767.0f),
-          "image-2 tile aliased image-0 original-normal map key");
-  tile.reset();
-  const auto again = ws.ReadOriginalNormal(0, 0, 2);
-  Require(Bits(again[0]) == Bits(0.0f) && Bits(again[2]) == Bits(-1.0f),
-          "normal tile changed later exact-normal reader");
-  const auto s = ws.GetMappedNormalStats();
-  Require(s.peak_charged_files == 1 && s.active_copies == 0,
-          "normal-key regression leaked owner pin");
-  std::cout << "normal_key_regression_images=0,2 depth_guard=off passed\n";
-}
 void VerifyExactDepthOptions() {
   Require(!StereoFusionOptions().bounded_cache_exact_depth,
           "exact-depth unexpectedly default-on");
   const auto valid = Options(true);
   Require(valid.Check(), "valid exact-depth options refused");
-  for (int variant = 0; variant < 8; ++variant) {
+  for (int variant = 0; variant < 6; ++variant) {
     auto o = valid;
     switch (variant) {
       case 0:
@@ -355,21 +326,15 @@ void VerifyExactDepthOptions() {
         o.bounded_cache_components = false;
         break;
       case 2:
-        o.bounded_cache_normal_snorm16 = true;
-        break;
-      case 3:
-        o.bounded_cache_normal_snorm16_guard = true;
-        break;
-      case 4:
         o.bounded_cache_normal_tile_size = 4;
         break;
-      case 5:
+      case 3:
         o.bounded_cache_normal_mapped_bytes = 0;
         break;
-      case 6:
+      case 4:
         o.bounded_cache_normal_mapped_files = 0;
         break;
-      case 7:
+      case 5:
         o.num_threads = 2;
         break;
     }
@@ -453,7 +418,6 @@ void VerifyPositiveMaskAccountingAndRefusal(const fs::path& root) {
                    std::vector<float>(3 * count, 0));
         }
         auto raw_options = WorkspaceOptions(f.root);
-        raw_options.normal_tiles_snorm16 = false;
         raw_options.exact_depth_state = false;
         auto mask_options = raw_options;
         mask_options.exact_depth_state = true;
@@ -588,7 +552,6 @@ TEST(ExactDepthState, ScalarAdmissionKeysEvictionAndLeaseLifetime) {
   VerifyScalarReaderAdmissionAndLifetime(
       MakeFixture(root / "reader", 2.00002f, true));
   VerifyInvalidDepthSourceRefusal(root);
-  NormalTileKeyRegression(root);
   VerifyDepthLeaseLifetime(root);
 }
 TEST(ExactDepthState, PositiveMaskAccountingRoundingAndNonfiniteRefusal) {
@@ -658,7 +621,6 @@ void VerifyDirectOwnerPins(const fs::path& root) {
   const size_t page =
       colmap::mvs::ImmutableMapRegion::GetMappingReservationBytes(path);
   auto o = WorkspaceOptions(f.root);
-  o.normal_tiles_snorm16 = false;
   o.exact_depth_state = true;
   o.mapped_normal_bytes_limit = 2 * page;
   o.mapped_normal_files_limit = 2;
@@ -1075,7 +1037,6 @@ void TestDepthScalarSamples(const fs::path& root) {
 void VerifyScalarScratchLifetime(const fs::path& root) {
   const auto fixture = MakeFixture(root / "scalar-scratch", 2.00002f, true);
   auto options = WorkspaceOptions(fixture.root);
-  options.normal_tiles_snorm16 = false;
   options.exact_depth_state = true;
   BoundedWorkspace workspace(options);
   workspace.PrepareOriginalDepth(0, 8, 2);

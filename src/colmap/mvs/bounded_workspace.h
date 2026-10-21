@@ -41,8 +41,6 @@ class BoundedWorkspace : public Workspace {
     bool HasPositiveDepth(size_t row, size_t col) const;
     float GetDepth(size_t row, size_t col) const;
     NormalMap normal_map;
-    std::vector<int16_t> snorm_normals;
-    size_t snorm_width = 0, snorm_height = 0;
     bool bitmap_on_depth_grid = false;
     size_t normal_origin_x = 0;
     size_t normal_origin_y = 0;
@@ -100,9 +98,6 @@ class BoundedWorkspace : public Workspace {
                                size_t row,
                                size_t col,
                                size_t tile_size);
-  // Short mapped row lease; exact FP32 normal read for ambiguous SNORM
-  // decisions.
-  Eigen::Vector3f ReadOriginalNormal(int image_idx, size_t row, size_t col);
   // Admit complete original FP32 depth before starting row workers. Stored
   // and consumed grids must agree; inputs remain immutable for the run.
   void PrepareOriginalDepth(int image_idx, size_t width, size_t height);

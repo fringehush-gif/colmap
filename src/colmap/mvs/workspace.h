@@ -3,10 +3,8 @@
 #pragma once
 
 #include "colmap/mvs/depth_map.h"
-#include "colmap/mvs/immutable_map_pool.h"
 #include "colmap/mvs/model.h"
 #include "colmap/mvs/normal_map.h"
-#include "colmap/mvs/normal_precision_guard.h"
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/cache.h"
 #include "colmap/util/types.h"
@@ -19,69 +17,11 @@
 namespace colmap {
 namespace mvs {
 
-enum class NormalStorage { kFp32 = 0, kOct2x16 = 2 };
-
-// Exact selector spelling is shared by option validation and workspace binding.
-bool ParseFullRamNormalStorage(const std::string& name, NormalStorage* storage);
-
-// Immutable full-RAM normal payload; bounded storage remains independent.
-// No decoded FP32 shadow; guard source descriptors are separate from the
-// payload.
-struct NormalMapStorage {
-  NormalMap normal_map;
-  std::vector<OctNormalPair> oct_normals;
-  size_t normal_width = 0;
-  size_t normal_height = 0;
-
-  // Guard-only certificate binds this actual payload to its held source inode.
-  normal_precision_guard::Error normal_error =
-      normal_precision_guard::Error::Zero();
-  bool normal_error_valid = false;
-  std::shared_ptr<const ImmutableMapSource> original_normal_source;
-
-  // Validate and pack the consumed FP32 grid, releasing it only on success.
-  void Pack(NormalStorage storage);
-  // This operation owns the held-FD read through certificate publication.
-  void ReadAndPackOriginal(std::shared_ptr<const ImmutableMapSource> source,
-                           size_t width,
-                           size_t height);
-  size_t NormalNumBytes() const;
-  size_t NormalWidth() const {
-    return oct_normals.empty() ? normal_map.GetWidth() : normal_width;
-  }
-  size_t NormalHeight() const {
-    return oct_normals.empty() ? normal_map.GetHeight() : normal_height;
-  }
-  Eigen::Vector3f GetNormal(size_t row, size_t col) const {
-    if (!oct_normals.empty()) {
-      const size_t index = row * normal_width + col;
-      const auto& encoded = oct_normals[index];
-      return DecodeNormalOct2x16(encoded.x, encoded.y);
-    }
-    return {normal_map.Get(row, col, 0),
-            normal_map.Get(row, col, 1),
-            normal_map.Get(row, col, 2)};
-  }
-
- private:
-  void Pack(NormalStorage storage, bool certify);
-};
-
 class Workspace {
  public:
   struct Options {
     // The maximum cache size in gigabytes.
     double cache_size = 32.0;
-
-    // Full-RAM only; pack after normal-map resizing. FP32 remains the default.
-    NormalStorage full_ram_normal_storage = NormalStorage::kFp32;
-    // Separate resident guard admission; legacy mapping/tile controls stay
-    // zero.
-    bool full_ram_normal_guard = false;
-    size_t full_ram_normal_guard_bytes = 0, full_ram_normal_guard_files = 0;
-    // API budget supports future parallel proof; first consumer admits one
-    // worker.
-    size_t full_ram_normal_guard_concurrency = 1;
 
     // The number of threads to use when pre-loading workspace.
     int num_threads = -1;
@@ -94,9 +34,6 @@ class Workspace {
 
     // Opt-in bounded fusion: retain nearest-sampled RGB on the depth grid.
     bool compact_rgb_to_depth_grid = false;
-    // Approximate signed-normalized tiles retain original FP32 backing.
-    // Conservative decision screening is a separate consumer option.
-    bool normal_tiles_snorm16 = false;
     // Default-off exact-depth diagnostic: finite native-positive mask only.
     // Every consumed positive depth is copied from immutable original FP32.
     bool exact_depth_state = false;
@@ -126,25 +63,12 @@ class Workspace {
   // Retire one eagerly loaded FP32 image after every borrowing worker joins.
   // The caller must prevent future traversal of the image and discard views
   // before calling. Model metadata and source files remain available for Load.
-  // Compact/guarded storage and cache-backed workspaces are not supported.
+  // Cache-backed workspaces are not supported.
   void ReleaseFullRamImageInputs(int image_idx);
 
   virtual const Bitmap& GetBitmap(int image_idx);
   virtual const DepthMap& GetDepthMap(int image_idx);
   virtual const NormalMap& GetNormalMap(int image_idx);
-  Eigen::Vector3f GetStoredNormal(int image_idx, size_t row, size_t col) const;
-  std::pair<size_t, size_t> GetStoredNormalDimensions(int image_idx) const;
-  size_t GetStoredNormalNumBytes(int image_idx) const;
-
-  const normal_precision_guard::Error& GetStoredNormalError(
-      int image_idx) const;
-  Eigen::Vector3f ReadOriginalStoredNormal(int image_idx,
-                                           size_t row,
-                                           size_t col);
-  void ValidateOriginalNormalSources() const;
-  MappedNormalStats GetOriginalNormalMappingStats() const;
-  // Call only after all row workers join. Certificates become unusable.
-  void ReleaseOriginalNormalSources();
 
   // Cached leases own the image across eviction and Workspace destruction.
   // Eager leases are non-owning aliases: Workspace must outlive them, and Load
@@ -182,12 +106,7 @@ class Workspace {
   std::filesystem::path normal_map_path_;
   std::vector<std::unique_ptr<Bitmap>> bitmaps_;
   std::vector<std::unique_ptr<DepthMap>> depth_maps_;
-  std::vector<std::unique_ptr<NormalMapStorage>> normal_maps_;
-  void PrepareOriginalNormalSources(
-      const std::vector<std::string>& image_names);
-  std::shared_ptr<MappedNormalPool> original_normal_pool_;
-  std::vector<std::shared_ptr<const ImmutableMapSource>>
-      original_normal_sources_;
+  std::vector<std::unique_ptr<NormalMap>> normal_maps_;
 };
 
 class CachedWorkspace : public Workspace {
