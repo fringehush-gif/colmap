@@ -876,6 +876,13 @@ void StereoFusion::Run() {
                     views.end());
       }
 
+      if (!full_ram_inputs_.empty() && used_images_.at(image_idx)) {
+        // All readers joined and no remaining adjacency can reach this image.
+        // Drop borrowed views before releasing their eager FP32 owners.
+        full_ram_inputs_.at(image_idx) = FullRamInput();
+        workspace_->ReleaseFullRamImageInputs(image_idx);
+      }
+
       total_fused_points = 0;
       for (const auto& task_fused_points : task_fused_points_) {
         total_fused_points += task_fused_points.size();

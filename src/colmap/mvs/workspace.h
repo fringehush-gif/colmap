@@ -123,6 +123,12 @@ class Workspace {
 
   inline const Model& GetModel() const { return model_; }
 
+  // Retire one eagerly loaded FP32 image after every borrowing worker joins.
+  // The caller must prevent future traversal of the image and discard views
+  // before calling. Model metadata and source files remain available for Load.
+  // Compact/guarded storage and cache-backed workspaces are not supported.
+  void ReleaseFullRamImageInputs(int image_idx);
+
   virtual const Bitmap& GetBitmap(int image_idx);
   virtual const DepthMap& GetDepthMap(int image_idx);
   virtual const NormalMap& GetNormalMap(int image_idx);

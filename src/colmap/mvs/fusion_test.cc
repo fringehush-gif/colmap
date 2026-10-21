@@ -145,7 +145,7 @@ struct StereoFusionExactDepthTestPeer {
       return false;
     for (size_t index = 0; index < fusion.used_images_.size(); ++index) {
       const auto& input = fusion.full_ram_inputs_[index];
-      if (!fusion.used_images_[index]) {
+      if (!fusion.used_images_[index] || fusion.fused_images_[index]) {
         if (input.depth.data || input.normal.data || input.bitmap) return false;
         continue;
       }
@@ -164,6 +164,30 @@ struct StereoFusionExactDepthTestPeer {
     }
     return !fusion.full_ram_inputs_.empty();
   }
+  static size_t NumRetiredFullRamInputs(StereoFusion& fusion) {
+    size_t count = 0;
+    for (size_t index = 0; index < fusion.full_ram_inputs_.size(); ++index) {
+      if (!fusion.used_images_[index] || !fusion.fused_images_[index]) continue;
+      const auto& input = fusion.full_ram_inputs_[index];
+      if (input.depth.data || input.normal.data || input.bitmap) return 0;
+      const auto absent = [](auto getter) {
+        try {
+          getter();
+          return false;
+        } catch (const std::invalid_argument&) {
+          return true;
+        }
+      };
+      const int view = static_cast<int>(index);
+      if (!absent([&] { fusion.workspace_->GetBitmap(view); }) ||
+          !absent([&] { fusion.workspace_->GetDepthMap(view); }) ||
+          !absent([&] { fusion.workspace_->GetNormalMap(view); }))
+        return 0;
+      ++count;
+    }
+    return count;
+  }
+
   static bool HasFullRamInputs(const StereoFusion& fusion) {
     return !fusion.full_ram_inputs_.empty();
   }
@@ -533,6 +557,10 @@ TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
     ASSERT_EQ(parallel.GetFusedPoints().size(), expected.size());
     ASSERT_EQ(parallel.GetFusedPointsVisibility().size(), expected.size());
     EXPECT_EQ(capture(parallel), expected);
+    EXPECT_TRUE(
+        StereoFusionExactDepthTestPeer::FullRamInputsMatchWorkspace(parallel));
+    EXPECT_EQ(StereoFusionExactDepthTestPeer::NumRetiredFullRamInputs(parallel),
+              1);
   }
 
   // All row bands execute, but every pixel is skipped before Fuse. The
@@ -1581,6 +1609,43 @@ std::filesystem::path CreateTwoViewNormalDecisionFixture() {
     for (const auto& name : names) config << name << '\n';
   }
   return root;
+}
+
+TEST(StereoFusion, RetiredEagerInputsSurviveInterruptionAndRepeat) {
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  StereoFusionOptions options;
+  options.num_threads = 1;
+  options.min_num_pixels = options.max_num_pixels = 2;
+  StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+  fusion.SetCheckIfStoppedFunc([&fusion] {
+    return StereoFusionExactDepthTestPeer::NumRetiredFullRamInputs(fusion) > 0;
+  });
+  fusion.Run();
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NumRetiredFullRamInputs(fusion), 1);
+  EXPECT_TRUE(
+      StereoFusionExactDepthTestPeer::FullRamInputsMatchWorkspace(fusion));
+  ASSERT_FALSE(fusion.GetFusedPoints().empty());
+  const auto partial = fusion.GetFusedPoints();
+  const auto partial_visibility = fusion.GetFusedPointsVisibility();
+  fusion.SetCheckIfStoppedFunc([] { return false; });
+  for (int run = 0; run < 2; ++run) {
+    fusion.Run();
+    EXPECT_EQ(StereoFusionExactDepthTestPeer::NumRetiredFullRamInputs(fusion),
+              2);
+    EXPECT_TRUE(
+        StereoFusionExactDepthTestPeer::FullRamInputsMatchWorkspace(fusion));
+    ASSERT_EQ(fusion.GetFusedPoints().size(), partial.size());
+    EXPECT_EQ(fusion.GetFusedPointsVisibility(), partial_visibility);
+    for (size_t i = 0; i < partial.size(); ++i) {
+      const auto& actual = fusion.GetFusedPoints()[i];
+      const auto& expected = partial[i];
+      EXPECT_TRUE(actual.x == expected.x && actual.y == expected.y &&
+                  actual.z == expected.z && actual.nx == expected.nx &&
+                  actual.ny == expected.ny && actual.nz == expected.nz &&
+                  actual.r == expected.r && actual.g == expected.g &&
+                  actual.b == expected.b);
+    }
+  }
 }
 
 TEST(StereoFusion, RejectedRootsDoNotLeakVisibility) {

@@ -396,6 +396,21 @@ void Workspace::ReleaseOriginalNormalSources() {
   original_normal_pool_.reset();
 }
 
+void Workspace::ReleaseFullRamImageInputs(const int image_idx) {
+  THROW_CHECK(options_.full_ram_normal_storage == NormalStorage::kFp32);
+  THROW_CHECK(!options_.full_ram_normal_guard);
+  // Cached workspaces do not initialize the eager owners with Load.
+  THROW_CHECK_EQ(bitmaps_.size(), model_.images.size());
+  THROW_CHECK_EQ(depth_maps_.size(), model_.images.size());
+  THROW_CHECK_EQ(normal_maps_.size(), model_.images.size());
+  auto& bitmap = bitmaps_.at(image_idx);
+  auto& depth = depth_maps_.at(image_idx);
+  auto& normal = normal_maps_.at(image_idx);
+  bitmap.reset();
+  depth.reset();
+  normal.reset();
+}
+
 const Bitmap& Workspace::GetBitmap(const int image_idx) {
   return *THROW_CHECK_NOTNULL(bitmaps_.at(image_idx));
 }
