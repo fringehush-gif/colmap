@@ -43,9 +43,9 @@ struct Inputs {
 // Two independent reference problems, each with differently calibrated source
 // views. All images are rendered from the same textured world plane. Sizes are
 // deliberately non-square, odd, and not CUDA block multiples.
-Inputs MakeInputs(const int variant) {
+Inputs MakeInputs(const int variant, const int num_source_images = 2) {
   Inputs inputs;
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i <= num_source_images; ++i) {
     const int width = (variant == 0 ? 47 : 39) + 2 * i;
     const int height = (variant == 0 ? 35 : 53) + 2 * i;
     const float fx = (variant == 0 ? 48.0f : 69.0f) + 3.0f * i;
@@ -136,7 +136,9 @@ struct Result {
 Result RunPatchMatch(Inputs* inputs, const PatchMatchOptions& options) {
   PatchMatch::Problem problem;
   problem.ref_image_idx = 0;
-  problem.src_image_idxs = {1, 2};
+  for (size_t i = 1; i < inputs->images.size(); ++i) {
+    problem.src_image_idxs.push_back(static_cast<int>(i));
+  }
   problem.images = &inputs->images;
   problem.depth_maps = &inputs->depths;
   problem.normal_maps = &inputs->normals;
@@ -196,7 +198,7 @@ void ExpectNonempty(const Result& result,
   EXPECT_EQ(result.depths.GetWidth(), inputs.images[0].GetWidth());
   EXPECT_EQ(result.depths.GetHeight(), inputs.images[0].GetHeight());
   EXPECT_EQ(result.normals.GetDepth(), 3);
-  EXPECT_EQ(result.selection.GetDepth(), 2);
+  EXPECT_EQ(result.selection.GetDepth(), inputs.images.size() - 1);
   EXPECT_EQ(result.depths.GetData().size(),
             result.depths.GetWidth() * result.depths.GetHeight());
   size_t valid_depths = 0;
@@ -212,7 +214,8 @@ void ExpectNonempty(const Result& result,
   for (const auto& image_idxs : result.consistent_images) {
     consistent_pixels += !image_idxs.empty();
     for (const int image_idx : image_idxs) {
-      EXPECT_TRUE(image_idx == 1 || image_idx == 2);
+      EXPECT_GT(image_idx, 0);
+      EXPECT_LT(image_idx, inputs.images.size());
     }
   }
   if (filter) {
@@ -312,6 +315,26 @@ TEST_F(CudaTest, ExplicitAndDefaultStreamHelpers) {
     CudaSyncAndCheck(__FILE__, __LINE__);
     EXPECT_EQ(resources.host[0], 0xa5);
     timer.Print("Per-thread default stream helper test");
+  }
+}
+
+TEST_P(PatchMatchCudaTest, UnevenSourceGroupsPreserveOutputs) {
+  const auto [geometry, filter] = GetParam();
+  // Five sources exercise every cooperative group and a second source in one
+  // group. Odd image sizes also leave invalid lanes at the tile boundary.
+  Inputs inputs = MakeInputs(0, 5);
+  PatchMatchOptions options = MakeOptions(geometry, filter, false);
+  const Result original = RunPatchMatch(&inputs, options);
+  options.rotation_buffer_reuse = true;
+  const Result reused = RunPatchMatch(&inputs, options);
+  ExpectNonempty(original, inputs, filter);
+  ExpectNonempty(reused, inputs, filter);
+  ExpectEquivalent(original, reused);
+  // Allow FP32 rounding at the probability bounds; parity above stays exact.
+  constexpr float kProbabilityTolerance = 1e-6f;
+  for (const float probability : original.selection.GetData()) {
+    EXPECT_GE(probability, -kProbabilityTolerance);
+    EXPECT_LE(probability, 1.0f + kProbabilityTolerance);
   }
 }
 
