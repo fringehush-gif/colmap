@@ -9,6 +9,7 @@
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/bitmap.h"
 #include "colmap/sensor/bitmap_reader.h"
+#include "colmap/util/endian.h"
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
@@ -20,7 +21,9 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -1230,6 +1233,44 @@ TEST(StereoFusion, CompactResidentRgbMatchesDiskFusion) {
   scope->Close();
   for (const auto& name : names) {
     EXPECT_FALSE(descriptor.HasBitmap(descriptor.GetModel().GetImageIdx(name)));
+  }
+}
+
+TEST(ReadPointsVisibility, BinaryWireBytes) {
+  const auto test_file = CreateTestDir() / "wire.vis";
+  std::vector<std::vector<std::vector<int>>> cases = {
+      {},
+      {{},
+       {std::numeric_limits<int>::min(),
+        -1,
+        0,
+        1,
+        std::numeric_limits<int>::max()}},
+      {std::vector<int>(8191), {}, std::vector<int>(8193)}};
+  for (size_t i = 0; i < cases[2][0].size(); ++i) {
+    cases[2][0][i] = static_cast<int>(i % 11);
+  }
+  for (size_t i = 0; i < cases[2][2].size(); ++i) {
+    cases[2][2][i] = static_cast<int>(10 - i % 11);
+  }
+  for (size_t i = 0; i < cases.size(); ++i) {
+    SCOPED_TRACE(i);
+    const auto& visibility = cases[i];
+    WritePointsVisibility(test_file, visibility);
+    std::ifstream file(test_file, std::ios::binary);
+    ASSERT_TRUE(file.is_open());
+    const std::string actual((std::istreambuf_iterator<char>(file)),
+                             std::istreambuf_iterator<char>());
+    // Preserve global/list counts, order, duplicates and uint32 conversions.
+    std::ostringstream expected(std::ios::out | std::ios::binary);
+    WriteBinaryLittleEndian<uint64_t>(&expected, visibility.size());
+    for (const auto& images : visibility) {
+      WriteBinaryLittleEndian<uint32_t>(&expected, images.size());
+      for (const int image : images) {
+        WriteBinaryLittleEndian<uint32_t>(&expected, image);
+      }
+    }
+    EXPECT_EQ(actual, expected.str());
   }
 }
 
