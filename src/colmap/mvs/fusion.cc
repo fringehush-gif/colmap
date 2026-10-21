@@ -21,6 +21,7 @@
 #include <optional>
 #include <sstream>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -1482,335 +1483,355 @@ void StereoFusion::Fuse(const int thread_id,
   auto& fused_point_b = scratch.b;
   auto& fused_point_visibility = scratch.visibility;
 
-  while (!fusion_queue.empty()) {
-    const auto data = fusion_queue.back();
-    const int image_idx = data.image_idx;
-    const int row = data.row;
-    const int col = data.col;
-    const int traversal_depth = data.traversal_depth;
+  // Select the immutable workspace mode once for this root. Specializing the
+  // traversal lets eager FP32 inputs avoid fallback ownership and cache checks.
+  const auto traverse = [&](auto resident_tag) {
+    constexpr bool kResident = decltype(resident_tag)::value;
+    while (!fusion_queue.empty()) {
+      const auto data = fusion_queue.back();
+      const int image_idx = data.image_idx;
+      const int row = data.row;
+      const int col = data.col;
+      const int traversal_depth = data.traversal_depth;
 
-    fusion_queue.pop_back();
+      fusion_queue.pop_back();
 
-    // Check if pixel already fused.
-    auto& fused_pixel_mask = fused_pixel_masks_.at(image_idx);
-    if (fused_pixel_mask.Get(row, col) > 0) {
-      continue;
-    }
-
-    // Root pointers are borrowed only until the row-task join. Demand leases
-    // keep one component pinned while its value is copied, then release it
-    // before another component acquisition can wait for capacity.
-    // Ordinary workspaces need no bounded-cache lease, even an empty one.
-    std::optional<BoundedWorkspace::ImageLease> image_lease;
-    std::shared_ptr<const DepthMap> depth_map;
-    const BoundedWorkspace::ImageData* image_data = nullptr;
-    const auto* resident =
-        full_ram_inputs_.empty() ? nullptr : &full_ram_inputs_.at(image_idx);
-    float depth;
-    if (resident) {
-      depth = resident->depth->Get(row, col);
-    } else {
-      const auto* pinned =
-          direct_component_pins_admitted_ ? direct_depth_data_.at(image_idx)
-          : bounded_workspace_ && options_.bounded_cache_neighborhood
-              ? neighborhood_data_.at(image_idx)
-              : nullptr;
-      if (direct_component_pins_admitted_) ++direct_depth_borrows_;
-      if (pinned && options_.bounded_cache_neighborhood) {
-        ++task_neighborhood_reads_[thread_id].pointer_reads;
-      }
-      if (bounded_workspace_ && !pinned) {
-        image_lease.emplace(bounded_workspace_->AcquireComponent(
-            image_idx,
-            options_.bounded_cache_components
-                ? BoundedWorkspace::Component::kDepth
-                : BoundedWorkspace::Component::kImage));
-      }
-      if (image_lease && *image_lease && options_.bounded_cache_neighborhood) {
-        ++task_neighborhood_reads_[thread_id].demand_acquires;
-      }
-      image_data = pinned ? pinned : image_lease ? image_lease->get() : nullptr;
-      depth_map = image_data ? std::shared_ptr<const DepthMap>()
-                             : workspace_->GetDepthMapLease(image_idx);
-      const bool exact_depth = options_.bounded_cache_exact_depth;
-      const bool exact_nonpositive =
-          exact_depth && !image_data->HasPositiveDepth(row, col);
-      depth = exact_depth ? 0.0f
-                          : (image_data ? image_data->depth_map.Get(row, col)
-                                        : depth_map->Get(row, col));
-      if (options_.bounded_cache_components && image_lease && *image_lease) {
-        image_lease.reset();
-        image_data = nullptr;
-      }
-
-      if (exact_depth) {
-        if (exact_nonpositive) continue;
-        auto& scratch = exact_depth_scratch_.at(thread_id);
-        depth = bounded_workspace_->ReadOriginalDepth(
-            image_idx, row, col, scratch.scalar);
-        THROW_CHECK_GT(depth, 0.0f) << "Original depth/positive mask disagree";
-        if (traversal_depth == 0)
-          ++scratch.root_reads;
-        else
-          ++scratch.candidate_reads;
-      }
-    }
-    // Original FP32 now feeds every unchanged predicate and output operation.
-    // Pixels with negative depth are filtered.
-    if (depth <= 0.0f) {
-      continue;
-    }
-
-    // If the traversal depth is greater than zero, the initial reference
-    // pixel has already been added and we need to check for consistency.
-    if (traversal_depth > 0) {
-      // Project reference point into current view.
-      const Eigen::Vector3f proj = P_.at(image_idx) * fused_ref_point;
-
-      // Depth error of reference depth with current depth.
-      const float depth_error = std::abs((proj(2) - depth) / depth);
-      if (depth_error > options_.max_depth_error) {
+      // Check if pixel already fused.
+      auto& fused_pixel_mask = fused_pixel_masks_.at(image_idx);
+      if (fused_pixel_mask.Get(row, col) > 0) {
         continue;
       }
 
-      // Reprojection error reference point in the current view.
-      const float col_diff = proj(0) / proj(2) - col;
-      const float row_diff = proj(1) / proj(2) - row;
-      const float squared_reproj_error =
-          col_diff * col_diff + row_diff * row_diff;
-      if (squared_reproj_error > max_squared_reproj_error_) {
-        continue;
-      }
-    }
-
-    // Determine normal direction in global reference frame.
-    std::optional<BoundedWorkspace::ImageLease> normal_lease;
-    std::shared_ptr<const NormalMap> normal_map;
-    Eigen::Vector3f local_normal;
-    if (resident) {
-      // Eager FP32 owners cannot use optional normal-source routes.
-      local_normal = Eigen::Vector3f(resident->normal->Get(row, col, 0),
-                                     resident->normal->Get(row, col, 1),
-                                     resident->normal->Get(row, col, 2));
-    } else {
-      const auto* tile_image =
-          options_.bounded_cache_normal_tile_size > 0
-              ? AcquireWorkerNormalTile(thread_id, image_idx, row, col)
-              : nullptr;
-      const auto* mapped_normal =
-          direct_mapped_normals_ ? AcquireWorkerMappedNormal(image_idx, row)
-                                 : nullptr;
-      if (bounded_workspace_ && options_.bounded_cache_components &&
-          !tile_image && !mapped_normal &&
-          (!image_data || image_data->normal_map.GetWidth() == 0)) {
-        normal_lease.emplace(bounded_workspace_->AcquireComponent(
-            image_idx, BoundedWorkspace::Component::kNormal));
-      }
-      const auto* normal_image = tile_image ? tile_image
-                                 : normal_lease && *normal_lease
-                                     ? normal_lease->get()
-                                     : image_data;
-      const bool compact_full_ram =
-          workspace_->GetOptions().full_ram_normal_storage !=
-          NormalStorage::kFp32;
-      normal_map = normal_image || mapped_normal || compact_full_ram
-                       ? std::shared_ptr<const NormalMap>()
-                       : workspace_->GetNormalMapLease(image_idx);
-      const auto* fp32_normal = normal_map.get();
-      local_normal = mapped_normal  ? mapped_normal->ReadFloat3(row, col)
-                     : normal_image ? normal_image->GetNormal(row, col)
-                     : compact_full_ram
-                         ? workspace_->GetStoredNormal(image_idx, row, col)
-                         : Eigen::Vector3f(fp32_normal->Get(row, col, 0),
-                                           fp32_normal->Get(row, col, 1),
-                                           fp32_normal->Get(row, col, 2));
-    }
-    const Eigen::Vector3f normal = inv_R_.at(image_idx) * local_normal;
-    normal_lease.reset();
-
-    // Check for consistent normal direction with reference normal.
-    if (traversal_depth > 0) {
-      if (options_.bounded_cache_normal_snorm16_guard ||
-          options_.full_ram_normal_guard) {
-        const auto candidate =
-            options_.full_ram_normal_guard
-                ? normal_precision_guard::BoundedOperandFromRotated(
-                      inv_R_.at(image_idx),
-                      workspace_->GetStoredNormalError(image_idx),
-                      prepared_codec_rotations_.at(image_idx),
-                      local_normal,
-                      normal)
-                : normal_precision_guard::CompressedOperandFromRotated(
-                      inv_R_.at(image_idx),
-                      prepared_normal_rotations_.at(image_idx),
-                      local_normal,
-                      normal);
-        if (!normal_precision_guard::NormalAccept(
-                guarded_ref_normal,
-                candidate,
-                min_cos_normal_error_,
-                [&]() -> Eigen::Vector3f {
-                  if (options_.full_ram_normal_guard) {
-                    const Eigen::Vector3f original =
-                        workspace_->ReadOriginalStoredNormal(guarded_ref_image,
-                                                             guarded_ref_row,
-                                                             guarded_ref_col);
-                    const Eigen::Vector3f rotated =
-                        inv_R_.at(guarded_ref_image) * original;
-                    return rotated;
-                  }
-                  return inv_R_.at(guarded_ref_image) *
-                         bounded_workspace_->ReadOriginalNormal(
-                             guarded_ref_image,
-                             guarded_ref_row,
-                             guarded_ref_col);
-                },
-                [&]() -> Eigen::Vector3f {
-                  if (options_.full_ram_normal_guard) {
-                    const Eigen::Vector3f original =
-                        workspace_->ReadOriginalStoredNormal(
-                            image_idx, row, col);
-                    const Eigen::Vector3f rotated =
-                        inv_R_.at(image_idx) * original;
-                    return rotated;
-                  }
-                  return inv_R_.at(image_idx) *
-                         bounded_workspace_->ReadOriginalNormal(
-                             image_idx, row, col);
-                }))
-          continue;
+      // Root pointers are borrowed only until the row-task join. Demand leases
+      // keep one component pinned while its value is copied, then release it
+      // before another component acquisition can wait for capacity.
+      // Ordinary workspaces need no bounded-cache lease, even an empty one.
+      std::optional<BoundedWorkspace::ImageLease> image_lease;
+      std::shared_ptr<const DepthMap> depth_map;
+      const BoundedWorkspace::ImageData* image_data = nullptr;
+      const auto* resident =
+          kResident ? &full_ram_inputs_.at(image_idx) : nullptr;
+      float depth;
+      if constexpr (kResident) {
+        depth = resident->depth->Get(row, col);
       } else {
-        const float cos_normal_error = fused_ref_normal.dot(normal);
-        if (cos_normal_error < min_cos_normal_error_) continue;
+        const auto* pinned =
+            direct_component_pins_admitted_ ? direct_depth_data_.at(image_idx)
+            : bounded_workspace_ && options_.bounded_cache_neighborhood
+                ? neighborhood_data_.at(image_idx)
+                : nullptr;
+        if (direct_component_pins_admitted_) ++direct_depth_borrows_;
+        if (pinned && options_.bounded_cache_neighborhood) {
+          ++task_neighborhood_reads_[thread_id].pointer_reads;
+        }
+        if (bounded_workspace_ && !pinned) {
+          image_lease.emplace(bounded_workspace_->AcquireComponent(
+              image_idx,
+              options_.bounded_cache_components
+                  ? BoundedWorkspace::Component::kDepth
+                  : BoundedWorkspace::Component::kImage));
+        }
+        if (image_lease && *image_lease &&
+            options_.bounded_cache_neighborhood) {
+          ++task_neighborhood_reads_[thread_id].demand_acquires;
+        }
+        image_data = pinned        ? pinned
+                     : image_lease ? image_lease->get()
+                                   : nullptr;
+        depth_map = image_data ? std::shared_ptr<const DepthMap>()
+                               : workspace_->GetDepthMapLease(image_idx);
+        const bool exact_depth = options_.bounded_cache_exact_depth;
+        const bool exact_nonpositive =
+            exact_depth && !image_data->HasPositiveDepth(row, col);
+        depth = exact_depth ? 0.0f
+                            : (image_data ? image_data->depth_map.Get(row, col)
+                                          : depth_map->Get(row, col));
+        if (options_.bounded_cache_components && image_lease && *image_lease) {
+          image_lease.reset();
+          image_data = nullptr;
+        }
+
+        if (exact_depth) {
+          if (exact_nonpositive) continue;
+          auto& scratch = exact_depth_scratch_.at(thread_id);
+          depth = bounded_workspace_->ReadOriginalDepth(
+              image_idx, row, col, scratch.scalar);
+          THROW_CHECK_GT(depth, 0.0f)
+              << "Original depth/positive mask disagree";
+          if (traversal_depth == 0)
+            ++scratch.root_reads;
+          else
+            ++scratch.candidate_reads;
+        }
       }
-    }
-
-    // Determine 3D location of current depth value.
-    const Eigen::Vector3f xyz =
-        inv_P_.at(image_idx) *
-        Eigen::Vector4f(col * depth, row * depth, depth, 1.0f);
-
-    // Read the color of the pixel.
-    const auto& bitmap_scale = bitmap_scales_.at(image_idx);
-    const auto* borrowed_bitmap =
-        options_.bounded_cache_neighborhood &&
-                options_.bounded_cache_normal_tile_size > 0
-            ? AcquireNeighborhoodBitmap(thread_id, image_idx)
-        : direct_component_pins_admitted_ ? direct_bitmap_data_.at(image_idx)
-                                          : nullptr;
-    if (borrowed_bitmap && direct_component_pins_admitted_) {
-      ++direct_bitmap_borrows_;
-    }
-    std::optional<BoundedWorkspace::ImageLease> bitmap_lease;
-    if (bounded_workspace_ && options_.bounded_cache_components &&
-        !borrowed_bitmap && (!image_data || image_data->bitmap.Width() == 0)) {
-      bitmap_lease.emplace(bounded_workspace_->AcquireComponent(
-          image_idx, BoundedWorkspace::Component::kBitmap));
-    }
-    if (bitmap_lease && *bitmap_lease && options_.bounded_cache_neighborhood &&
-        options_.bounded_cache_normal_tile_size > 0) {
-      ++task_neighborhood_reads_[thread_id].rgb_demand_acquires;
-    }
-    const auto* bitmap_image = borrowed_bitmap ? borrowed_bitmap
-                               : bitmap_lease && *bitmap_lease
-                                   ? bitmap_lease->get()
-                                   : image_data;
-    const auto bitmap = bitmap_image || resident
-                            ? std::shared_ptr<const Bitmap>()
-                            : workspace_->GetBitmapLease(image_idx);
-    const Bitmap& bitmap_data = bitmap_image ? bitmap_image->bitmap
-                                : resident   ? *resident->bitmap
-                                             : *bitmap;
-    // Unit-scale float coordinates preserve these integer pixel positions.
-    constexpr int kMaxExactFloatInteger = 1 << 24;
-    const bool resident_on_depth_grid =
-        resident && bitmap_scale.first == 1.0f && bitmap_scale.second == 1.0f &&
-        col >= 0 && col <= kMaxExactFloatInteger && row >= 0 &&
-        row <= kMaxExactFloatInteger;
-    const auto color =
-        ((bitmap_image && bitmap_image->bitmap_on_depth_grid) ||
-         resident_on_depth_grid)
-            ? bitmap_data.GetPixel(col, row).value_or(BitmapColor<uint8_t>(0))
-            : bitmap_data
-                  .InterpolateNearestNeighbor(col / bitmap_scale.first,
-                                              row / bitmap_scale.second)
-                  .value_or(BitmapColor<uint8_t>(0));
-    bitmap_lease.reset();
-
-    // Set the current pixel as visited.
-    fused_pixel_mask.Set(row, col, 1);
-
-    // Pixels out of bounds are filtered
-    if (xyz(0) < options_.bounding_box.first(0) ||
-        xyz(1) < options_.bounding_box.first(1) ||
-        xyz(2) < options_.bounding_box.first(2) ||
-        xyz(0) > options_.bounding_box.second(0) ||
-        xyz(1) > options_.bounding_box.second(1) ||
-        xyz(2) > options_.bounding_box.second(2)) {
-      continue;
-    }
-
-    // Accumulate statistics for fused point.
-    fused_point_x.push_back(xyz(0));
-    fused_point_y.push_back(xyz(1));
-    fused_point_z.push_back(xyz(2));
-    fused_point_nx.push_back(normal(0));
-    fused_point_ny.push_back(normal(1));
-    fused_point_nz.push_back(normal(2));
-    fused_point_r.push_back(color.r);
-    fused_point_g.push_back(color.g);
-    fused_point_b.push_back(color.b);
-    fused_point_visibility.push_back(image_idx);
-
-    // Remember the first pixel as the reference.
-    if (traversal_depth == 0) {
-      fused_ref_point = Eigen::Vector4f(xyz(0), xyz(1), xyz(2), 1.0f);
-      fused_ref_normal = normal;
-      if (options_.bounded_cache_normal_snorm16_guard ||
-          options_.full_ram_normal_guard) {
-        guarded_ref_normal =
-            options_.full_ram_normal_guard
-                ? normal_precision_guard::BoundedOperandFromRotated(
-                      inv_R_.at(image_idx),
-                      workspace_->GetStoredNormalError(image_idx),
-                      prepared_codec_rotations_.at(image_idx),
-                      local_normal,
-                      normal)
-                : normal_precision_guard::CompressedOperandFromRotated(
-                      inv_R_.at(image_idx),
-                      prepared_normal_rotations_.at(image_idx),
-                      local_normal,
-                      normal);
-        guarded_ref_image = image_idx;
-        guarded_ref_row = row;
-        guarded_ref_col = col;
-      }
-    }
-
-    if (fused_point_x.size() >= static_cast<size_t>(options_.max_num_pixels)) {
-      break;
-    }
-
-    if (traversal_depth >= options_.max_traversal_depth - 1) {
-      continue;
-    }
-
-    for (const auto next_image_idx : overlapping_images_.at(image_idx)) {
-      const Eigen::Vector3f next_proj =
-          P_.at(next_image_idx) * xyz.homogeneous();
-      const int next_col =
-          static_cast<int>(std::round(next_proj(0) / next_proj(2)));
-      const int next_row =
-          static_cast<int>(std::round(next_proj(1) / next_proj(2)));
-
-      const auto& depth_map_size = depth_map_sizes_.at(next_image_idx);
-      if (next_col < 0 || next_row < 0 || next_col >= depth_map_size.first ||
-          next_row >= depth_map_size.second) {
+      // Original FP32 now feeds every unchanged predicate and output operation.
+      // Pixels with negative depth are filtered.
+      if (depth <= 0.0f) {
         continue;
       }
-      fusion_queue.push_back(
-          {next_image_idx, next_row, next_col, traversal_depth + 1});
+
+      // If the traversal depth is greater than zero, the initial reference
+      // pixel has already been added and we need to check for consistency.
+      if (traversal_depth > 0) {
+        // Project reference point into current view.
+        const Eigen::Vector3f proj = P_.at(image_idx) * fused_ref_point;
+
+        // Depth error of reference depth with current depth.
+        const float depth_error = std::abs((proj(2) - depth) / depth);
+        if (depth_error > options_.max_depth_error) {
+          continue;
+        }
+
+        // Reprojection error reference point in the current view.
+        const float col_diff = proj(0) / proj(2) - col;
+        const float row_diff = proj(1) / proj(2) - row;
+        const float squared_reproj_error =
+            col_diff * col_diff + row_diff * row_diff;
+        if (squared_reproj_error > max_squared_reproj_error_) {
+          continue;
+        }
+      }
+
+      // Determine normal direction in global reference frame.
+      std::optional<BoundedWorkspace::ImageLease> normal_lease;
+      std::shared_ptr<const NormalMap> normal_map;
+      Eigen::Vector3f local_normal;
+      if constexpr (kResident) {
+        // Eager FP32 owners cannot use optional normal-source routes.
+        local_normal = Eigen::Vector3f(resident->normal->Get(row, col, 0),
+                                       resident->normal->Get(row, col, 1),
+                                       resident->normal->Get(row, col, 2));
+      } else {
+        const auto* tile_image =
+            options_.bounded_cache_normal_tile_size > 0
+                ? AcquireWorkerNormalTile(thread_id, image_idx, row, col)
+                : nullptr;
+        const auto* mapped_normal =
+            direct_mapped_normals_ ? AcquireWorkerMappedNormal(image_idx, row)
+                                   : nullptr;
+        if (bounded_workspace_ && options_.bounded_cache_components &&
+            !tile_image && !mapped_normal &&
+            (!image_data || image_data->normal_map.GetWidth() == 0)) {
+          normal_lease.emplace(bounded_workspace_->AcquireComponent(
+              image_idx, BoundedWorkspace::Component::kNormal));
+        }
+        const auto* normal_image = tile_image ? tile_image
+                                   : normal_lease && *normal_lease
+                                       ? normal_lease->get()
+                                       : image_data;
+        const bool compact_full_ram =
+            workspace_->GetOptions().full_ram_normal_storage !=
+            NormalStorage::kFp32;
+        normal_map = normal_image || mapped_normal || compact_full_ram
+                         ? std::shared_ptr<const NormalMap>()
+                         : workspace_->GetNormalMapLease(image_idx);
+        const auto* fp32_normal = normal_map.get();
+        local_normal = mapped_normal  ? mapped_normal->ReadFloat3(row, col)
+                       : normal_image ? normal_image->GetNormal(row, col)
+                       : compact_full_ram
+                           ? workspace_->GetStoredNormal(image_idx, row, col)
+                           : Eigen::Vector3f(fp32_normal->Get(row, col, 0),
+                                             fp32_normal->Get(row, col, 1),
+                                             fp32_normal->Get(row, col, 2));
+      }
+      const Eigen::Vector3f normal = inv_R_.at(image_idx) * local_normal;
+      normal_lease.reset();
+
+      // Check for consistent normal direction with reference normal.
+      if (traversal_depth > 0) {
+        if (!kResident && (options_.bounded_cache_normal_snorm16_guard ||
+                           options_.full_ram_normal_guard)) {
+          const auto candidate =
+              options_.full_ram_normal_guard
+                  ? normal_precision_guard::BoundedOperandFromRotated(
+                        inv_R_.at(image_idx),
+                        workspace_->GetStoredNormalError(image_idx),
+                        prepared_codec_rotations_.at(image_idx),
+                        local_normal,
+                        normal)
+                  : normal_precision_guard::CompressedOperandFromRotated(
+                        inv_R_.at(image_idx),
+                        prepared_normal_rotations_.at(image_idx),
+                        local_normal,
+                        normal);
+          if (!normal_precision_guard::NormalAccept(
+                  guarded_ref_normal,
+                  candidate,
+                  min_cos_normal_error_,
+                  [&]() -> Eigen::Vector3f {
+                    if (options_.full_ram_normal_guard) {
+                      const Eigen::Vector3f original =
+                          workspace_->ReadOriginalStoredNormal(
+                              guarded_ref_image,
+                              guarded_ref_row,
+                              guarded_ref_col);
+                      const Eigen::Vector3f rotated =
+                          inv_R_.at(guarded_ref_image) * original;
+                      return rotated;
+                    }
+                    return inv_R_.at(guarded_ref_image) *
+                           bounded_workspace_->ReadOriginalNormal(
+                               guarded_ref_image,
+                               guarded_ref_row,
+                               guarded_ref_col);
+                  },
+                  [&]() -> Eigen::Vector3f {
+                    if (options_.full_ram_normal_guard) {
+                      const Eigen::Vector3f original =
+                          workspace_->ReadOriginalStoredNormal(
+                              image_idx, row, col);
+                      const Eigen::Vector3f rotated =
+                          inv_R_.at(image_idx) * original;
+                      return rotated;
+                    }
+                    return inv_R_.at(image_idx) *
+                           bounded_workspace_->ReadOriginalNormal(
+                               image_idx, row, col);
+                  }))
+            continue;
+        } else {
+          const float cos_normal_error = fused_ref_normal.dot(normal);
+          if (cos_normal_error < min_cos_normal_error_) continue;
+        }
+      }
+
+      // Determine 3D location of current depth value.
+      const Eigen::Vector3f xyz =
+          inv_P_.at(image_idx) *
+          Eigen::Vector4f(col * depth, row * depth, depth, 1.0f);
+
+      // Read the color of the pixel.
+      const auto& bitmap_scale = bitmap_scales_.at(image_idx);
+      const auto* borrowed_bitmap =
+          kResident ? nullptr
+          : options_.bounded_cache_neighborhood &&
+                  options_.bounded_cache_normal_tile_size > 0
+              ? AcquireNeighborhoodBitmap(thread_id, image_idx)
+          : direct_component_pins_admitted_ ? direct_bitmap_data_.at(image_idx)
+                                            : nullptr;
+      if (borrowed_bitmap && direct_component_pins_admitted_) {
+        ++direct_bitmap_borrows_;
+      }
+      std::optional<BoundedWorkspace::ImageLease> bitmap_lease;
+      if (!kResident && bounded_workspace_ &&
+          options_.bounded_cache_components && !borrowed_bitmap &&
+          (!image_data || image_data->bitmap.Width() == 0)) {
+        bitmap_lease.emplace(bounded_workspace_->AcquireComponent(
+            image_idx, BoundedWorkspace::Component::kBitmap));
+      }
+      if (bitmap_lease && *bitmap_lease &&
+          options_.bounded_cache_neighborhood &&
+          options_.bounded_cache_normal_tile_size > 0) {
+        ++task_neighborhood_reads_[thread_id].rgb_demand_acquires;
+      }
+      const auto* bitmap_image = borrowed_bitmap ? borrowed_bitmap
+                                 : bitmap_lease && *bitmap_lease
+                                     ? bitmap_lease->get()
+                                     : image_data;
+      const auto bitmap = bitmap_image || resident
+                              ? std::shared_ptr<const Bitmap>()
+                              : workspace_->GetBitmapLease(image_idx);
+      const Bitmap& bitmap_data = bitmap_image ? bitmap_image->bitmap
+                                  : resident   ? *resident->bitmap
+                                               : *bitmap;
+      // Unit-scale float coordinates preserve these integer pixel positions.
+      constexpr int kMaxExactFloatInteger = 1 << 24;
+      const bool resident_on_depth_grid =
+          resident && bitmap_scale.first == 1.0f &&
+          bitmap_scale.second == 1.0f && col >= 0 &&
+          col <= kMaxExactFloatInteger && row >= 0 &&
+          row <= kMaxExactFloatInteger;
+      const auto color =
+          ((bitmap_image && bitmap_image->bitmap_on_depth_grid) ||
+           resident_on_depth_grid)
+              ? bitmap_data.GetPixel(col, row).value_or(BitmapColor<uint8_t>(0))
+              : bitmap_data
+                    .InterpolateNearestNeighbor(col / bitmap_scale.first,
+                                                row / bitmap_scale.second)
+                    .value_or(BitmapColor<uint8_t>(0));
+      bitmap_lease.reset();
+
+      // Set the current pixel as visited.
+      fused_pixel_mask.Set(row, col, 1);
+
+      // Pixels out of bounds are filtered
+      if (xyz(0) < options_.bounding_box.first(0) ||
+          xyz(1) < options_.bounding_box.first(1) ||
+          xyz(2) < options_.bounding_box.first(2) ||
+          xyz(0) > options_.bounding_box.second(0) ||
+          xyz(1) > options_.bounding_box.second(1) ||
+          xyz(2) > options_.bounding_box.second(2)) {
+        continue;
+      }
+
+      // Accumulate statistics for fused point.
+      fused_point_x.push_back(xyz(0));
+      fused_point_y.push_back(xyz(1));
+      fused_point_z.push_back(xyz(2));
+      fused_point_nx.push_back(normal(0));
+      fused_point_ny.push_back(normal(1));
+      fused_point_nz.push_back(normal(2));
+      fused_point_r.push_back(color.r);
+      fused_point_g.push_back(color.g);
+      fused_point_b.push_back(color.b);
+      fused_point_visibility.push_back(image_idx);
+
+      // Remember the first pixel as the reference.
+      if (traversal_depth == 0) {
+        fused_ref_point = Eigen::Vector4f(xyz(0), xyz(1), xyz(2), 1.0f);
+        fused_ref_normal = normal;
+        if (!kResident && (options_.bounded_cache_normal_snorm16_guard ||
+                           options_.full_ram_normal_guard)) {
+          guarded_ref_normal =
+              options_.full_ram_normal_guard
+                  ? normal_precision_guard::BoundedOperandFromRotated(
+                        inv_R_.at(image_idx),
+                        workspace_->GetStoredNormalError(image_idx),
+                        prepared_codec_rotations_.at(image_idx),
+                        local_normal,
+                        normal)
+                  : normal_precision_guard::CompressedOperandFromRotated(
+                        inv_R_.at(image_idx),
+                        prepared_normal_rotations_.at(image_idx),
+                        local_normal,
+                        normal);
+          guarded_ref_image = image_idx;
+          guarded_ref_row = row;
+          guarded_ref_col = col;
+        }
+      }
+
+      if (fused_point_x.size() >=
+          static_cast<size_t>(options_.max_num_pixels)) {
+        break;
+      }
+
+      if (traversal_depth >= options_.max_traversal_depth - 1) {
+        continue;
+      }
+
+      for (const auto next_image_idx : overlapping_images_.at(image_idx)) {
+        const Eigen::Vector3f next_proj =
+            P_.at(next_image_idx) * xyz.homogeneous();
+        const int next_col =
+            static_cast<int>(std::round(next_proj(0) / next_proj(2)));
+        const int next_row =
+            static_cast<int>(std::round(next_proj(1) / next_proj(2)));
+
+        const auto& depth_map_size = depth_map_sizes_.at(next_image_idx);
+        if (next_col < 0 || next_row < 0 || next_col >= depth_map_size.first ||
+            next_row >= depth_map_size.second) {
+          continue;
+        }
+        fusion_queue.push_back(
+            {next_image_idx, next_row, next_col, traversal_depth + 1});
+      }
     }
+  };
+  if (full_ram_inputs_.empty()) {
+    traverse(std::false_type{});
+  } else {
+    traverse(std::true_type{});
   }
 
   const size_t num_pixels = fused_point_x.size();
