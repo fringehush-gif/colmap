@@ -6,6 +6,8 @@
 #include "colmap/util/testing.h"
 
 #include <array>
+#include <cmath>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -131,6 +133,121 @@ TEST(Ply, BinaryPointWireBytes) {
           }
         }
         EXPECT_EQ(actual.substr(header_end + 1), expected.str());
+        const auto decoded = ReadPly(test_file);
+        ASSERT_EQ(decoded.size(), points.size());
+        const auto bits = [](float value) {
+          uint32_t result;
+          std::memcpy(&result, &value, sizeof(result));
+          return result;
+        };
+        for (size_t i = 0; i < points.size(); ++i) {
+          const auto& a = decoded[i];
+          const auto& b = points[i];
+          const std::array<float, 6> actual_values = {
+              a.x, a.y, a.z, a.nx, a.ny, a.nz};
+          const std::array<float, 6> expected_values = {
+              b.x,
+              b.y,
+              b.z,
+              write_normal ? b.nx : 0.0f,
+              write_normal ? b.ny : 0.0f,
+              write_normal ? b.nz : 0.0f};
+          for (size_t field = 0; field < actual_values.size(); ++field) {
+            EXPECT_EQ(bits(actual_values[field]), bits(expected_values[field]));
+          }
+          EXPECT_EQ(a.r, write_rgb ? b.r : 0);
+          EXPECT_EQ(a.g, write_rgb ? b.g : 0);
+          EXPECT_EQ(a.b, write_rgb ? b.b : 0);
+        }
+      }
+    }
+  }
+}
+
+TEST(Ply, ReadBinaryMixedLayoutAndOversizedRecords) {
+  const auto path = CreateTestDir() / "mixed.ply";
+  for (const bool little_endian : {false, true}) {
+    for (const size_t extra_doubles : {size_t{0}, size_t{4096}}) {
+      SCOPED_TRACE(::testing::Message() << "little=" << little_endian
+                                        << ", extra=" << extra_doubles);
+      const size_t count = extra_doubles == 0 ? 2049 : 3;
+      std::ofstream file(path, std::ios::binary);
+      file << "ply\nformat binary_" << (little_endian ? "little" : "big")
+           << "_endian 1.0\nelement vertex " << count
+           << "\nproperty uchar green\nproperty double z\nproperty float nx\n"
+              "property float x\n";
+      for (size_t i = 0; i < extra_doubles; ++i) {
+        file << "property double ignored" << i << '\n';
+      }
+      file << "property uchar blue\nproperty double ny\nproperty float y\n"
+              "property float nz\nproperty uchar red\nend_header\n";
+      const auto write = [&](const auto value) {
+        if (little_endian) {
+          WriteBinaryLittleEndian(&file, value);
+        } else {
+          const auto encoded = NativeToBigEndian(value);
+          file.write(reinterpret_cast<const char*>(&encoded), sizeof(encoded));
+        }
+      };
+      for (size_t i = 0; i < count; ++i) {
+        write(static_cast<uint8_t>(i));
+        write(-2.75 - 0.25 * i);
+        write(0.125f);
+        write(i == 0 ? -0.0f : static_cast<float>(i) + 0.25f);
+        for (size_t extra = 0; extra < extra_doubles; ++extra) write(123.5);
+        write(static_cast<uint8_t>(31 * i + 7));
+        write(-0.5);
+        write(static_cast<float>(i) - 0.75f);
+        write(1.0f);
+        write(static_cast<uint8_t>(17 * i + 3));
+      }
+      file.close();
+      const auto points = ReadPly(path);
+      ASSERT_EQ(points.size(), count);
+      EXPECT_TRUE(std::signbit(points.front().x));
+      for (size_t i = 0; i < count; ++i) {
+        const auto& point = points[i];
+        EXPECT_FLOAT_EQ(point.x,
+                        i == 0 ? -0.0f : static_cast<float>(i) + 0.25f);
+        EXPECT_FLOAT_EQ(point.y, static_cast<float>(i) - 0.75f);
+        EXPECT_FLOAT_EQ(point.z, static_cast<float>(-2.75 - 0.25 * i));
+        EXPECT_FLOAT_EQ(point.nx, 0.125f);
+        EXPECT_FLOAT_EQ(point.ny, -0.5f);
+        EXPECT_FLOAT_EQ(point.nz, 1.0f);
+        EXPECT_EQ(point.r, static_cast<uint8_t>(17 * i + 3));
+        EXPECT_EQ(point.g, static_cast<uint8_t>(i));
+        EXPECT_EQ(point.b, static_cast<uint8_t>(31 * i + 7));
+      }
+    }
+  }
+}
+
+TEST(Ply, ReadBinaryTruncationReportsFirstIncompleteVertex) {
+  const auto path = CreateTestDir() / "truncated-binary.ply";
+  for (const size_t complete_vertices :
+       {size_t{0}, size_t{2730}, size_t{2731}}) {
+    for (const size_t trailing_bytes : {size_t{0}, size_t{7}}) {
+      SCOPED_TRACE(::testing::Message() << complete_vertices << " complete, "
+                                        << trailing_bytes << " trailing bytes");
+      std::ofstream file(path, std::ios::binary);
+      file << "ply\nformat binary_little_endian 1.0\nelement vertex 4097\n"
+              "property float x\nproperty float y\nproperty float z\n"
+              "end_header\n";
+      for (size_t i = 0; i < complete_vertices; ++i) {
+        WriteBinaryLittleEndian<float>(&file, 1.0f);
+        WriteBinaryLittleEndian<float>(&file, 2.0f);
+        WriteBinaryLittleEndian<float>(&file, 3.0f);
+      }
+      const std::array<char, 7> partial{};
+      file.write(partial.data(), trailing_bytes);
+      file.close();
+      try {
+        ReadPly(path);
+        FAIL() << "Expected truncated PLY input to be rejected";
+      } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what())
+                      .find("vertex " + std::to_string(complete_vertices)),
+                  std::string::npos);
       }
     }
   }
