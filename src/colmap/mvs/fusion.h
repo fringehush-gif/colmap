@@ -165,41 +165,88 @@ struct FusionFloatMapView {
   size_t plane = 0;
 };
 
-// Visited flags publish no payload. Relaxed accesses preserve the existing
-// observation policy without racing with row snapshots or other workers.
+// Binary visited flags publish no payload. Relaxed accesses preserve the
+// existing observation policy without racing with row snapshots or other
+// workers.
 class FusionPixelMask {
  public:
   FusionPixelMask() = default;
   FusionPixelMask(size_t width, size_t height)
-      : width_(width), data_(width * height) {
+      : width_(width),
+        size_(width * height),
+        data_(size_ / kWordBits + (size_ % kWordBits != 0)) {
     for (auto& value : data_) value.store(0, std::memory_order_relaxed);
   }
   FusionPixelMask(const FusionPixelMask&) = delete;
   FusionPixelMask& operator=(const FusionPixelMask&) = delete;
-  FusionPixelMask(FusionPixelMask&&) noexcept = default;
-  FusionPixelMask& operator=(FusionPixelMask&&) noexcept = default;
+  FusionPixelMask(FusionPixelMask&& other) noexcept
+      : width_(std::exchange(other.width_, 0)),
+        size_(std::exchange(other.size_, 0)),
+        data_(std::move(other.data_)) {}
+  FusionPixelMask& operator=(FusionPixelMask&& other) noexcept {
+    if (this != &other) {
+      width_ = std::exchange(other.width_, 0);
+      size_ = std::exchange(other.size_, 0);
+      data_ = std::move(other.data_);
+    }
+    return *this;
+  }
 
   char Get(size_t row, size_t col) const {
-    return data_.at(row * width_ + col).load(std::memory_order_relaxed);
+    const size_t index = CheckedIndex(row, col);
+    const uint64_t word =
+        data_[index / kWordBits].load(std::memory_order_relaxed);
+    return static_cast<char>((word >> (index % kWordBits)) & uint64_t{1});
   }
   void Set(size_t row, size_t col, char value) {
-    data_.at(row * width_ + col).store(value, std::memory_order_relaxed);
+    const size_t index = CheckedIndex(row, col);
+    if (value != 0 && value != 1) {
+      throw std::invalid_argument("Fusion mask values must be zero or one");
+    }
+    const uint64_t bit = uint64_t{1} << (index % kWordBits);
+    auto& word = data_[index / kWordBits];
+    if (value) {
+      word.fetch_or(bit, std::memory_order_relaxed);
+    } else {
+      word.fetch_and(~bit, std::memory_order_relaxed);
+    }
   }
-  // Snapshot only the task's bounded band; concurrent stores remain allowed.
+  // Snapshot only the task's bounded band. Words may be observed at different
+  // times while workers update flags; this is not a coherent whole-band view.
   std::vector<char> Snapshot(size_t first, size_t last) const {
-    if (first > last || last > data_.size()) {
+    if (first > last || last > size_) {
       throw std::out_of_range("Fusion mask snapshot is outside its storage");
     }
     std::vector<char> values(last - first);
-    for (size_t index = first; index < last; ++index) {
-      values[index - first] = data_[index].load(std::memory_order_relaxed);
+    size_t index = first;
+    while (index < last) {
+      const size_t bit = index % kWordBits;
+      const uint64_t word =
+          data_[index / kWordBits].load(std::memory_order_relaxed);
+      const size_t count = std::min(last - index, kWordBits - bit);
+      for (size_t offset = 0; offset < count; ++offset) {
+        values[index - first + offset] =
+            static_cast<char>((word >> (bit + offset)) & uint64_t{1});
+      }
+      index += count;
     }
     return values;
   }
 
  private:
+  size_t CheckedIndex(size_t row, size_t col) const {
+    // Preserve the original unsigned flattened offset, including aliases.
+    const size_t index = row * width_ + col;
+    if (index >= size_) {
+      throw std::out_of_range("Fusion mask index is outside its storage");
+    }
+    return index;
+  }
+
+  static constexpr size_t kWordBits = 64;
   size_t width_ = 0;
-  std::vector<std::atomic<char>> data_;
+  size_t size_ = 0;
+  std::vector<std::atomic<uint64_t>> data_;
 };
 
 // Index only the already-owned serial mapped ring. Entries and last-image
