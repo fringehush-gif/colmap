@@ -22,12 +22,67 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <thread>
 #include <tuple>
+#include <type_traits>
 
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace mvs {
+TEST(StereoFusion, AtomicPixelMaskInitializesBoundsAndMoves) {
+  static_assert(
+      std::is_nothrow_move_constructible_v<internal::FusionPixelMask>);
+  static_assert(!std::is_copy_constructible_v<internal::FusionPixelMask>);
+  internal::FusionPixelMask empty;
+  EXPECT_TRUE(empty.Snapshot(0, 0).empty());
+  EXPECT_THROW(empty.Get(0, 0), std::out_of_range);
+  std::vector<internal::FusionPixelMask> masks(1);
+  masks[0] = internal::FusionPixelMask(3, 2);
+  EXPECT_EQ(masks[0].Snapshot(0, 6), std::vector<char>(6, 0));
+  masks[0].Set(0, 1, 1);
+  masks[0].Set(1, 2, 1);
+  masks.resize(4);
+  EXPECT_EQ(masks[0].Get(0, 1), 1);
+  EXPECT_EQ(masks[0].Get(1, 0), 0);
+  EXPECT_EQ(masks[0].Snapshot(1, 6), (std::vector<char>{1, 0, 0, 0, 1}));
+  EXPECT_TRUE(masks[0].Snapshot(6, 6).empty());
+  EXPECT_THROW(masks[0].Snapshot(4, 3), std::out_of_range);
+  EXPECT_THROW(masks[0].Snapshot(2, 7), std::out_of_range);
+  EXPECT_THROW(masks[0].Set(2, 0, 1), std::out_of_range);
+  EXPECT_THROW(masks[0].Get(2, 0), std::out_of_range);
+}
+
+TEST(StereoFusion, AtomicPixelMaskAllowsConcurrentStoresAndSnapshots) {
+  constexpr size_t kSide = 64;
+  internal::FusionPixelMask mask(kSide, kSide);
+  std::atomic<bool> start{false};
+  const auto write = [&] {
+    while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+    for (int repeat = 0; repeat < 8; ++repeat) {
+      for (size_t row = 0; row < kSide; ++row) {
+        for (size_t col = 0; col < kSide; ++col) mask.Set(row, col, 1);
+      }
+    }
+  };
+  std::thread first(write);
+  std::thread second(write);
+  start.store(true, std::memory_order_release);
+  for (int repeat = 0; repeat < 8; ++repeat) {
+    const auto snapshot = mask.Snapshot(0, kSide * kSide);
+    EXPECT_TRUE(std::all_of(snapshot.begin(), snapshot.end(), [](char value) {
+      return value == 0 || value == 1;
+    }));
+    const char value = mask.Get(kSide / 2, kSide / 2);
+    EXPECT_TRUE(value == 0 || value == 1);
+  }
+  first.join();
+  second.join();
+  const auto snapshot = mask.Snapshot(0, kSide * kSide);
+  EXPECT_TRUE(std::all_of(
+      snapshot.begin(), snapshot.end(), [](char value) { return value == 1; }));
+}
+
 // Inspect ring ownership through the Fusion test peer.
 struct StereoFusionExactDepthTestPeer {
   static bool FullRamInputsMatchWorkspace(StereoFusion& fusion) {

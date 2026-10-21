@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -140,6 +141,43 @@ struct StereoFusionOptions {
 };
 
 namespace internal {
+// Visited flags publish no payload. Relaxed accesses preserve the existing
+// observation policy without racing with row snapshots or other workers.
+class FusionPixelMask {
+ public:
+  FusionPixelMask() = default;
+  FusionPixelMask(size_t width, size_t height)
+      : width_(width), data_(width * height) {
+    for (auto& value : data_) value.store(0, std::memory_order_relaxed);
+  }
+  FusionPixelMask(const FusionPixelMask&) = delete;
+  FusionPixelMask& operator=(const FusionPixelMask&) = delete;
+  FusionPixelMask(FusionPixelMask&&) noexcept = default;
+  FusionPixelMask& operator=(FusionPixelMask&&) noexcept = default;
+
+  char Get(size_t row, size_t col) const {
+    return data_.at(row * width_ + col).load(std::memory_order_relaxed);
+  }
+  void Set(size_t row, size_t col, char value) {
+    data_.at(row * width_ + col).store(value, std::memory_order_relaxed);
+  }
+  // Snapshot only the task's bounded band; concurrent stores remain allowed.
+  std::vector<char> Snapshot(size_t first, size_t last) const {
+    if (first > last || last > data_.size()) {
+      throw std::out_of_range("Fusion mask snapshot is outside its storage");
+    }
+    std::vector<char> values(last - first);
+    for (size_t index = first; index < last; ++index) {
+      values[index - first] = data_[index].load(std::memory_order_relaxed);
+    }
+    return values;
+  }
+
+ private:
+  size_t width_ = 0;
+  std::vector<std::atomic<char>> data_;
+};
+
 // Index only the already-owned serial mapped ring. Entries and last-image
 // hints are bounded by the admitted slot count and model image count.
 class MappedNormalRingIndex {
@@ -331,7 +369,7 @@ class StereoFusion : public BaseController {
   std::vector<std::vector<int>> overlapping_images_;
   // Contains image masks of pre-masked and already fused pixels.
   // Initialized from image masks if provided in StereoFusionOptions.
-  std::vector<Mat<char>> fused_pixel_masks_;
+  std::vector<internal::FusionPixelMask> fused_pixel_masks_;
   std::vector<std::pair<int, int>> depth_map_sizes_;
   std::vector<std::pair<float, float>> bitmap_scales_;
   std::vector<Eigen::Matrix<float, 3, 4, Eigen::RowMajor>> P_;
