@@ -1330,6 +1330,45 @@ TEST(ReadPointsVisibility, BinaryWireBytes) {
       }
     }
     EXPECT_EQ(actual, expected.str());
+    EXPECT_EQ(ReadPointsVisibility(test_file, visibility.size()), visibility);
+  }
+}
+
+TEST(ReadPointsVisibility, TrailingBytesAreIgnored) {
+  const auto path = CreateTestDir() / "trailing.vis";
+  const std::vector<std::vector<int>> expected = {{7, 7, 0, -1}, {}, {42}};
+  const std::vector<char> tail(32769, 'x');
+  for (const size_t count : {size_t{1}, size_t{3}, size_t{4}, tail.size()}) {
+    SCOPED_TRACE(count);
+    WritePointsVisibility(path, expected);
+    {
+      std::ofstream file(path, std::ios::binary | std::ios::app);
+      file.write(tail.data(), count);
+    }
+    EXPECT_EQ(ReadPointsVisibility(path, expected.size()), expected);
+  }
+}
+
+TEST(ReadPointsVisibility, TruncatedHeaderCountAndPayloadAreRejected) {
+  const auto path = CreateTestDir() / "truncated.vis";
+  const std::vector<std::vector<int>> expected = {{7, 8, 9}, {}, {3, 4}};
+  std::ostringstream encoded(std::ios::out | std::ios::binary);
+  WriteBinaryLittleEndian<uint64_t>(&encoded, expected.size());
+  for (const auto& images : expected) {
+    WriteBinaryLittleEndian<uint32_t>(&encoded, images.size());
+    for (const int image : images) {
+      WriteBinaryLittleEndian<uint32_t>(&encoded, image);
+    }
+  }
+  const std::string bytes = encoded.str();
+  for (size_t cut = 0; cut < bytes.size(); ++cut) {
+    SCOPED_TRACE(cut);
+    {
+      std::ofstream file(path, std::ios::binary);
+      file.write(bytes.data(), cut);
+    }
+    EXPECT_THROW(ReadPointsVisibility(path, expected.size()),
+                 std::invalid_argument);
   }
 }
 
