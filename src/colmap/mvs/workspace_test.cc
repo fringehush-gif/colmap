@@ -111,6 +111,45 @@ void ExpectLoadedWorkspaceData(Workspace& workspace) {
   }
 }
 
+TEST_F(WorkspaceTests, ReleaseEagerImageInputsPreservesMetadataAndReload) {
+  auto options = GetOptions();
+  options.num_threads = 1;
+  Workspace workspace(options);
+  workspace.Load({image_name_});
+  const auto num_images = workspace.GetModel().images.size();
+  const auto depth_path = workspace.GetDepthMapPath(0);
+  const auto normal_path = workspace.GetNormalMapPath(0);
+  EXPECT_EQ(workspace.GetDepthMap(0).Get(0, 0), 1.0f);
+  EXPECT_THROW(workspace.ReleaseFullRamImageInputs(1), std::out_of_range);
+  EXPECT_EQ(workspace.GetDepthMap(0).Get(0, 0), 1.0f);
+  workspace.ReleaseFullRamImageInputs(0);
+  EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+  EXPECT_THROW(workspace.GetDepthMap(0), std::invalid_argument);
+  EXPECT_THROW(workspace.GetNormalMap(0), std::invalid_argument);
+  EXPECT_EQ(workspace.GetModel().images.size(), num_images);
+  EXPECT_EQ(workspace.GetDepthMapPath(0), depth_path);
+  EXPECT_EQ(workspace.GetNormalMapPath(0), normal_path);
+  EXPECT_TRUE(workspace.HasBitmap(0));
+  EXPECT_TRUE(workspace.HasDepthMap(0));
+  EXPECT_TRUE(workspace.HasNormalMap(0));
+  EXPECT_NO_THROW(workspace.ReleaseFullRamImageInputs(0));
+  workspace.Load({image_name_});
+  EXPECT_EQ(workspace.GetDepthMap(0).Get(0, 0), 1.0f);
+  EXPECT_EQ(workspace.GetNormalMap(0).Get(0, 0, 0), 1.0f);
+  EXPECT_EQ(workspace.GetBitmap(0).Width(), 10);
+
+  CachedWorkspace cached(options);
+  EXPECT_THROW(cached.ReleaseFullRamImageInputs(0), std::invalid_argument);
+  BoundedWorkspace bounded(options);
+  EXPECT_THROW(bounded.ReleaseFullRamImageInputs(0), std::invalid_argument);
+  options.full_ram_normal_storage = NormalStorage::kOct2x16;
+  Workspace compact(options);
+  compact.Load({image_name_});
+  EXPECT_THROW(compact.ReleaseFullRamImageInputs(0), std::invalid_argument);
+  EXPECT_EQ(compact.GetStoredNormalDimensions(0),
+            std::make_pair(size_t{10}, size_t{5}));
+}
+
 TEST_F(WorkspaceTests, EagerLoadDeduplicatesPerCall) {
   for (const int num_threads : {1, 2}) {
     SCOPED_TRACE(num_threads);
@@ -1189,6 +1228,8 @@ TEST_F(WorkspaceTests, ResidentGuardCertificateAndIdentityRefusal) {
   Workspace workspace(options);
   const int image = workspace.GetModel().GetImageIdx(image_name_);
   workspace.Load({image_name_});
+  EXPECT_THROW(workspace.ReleaseFullRamImageInputs(image),
+               std::invalid_argument);
   const auto error = workspace.GetStoredNormalError(image);
   const auto decoded = workspace.GetStoredNormal(image, 0, 0);
   const Eigen::Vector3f original = Eigen::Vector3f::Ones();
