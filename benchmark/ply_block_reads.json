@@ -1,0 +1,709 @@
+{
+  "schema": "colmap.binaryPlyBlockReadBenchmark/v1",
+  "sourceBase": "7dfaaf1888d31413ae66834f74a724d872319ab5",
+  "improves": "c2b3b0355e07598916c0344f15aa77f2ea27c0b6",
+  "sourceSha256": {
+    "src/colmap/util/ply.cc": "6849d47bb402a4e79da413a538c01281d047bc2e834c3258721fc53e0915f176",
+    "src/colmap/util/ply_test.cc": "2b962c06500a65d9488c752589b05c663d2971243f1fe17c9c525f8ffdca3974"
+  },
+  "scene": "Fountain P11, all 11 photos",
+  "inputProducerWorkers": 12,
+  "readerThreads": 1,
+  "settings": "Fixed clouds produced with default Fusion settings; identical reader inputs between arms.",
+  "observationsPerArmPerResolution": 4,
+  "warmupsPerArmPerResolution": 1,
+  "nativeCalls": 20,
+  "order": "ABBABAAB",
+  "cpuModel": "AMD Ryzen 9 3900X 12-Core Processor",
+  "platform": "Linux/WSL, libstdc++, inputs on a Windows-mounted volume",
+  "scope": "ReadPly and ReadPointsVisibility APIs; no whole Fusion or whole meshing measurement.",
+  "units": {
+    "wallSeconds": "native process elapsed seconds, including startup and vector destruction",
+    "cpuSeconds": "native user+system CPU seconds",
+    "peakRssKiB": "mean native peak RSS in KiB",
+    "readPlySeconds": "steady-clock elapsed seconds inside ReadPly",
+    "readTotalSeconds": "steady-clock elapsed seconds across both reader APIs",
+    "counters": "selected hardware event counts from the same measured calls"
+  },
+  "allCollectedEvents": [
+    "task-clock",
+    "context-switches",
+    "cpu-migrations",
+    "page-faults",
+    "cycles:u",
+    "instructions:u",
+    "cache-references:u",
+    "cache-misses:u"
+  ],
+  "hardwareRunningPercent": 100,
+  "quality": {
+    "plyTestsPassed": 29,
+    "readerWriterByteExactClouds": 2,
+    "readerWriterByteExactResolutions": [
+      1536,
+      3072
+    ],
+    "format": "clang-format 23.1.3 with repository configuration",
+    "coverage": "Signed zero, subnormals, extrema, infinities, NaNs, optional normal/RGB fields, reordered mixed float/double properties, both byte orders, oversized records and truncated-record diagnostics."
+  },
+  "rows": [
+    {
+      "maxImageSize": 1536,
+      "arms": {
+        "baseline": {
+          "means": {
+            "wallSeconds": 0.51,
+            "cpuSeconds": 0.3425,
+            "userSeconds": 0.1875,
+            "systemSeconds": 0.155,
+            "peakRssKiB": 376914.0,
+            "readPlySeconds": 0.114037162,
+            "readVisibilitySeconds": 0.158293606,
+            "readTotalSeconds": 0.272330768
+          },
+          "observations": {
+            "wallSeconds": [
+              0.57,
+              0.47,
+              0.5,
+              0.5
+            ],
+            "cpuSeconds": [
+              0.41000000000000003,
+              0.31,
+              0.32,
+              0.33
+            ],
+            "userSeconds": [
+              0.21,
+              0.18,
+              0.17,
+              0.19
+            ],
+            "systemSeconds": [
+              0.2,
+              0.13,
+              0.15,
+              0.14
+            ],
+            "peakRssKiB": [
+              377076.0,
+              376660.0,
+              376896.0,
+              377024.0
+            ],
+            "readPlySeconds": [
+              0.117677674,
+              0.104997451,
+              0.115369581,
+              0.118103942
+            ],
+            "readVisibilitySeconds": [
+              0.164516199,
+              0.153816778,
+              0.158277551,
+              0.156563896
+            ],
+            "readTotalSeconds": [
+              0.282193873,
+              0.258814229,
+              0.273647132,
+              0.274667838
+            ]
+          },
+          "counters": {
+            "instructions:u": {
+              "count": 1386006582.75,
+              "observations": [
+                {
+                  "count": 1386000590.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 1386011476.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 1386007044.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 1386007221.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cycles:u": {
+              "count": 783415627.5,
+              "observations": [
+                {
+                  "count": 805560626.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 770387390.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 757644129.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 800070365.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-references:u": {
+              "count": 57471584.75,
+              "observations": [
+                {
+                  "count": 57795612.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 57158232.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 57273373.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 57659122.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-misses:u": {
+              "count": 5368288.75,
+              "observations": [
+                {
+                  "count": 5749406.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 5083294.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 5280137.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 5360318.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            }
+          }
+        },
+        "candidate": {
+          "means": {
+            "wallSeconds": 0.5175,
+            "cpuSeconds": 0.3475,
+            "userSeconds": 0.1475,
+            "systemSeconds": 0.2,
+            "peakRssKiB": 376880.0,
+            "readPlySeconds": 0.08560229325,
+            "readVisibilitySeconds": 0.1626138005,
+            "readTotalSeconds": 0.24821609375
+          },
+          "observations": {
+            "wallSeconds": [
+              0.55,
+              0.53,
+              0.49,
+              0.5
+            ],
+            "cpuSeconds": [
+              0.37,
+              0.36,
+              0.32,
+              0.33999999999999997
+            ],
+            "userSeconds": [
+              0.16,
+              0.15,
+              0.12,
+              0.16
+            ],
+            "systemSeconds": [
+              0.21,
+              0.21,
+              0.2,
+              0.18
+            ],
+            "peakRssKiB": [
+              377196.0,
+              376460.0,
+              377088.0,
+              376776.0
+            ],
+            "readPlySeconds": [
+              0.090519014,
+              0.084149581,
+              0.082772188,
+              0.08496839
+            ],
+            "readVisibilitySeconds": [
+              0.164057989,
+              0.163579797,
+              0.162365835,
+              0.160451581
+            ],
+            "readTotalSeconds": [
+              0.25457700299999997,
+              0.247729378,
+              0.24513802299999998,
+              0.24541997100000001
+            ]
+          },
+          "counters": {
+            "instructions:u": {
+              "count": 1311745192.0,
+              "observations": [
+                {
+                  "count": 1311746480.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 1311740564.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 1311748532.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 1311745192.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cycles:u": {
+              "count": 660290490.25,
+              "observations": [
+                {
+                  "count": 664810349.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 662249394.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 653252734.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 660849484.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-references:u": {
+              "count": 58142952.25,
+              "observations": [
+                {
+                  "count": 58120054.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 58141929.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 58151854.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 58157972.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-misses:u": {
+              "count": 5778321.0,
+              "observations": [
+                {
+                  "count": 5992090.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 5829682.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 5683872.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 5607640.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            }
+          }
+        }
+      },
+      "candidateChangePercent": {
+        "wallSeconds": 1.4705882352941124,
+        "cpuSeconds": 1.4598540145985162,
+        "userSeconds": -21.333333333333336,
+        "systemSeconds": 29.03225806451615,
+        "peakRssKiB": -0.009020625394651205,
+        "readPlySeconds": -24.93473903708687,
+        "readVisibilitySeconds": 2.729228684069507,
+        "readTotalSeconds": -8.854920957737688,
+        "cycles:u": -15.716451514110242,
+        "instructions:u": -5.357939253265065,
+        "cache-references:u": 1.1681729378447248,
+        "cache-misses:u": 7.638043873850853
+      },
+      "rangesOverlap": {
+        "wallSeconds": true,
+        "cpuSeconds": true,
+        "userSeconds": false,
+        "systemSeconds": true,
+        "peakRssKiB": true,
+        "readPlySeconds": false,
+        "readVisibilitySeconds": true,
+        "readTotalSeconds": false,
+        "instructions:u": false,
+        "cycles:u": false,
+        "cache-references:u": false,
+        "cache-misses:u": true
+      }
+    },
+    {
+      "maxImageSize": 3072,
+      "arms": {
+        "baseline": {
+          "means": {
+            "wallSeconds": 1.2425,
+            "cpuSeconds": 0.7325,
+            "userSeconds": 0.4775,
+            "systemSeconds": 0.255,
+            "peakRssKiB": 433205.0,
+            "readPlySeconds": 0.41460729525,
+            "readVisibilitySeconds": 0.567642559,
+            "readTotalSeconds": 0.98224985425
+          },
+          "observations": {
+            "wallSeconds": [
+              1.3,
+              1.23,
+              1.2,
+              1.24
+            ],
+            "cpuSeconds": [
+              0.81,
+              0.71,
+              0.7,
+              0.71
+            ],
+            "userSeconds": [
+              0.52,
+              0.44,
+              0.49,
+              0.46
+            ],
+            "systemSeconds": [
+              0.29,
+              0.27,
+              0.21,
+              0.25
+            ],
+            "peakRssKiB": [
+              433532.0,
+              433080.0,
+              433148.0,
+              433060.0
+            ],
+            "readPlySeconds": [
+              0.446742773,
+              0.40588779,
+              0.392803128,
+              0.41299549
+            ],
+            "readVisibilitySeconds": [
+              0.586203039,
+              0.561060935,
+              0.551741067,
+              0.571565195
+            ],
+            "readTotalSeconds": [
+              1.032945812,
+              0.966948725,
+              0.944544195,
+              0.984560685
+            ]
+          },
+          "counters": {
+            "instructions:u": {
+              "count": 3932125608.5,
+              "observations": [
+                {
+                  "count": 3932124088.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 3932130318.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 3932124669.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 3932123359.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cycles:u": {
+              "count": 2049820867.25,
+              "observations": [
+                {
+                  "count": 2177249541.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 1971769640.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 2019224174.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 2031040114.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-references:u": {
+              "count": 69293562.0,
+              "observations": [
+                {
+                  "count": 69834132.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 68690579.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 69108798.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 69540739.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-misses:u": {
+              "count": 6028870.75,
+              "observations": [
+                {
+                  "count": 6355673.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 5777728.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 5991553.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 5990529.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            }
+          }
+        },
+        "candidate": {
+          "means": {
+            "wallSeconds": 1.115,
+            "cpuSeconds": 0.615,
+            "userSeconds": 0.3675,
+            "systemSeconds": 0.2475,
+            "peakRssKiB": 433202.0,
+            "readPlySeconds": 0.298880675,
+            "readVisibilitySeconds": 0.563970751,
+            "readTotalSeconds": 0.862851426
+          },
+          "observations": {
+            "wallSeconds": [
+              1.14,
+              1.11,
+              1.11,
+              1.1
+            ],
+            "cpuSeconds": [
+              0.63,
+              0.61,
+              0.61,
+              0.61
+            ],
+            "userSeconds": [
+              0.37,
+              0.36,
+              0.36,
+              0.38
+            ],
+            "systemSeconds": [
+              0.26,
+              0.25,
+              0.25,
+              0.23
+            ],
+            "peakRssKiB": [
+              433220.0,
+              433324.0,
+              433136.0,
+              433128.0
+            ],
+            "readPlySeconds": [
+              0.303221607,
+              0.292092191,
+              0.300533677,
+              0.299675225
+            ],
+            "readVisibilitySeconds": [
+              0.582161893,
+              0.567964733,
+              0.556165786,
+              0.549590592
+            ],
+            "readTotalSeconds": [
+              0.8853835,
+              0.860056924,
+              0.856699463,
+              0.849265817
+            ]
+          },
+          "counters": {
+            "instructions:u": {
+              "count": 3644931416.25,
+              "observations": [
+                {
+                  "count": 3644929581.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 3644927226.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 3644935341.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 3644933517.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cycles:u": {
+              "count": 1603885815.75,
+              "observations": [
+                {
+                  "count": 1628988657.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 1601430040.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 1591678463.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 1593446103.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-references:u": {
+              "count": 70366509.5,
+              "observations": [
+                {
+                  "count": 70459686.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 70386404.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 70376209.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 70243739.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-misses:u": {
+              "count": 6146811.25,
+              "observations": [
+                {
+                  "count": 6181114.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 6242594.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 6189786.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 5973751.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            }
+          }
+        }
+      },
+      "candidateChangePercent": {
+        "wallSeconds": -10.261569416498995,
+        "cpuSeconds": -16.040955631399324,
+        "userSeconds": -23.03664921465969,
+        "systemSeconds": -2.941176470588236,
+        "peakRssKiB": -0.0006925127826296062,
+        "readPlySeconds": -27.912345387029227,
+        "readVisibilitySeconds": -0.6468521328753973,
+        "readTotalSeconds": -12.155606614079584,
+        "cycles:u": -21.754830318332054,
+        "instructions:u": -7.30378987968181,
+        "cache-references:u": 1.5484086385976203,
+        "cache-misses:u": 1.9562618754100924
+      },
+      "rangesOverlap": {
+        "wallSeconds": false,
+        "cpuSeconds": false,
+        "userSeconds": false,
+        "systemSeconds": true,
+        "peakRssKiB": true,
+        "readPlySeconds": false,
+        "readVisibilitySeconds": true,
+        "readTotalSeconds": false,
+        "instructions:u": false,
+        "cycles:u": false,
+        "cache-references:u": false,
+        "cache-misses:u": true
+      }
+    }
+  ]
+}
