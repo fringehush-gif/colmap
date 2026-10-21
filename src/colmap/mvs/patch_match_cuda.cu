@@ -992,6 +992,9 @@ struct CooperativeNccJob<true> {
   float ref_sum[THREADS_PER_BLOCK];
   float ref_squared_sum[THREADS_PER_BLOCK];
   int source[THREADS_PER_BLOCK];
+  float best_depth[THREADS_PER_BLOCK];
+  float best_normal[3][THREADS_PER_BLOCK];
+  int best_idx[THREADS_PER_BLOCK];
 };
 
 template <int kWindowSize,
@@ -1103,8 +1106,10 @@ __global__ void SweepFromTopToBottom(
   }
 
   for (int row = 0; row < cost_map.GetHeight(); ++row) {
-    // Finish every column's previous-row reads before reusing the shared tile.
-    __syncthreads();
+    if constexpr (!kCooperative) {
+      // The scalar refresh has no end-of-row barrier before tile reuse.
+      __syncthreads();
+    }
     // Note that this must be executed even for pixels outside the borders,
     // since pixels are used in the local neighborhood of the current pixel.
     if constexpr (kCooperative) {
@@ -1327,16 +1332,68 @@ __global__ void SweepFromTopToBottom(
       }
     }
 
+    int min_cost_idx = 0;
+    float best_depth = 0.0f;
+    const float* best_normal = nullptr;
     if (owner && col < cost_map.GetWidth()) {
       // Find the parameters of the minimum cost.
-      const int min_cost_idx = FindMinCost<kNumCosts>(costs);
-      const float best_depth = depths[min_cost_idx];
-      const float* best_normal = normals[min_cost_idx];
+      min_cost_idx = FindMinCost<kNumCosts>(costs);
+      best_depth = depths[min_cost_idx];
+      best_normal = normals[min_cost_idx];
 
       // Save best new parameters.
       depth_map.Set(row, col, best_depth);
       normal_map.SetSlice(row, col, best_normal);
 
+      if constexpr (kCooperative) {
+        const int lane = threadIdx.x;
+        cooperative_job.best_depth[lane] = best_depth;
+        cooperative_job.best_idx[lane] = min_cost_idx;
+        for (int axis = 0; axis < 3; ++axis) {
+          cooperative_job.best_normal[axis][lane] = best_normal[axis];
+        }
+      }
+    }
+
+    if constexpr (kCooperative) {
+      // The owner publishes the winner before all four warps refresh
+      // independent source-image costs and forward messages.
+      __syncthreads();
+      if (col < cost_map.GetWidth()) {
+        const int lane = threadIdx.x;
+        const int winner = cooperative_job.best_idx[lane];
+        float winning_normal[3];
+        for (int axis = 0; axis < 3; ++axis) {
+          winning_normal[axis] = cooperative_job.best_normal[axis][lane];
+        }
+        pcc_computer.depth = cooperative_job.best_depth[lane];
+        pcc_computer.normal = winning_normal;
+        float* source_forward_message = &global_workspace.GetPtr()[col];
+        for (int image_idx = threadIdx.y; image_idx < cost_map.GetDepth();
+             image_idx += blockDim.y) {
+          float cost;
+          if (winner == 0) {
+            cost = cost_map.Get(row, col, image_idx);
+          } else {
+            pcc_computer.src_image_idx = image_idx;
+            cost = pcc_computer.Compute();
+            cost_map.Set(row, col, image_idx, cost);
+          }
+
+          const float alpha = likelihood_computer.ComputeForwardMessage(
+              cost, source_forward_message[image_idx * source_stride]);
+          const float beta = sel_prob_map.Get(row, col, image_idx);
+          const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
+          const float prob = likelihood_computer.ComputeSelProb(
+              alpha, beta, prev_prob, options.prev_sel_prob_weight);
+          source_forward_message[image_idx * source_stride] = alpha;
+          sel_prob_map.Set(row, col, image_idx, prob);
+        }
+      }
+      // Filtering consumes all updated source probabilities.
+      // Shared-tile reads also finish here before next-row reuse.
+      __syncthreads();
+    } else if (owner && col < cost_map.GetWidth()) {
       // Use the new cost to recompute the updated forward message and
       // the selection probability.
       pcc_computer.depth = best_depth;
@@ -1361,7 +1418,9 @@ __global__ void SweepFromTopToBottom(
         forward_message[image_idx * source_stride] = alpha;
         sel_prob_map.Set(row, col, image_idx, prob);
       }
+    }
 
+    if (owner && col < cost_map.GetWidth()) {
       if (kFilterPhotoConsistency || kFilterGeomConsistency) {
         int num_consistent = 0;
 
