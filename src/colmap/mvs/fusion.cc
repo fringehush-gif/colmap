@@ -13,6 +13,7 @@
 #include "colmap/util/timer.h"
 
 #include <algorithm>
+#include <array>
 #include <exception>
 #include <fstream>
 #include <iterator>
@@ -1880,12 +1881,26 @@ void WritePointsVisibility(
 
   WriteBinaryLittleEndian<uint64_t>(&file, points_visibility.size());
 
+  // Coalesce the existing uint32 wire fields without per-scalar stream calls.
+  std::array<uint32_t, 8192> payload;
+  const bool native_little_endian = IsLittleEndian();
+  size_t used = 0;
+  const auto flush = [&] {
+    file.write(reinterpret_cast<const char*>(payload.data()),
+               static_cast<std::streamsize>(used * sizeof(uint32_t)));
+    used = 0;
+  };
+  const auto append = [&](const uint32_t value) {
+    payload[used++] = native_little_endian ? value : ReverseBytes(value);
+    if (used == payload.size()) flush();
+  };
   for (const auto& visibility : points_visibility) {
-    WriteBinaryLittleEndian<uint32_t>(&file, visibility.size());
+    append(static_cast<uint32_t>(visibility.size()));
     for (const auto& image_idx : visibility) {
-      WriteBinaryLittleEndian<uint32_t>(&file, image_idx);
+      append(static_cast<uint32_t>(image_idx));
     }
   }
+  if (used != 0) flush();
 }
 
 std::vector<std::vector<int>> ReadPointsVisibility(
