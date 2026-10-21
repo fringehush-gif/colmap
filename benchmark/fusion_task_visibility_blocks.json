@@ -1,0 +1,1545 @@
+{
+  "schema": "colmap.fusionTaskVisibilityBlocks/v1",
+  "incrementalPublicBase": "2d8652bdb1878bf87909dba57647768065b5bf17",
+  "measuredCppBase": "2d8652bdb1878bf87909dba57647768065b5bf17",
+  "relatedVisibilityCommit": "48f39f514d58614154c40e42301cdf488f939ea5",
+  "workload": {
+    "scene": "Fountain P11",
+    "images": 11,
+    "resolutions": [
+      {
+        "width": 1536,
+        "height": 1024
+      },
+      {
+        "width": 3072,
+        "height": 2048
+      }
+    ],
+    "fusionWorkers": 12,
+    "inputType": "fixed geometric FP32 maps",
+    "minNumPixels": 5,
+    "preload": "default -1 follows Fusion workers",
+    "settings": "defaults",
+    "observationsPerArmPerResolution": 2,
+    "excludedWarmupsPerArmPerResolution": 1,
+    "timedOrder": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "events": [
+      "task-clock",
+      "context-switches",
+      "cpu-migrations",
+      "page-faults",
+      "cycles:u",
+      "instructions:u",
+      "cache-references:u",
+      "cache-misses:u"
+    ],
+    "counterScope": "Same timed calls; hardware events user-only,100percent running",
+    "cpuModel": "AMD Ryzen 9 3900X 12-Core Processor",
+    "storage": "Windows-backed WSL9p/DrvFS",
+    "timingScope": "Complete native Fusion process, including loading, final list materialization and PLY/VIS output. Preparation excluded."
+  },
+  "candidate": {
+    "change": "Pack private worker visibility into64KiBinteger blocks; preserve fresh set iteration and worker/point order, materialize existing public lists at merge and release each consumed block.",
+    "classLayoutChanged": false,
+    "memberTypesChanged": false,
+    "publicApiChanged": false,
+    "wireFormatChanged": false,
+    "precisionChanged": false,
+    "settingsChanged": false,
+    "oversizedRecordPolicy": "One dedicated block"
+  },
+  "timingAndCounters": [
+    {
+      "maxImageSize": 1536,
+      "workers": 12,
+      "arms": {
+        "baseline": {
+          "controllerWallObservationsSeconds": [
+            2.5906968250055797,
+            2.5269504839961883
+          ],
+          "fusedPoints": 433507,
+          "cpuSeconds": 8.095,
+          "userSeconds": 6.645,
+          "systemSeconds": 1.4500000000000002,
+          "meanPeakRssKiB": 669344.0,
+          "fusionImageStageObservationsSeconds": [
+            0.568,
+            0.5449999999999999
+          ],
+          "fusionImageStageSeconds": 0.5565,
+          "wallObservationsSeconds": [
+            2.51,
+            2.48
+          ],
+          "wallSeconds": 2.495,
+          "cpuObservationsSeconds": [
+            8.030000000000001,
+            8.16
+          ],
+          "peakRssObservationsKiB": [
+            669744.0,
+            668944.0
+          ],
+          "counters": {
+            "task-clock": {
+              "count": 8253410242.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 8188545109.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 8318275375.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "context-switches": {
+              "count": 18372.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 18620.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 18124.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cpu-migrations": {
+              "count": 206.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 263.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 150.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "page-faults": {
+              "count": 169476.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 169510.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 169442.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cycles:u": {
+              "count": 25908089019.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 26361658359.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 25454519679.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "instructions:u": {
+              "count": 37331370756.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 37330150009.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 37332591503.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-references:u": {
+              "count": 462638725.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 475454249.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 449823201.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-misses:u": {
+              "count": 89095538.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 92625759.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 85565318.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            }
+          },
+          "unsupportedEvents": []
+        },
+        "candidate": {
+          "controllerWallObservationsSeconds": [
+            2.475116435001837,
+            2.5760759400000097
+          ],
+          "fusedPoints": 433510,
+          "cpuSeconds": 7.734999999999999,
+          "userSeconds": 6.515000000000001,
+          "systemSeconds": 1.22,
+          "meanPeakRssKiB": 659290.0,
+          "fusionImageStageObservationsSeconds": [
+            0.555,
+            0.522
+          ],
+          "fusionImageStageSeconds": 0.5385,
+          "wallObservationsSeconds": [
+            2.45,
+            2.55
+          ],
+          "wallSeconds": 2.5,
+          "cpuObservationsSeconds": [
+            7.8,
+            7.67
+          ],
+          "peakRssObservationsKiB": [
+            659172.0,
+            659408.0
+          ],
+          "counters": {
+            "task-clock": {
+              "count": 7896865427.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 7952416007.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 7841314848.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "context-switches": {
+              "count": 18461.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 18205.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 18718.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cpu-migrations": {
+              "count": 167.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 155.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 180.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "page-faults": {
+              "count": 167428.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 167418.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 167438.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cycles:u": {
+              "count": 25414585730.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 25849884171.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 24979287290.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "instructions:u": {
+              "count": 37417892941.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 37418399655.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 37417386228.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-references:u": {
+              "count": 417046208.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 443470337.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 390622079.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-misses:u": {
+              "count": 81265335.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 86400545.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 76130126.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            }
+          },
+          "unsupportedEvents": []
+        }
+      },
+      "comparisons": [
+        {
+          "mode": "candidate",
+          "control": "baseline",
+          "relationship": "control",
+          "changePercent": {
+            "wallSeconds": 0.2004008016031955,
+            "cpuSeconds": -4.447189623224224,
+            "userSeconds": -1.9563581640330896,
+            "systemSeconds": -15.86206896551725,
+            "meanPeakRssKiB": -1.5020676961323365,
+            "fusionImageStageSeconds": -3.2345013477088957,
+            "instructions:u": 0.2317680378401077,
+            "cycles:u": -1.9048231930115844,
+            "cache-misses:u": -8.788546690247568
+          },
+          "rangesOverlap": {
+            "wallObservationsSeconds": true,
+            "cpuObservationsSeconds": false,
+            "peakRssObservationsKiB": false
+          }
+        }
+      ]
+    },
+    {
+      "maxImageSize": 3072,
+      "workers": 12,
+      "arms": {
+        "baseline": {
+          "controllerWallObservationsSeconds": [
+            8.091783098992892,
+            7.539472516000387
+          ],
+          "fusedPoints": 1676558,
+          "cpuSeconds": 30.46,
+          "userSeconds": 26.145,
+          "systemSeconds": 4.3149999999999995,
+          "meanPeakRssKiB": 1724574.0,
+          "fusionImageStageObservationsSeconds": [
+            2.23,
+            2.111
+          ],
+          "fusionImageStageSeconds": 2.1705,
+          "wallObservationsSeconds": [
+            7.98,
+            7.48
+          ],
+          "wallSeconds": 7.73,
+          "cpuObservationsSeconds": [
+            31.310000000000002,
+            29.61
+          ],
+          "peakRssObservationsKiB": [
+            1725012.0,
+            1724136.0
+          ],
+          "counters": {
+            "task-clock": {
+              "count": 30961731618.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 31831056225.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 30092407012.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "context-switches": {
+              "count": 54689.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 55544.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 53835.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cpu-migrations": {
+              "count": 379.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 374.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 385.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "page-faults": {
+              "count": 533202.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 534883.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 531521.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cycles:u": {
+              "count": 100368079994.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 102277469958.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 98458690031.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "instructions:u": {
+              "count": 140314535798.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 140316324447.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 140312747150.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-references:u": {
+              "count": 1815761918.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 1881577722.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 1749946114.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-misses:u": {
+              "count": 393562976.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 403721686.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 383404266.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            }
+          },
+          "unsupportedEvents": []
+        },
+        "candidate": {
+          "controllerWallObservationsSeconds": [
+            7.689918698000838,
+            7.740972838000744
+          ],
+          "fusedPoints": 1676555,
+          "cpuSeconds": 30.345,
+          "userSeconds": 26.41,
+          "systemSeconds": 3.935,
+          "meanPeakRssKiB": 1702712.0,
+          "fusionImageStageObservationsSeconds": [
+            2.169,
+            2.199
+          ],
+          "fusionImageStageSeconds": 2.184,
+          "wallObservationsSeconds": [
+            7.66,
+            7.7
+          ],
+          "wallSeconds": 7.68,
+          "cpuObservationsSeconds": [
+            30.18,
+            30.509999999999998
+          ],
+          "peakRssObservationsKiB": [
+            1702488.0,
+            1702936.0
+          ],
+          "counters": {
+            "task-clock": {
+              "count": 30821475170.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 30661828816.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 30981121525.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "context-switches": {
+              "count": 53367.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 54046.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 52688.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cpu-migrations": {
+              "count": 398.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 437.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 359.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "page-faults": {
+              "count": 518416.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 517968.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 518864.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cycles:u": {
+              "count": 101241621507.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 101070525639.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 101412717376.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "instructions:u": {
+              "count": 140643313296.0,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 140642495290.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 140644131302.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-references:u": {
+              "count": 1750338544.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 1738970044.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 1761707045.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            },
+            "cache-misses:u": {
+              "count": 376020288.5,
+              "runningPercent": 100.0,
+              "observations": [
+                {
+                  "count": 365215542.0,
+                  "runningPercent": 100.0
+                },
+                {
+                  "count": 386825035.0,
+                  "runningPercent": 100.0
+                }
+              ]
+            }
+          },
+          "unsupportedEvents": []
+        }
+      },
+      "comparisons": [
+        {
+          "mode": "candidate",
+          "control": "baseline",
+          "relationship": "control",
+          "changePercent": {
+            "wallSeconds": -0.6468305304010435,
+            "cpuSeconds": -0.3775443204202311,
+            "userSeconds": 1.01357812201186,
+            "systemSeconds": -8.80648899188875,
+            "meanPeakRssKiB": -1.2676753795430096,
+            "fusionImageStageSeconds": 0.621976503109889,
+            "instructions:u": 0.23431463862884083,
+            "cycles:u": 0.8703379730367056,
+            "cache-misses:u": -4.457402898589724
+          },
+          "rangesOverlap": {
+            "wallObservationsSeconds": true,
+            "cpuObservationsSeconds": true,
+            "peakRssObservationsKiB": false
+          }
+        }
+      ]
+    }
+  ],
+  "qualityHighlights": [
+    {
+      "resolution": 1536,
+      "role": "control",
+      "accepted": true,
+      "pointCountRatio": 1.0000069203034785,
+      "geometryP99": 0.0,
+      "geometryMaximum": 0.005724609615270416,
+      "normalP99": 1.2074182697257333e-06,
+      "normalMaximum": 11.955888349961187,
+      "rgbP99": 0.0,
+      "contributorMismatchFraction": 3.0517578125e-05
+    },
+    {
+      "resolution": 1536,
+      "role": "repeat",
+      "accepted": true,
+      "pointCountRatio": 1.0000299879817396,
+      "geometryP99": 0.0,
+      "geometryMaximum": 0.014401512790030702,
+      "normalP99": 1.2074182697257333e-06,
+      "normalMaximum": 10.87297455514358,
+      "rgbP99": 0.0,
+      "contributorMismatchFraction": 0.0002288818359375
+    },
+    {
+      "resolution": 1536,
+      "role": "repeat",
+      "accepted": true,
+      "pointCountRatio": 0.9999930797444119,
+      "geometryP99": 0.0,
+      "geometryMaximum": 0.005724609615270416,
+      "normalP99": 1.2074182697257333e-06,
+      "normalMaximum": 11.955888349961187,
+      "rgbP99": 0.0,
+      "contributorMismatchFraction": 9.1552734375e-05
+    },
+    {
+      "resolution": 3072,
+      "role": "control",
+      "accepted": true,
+      "pointCountRatio": 0.9999982106196147,
+      "geometryP99": 0.0,
+      "geometryMaximum": 0.0005324845050561516,
+      "normalP99": 1.2074182697257333e-06,
+      "normalMaximum": 0.20245505913237036,
+      "rgbP99": 0.0,
+      "contributorMismatchFraction": 1.52587890625e-05
+    },
+    {
+      "resolution": 3072,
+      "role": "repeat",
+      "accepted": true,
+      "pointCountRatio": 0.9999970176993579,
+      "geometryP99": 0.0,
+      "geometryMaximum": 0.0005463942669183511,
+      "normalP99": 1.2074182697257333e-06,
+      "normalMaximum": 3.079892460693079,
+      "rgbP99": 0.0,
+      "contributorMismatchFraction": 3.0517578125e-05
+    },
+    {
+      "resolution": 3072,
+      "role": "repeat",
+      "accepted": true,
+      "pointCountRatio": 1.0000005964611958,
+      "geometryP99": 0.0,
+      "geometryMaximum": 0.0015167754531888369,
+      "normalP99": 1.2074182697257333e-06,
+      "normalMaximum": 0.9881582725928022,
+      "rgbP99": 0.0,
+      "contributorMismatchFraction": 6.103515625e-05
+    }
+  ],
+  "qualityComparisons": [
+    {
+      "resolution": 1536,
+      "workers": 12,
+      "role": "control",
+      "quality": {
+        "completePointAttributeMultiset": {
+          "leftRecords": 433507,
+          "rightRecords": 433510,
+          "matchedRecords": 433448,
+          "unmatchedLeft": 59,
+          "unmatchedRight": 62,
+          "maximumUnmatchedFraction": 0.000143018615487532,
+          "equal": false,
+          "preservesMultiplicity": true
+        },
+        "completePointAttributeVisibilityMultiset": {
+          "leftRecords": 433507,
+          "rightRecords": 433510,
+          "matchedRecords": 433448,
+          "unmatchedLeft": 59,
+          "unmatchedRight": 62,
+          "maximumUnmatchedFraction": 0.000143018615487532,
+          "equal": false,
+          "preservesMultiplicity": true
+        },
+        "symmetricGeometry": {
+          "pointCountRatio": 1.0000069203034785,
+          "symmetricSampledNearestNeighbor": [
+            {
+              "queries": 65536,
+              "targetPoints": 433510,
+              "distances": {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "maximum": 0.004422370355896791
+              }
+            },
+            {
+              "queries": 65536,
+              "targetPoints": 433507,
+              "distances": {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "maximum": 0.005724609615270416
+              }
+            }
+          ],
+          "units": "unchanged native reconstruction units",
+          "accepted": true
+        },
+        "symmetricAttributeErrors": [
+          {
+            "queries": 65536,
+            "targetPoints": 433510,
+            "scope": "canonical attribute-record order for equal nearest XYZ; ties disclosed, never best-color selection",
+            "nearestGeometryTieFraction": 0.0,
+            "normalAngleDegrees": {
+              "p50": 0.0,
+              "p95": 1.2074182697257333e-06,
+              "p99": 1.2074182697257333e-06,
+              "maximum": 2.8202600092158425
+            },
+            "rgbMaximumChannelAbsolute": {
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "maximum": 6.0
+            },
+            "tiedNormalP99Bounds": [
+              1.2074182697257333e-06,
+              1.2074182697257333e-06
+            ],
+            "tiedRgbP99Bounds": [
+              0.0,
+              0.0
+            ],
+            "visibilityContributorSetMismatchFraction": 0.0,
+            "visibilityScope": "deterministic symmetric nearest-geometry sample; at most65536 rows per arm",
+            "tiedVisibilityMismatchFractionBounds": [
+              0.0,
+              0.0
+            ]
+          },
+          {
+            "queries": 65536,
+            "targetPoints": 433507,
+            "scope": "canonical attribute-record order for equal nearest XYZ; ties disclosed, never best-color selection",
+            "nearestGeometryTieFraction": 0.0,
+            "normalAngleDegrees": {
+              "p50": 0.0,
+              "p95": 1.2074182697257333e-06,
+              "p99": 1.2074182697257333e-06,
+              "maximum": 11.955888349961187
+            },
+            "rgbMaximumChannelAbsolute": {
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "maximum": 12.0
+            },
+            "tiedNormalP99Bounds": [
+              1.2074182697257333e-06,
+              1.2074182697257333e-06
+            ],
+            "tiedRgbP99Bounds": [
+              0.0,
+              0.0
+            ],
+            "visibilityContributorSetMismatchFraction": 3.0517578125e-05,
+            "visibilityScope": "deterministic symmetric nearest-geometry sample; at most65536 rows per arm",
+            "tiedVisibilityMismatchFractionBounds": [
+              3.0517578125e-05,
+              3.0517578125e-05
+            ]
+          }
+        ],
+        "serialExactBitAndVisibilityParity": null,
+        "acceptance": "predeclared parallel/codec gates",
+        "completeMultisetDifferencesRecordOnly": true,
+        "inconclusive": false,
+        "inconclusiveReason": null,
+        "accepted": true,
+        "performanceAccepted": false
+      }
+    },
+    {
+      "resolution": 1536,
+      "workers": 12,
+      "role": "repeat",
+      "quality": {
+        "completePointAttributeMultiset": {
+          "leftRecords": 433507,
+          "rightRecords": 433520,
+          "matchedRecords": 433321,
+          "unmatchedLeft": 186,
+          "unmatchedRight": 199,
+          "maximumUnmatchedFraction": 0.00045903303192470937,
+          "equal": false,
+          "preservesMultiplicity": true
+        },
+        "completePointAttributeVisibilityMultiset": {
+          "leftRecords": 433507,
+          "rightRecords": 433520,
+          "matchedRecords": 433321,
+          "unmatchedLeft": 186,
+          "unmatchedRight": 199,
+          "maximumUnmatchedFraction": 0.00045903303192470937,
+          "equal": false,
+          "preservesMultiplicity": true
+        },
+        "symmetricGeometry": {
+          "pointCountRatio": 1.0000299879817396,
+          "symmetricSampledNearestNeighbor": [
+            {
+              "queries": 65536,
+              "targetPoints": 433520,
+              "distances": {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "maximum": 0.014401512790030702
+              }
+            },
+            {
+              "queries": 65536,
+              "targetPoints": 433507,
+              "distances": {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "maximum": 0.008215252028590693
+              }
+            }
+          ],
+          "units": "unchanged native reconstruction units",
+          "accepted": true
+        },
+        "symmetricAttributeErrors": [
+          {
+            "queries": 65536,
+            "targetPoints": 433520,
+            "scope": "canonical attribute-record order for equal nearest XYZ; ties disclosed, never best-color selection",
+            "nearestGeometryTieFraction": 0.0,
+            "normalAngleDegrees": {
+              "p50": 0.0,
+              "p95": 1.2074182697257333e-06,
+              "p99": 1.2074182697257333e-06,
+              "maximum": 10.87297455514358
+            },
+            "rgbMaximumChannelAbsolute": {
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "maximum": 19.0
+            },
+            "tiedNormalP99Bounds": [
+              1.2074182697257333e-06,
+              1.2074182697257333e-06
+            ],
+            "tiedRgbP99Bounds": [
+              0.0,
+              0.0
+            ],
+            "visibilityContributorSetMismatchFraction": 0.000152587890625,
+            "visibilityScope": "deterministic symmetric nearest-geometry sample; at most65536 rows per arm",
+            "tiedVisibilityMismatchFractionBounds": [
+              0.000152587890625,
+              0.000152587890625
+            ]
+          },
+          {
+            "queries": 65536,
+            "targetPoints": 433507,
+            "scope": "canonical attribute-record order for equal nearest XYZ; ties disclosed, never best-color selection",
+            "nearestGeometryTieFraction": 0.0,
+            "normalAngleDegrees": {
+              "p50": 0.0,
+              "p95": 1.2074182697257333e-06,
+              "p99": 1.2074182697257333e-06,
+              "maximum": 4.255534134574952
+            },
+            "rgbMaximumChannelAbsolute": {
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "maximum": 10.0
+            },
+            "tiedNormalP99Bounds": [
+              1.2074182697257333e-06,
+              1.2074182697257333e-06
+            ],
+            "tiedRgbP99Bounds": [
+              0.0,
+              0.0
+            ],
+            "visibilityContributorSetMismatchFraction": 0.0002288818359375,
+            "visibilityScope": "deterministic symmetric nearest-geometry sample; at most65536 rows per arm",
+            "tiedVisibilityMismatchFractionBounds": [
+              0.0002288818359375,
+              0.0002288818359375
+            ]
+          }
+        ],
+        "serialExactBitAndVisibilityParity": null,
+        "acceptance": "predeclared parallel/codec gates",
+        "completeMultisetDifferencesRecordOnly": true,
+        "inconclusive": false,
+        "inconclusiveReason": null,
+        "accepted": true,
+        "performanceAccepted": false
+      }
+    },
+    {
+      "resolution": 1536,
+      "workers": 12,
+      "role": "repeat",
+      "quality": {
+        "completePointAttributeMultiset": {
+          "leftRecords": 433510,
+          "rightRecords": 433507,
+          "matchedRecords": 433425,
+          "unmatchedLeft": 85,
+          "unmatchedRight": 82,
+          "maximumUnmatchedFraction": 0.00019607390832968098,
+          "equal": false,
+          "preservesMultiplicity": true
+        },
+        "completePointAttributeVisibilityMultiset": {
+          "leftRecords": 433510,
+          "rightRecords": 433507,
+          "matchedRecords": 433425,
+          "unmatchedLeft": 85,
+          "unmatchedRight": 82,
+          "maximumUnmatchedFraction": 0.00019607390832968098,
+          "equal": false,
+          "preservesMultiplicity": true
+        },
+        "symmetricGeometry": {
+          "pointCountRatio": 0.9999930797444119,
+          "symmetricSampledNearestNeighbor": [
+            {
+              "queries": 65536,
+              "targetPoints": 433507,
+              "distances": {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "maximum": 0.005724609615270416
+              }
+            },
+            {
+              "queries": 65536,
+              "targetPoints": 433510,
+              "distances": {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "maximum": 0.0051174265135602755
+              }
+            }
+          ],
+          "units": "unchanged native reconstruction units",
+          "accepted": true
+        },
+        "symmetricAttributeErrors": [
+          {
+            "queries": 65536,
+            "targetPoints": 433507,
+            "scope": "canonical attribute-record order for equal nearest XYZ; ties disclosed, never best-color selection",
+            "nearestGeometryTieFraction": 0.0,
+            "normalAngleDegrees": {
+              "p50": 0.0,
+              "p95": 1.2074182697257333e-06,
+              "p99": 1.2074182697257333e-06,
+              "maximum": 11.955888349961187
+            },
+            "rgbMaximumChannelAbsolute": {
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "maximum": 12.0
+            },
+            "tiedNormalP99Bounds": [
+              1.2074182697257333e-06,
+              1.2074182697257333e-06
+            ],
+            "tiedRgbP99Bounds": [
+              0.0,
+              0.0
+            ],
+            "visibilityContributorSetMismatchFraction": 3.0517578125e-05,
+            "visibilityScope": "deterministic symmetric nearest-geometry sample; at most65536 rows per arm",
+            "tiedVisibilityMismatchFractionBounds": [
+              3.0517578125e-05,
+              3.0517578125e-05
+            ]
+          },
+          {
+            "queries": 65536,
+            "targetPoints": 433510,
+            "scope": "canonical attribute-record order for equal nearest XYZ; ties disclosed, never best-color selection",
+            "nearestGeometryTieFraction": 0.0,
+            "normalAngleDegrees": {
+              "p50": 0.0,
+              "p95": 1.2074182697257333e-06,
+              "p99": 1.2074182697257333e-06,
+              "maximum": 11.854877116808625
+            },
+            "rgbMaximumChannelAbsolute": {
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "maximum": 18.0
+            },
+            "tiedNormalP99Bounds": [
+              1.2074182697257333e-06,
+              1.2074182697257333e-06
+            ],
+            "tiedRgbP99Bounds": [
+              0.0,
+              0.0
+            ],
+            "visibilityContributorSetMismatchFraction": 9.1552734375e-05,
+            "visibilityScope": "deterministic symmetric nearest-geometry sample; at most65536 rows per arm",
+            "tiedVisibilityMismatchFractionBounds": [
+              9.1552734375e-05,
+              9.1552734375e-05
+            ]
+          }
+        ],
+        "serialExactBitAndVisibilityParity": null,
+        "acceptance": "predeclared parallel/codec gates",
+        "completeMultisetDifferencesRecordOnly": true,
+        "inconclusive": false,
+        "inconclusiveReason": null,
+        "accepted": true,
+        "performanceAccepted": false
+      }
+    },
+    {
+      "resolution": 3072,
+      "workers": 12,
+      "role": "control",
+      "quality": {
+        "completePointAttributeMultiset": {
+          "leftRecords": 1676558,
+          "rightRecords": 1676555,
+          "matchedRecords": 1676515,
+          "unmatchedLeft": 43,
+          "unmatchedRight": 40,
+          "maximumUnmatchedFraction": 2.564778552248118e-05,
+          "equal": false,
+          "preservesMultiplicity": true
+        },
+        "completePointAttributeVisibilityMultiset": {
+          "leftRecords": 1676558,
+          "rightRecords": 1676555,
+          "matchedRecords": 1676515,
+          "unmatchedLeft": 43,
+          "unmatchedRight": 40,
+          "maximumUnmatchedFraction": 2.564778552248118e-05,
+          "equal": false,
+          "preservesMultiplicity": true
+        },
+        "symmetricGeometry": {
+          "pointCountRatio": 0.9999982106196147,
+          "symmetricSampledNearestNeighbor": [
+            {
+              "queries": 65536,
+              "targetPoints": 1676555,
+              "distances": {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "maximum": 6.981553896144157e-05
+              }
+            },
+            {
+              "queries": 65536,
+              "targetPoints": 1676558,
+              "distances": {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "maximum": 0.0005324845050561516
+              }
+            }
+          ],
+          "units": "unchanged native reconstruction units",
+          "accepted": true
+        },
+        "symmetricAttributeErrors": [
+          {
+            "queries": 65536,
+            "targetPoints": 1676555,
+            "scope": "canonical attribute-record order for equal nearest XYZ; ties disclosed, never best-color selection",
+            "nearestGeometryTieFraction": 0.0,
+            "normalAngleDegrees": {
+              "p50": 0.0,
+              "p95": 1.2074182697257333e-06,
+              "p99": 1.2074182697257333e-06,
+              "maximum": 0.20245505913237036
+            },
+            "rgbMaximumChannelAbsolute": {
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "maximum": 0.0
+            },
+            "tiedNormalP99Bounds": [
+              1.2074182697257333e-06,
+              1.2074182697257333e-06
+            ],
+            "tiedRgbP99Bounds": [
+              0.0,
+              0.0
+            ],
+            "visibilityContributorSetMismatchFraction": 0.0,
+            "visibilityScope": "deterministic symmetric nearest-geometry sample; at most65536 rows per arm",
+            "tiedVisibilityMismatchFractionBounds": [
+              0.0,
+              0.0
+            ]
+          },
+          {
+            "queries": 65536,
+            "targetPoints": 1676558,
+            "scope": "canonical attribute-record order for equal nearest XYZ; ties disclosed, never best-color selection",
+            "nearestGeometryTieFraction": 0.0,
+            "normalAngleDegrees": {
+              "p50": 0.0,
+              "p95": 1.2074182697257333e-06,
+              "p99": 1.2074182697257333e-06,
+              "maximum": 0.011096036881839588
+            },
+            "rgbMaximumChannelAbsolute": {
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "maximum": 1.0
+            },
+            "tiedNormalP99Bounds": [
+              1.2074182697257333e-06,
+              1.2074182697257333e-06
+            ],
+            "tiedRgbP99Bounds": [
+              0.0,
+              0.0
+            ],
+            "visibilityContributorSetMismatchFraction": 1.52587890625e-05,
+            "visibilityScope": "deterministic symmetric nearest-geometry sample; at most65536 rows per arm",
+            "tiedVisibilityMismatchFractionBounds": [
+              1.52587890625e-05,
+              1.52587890625e-05
+            ]
+          }
+        ],
+        "serialExactBitAndVisibilityParity": null,
+        "acceptance": "predeclared parallel/codec gates",
+        "completeMultisetDifferencesRecordOnly": true,
+        "inconclusive": false,
+        "inconclusiveReason": null,
+        "accepted": true,
+        "performanceAccepted": false
+      }
+    },
+    {
+      "resolution": 3072,
+      "workers": 12,
+      "role": "repeat",
+      "quality": {
+        "completePointAttributeMultiset": {
+          "leftRecords": 1676558,
+          "rightRecords": 1676553,
+          "matchedRecords": 1676447,
+          "unmatchedLeft": 111,
+          "unmatchedRight": 106,
+          "maximumUnmatchedFraction": 6.620707425570723e-05,
+          "equal": false,
+          "preservesMultiplicity": true
+        },
+        "completePointAttributeVisibilityMultiset": {
+          "leftRecords": 1676558,
+          "rightRecords": 1676553,
+          "matchedRecords": 1676447,
+          "unmatchedLeft": 111,
+          "unmatchedRight": 106,
+          "maximumUnmatchedFraction": 6.620707425570723e-05,
+          "equal": false,
+          "preservesMultiplicity": true
+        },
+        "symmetricGeometry": {
+          "pointCountRatio": 0.9999970176993579,
+          "symmetricSampledNearestNeighbor": [
+            {
+              "queries": 65536,
+              "targetPoints": 1676553,
+              "distances": {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "maximum": 0.0005463942669183511
+              }
+            },
+            {
+              "queries": 65536,
+              "targetPoints": 1676558,
+              "distances": {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "maximum": 0.0002812758280690755
+              }
+            }
+          ],
+          "units": "unchanged native reconstruction units",
+          "accepted": true
+        },
+        "symmetricAttributeErrors": [
+          {
+            "queries": 65536,
+            "targetPoints": 1676553,
+            "scope": "canonical attribute-record order for equal nearest XYZ; ties disclosed, never best-color selection",
+            "nearestGeometryTieFraction": 0.0,
+            "normalAngleDegrees": {
+              "p50": 0.0,
+              "p95": 1.2074182697257333e-06,
+              "p99": 1.2074182697257333e-06,
+              "maximum": 0.21597669148303963
+            },
+            "rgbMaximumChannelAbsolute": {
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "maximum": 2.0
+            },
+            "tiedNormalP99Bounds": [
+              1.2074182697257333e-06,
+              1.2074182697257333e-06
+            ],
+            "tiedRgbP99Bounds": [
+              0.0,
+              0.0
+            ],
+            "visibilityContributorSetMismatchFraction": 0.0,
+            "visibilityScope": "deterministic symmetric nearest-geometry sample; at most65536 rows per arm",
+            "tiedVisibilityMismatchFractionBounds": [
+              0.0,
+              0.0
+            ]
+          },
+          {
+            "queries": 65536,
+            "targetPoints": 1676558,
+            "scope": "canonical attribute-record order for equal nearest XYZ; ties disclosed, never best-color selection",
+            "nearestGeometryTieFraction": 0.0,
+            "normalAngleDegrees": {
+              "p50": 0.0,
+              "p95": 1.2074182697257333e-06,
+              "p99": 1.2074182697257333e-06,
+              "maximum": 3.079892460693079
+            },
+            "rgbMaximumChannelAbsolute": {
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "maximum": 1.0
+            },
+            "tiedNormalP99Bounds": [
+              1.2074182697257333e-06,
+              1.2074182697257333e-06
+            ],
+            "tiedRgbP99Bounds": [
+              0.0,
+              0.0
+            ],
+            "visibilityContributorSetMismatchFraction": 3.0517578125e-05,
+            "visibilityScope": "deterministic symmetric nearest-geometry sample; at most65536 rows per arm",
+            "tiedVisibilityMismatchFractionBounds": [
+              3.0517578125e-05,
+              3.0517578125e-05
+            ]
+          }
+        ],
+        "serialExactBitAndVisibilityParity": null,
+        "acceptance": "predeclared parallel/codec gates",
+        "completeMultisetDifferencesRecordOnly": true,
+        "inconclusive": false,
+        "inconclusiveReason": null,
+        "accepted": true,
+        "performanceAccepted": false
+      }
+    },
+    {
+      "resolution": 3072,
+      "workers": 12,
+      "role": "repeat",
+      "quality": {
+        "completePointAttributeMultiset": {
+          "leftRecords": 1676555,
+          "rightRecords": 1676556,
+          "matchedRecords": 1676465,
+          "unmatchedLeft": 90,
+          "unmatchedRight": 91,
+          "maximumUnmatchedFraction": 5.427793643636121e-05,
+          "equal": false,
+          "preservesMultiplicity": true
+        },
+        "completePointAttributeVisibilityMultiset": {
+          "leftRecords": 1676555,
+          "rightRecords": 1676556,
+          "matchedRecords": 1676465,
+          "unmatchedLeft": 90,
+          "unmatchedRight": 91,
+          "maximumUnmatchedFraction": 5.427793643636121e-05,
+          "equal": false,
+          "preservesMultiplicity": true
+        },
+        "symmetricGeometry": {
+          "pointCountRatio": 1.0000005964611958,
+          "symmetricSampledNearestNeighbor": [
+            {
+              "queries": 65536,
+              "targetPoints": 1676556,
+              "distances": {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "maximum": 0.0005324845050561516
+              }
+            },
+            {
+              "queries": 65536,
+              "targetPoints": 1676555,
+              "distances": {
+                "p50": 0.0,
+                "p95": 0.0,
+                "p99": 0.0,
+                "maximum": 0.0015167754531888369
+              }
+            }
+          ],
+          "units": "unchanged native reconstruction units",
+          "accepted": true
+        },
+        "symmetricAttributeErrors": [
+          {
+            "queries": 65536,
+            "targetPoints": 1676556,
+            "scope": "canonical attribute-record order for equal nearest XYZ; ties disclosed, never best-color selection",
+            "nearestGeometryTieFraction": 0.0,
+            "normalAngleDegrees": {
+              "p50": 0.0,
+              "p95": 1.2074182697257333e-06,
+              "p99": 1.2074182697257333e-06,
+              "maximum": 0.4639476118672381
+            },
+            "rgbMaximumChannelAbsolute": {
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "maximum": 1.0
+            },
+            "tiedNormalP99Bounds": [
+              1.2074182697257333e-06,
+              1.2074182697257333e-06
+            ],
+            "tiedRgbP99Bounds": [
+              0.0,
+              0.0
+            ],
+            "visibilityContributorSetMismatchFraction": 1.52587890625e-05,
+            "visibilityScope": "deterministic symmetric nearest-geometry sample; at most65536 rows per arm",
+            "tiedVisibilityMismatchFractionBounds": [
+              1.52587890625e-05,
+              1.52587890625e-05
+            ]
+          },
+          {
+            "queries": 65536,
+            "targetPoints": 1676555,
+            "scope": "canonical attribute-record order for equal nearest XYZ; ties disclosed, never best-color selection",
+            "nearestGeometryTieFraction": 0.0,
+            "normalAngleDegrees": {
+              "p50": 0.0,
+              "p95": 1.2074182697257333e-06,
+              "p99": 1.2074182697257333e-06,
+              "maximum": 0.9881582725928022
+            },
+            "rgbMaximumChannelAbsolute": {
+              "p50": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "maximum": 2.0
+            },
+            "tiedNormalP99Bounds": [
+              1.2074182697257333e-06,
+              1.2074182697257333e-06
+            ],
+            "tiedRgbP99Bounds": [
+              0.0,
+              0.0
+            ],
+            "visibilityContributorSetMismatchFraction": 6.103515625e-05,
+            "visibilityScope": "deterministic symmetric nearest-geometry sample; at most65536 rows per arm",
+            "tiedVisibilityMismatchFractionBounds": [
+              6.103515625e-05,
+              6.103515625e-05
+            ]
+          }
+        ],
+        "serialExactBitAndVisibilityParity": null,
+        "acceptance": "predeclared parallel/codec gates",
+        "completeMultisetDifferencesRecordOnly": true,
+        "inconclusive": false,
+        "inconclusiveReason": null,
+        "accepted": true,
+        "performanceAccepted": false
+      }
+    }
+  ],
+  "validation": {
+    "directNativeTestsPassed": 52,
+    "expectedUnsupportedBuildSkip": 1,
+    "cpuCompiles": 2,
+    "cudaCompiles": 0,
+    "configureCalls": 0,
+    "clangFormat": "23.1.3, repository style",
+    "focusedTests": [
+      "VisibilityBlocksPreserveListsAcrossBoundariesAndReuse",
+      "VisibilityBlocksRejectTruncatedOrNegativeCounts"
+    ],
+    "sceneQualityPassed": true
+  },
+  "conclusion": "Modest peak-memory improvement. Elapsed ranges overlap at both resolutions; no established elapsed speedup. Instructions rise about0.23percent at both. Final public per-point allocations remain necessary."
+}

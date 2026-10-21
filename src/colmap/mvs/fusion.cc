@@ -52,6 +52,44 @@ uint8_t RoundedByteMedian(std::vector<uint8_t>& elems) {
 }  // namespace
 namespace internal {
 
+void AppendFusionVisibilityBlock(std::vector<std::vector<int>>& blocks,
+                                 const FlatHashSet<int>& visibility) {
+  constexpr size_t kBlockWords = 64 * 1024 / sizeof(int);
+  THROW_CHECK_LE(visibility.size(),
+                 static_cast<size_t>(std::numeric_limits<int>::max()));
+  THROW_CHECK_LT(visibility.size(), std::numeric_limits<size_t>::max());
+  const size_t record_words = visibility.size() + 1;
+  if (blocks.empty() || blocks.back().size() > kBlockWords ||
+      record_words > kBlockWords - blocks.back().size()) {
+    blocks.emplace_back();
+    blocks.back().reserve(std::max(kBlockWords, record_words));
+  }
+  auto& block = blocks.back();
+  block.push_back(static_cast<int>(visibility.size()));
+  block.insert(block.end(), visibility.begin(), visibility.end());
+}
+
+size_t MergeFusionVisibilityBlocks(std::vector<std::vector<int>>& blocks,
+                                   std::vector<std::vector<int>>& output) {
+  const size_t first = output.size();
+  for (auto& block : blocks) {
+    size_t offset = 0;
+    while (offset < block.size()) {
+      const int count = block[offset++];
+      if (count < 0 || static_cast<size_t>(count) > block.size() - offset) {
+        throw std::invalid_argument("Malformed Fusion visibility block");
+      }
+      output.emplace_back(block.begin() + offset,
+                          block.begin() + offset + count);
+      offset += static_cast<size_t>(count);
+    }
+    // Release each payload before materializing the next block's lists.
+    std::vector<int>().swap(block);
+  }
+  blocks.clear();
+  return output.size() - first;
+}
+
 std::vector<int> FusionNeighborhood(
     const std::vector<std::vector<int>>& overlapping_images,
     const std::vector<char>& used_images,
@@ -906,18 +944,15 @@ void StereoFusion::Run() {
     fused_points_visibility_.reserve(total_fused_points);
     for (size_t thread_id = 0; thread_id < task_fused_points_.size();
          ++thread_id) {
+      const size_t num_task_points = task_fused_points_[thread_id].size();
       fused_points_.insert(fused_points_.end(),
                            task_fused_points_[thread_id].begin(),
                            task_fused_points_[thread_id].end());
       task_fused_points_[thread_id].clear();
 
-      fused_points_visibility_.insert(
-          fused_points_visibility_.end(),
-          std::make_move_iterator(
-              task_fused_points_visibility_[thread_id].begin()),
-          std::make_move_iterator(
-              task_fused_points_visibility_[thread_id].end()));
-      task_fused_points_visibility_[thread_id].clear();
+      const size_t num_visibility = internal::MergeFusionVisibilityBlocks(
+          task_fused_points_visibility_[thread_id], fused_points_visibility_);
+      THROW_CHECK_EQ(num_visibility, num_task_points);
     }
 
     if (fused_points_.empty()) {
@@ -1872,8 +1907,8 @@ void StereoFusion::Fuse(const int thread_id,
       visibility.insert(visible_image_idx);
     }
     task_fused_points_[thread_id].push_back(fused_point);
-    task_fused_points_visibility_[thread_id].emplace_back(visibility.begin(),
-                                                          visibility.end());
+    internal::AppendFusionVisibilityBlock(
+        task_fused_points_visibility_[thread_id], visibility);
   }
 }
 
