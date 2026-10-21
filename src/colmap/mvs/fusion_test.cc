@@ -33,6 +33,58 @@
 
 namespace colmap {
 namespace mvs {
+TEST(StereoFusion, FloatMapViewPreservesValuesAndFlatBounds) {
+  const std::array<float, 8> values = {0.0f,
+                                       -0.0f,
+                                       1.25f,
+                                       -2.5f,
+                                       std::numeric_limits<float>::denorm_min(),
+                                       std::numeric_limits<float>::max(),
+                                       std::numeric_limits<float>::infinity(),
+                                       std::numeric_limits<float>::quiet_NaN()};
+  const auto bits = [](float value) {
+    uint32_t result;
+    std::memcpy(&result, &value, sizeof(result));
+    return result;
+  };
+  for (size_t depth : {size_t{1}, size_t{2}, size_t{3}}) {
+    Mat<float> map(7, 3, depth);
+    for (size_t slice = 0; slice < depth; ++slice) {
+      for (size_t row = 0; row < map.GetHeight(); ++row) {
+        for (size_t col = 0; col < map.GetWidth(); ++col) {
+          map.Set(row,
+                  col,
+                  slice,
+                  values[(slice * 21 + row * 7 + col) % values.size()]);
+        }
+      }
+    }
+    const internal::FusionFloatMapView view(map);
+    EXPECT_EQ(view.data, map.GetData().data());
+    for (size_t slice = 0; slice < depth; ++slice) {
+      for (size_t row = 0; row < map.GetHeight(); ++row) {
+        for (size_t col = 0; col < map.GetWidth(); ++col) {
+          EXPECT_EQ(bits(view.Get(row, col, slice)),
+                    bits(map.Get(row, col, slice)));
+        }
+      }
+    }
+    // Mat::Get checks the flattened offset, including aliases between rows.
+    EXPECT_EQ(bits(view.Get(0, 7)), bits(map.Get(0, 7)));
+    if (depth > 1) {
+      EXPECT_EQ(bits(view.Get(3, 0)), bits(map.Get(3, 0)));
+    }
+    EXPECT_THROW(view.Get(0, 0, depth), std::out_of_range);
+    EXPECT_THROW(map.Get(0, 0, depth), std::out_of_range);
+    EXPECT_THROW(view.Get(3 * depth, 0), std::out_of_range);
+    EXPECT_THROW(map.Get(3 * depth, 0), std::out_of_range);
+    map.Set(0, 0, 4.5f);
+    EXPECT_EQ(view.Get(0, 0), 4.5f);
+  }
+  const internal::FusionFloatMapView empty;
+  EXPECT_THROW(empty.Get(0, 0), std::out_of_range);
+}
+
 TEST(StereoFusion, AtomicPixelMaskInitializesBoundsAndMoves) {
   static_assert(
       std::is_nothrow_move_constructible_v<internal::FusionPixelMask>);
@@ -94,12 +146,19 @@ struct StereoFusionExactDepthTestPeer {
     for (size_t index = 0; index < fusion.used_images_.size(); ++index) {
       const auto& input = fusion.full_ram_inputs_[index];
       if (!fusion.used_images_[index]) {
-        if (input.depth || input.normal || input.bitmap) return false;
+        if (input.depth.data || input.normal.data || input.bitmap) return false;
         continue;
       }
       const int view = static_cast<int>(index);
-      if (input.depth != &fusion.workspace_->GetDepthMap(view) ||
-          input.normal != &fusion.workspace_->GetNormalMap(view) ||
+      const auto matches = [](const internal::FusionFloatMapView& input,
+                              const Mat<float>& map) {
+        return input.data == map.GetData().data() &&
+               input.size == map.GetData().size() &&
+               input.width == map.GetWidth() &&
+               input.plane == map.GetWidth() * map.GetHeight();
+      };
+      if (!matches(input.depth, fusion.workspace_->GetDepthMap(view)) ||
+          !matches(input.normal, fusion.workspace_->GetNormalMap(view)) ||
           input.bitmap != &fusion.workspace_->GetBitmap(view))
         return false;
     }

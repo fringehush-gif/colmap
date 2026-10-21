@@ -628,9 +628,10 @@ void StereoFusion::Run() {
     used_images_.at(image_idx) = true;
 
     if (!full_ram_inputs_.empty()) {
-      full_ram_inputs_.at(image_idx) = {&workspace_->GetDepthMap(image_idx),
-                                        &workspace_->GetNormalMap(image_idx),
-                                        &workspace_->GetBitmap(image_idx)};
+      full_ram_inputs_.at(image_idx) = {
+          internal::FusionFloatMapView(workspace_->GetDepthMap(image_idx)),
+          internal::FusionFloatMapView(workspace_->GetNormalMap(image_idx)),
+          &workspace_->GetBitmap(image_idx)};
     }
 
     InitFusedPixelMask(image_idx, depth_width, depth_height);
@@ -1511,7 +1512,7 @@ void StereoFusion::Fuse(const int thread_id,
           kResident ? &full_ram_inputs_.at(image_idx) : nullptr;
       float depth;
       if constexpr (kResident) {
-        depth = resident->depth->Get(row, col);
+        depth = resident->depth.Get(row, col);
       } else {
         const auto* pinned =
             direct_component_pins_admitted_ ? direct_depth_data_.at(image_idx)
@@ -1596,9 +1597,9 @@ void StereoFusion::Fuse(const int thread_id,
       Eigen::Vector3f local_normal;
       if constexpr (kResident) {
         // Eager FP32 owners cannot use optional normal-source routes.
-        local_normal = Eigen::Vector3f(resident->normal->Get(row, col, 0),
-                                       resident->normal->Get(row, col, 1),
-                                       resident->normal->Get(row, col, 2));
+        local_normal = Eigen::Vector3f(resident->normal.Get(row, col, 0),
+                                       resident->normal.Get(row, col, 1),
+                                       resident->normal.Get(row, col, 2));
       } else {
         const auto* tile_image =
             options_.bounded_cache_normal_tile_size > 0

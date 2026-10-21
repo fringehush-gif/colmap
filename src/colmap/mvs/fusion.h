@@ -141,6 +141,30 @@ struct StereoFusionOptions {
 };
 
 namespace internal {
+// Borrowed FP32 raster metadata. The owner must keep its vector unchanged
+// until all readers join. Preserve Mat::Get's flat-index bounds behavior.
+struct FusionFloatMapView {
+  FusionFloatMapView() = default;
+  explicit FusionFloatMapView(const Mat<float>& map)
+      : data(map.GetData().data()),
+        size(map.GetData().size()),
+        width(map.GetWidth()),
+        plane(map.GetWidth() * map.GetHeight()) {}
+
+  float Get(size_t row, size_t col, size_t slice = 0) const {
+    const size_t index = slice * plane + row * width + col;
+    if (index >= size) {
+      throw std::out_of_range("Fusion float map index is outside its storage");
+    }
+    return data[index];
+  }
+
+  const float* data = nullptr;
+  size_t size = 0;
+  size_t width = 0;
+  size_t plane = 0;
+};
+
 // Visited flags publish no payload. Relaxed accesses preserve the existing
 // observation policy without racing with row snapshots or other workers.
 class FusionPixelMask {
@@ -302,8 +326,8 @@ class StereoFusion : public BaseController {
 
   std::unique_ptr<Workspace> workspace_;
   struct FullRamInput {
-    const DepthMap* depth = nullptr;
-    const NormalMap* normal = nullptr;
+    internal::FusionFloatMapView depth;
+    internal::FusionFloatMapView normal;
     const Bitmap* bitmap = nullptr;
   };
   // Borrowed only from the eager FP32 workspace, which outlives joined rows.
