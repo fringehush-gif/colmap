@@ -318,6 +318,24 @@ TEST_F(CudaTest, ExplicitAndDefaultStreamHelpers) {
   }
 }
 
+TEST_F(CudaTest, WideWindowsPreserveOutputs) {
+  Inputs inputs = MakeInputs(0);
+  // Radius 16 fits the narrow tile; radius 17 requires the wider fallback.
+  for (const int radius : {16, 17}) {
+    SCOPED_TRACE(radius);
+    PatchMatchOptions options = MakeOptions(false, false, false);
+    options.window_radius = radius;
+    options.num_iterations = 1;
+    options.num_samples = 1;
+    const Result original = RunPatchMatch(&inputs, options);
+    options.rotation_buffer_reuse = true;
+    const Result reused = RunPatchMatch(&inputs, options);
+    ExpectNonempty(original, inputs, false);
+    ExpectNonempty(reused, inputs, false);
+    ExpectEquivalent(original, reused);
+  }
+}
+
 TEST_P(PatchMatchCudaTest, UnevenSourceGroupsPreserveOutputs) {
   const auto [geometry, filter] = GetParam();
   // Five sources exercise every cooperative group and a second source in one
