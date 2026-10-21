@@ -9,6 +9,38 @@ image-loader service or Python callback is required.
 They change Fusion's resident representation or loading policy; they do not
 change PatchMatch's map files.
 
+Normal compression at a glance
+------------------------------
+
+**Oct2x16** keeps compressed whole normal maps in RAM. **SNORM16** compresses
+normal tiles in the bounded cache. An optional **guard** consults the original
+FP32 normal when a decision is ambiguous. Guards reduce decision changes;
+the output remains approximate.
+
+Fountain P11, all 11 photos; 12 Fusion workers; two observations per mode and
+resolution. The ranges cover 1536 x 1024 and 3072 x 2048. Detailed results below
+show each resolution separately.
+
+.. csv-table:: Quick comparison with each mode's matched FP32 control
+   :header: "Mode", "Peak RAM saved", "Runtime cost", "Sampled contributor-set changes"
+   :widths: 24, 17, 22, 37
+
+   "Oct2x16, unguarded", "9.2-10.9%", "+10.0-11.4%", "Up to 0.115%"
+   "Oct2x16, guarded", "13.2-28.5%", "12.1-19.8 times", "Up to 0.026%"
+   "SNORM tiles, unguarded", "9.6-11.3%", "+3.5-9.0%", "Up to 0.330%"
+   "SNORM tiles, guarded", "28.0-31.1%", "+16.7-18.9%", "Up to 0.010%"
+
+Contributor sets identify which images contributed to a sampled point. Across
+all four modes, position and RGB P99 differences were zero; normal P99 was at
+most about 0.0025 degrees. Rare larger differences remain in the detailed data.
+These are numerical comparisons with FP32, not rendered or laser accuracy.
+
+Resident oct rows use resident FP32 controls; SNORM rows use bounded FP32 tile
+controls. These are separate loading/cache comparisons. Guarded oct requires
+one preloader: its table cost uses matched FP32 with one preloader. Against
+ordinary default-preload FP32, its complete runtime was 24-43 times higher.
+This expensive fallback was measured on Windows-backed WSL 9p/DrvFS storage.
+
 Choose a loading policy
 -----------------------
 
