@@ -2,9 +2,15 @@
 
 #include "colmap/util/ply.h"
 
+#include "colmap/util/endian.h"
 #include "colmap/util/testing.h"
 
+#include <array>
 #include <fstream>
+#include <iterator>
+#include <limits>
+#include <sstream>
+#include <string>
 
 #include <gtest/gtest.h>
 
@@ -66,6 +72,68 @@ TEST(PlyMeshFace, ParameterizedConstructor) {
   EXPECT_EQ(face.vertex_idx1, 10);
   EXPECT_EQ(face.vertex_idx2, 20);
   EXPECT_EQ(face.vertex_idx3, 30);
+}
+
+TEST(Ply, BinaryPointWireBytes) {
+  const auto test_dir = CreateTestDir();
+  const auto test_file = test_dir / "wire.ply";
+  const std::array<float, 7> values = {0.0f,
+                                       -0.0f,
+                                       std::numeric_limits<float>::denorm_min(),
+                                       std::numeric_limits<float>::max(),
+                                       std::numeric_limits<float>::lowest(),
+                                       std::numeric_limits<float>::infinity(),
+                                       std::numeric_limits<float>::quiet_NaN()};
+  for (const size_t count : {size_t{0}, size_t{1}, size_t{4097}}) {
+    std::vector<PlyPoint> points(count);
+    for (size_t i = 0; i < count; ++i) {
+      auto& point = points[i];
+      point.x = values[i % values.size()];
+      point.y = values[(i + 1) % values.size()];
+      point.z = values[(i + 2) % values.size()];
+      point.nx = values[(i + 3) % values.size()];
+      point.ny = values[(i + 4) % values.size()];
+      point.nz = values[(i + 5) % values.size()];
+      point.r = static_cast<uint8_t>(i);
+      point.g = static_cast<uint8_t>(17 * i + 3);
+      point.b = static_cast<uint8_t>(31 * i + 7);
+    }
+    for (const bool write_normal : {false, true}) {
+      for (const bool write_rgb : {false, true}) {
+        SCOPED_TRACE(::testing::Message()
+                     << count << " points, normal=" << write_normal
+                     << ", rgb=" << write_rgb);
+        WriteBinaryPlyPoints(test_file, points, write_normal, write_rgb);
+        std::ifstream file(test_file, std::ios::binary);
+        ASSERT_TRUE(file.is_open());
+        const std::string actual((std::istreambuf_iterator<char>(file)),
+                                 std::istreambuf_iterator<char>());
+        const size_t marker = actual.find("end_header");
+        ASSERT_NE(marker, std::string::npos);
+        const size_t header_end = actual.find('\n', marker);
+        ASSERT_NE(header_end, std::string::npos);
+        // The scalar wire writer independently defines field order and endian
+        // conversion, including signed zero and non-finite float bits.
+        std::ostringstream expected(std::ios::out | std::ios::binary);
+        for (const auto& point : points) {
+          WriteBinaryLittleEndian<float>(&expected, point.x);
+          WriteBinaryLittleEndian<float>(&expected, point.y);
+          WriteBinaryLittleEndian<float>(&expected, point.z);
+          if (write_normal) {
+            WriteBinaryLittleEndian<float>(&expected, point.nx);
+            WriteBinaryLittleEndian<float>(&expected, point.ny);
+            WriteBinaryLittleEndian<float>(&expected, point.nz);
+          }
+          if (write_rgb) {
+            WriteBinaryLittleEndian<uint8_t>(&expected, point.r);
+            WriteBinaryLittleEndian<uint8_t>(&expected, point.g);
+            WriteBinaryLittleEndian<uint8_t>(&expected, point.b);
+          }
+        }
+        EXPECT_EQ(actual.substr(header_end + 1), expected.str());
+      }
+    }
+  }
 }
 
 TEST(Ply, RoundTripTextPlyPointsFullData) {
