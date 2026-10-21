@@ -851,8 +851,7 @@ void StereoFusion::Run() {
         const size_t last = static_cast<size_t>(row_end) * width;
         // A task reads only its own rows. Move that snapshot into the bound
         // task rather than copying the entire image mask for every band.
-        std::vector<char> row_mask(fused_pixel_mask.GetData().begin() + first,
-                                   fused_pixel_mask.GetData().begin() + last);
+        std::vector<char> row_mask = fused_pixel_mask.Snapshot(first, last);
         thread_pool.AddTask(ProcessImageRows,
                             row_start,
                             height,
@@ -1384,14 +1383,14 @@ void StereoFusion::InitFusedPixelMask(int image_idx,
                                       size_t width,
                                       size_t height) {
   Bitmap mask;
-  Mat<char>& fused_pixel_mask = fused_pixel_masks_.at(image_idx);
+  auto& fused_pixel_mask = fused_pixel_masks_.at(image_idx);
   const std::string mask_image_name =
       workspace_->GetModel().GetImageName(image_idx);
   auto mask_path = options_.mask_path / (mask_image_name + ".png");
   if (!ExistsFile(mask_path) && HasFileExtension(mask_image_name, ".png")) {
     mask_path = options_.mask_path / mask_image_name;
   }
-  fused_pixel_mask = Mat<char>(width, height, 1);
+  fused_pixel_mask = internal::FusionPixelMask(width, height);
   if (!options_.mask_path.empty() && ExistsFile(mask_path) &&
       mask.Read(mask_path, false)) {
     mask.Rescale(static_cast<int>(width),
@@ -1403,8 +1402,6 @@ void StereoFusion::InitFusedPixelMask(int image_idx,
         fused_pixel_mask.Set(row, col, (!color || color->r == 0) ? 1 : 0);
       }
     }
-  } else {
-    fused_pixel_mask.Fill(0);
   }
 }
 

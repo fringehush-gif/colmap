@@ -30,8 +30,11 @@ namespace colmap::mvs {
 struct StereoFusionExactDepthTestPeer {
   static std::vector<std::vector<char>> Masks(const StereoFusion& fusion) {
     std::vector<std::vector<char>> masks;
-    for (const auto& mask : fusion.fused_pixel_masks_)
-      masks.push_back(mask.GetData());
+    for (size_t index = 0; index < fusion.fused_pixel_masks_.size(); ++index) {
+      const auto& [width, height] = fusion.depth_map_sizes_.at(index);
+      masks.push_back(fusion.fused_pixel_masks_[index].Snapshot(
+          0, static_cast<size_t>(width) * height));
+    }
     return masks;
   }
 };
