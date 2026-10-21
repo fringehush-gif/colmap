@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <exception>
 #include <fstream>
 #include <iterator>
@@ -51,6 +52,42 @@ uint8_t RoundedByteMedian(std::vector<uint8_t>& elems) {
 
 }  // namespace
 namespace internal {
+
+void FusionPixelMask::ExcludeNonpositiveDepth(const FusionFloatMapView& depth) {
+  if constexpr (sizeof(float) != sizeof(uint32_t) ||
+                !std::numeric_limits<float>::is_iec559) {
+    return;
+  }
+  const float representation_probe = 0x1.2468acp0f;
+  uint32_t representation_bits;
+  std::memcpy(
+      &representation_bits, &representation_probe, sizeof(representation_bits));
+  if (representation_bits != 0x3f923456u) return;
+  if (depth.width != width_ || depth.plane != size_ || depth.size < size_ ||
+      (size_ != 0 && depth.data == nullptr)) {
+    return;
+  }
+  for (size_t first = 0; first < size_;) {
+    const size_t count = std::min(kWordBits, size_ - first);
+    uint64_t excluded = 0;
+    for (size_t bit = 0; bit < count; ++bit) {
+      uint32_t bits;
+      std::memcpy(&bits, depth.data + first + bit, sizeof(bits));
+      const uint32_t magnitude = bits & 0x7fffffffu;
+      // Leave NaNs and subnormals to the original worker-local comparison.
+      // In particular, classification must not depend on the initializer's
+      // floating-point flags or denormals-are-zero setting.
+      const bool nonpositive = magnitude == 0 || ((bits & 0x80000000u) != 0 &&
+                                                  magnitude >= 0x00800000u &&
+                                                  magnitude <= 0x7f800000u);
+      excluded |= static_cast<uint64_t>(nonpositive) << bit;
+    }
+    auto& word = data_[first / kWordBits];
+    word.store(word.load(std::memory_order_relaxed) | excluded,
+               std::memory_order_relaxed);
+    first += count;
+  }
+}
 
 void AppendFusionVisibilityBlock(std::vector<std::vector<int>>& blocks,
                                  const FlatHashSet<int>& visibility) {
@@ -673,6 +710,10 @@ void StereoFusion::Run() {
     }
 
     InitFusedPixelMask(image_idx, depth_width, depth_height);
+    if (!full_ram_inputs_.empty()) {
+      fused_pixel_masks_.at(image_idx).ExcludeNonpositiveDepth(
+          full_ram_inputs_.at(image_idx).depth);
+    }
 
     depth_map_sizes_.at(image_idx) = {depth_width, depth_height};
 

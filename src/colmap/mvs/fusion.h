@@ -198,6 +198,9 @@ class FusionPixelMask {
         data_[index / kWordBits].load(std::memory_order_relaxed);
     return static_cast<char>((word >> (index % kWordBits)) & uint64_t{1});
   }
+  // Exclude depths that always fail the nonpositive check, before workers
+  // start. Preserve existing mask bits; mismatched views leave them unchanged.
+  void ExcludeNonpositiveDepth(const FusionFloatMapView& depth);
   void Set(size_t row, size_t col, char value) {
     const size_t index = CheckedIndex(row, col);
     if (value != 0 && value != 1) {

@@ -33,6 +33,83 @@
 
 namespace colmap {
 namespace mvs {
+TEST(StereoFusion, ResidentNonpositiveDepthSeedsMaskWithoutChangingSpecials) {
+  if (sizeof(float) != sizeof(uint32_t) ||
+      !std::numeric_limits<float>::is_iec559) {
+    GTEST_SKIP() << "The bit-pattern oracle requires IEEE binary32";
+  }
+  const float probe = 0x1.2468acp0f;
+  uint32_t probe_bits;
+  std::memcpy(&probe_bits, &probe, sizeof(probe_bits));
+  if (probe_bits != 0x3f923456u) {
+    GTEST_SKIP() << "The bit-pattern oracle requires matching float/int layout";
+  }
+  constexpr size_t kWidth = 13, kHeight = 7, kSize = kWidth * kHeight;
+  const std::vector<uint32_t> patterns = {0x00000000u,
+                                          0x80000000u,
+                                          0xbf800000u,
+                                          0x3f800000u,
+                                          0xff800000u,
+                                          0x7f800000u,
+                                          0xff7fffffu,
+                                          0x7f7fffffu,
+                                          0x80800000u,
+                                          0x00800000u,
+                                          0x80000001u,
+                                          0x00000001u,
+                                          0xffc12345u,
+                                          0x7fc12345u,
+                                          0xff812345u,
+                                          0x7f812345u};
+  Mat<float> depth(kWidth, kHeight, 1);
+  std::vector<char> expected(kSize);
+  for (size_t index = 0; index < kSize; ++index) {
+    const uint32_t bits = patterns[index % patterns.size()];
+    float value;
+    std::memcpy(&value, &bits, sizeof(bits));
+    depth.Set(index / kWidth, index % kWidth, value);
+    // Pattern indices intentionally specify the independent expected oracle.
+    const size_t pattern = index % patterns.size();
+    expected[index] = pattern == 0 || pattern == 1 || pattern == 2 ||
+                      pattern == 4 || pattern == 6 || pattern == 8;
+  }
+  expected[3] = 1;
+  const auto original_depth = depth.GetData();
+  std::fenv_t original;
+  ASSERT_EQ(std::fegetenv(&original), 0);
+  struct RestoreEnvironment {
+    std::fenv_t saved;
+    ~RestoreEnvironment() { std::fesetenv(&saved); }
+  } restore{original};
+  for (const int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    internal::FusionPixelMask mask(kWidth, kHeight);
+    mask.Set(0, 3, 1);  // Retain a PNG exclusion on positive depth.
+    ASSERT_EQ(std::fesetround(mode), 0);
+    std::feclearexcept(FE_ALL_EXCEPT);
+    mask.ExcludeNonpositiveDepth(internal::FusionFloatMapView(depth));
+    EXPECT_EQ(std::fetestexcept(FE_ALL_EXCEPT), 0);
+    EXPECT_EQ(mask.Snapshot(0, kSize), expected);
+  }
+  EXPECT_EQ(
+      std::memcmp(
+          depth.GetData().data(), original_depth.data(), kSize * sizeof(float)),
+      0);
+  auto view = internal::FusionFloatMapView(depth);
+  for (size_t failure = 0; failure < 4; ++failure) {
+    auto bad = view;
+    if (failure == 0) --bad.width;
+    if (failure == 1) --bad.plane;
+    if (failure == 2) --bad.size;
+    if (failure == 3) bad.data = nullptr;
+    internal::FusionPixelMask untouched(kWidth, kHeight);
+    untouched.ExcludeNonpositiveDepth(bad);
+    EXPECT_EQ(untouched.Snapshot(0, kSize), std::vector<char>(kSize, 0));
+  }
+  internal::FusionPixelMask empty;
+  empty.ExcludeNonpositiveDepth(internal::FusionFloatMapView());
+  EXPECT_TRUE(empty.Snapshot(0, 0).empty());
+}
+
 TEST(StereoFusion, VisibilityBlocksPreserveListsAcrossBoundariesAndReuse) {
   const FlatHashSet<int> visibility = {9, -3, 4};
   const std::vector<int> expected(visibility.begin(), visibility.end());
