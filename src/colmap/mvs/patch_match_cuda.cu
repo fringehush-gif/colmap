@@ -488,15 +488,19 @@ struct PhotoConsistencyCostComputer {
 
   __device__ inline void ReadRef(const int row) { local_ref_image.Read(row); }
 
-  __device__ inline void ReadWeights() {
+  __device__ inline void ReadWeights(const int first_row = 0,
+                                     const int row_stride = 1) {
     if constexpr (kCacheWeights) {
       const int thread_id = threadIdx.x;
       int ref_image_idx = kBlockWidth - kWindowRadius + thread_id;
       const float ref_center_color =
           local_ref_image.data[ref_image_idx + kWindowRadius * 3 * kBlockWidth +
                                kWindowRadius];
-      int tap = 0;
-      for (int dy = -kWindowRadius; dy <= kWindowRadius; dy += kWindowStep) {
+      ref_image_idx += first_row * kWindowStep * 3 * kBlockWidth;
+      int tap = first_row * kNumTapsPerAxis;
+      for (int dy = -kWindowRadius + first_row * kWindowStep;
+           dy <= kWindowRadius;
+           dy += row_stride * kWindowStep) {
         int idx = ref_image_idx;
         for (int dx = -kWindowRadius; dx <= kWindowRadius; dx += kWindowStep) {
           local_weights[tap * kBlockWidth + thread_id] =
@@ -505,7 +509,8 @@ struct PhotoConsistencyCostComputer {
           ++tap;
           idx += kWindowStep;
         }
-        ref_image_idx += kWindowStep * 3 * kBlockWidth;
+        tap += (row_stride - 1) * kNumTapsPerAxis;
+        ref_image_idx += row_stride * kWindowStep * 3 * kBlockWidth;
       }
     }
   }
@@ -1131,11 +1136,16 @@ __global__ void SweepFromTopToBottom(
     // Note that this must be executed even for pixels outside the borders,
     // since pixels are used in the local neighborhood of the current pixel.
     if constexpr (kCooperative) {
-      // The owner group loads each shared reference tile and weight cache.
-      // Every group reaches both barriers before consuming either payload.
+      // The owner loads the reference tile; groups fill independent weight
+      // rows. The first barrier publishes the tile, the second its weights.
       if (owner) pcc_computer.ReadRef(row);
       __syncthreads();
-      if (owner) pcc_computer.ReadWeights();
+      if constexpr (kBlockWidth == 8 &&
+                    PhotoConsistencyCostComputerType::kCacheWeights) {
+        pcc_computer.ReadWeights(threadIdx.y, 4 * kSampleBatchSize);
+      } else {
+        if (owner) pcc_computer.ReadWeights();
+      }
       __syncthreads();
     } else {
       pcc_computer.Read(row);
