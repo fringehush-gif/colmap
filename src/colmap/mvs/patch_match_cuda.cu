@@ -979,17 +979,21 @@ struct SweepOptions {
   float filter_geom_consistency_max_cost = 1.0f;
 };
 
-template <bool kCooperative, int kBlockWidth = THREADS_PER_BLOCK>
+constexpr int kCooperativeSampleBatchSize = 4;
+
+template <bool kCooperative,
+          int kBlockWidth = THREADS_PER_BLOCK,
+          int kSampleBatchSize = 1>
 struct CooperativeNccJob {};
 
-template <int kBlockWidth>
-struct CooperativeNccJob<true, kBlockWidth> {
+template <int kBlockWidth, int kSampleBatchSize>
+struct CooperativeNccJob<true, kBlockWidth, kSampleBatchSize> {
   float depths[4][kBlockWidth];
   float normals[4][3][kBlockWidth];
-  float results[4][kBlockWidth];
+  float results[kSampleBatchSize][4][kBlockWidth];
   float ref_sum[kBlockWidth];
   float ref_squared_sum[kBlockWidth];
-  int source[kBlockWidth];
+  int source[kSampleBatchSize][kBlockWidth];
   float best_depth[kBlockWidth];
   float best_normal[3][kBlockWidth];
   int best_idx[kBlockWidth];
@@ -1021,9 +1025,13 @@ __global__ void SweepFromTopToBottom(
     const SweepOptions options) {
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
   const bool owner = !kCooperative || threadIdx.y == 0;
-  __shared__ CooperativeNccJob<kCooperative, kBlockWidth> cooperative_job;
+  constexpr int kSampleBatchSize =
+      kCooperative && kBlockWidth == 8 ? kCooperativeSampleBatchSize : 1;
+  __shared__ CooperativeNccJob<kCooperative, kBlockWidth, kSampleBatchSize>
+      cooperative_job;
   __shared__ float
-      cooperative_geometric_costs[kCooperative && kGeomConsistencyTerm ? 3 : 1]
+      cooperative_geometric_costs[kSampleBatchSize]
+                                 [kCooperative && kGeomConsistencyTerm ? 3 : 1]
                                  [kBlockWidth];
 
   // Probability for boundary pixels.
@@ -1049,8 +1057,12 @@ __global__ void SweepFromTopToBottom(
   // updated forward messages are computed further below.
   //////////////////////////////////////////////////////////////////////////////
 
-  if (owner && col < cost_map.GetWidth()) {
-    for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
+  if (col < cost_map.GetWidth()) {
+    const int first_source = kCooperative ? threadIdx.y : 0;
+    const int source_step = kCooperative ? blockDim.y : 1;
+    for (int image_idx = first_source; image_idx < cost_map.GetDepth();
+         image_idx += source_step) {
+      // Source chains are independent; preserve each ordered row recurrence.
       // Compute backward message.
       float beta = kUniformProb;
       for (int row = cost_map.GetHeight() - 1; row >= 0; --row) {
@@ -1262,62 +1274,71 @@ __global__ void SweepFromTopToBottom(
       }
     }
 
-    for (int sample = 0; sample < options.num_samples; ++sample) {
-      // Three distinct depths serve the five fixed depth/normal candidates.
-      // Keep sampling and every photometric/geometric addition in original
-      // order.
+    for (int sample = 0; sample < options.num_samples;
+         sample += options.num_samples - sample < kSampleBatchSize
+                       ? options.num_samples - sample
+                       : kSampleBatchSize) {
+      const int sample_count = options.num_samples - sample < kSampleBatchSize
+                                   ? options.num_samples - sample
+                                   : kSampleBatchSize;
       float geometric_costs[3] = {0};
       if (owner && col < cost_map.GetWidth()) {
-        const float rand_prob = curand_uniform(&rand_state) - FLT_EPSILON;
-        pcc_computer.src_image_idx = -1;
-        for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
-          const float prob = sampling_probs[image_idx * source_stride];
-          if (prob > rand_prob) {
-            pcc_computer.src_image_idx = image_idx;
-            break;
-          }
-        }
-
-        if (pcc_computer.src_image_idx >= 0) {
-          if constexpr (kGeomConsistencyTerm && !kCooperative) {
-            for (int i = 0; i < 3; ++i) {
-              geometric_costs[i] =
-                  ComputeGeomConsistencyCost(camera,
-                                             poses_texture,
-                                             src_depth_maps_texture,
-                                             row,
-                                             col,
-                                             depths[i],
-                                             pcc_computer.src_image_idx,
-                                             options.geom_consistency_max_cost);
+        for (int slot = 0; slot < kSampleBatchSize; ++slot) {
+          pcc_computer.src_image_idx = -1;
+          if (slot < sample_count) {
+            // Draw only actual samples, in the original RNG order.
+            const float rand_prob = curand_uniform(&rand_state) - FLT_EPSILON;
+            for (int image_idx = 0; image_idx < cost_map.GetDepth();
+                 ++image_idx) {
+              const float prob = sampling_probs[image_idx * source_stride];
+              if (prob > rand_prob) {
+                pcc_computer.src_image_idx = image_idx;
+                break;
+              }
             }
           }
-          costs[0] += cost_map.Get(row, col, pcc_computer.src_image_idx);
-          if constexpr (kGeomConsistencyTerm && !kCooperative) {
-            costs[0] +=
-                options.geom_consistency_regularizer * geometric_costs[0];
+          if constexpr (kCooperative) {
+            cooperative_job.source[slot][threadIdx.x] =
+                pcc_computer.src_image_idx;
+          } else if (pcc_computer.src_image_idx >= 0) {
+            if constexpr (kGeomConsistencyTerm) {
+              for (int i = 0; i < 3; ++i) {
+                geometric_costs[i] = ComputeGeomConsistencyCost(
+                    camera,
+                    poses_texture,
+                    src_depth_maps_texture,
+                    row,
+                    col,
+                    depths[i],
+                    pcc_computer.src_image_idx,
+                    options.geom_consistency_max_cost);
+              }
+            }
+            costs[0] += cost_map.Get(row, col, pcc_computer.src_image_idx);
+            if constexpr (kGeomConsistencyTerm) {
+              costs[0] +=
+                  options.geom_consistency_regularizer * geometric_costs[0];
+            }
           }
-        }
-        if constexpr (kCooperative) {
-          cooperative_job.source[threadIdx.x] = pcc_computer.src_image_idx;
         }
       }
 
       if constexpr (kCooperative) {
         if (owner && col >= cost_map.GetWidth()) {
-          cooperative_job.source[threadIdx.x] = -1;
+          for (int slot = 0; slot < kSampleBatchSize; ++slot) {
+            cooperative_job.source[slot][threadIdx.x] = -1;
+          }
         }
-        // Every column, including invalid ones and missing source samples,
-        // participates in both barriers.
+        // Invalid columns and padded final-batch samples reach both barriers.
         __syncthreads();
-        const int source = cooperative_job.source[threadIdx.x];
+        const int slot = threadIdx.y / 4;
+        const int hypothesis = threadIdx.y % 4;
+        const int source = cooperative_job.source[slot][threadIdx.x];
         if (col < cost_map.GetWidth() && source >= 0) {
-          const int hypothesis = threadIdx.y;
           if constexpr (kGeomConsistencyTerm) {
             if (hypothesis < 3) {
-              // Current, propagated and random depths are hypotheses 2, 0, 1.
               const int depth_hypothesis = hypothesis == 0 ? 2 : hypothesis - 1;
-              cooperative_geometric_costs[hypothesis][threadIdx.x] =
+              cooperative_geometric_costs[slot][hypothesis][threadIdx.x] =
                   ComputeGeomConsistencyCost(
                       camera,
                       poses_texture,
@@ -1337,26 +1358,34 @@ __global__ void SweepFromTopToBottom(
           pcc_computer.src_image_idx = source;
           pcc_computer.depth = cooperative_job.depths[hypothesis][threadIdx.x];
           pcc_computer.normal = hypothesis_normal;
-          cooperative_job.results[hypothesis][threadIdx.x] =
+          cooperative_job.results[slot][hypothesis][threadIdx.x] =
               pcc_computer.Compute();
         }
         __syncthreads();
-        if (owner && col < cost_map.GetWidth() && source >= 0) {
-          if constexpr (kGeomConsistencyTerm) {
-            for (int i = 0; i < 3; ++i) {
-              geometric_costs[i] = cooperative_geometric_costs[i][threadIdx.x];
+        if (owner && col < cost_map.GetWidth()) {
+          for (int slot = 0; slot < sample_count; ++slot) {
+            const int source = cooperative_job.source[slot][threadIdx.x];
+            if (source < 0) continue;
+            // Fold samples in order, preserving every separate photo/geo add.
+            costs[0] += cost_map.Get(row, col, source);
+            if constexpr (kGeomConsistencyTerm) {
+              for (int i = 0; i < 3; ++i) {
+                geometric_costs[i] =
+                    cooperative_geometric_costs[slot][i][threadIdx.x];
+              }
+              costs[0] +=
+                  options.geom_consistency_regularizer * geometric_costs[0];
             }
-            // Preserve the separate photo-then-geometry addition for cost 0.
-            costs[0] +=
-                options.geom_consistency_regularizer * geometric_costs[0];
-          }
-          for (int i = 1; i < kNumCosts; ++i) {
-            costs[i] += cooperative_job.results[i - 1][threadIdx.x];
-            if (kGeomConsistencyTerm) {
-              costs[i] += options.geom_consistency_regularizer *
-                          geometric_costs[i == 3 ? 0 : (i == 4 ? 2 : i)];
+            for (int i = 1; i < kNumCosts; ++i) {
+              costs[i] += cooperative_job.results[slot][i - 1][threadIdx.x];
+              if (kGeomConsistencyTerm) {
+                costs[i] += options.geom_consistency_regularizer *
+                            geometric_costs[i == 3 ? 0 : (i == 4 ? 2 : i)];
+              }
             }
           }
+          pcc_computer.src_image_idx =
+              cooperative_job.source[sample_count - 1][threadIdx.x];
         }
       } else {
         if (pcc_computer.src_image_idx == -1) continue;
@@ -1396,7 +1425,7 @@ __global__ void SweepFromTopToBottom(
     }
 
     if constexpr (kCooperative) {
-      // The owner publishes the winner before all four groups refresh
+      // The owner publishes the winner before all groups refresh
       // independent source-image costs and forward messages.
       __syncthreads();
       if (col < cost_map.GetWidth()) {
@@ -1757,7 +1786,10 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   constexpr int kSweepBlockWidth = !kCooperative || kWindowSize / 2 > 16
                                        ? THREADS_PER_BLOCK
                                        : (kWindowSize / 2 <= 8 ? 8 : 16);
-  const dim3 sweep_kernel_block_size(kSweepBlockWidth, kCooperative ? 4 : 1, 1);
+  constexpr int kSampleBatchSize =
+      kCooperative && kSweepBlockWidth == 8 ? kCooperativeSampleBatchSize : 1;
+  const dim3 sweep_kernel_block_size(
+      kSweepBlockWidth, kCooperative ? 4 * kSampleBatchSize : 1, 1);
 
   for (int iter = 0; iter < options_.num_iterations; ++iter) {
     CudaTimer iter_timer;
