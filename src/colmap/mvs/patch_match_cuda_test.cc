@@ -379,6 +379,25 @@ TEST_F(CudaTest, EvenSampleGroupsPreserveOutputs) {
   }
 }
 
+TEST_F(CudaTest, SampleWindowBoundariesPreserveOutputs) {
+  for (const int num_sources : {1, 17}) {
+    SCOPED_TRACE(num_sources);
+    Inputs inputs = MakeInputs(0, num_sources);
+    for (const int num_samples : {16, 17}) {
+      SCOPED_TRACE(num_samples);
+      PatchMatchOptions options = MakeOptions(true, true, false);
+      options.num_iterations = 1;
+      options.num_samples = num_samples;
+      const Result original = RunPatchMatch(&inputs, options);
+      options.rotation_buffer_reuse = true;
+      const Result reused = RunPatchMatch(&inputs, options);
+      ExpectNonempty(original, inputs, true);
+      ExpectNonempty(reused, inputs, true);
+      ExpectEquivalent(original, reused);
+    }
+  }
+}
+
 TEST_P(PatchMatchCudaTest, UnevenSourceGroupsPreserveOutputs) {
   const auto [geometry, filter] = GetParam();
   // Five sources exercise every cooperative group and a second source in one
