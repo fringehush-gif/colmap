@@ -152,7 +152,7 @@ bool RegularTreeNode< Dim , NodeData , DepthAndOffsetType >::_initChildren_s( Al
 		_children[idx]._depth = _depth+1;
 		for( int d=0 ; d<Dim ; d++ ) _children[idx]._offset[d] = (_offset[d]<<1) | ( (idx>>d) & 1 );
 		// [WARNING] We are assuming that it's OK to initialize nodes that may not be used.
-		for( int idx=0 ; idx<(1<<Dim) ; idx++ ) initializer( _children[idx] );
+		initializer( _children[idx] );
 	}
 
 	// If we are the first to set the child, initialize
