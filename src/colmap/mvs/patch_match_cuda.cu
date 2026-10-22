@@ -1022,6 +1022,9 @@ __global__ void SweepFromTopToBottom(
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
   const bool owner = !kCooperative || threadIdx.y == 0;
   __shared__ CooperativeNccJob<kCooperative, kBlockWidth> cooperative_job;
+  __shared__ float
+      cooperative_geometric_costs[kCooperative && kGeomConsistencyTerm ? 3 : 1]
+                                 [kBlockWidth];
 
   // Probability for boundary pixels.
   constexpr float kUniformProb = 0.5f;
@@ -1033,7 +1036,7 @@ __global__ void SweepFromTopToBottom(
   const int source_stride = global_workspace.GetWidth();
   float* forward_message = nullptr;
   float* sampling_probs = nullptr;
-  if (owner && col < cost_map.GetWidth()) {
+  if (col < cost_map.GetWidth()) {
     forward_message = &global_workspace.GetPtr()[col];
     sampling_probs =
         &global_workspace
@@ -1156,14 +1159,23 @@ __global__ void SweepFromTopToBottom(
                     curr_param_state.normal,
                     &rand_state,
                     rand_param_state.normal);
+    }
 
-      // Read in the backward message, compute selection probabilities and
-      // modulate selection probabilities with priors.
-
+    // Compute independent source probabilities before the ordered CDF update.
+    if (col < cost_map.GetWidth()) {
+      if constexpr (kCooperative) {
+        if (!owner) {
+          curr_param_state.depth = depth_map.Get(row, col);
+          normal_map.GetSlice(row, col, curr_param_state.normal);
+        }
+      }
       float point[3];
       ComputePointAtDepth(camera, row, col, curr_param_state.depth, point);
 
-      for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
+      const int first_source = kCooperative ? threadIdx.y : 0;
+      const int source_step = kCooperative ? blockDim.y : 1;
+      for (int image_idx = first_source; image_idx < cost_map.GetDepth();
+           image_idx += source_step) {
         const float cost = cost_map.Get(row, col, image_idx);
         const float alpha = likelihood_computer.ComputeForwardMessage(
             cost, forward_message[image_idx * source_stride]);
@@ -1200,7 +1212,12 @@ __global__ void SweepFromTopToBottom(
         sampling_probs[image_idx * source_stride] =
             sel_prob * tri_prob * inc_prob * res_prob;
       }
-
+    }
+    if constexpr (kCooperative) {
+      // Finish every disjoint source probability before the ordered CDF update.
+      __syncthreads();
+    }
+    if (owner && col < cost_map.GetWidth()) {
       TransformPDFToCDF(sampling_probs, cost_map.GetDepth(), source_stride);
 
       // Compute matching cost using Monte Carlo sampling of source images.
@@ -1262,7 +1279,7 @@ __global__ void SweepFromTopToBottom(
         }
 
         if (pcc_computer.src_image_idx >= 0) {
-          if (kGeomConsistencyTerm) {
+          if constexpr (kGeomConsistencyTerm && !kCooperative) {
             for (int i = 0; i < 3; ++i) {
               geometric_costs[i] =
                   ComputeGeomConsistencyCost(camera,
@@ -1276,7 +1293,7 @@ __global__ void SweepFromTopToBottom(
             }
           }
           costs[0] += cost_map.Get(row, col, pcc_computer.src_image_idx);
-          if (kGeomConsistencyTerm) {
+          if constexpr (kGeomConsistencyTerm && !kCooperative) {
             costs[0] +=
                 options.geom_consistency_regularizer * geometric_costs[0];
           }
@@ -1296,6 +1313,22 @@ __global__ void SweepFromTopToBottom(
         const int source = cooperative_job.source[threadIdx.x];
         if (col < cost_map.GetWidth() && source >= 0) {
           const int hypothesis = threadIdx.y;
+          if constexpr (kGeomConsistencyTerm) {
+            if (hypothesis < 3) {
+              // Current, propagated and random depths are hypotheses 2, 0, 1.
+              const int depth_hypothesis = hypothesis == 0 ? 2 : hypothesis - 1;
+              cooperative_geometric_costs[hypothesis][threadIdx.x] =
+                  ComputeGeomConsistencyCost(
+                      camera,
+                      poses_texture,
+                      src_depth_maps_texture,
+                      row,
+                      col,
+                      cooperative_job.depths[depth_hypothesis][threadIdx.x],
+                      source,
+                      options.geom_consistency_max_cost);
+            }
+          }
           float hypothesis_normal[3];
           for (int axis = 0; axis < 3; ++axis) {
             hypothesis_normal[axis] =
@@ -1309,6 +1342,14 @@ __global__ void SweepFromTopToBottom(
         }
         __syncthreads();
         if (owner && col < cost_map.GetWidth() && source >= 0) {
+          if constexpr (kGeomConsistencyTerm) {
+            for (int i = 0; i < 3; ++i) {
+              geometric_costs[i] = cooperative_geometric_costs[i][threadIdx.x];
+            }
+            // Preserve the separate photo-then-geometry addition for cost 0.
+            costs[0] +=
+                options.geom_consistency_regularizer * geometric_costs[0];
+          }
           for (int i = 1; i < kNumCosts; ++i) {
             costs[i] += cooperative_job.results[i - 1][threadIdx.x];
             if (kGeomConsistencyTerm) {

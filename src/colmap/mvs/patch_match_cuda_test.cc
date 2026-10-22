@@ -336,6 +336,29 @@ TEST_F(CudaTest, WideWindowsPreserveOutputs) {
   }
 }
 
+TEST_F(CudaTest, GeometricCostGroupsPreserveOutputs) {
+  Inputs inputs = MakeInputs(0, 5);
+  // Cover shared geometric costs in both narrow and wide cooperative tiles.
+  for (const int radius : {5, 17}) {
+    for (const bool filter : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "radius=" << radius << ", filter=" << filter);
+      PatchMatchOptions options = MakeOptions(true, filter, false);
+      options.window_radius = radius;
+      options.num_iterations = 1;
+      options.num_samples = 1;
+      // The wide case targets shared-result safety rather than patch workload.
+      if (radius == 17) options.window_step = 2;
+      const Result original = RunPatchMatch(&inputs, options);
+      options.rotation_buffer_reuse = true;
+      const Result reused = RunPatchMatch(&inputs, options);
+      ExpectNonempty(original, inputs, filter);
+      ExpectNonempty(reused, inputs, filter);
+      ExpectEquivalent(original, reused);
+    }
+  }
+}
+
 TEST_P(PatchMatchCudaTest, UnevenSourceGroupsPreserveOutputs) {
   const auto [geometry, filter] = GetParam();
   // Five sources exercise every cooperative group and a second source in one
