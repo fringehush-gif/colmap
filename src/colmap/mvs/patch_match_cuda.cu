@@ -1298,6 +1298,8 @@ __global__ void SweepFromTopToBottom(
       float geometric_costs[3] = {0};
       if (owner && col < cost_map.GetWidth()) {
         int num_unique_sources = 0;
+        uint32_t sampled_sources = 0;
+        const bool use_source_mask = cost_map.GetDepth() <= 32;
         for (int slot = 0; slot < kSampleWindowSize; ++slot) {
           pcc_computer.src_image_idx = -1;
           if (slot < sample_count) {
@@ -1315,7 +1317,11 @@ __global__ void SweepFromTopToBottom(
           if constexpr (kCooperative) {
             if constexpr (kSampleWindowSize > 1) {
               int job_slot = -1;
-              if (pcc_computer.src_image_idx >= 0) {
+              if (use_source_mask) {
+                // Keep source IDs until the complete window mask is known.
+                job_slot = pcc_computer.src_image_idx;
+                if (job_slot >= 0) sampled_sources |= uint32_t{1} << job_slot;
+              } else if (pcc_computer.src_image_idx >= 0) {
                 job_slot = 0;
                 while (job_slot < num_unique_sources &&
                        cooperative_job.source[job_slot][threadIdx.x] !=
@@ -1355,6 +1361,23 @@ __global__ void SweepFromTopToBottom(
           }
         }
         if constexpr (kCooperative && kSampleWindowSize > 1) {
+          if (use_source_mask) {
+            uint32_t remaining_sources = sampled_sources;
+            while (remaining_sources != 0) {
+              const int source = __ffs(remaining_sources) - 1;
+              cooperative_job.source[num_unique_sources++][threadIdx.x] =
+                  source;
+              remaining_sources &= remaining_sources - 1;
+            }
+            for (int slot = 0; slot < sample_count; ++slot) {
+              const int source = cooperative_sample_alias[slot][threadIdx.x];
+              if (source >= 0) {
+                // Rank in source order, retaining every original draw alias.
+                cooperative_sample_alias[slot][threadIdx.x] =
+                    __popc(sampled_sources & ((uint32_t{1} << source) - 1));
+              }
+            }
+          }
           // Pack unique jobs first; aliases retain every original sample.
           for (int slot = num_unique_sources; slot < kSampleWindowSize;
                ++slot) {
