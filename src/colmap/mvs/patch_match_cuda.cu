@@ -980,20 +980,21 @@ struct SweepOptions {
 };
 
 constexpr int kCooperativeSampleBatchSize = 4;
+constexpr int kCooperativeSampleWindowSize = 16;
 
 template <bool kCooperative,
           int kBlockWidth = THREADS_PER_BLOCK,
-          int kSampleBatchSize = 1>
+          int kSampleWindowSize = 1>
 struct CooperativeNccJob {};
 
-template <int kBlockWidth, int kSampleBatchSize>
-struct CooperativeNccJob<true, kBlockWidth, kSampleBatchSize> {
+template <int kBlockWidth, int kSampleWindowSize>
+struct CooperativeNccJob<true, kBlockWidth, kSampleWindowSize> {
   float depths[4][kBlockWidth];
   float normals[4][3][kBlockWidth];
-  float results[kSampleBatchSize][4][kBlockWidth];
+  float results[kSampleWindowSize][4][kBlockWidth];
   float ref_sum[kBlockWidth];
   float ref_squared_sum[kBlockWidth];
-  int source[kSampleBatchSize][kBlockWidth];
+  int source[kSampleWindowSize][kBlockWidth];
   float best_depth[kBlockWidth];
   float best_normal[3][kBlockWidth];
   int best_idx[kBlockWidth];
@@ -1027,11 +1028,13 @@ __global__ void SweepFromTopToBottom(
   const bool owner = !kCooperative || threadIdx.y == 0;
   constexpr int kSampleBatchSize =
       kCooperative && kBlockWidth == 8 ? kCooperativeSampleBatchSize : 1;
-  __shared__ CooperativeNccJob<kCooperative, kBlockWidth, kSampleBatchSize>
+  constexpr int kSampleWindowSize =
+      kCooperative && kBlockWidth == 8 ? kCooperativeSampleWindowSize : 1;
+  __shared__ CooperativeNccJob<kCooperative, kBlockWidth, kSampleWindowSize>
       cooperative_job;
-  __shared__ int cooperative_sample_alias[kSampleBatchSize][kBlockWidth];
+  __shared__ int cooperative_sample_alias[kSampleWindowSize][kBlockWidth];
   __shared__ float
-      cooperative_geometric_costs[kSampleBatchSize]
+      cooperative_geometric_costs[kSampleWindowSize]
                                  [kCooperative && kGeomConsistencyTerm ? 3 : 1]
                                  [kBlockWidth];
 
@@ -1276,15 +1279,15 @@ __global__ void SweepFromTopToBottom(
     }
 
     for (int sample = 0; sample < options.num_samples;
-         sample += options.num_samples - sample < kSampleBatchSize
+         sample += options.num_samples - sample < kSampleWindowSize
                        ? options.num_samples - sample
-                       : kSampleBatchSize) {
-      const int sample_count = options.num_samples - sample < kSampleBatchSize
+                       : kSampleWindowSize) {
+      const int sample_count = options.num_samples - sample < kSampleWindowSize
                                    ? options.num_samples - sample
-                                   : kSampleBatchSize;
+                                   : kSampleWindowSize;
       float geometric_costs[3] = {0};
       if (owner && col < cost_map.GetWidth()) {
-        for (int slot = 0; slot < kSampleBatchSize; ++slot) {
+        for (int slot = 0; slot < kSampleWindowSize; ++slot) {
           pcc_computer.src_image_idx = -1;
           if (slot < sample_count) {
             // Draw only actual samples, in the original RNG order.
@@ -1301,7 +1304,7 @@ __global__ void SweepFromTopToBottom(
           if constexpr (kCooperative) {
             cooperative_job.source[slot][threadIdx.x] =
                 pcc_computer.src_image_idx;
-            if constexpr (kSampleBatchSize > 1) {
+            if constexpr (kSampleWindowSize > 1) {
               int canonical_slot = pcc_computer.src_image_idx >= 0 ? slot : -1;
               for (int previous = 0; previous < slot && canonical_slot == slot;
                    ++previous) {
@@ -1337,48 +1340,54 @@ __global__ void SweepFromTopToBottom(
 
       if constexpr (kCooperative) {
         if (owner && col >= cost_map.GetWidth()) {
-          for (int slot = 0; slot < kSampleBatchSize; ++slot) {
+          for (int slot = 0; slot < kSampleWindowSize; ++slot) {
             cooperative_job.source[slot][threadIdx.x] = -1;
-            if constexpr (kSampleBatchSize > 1) {
+            if constexpr (kSampleWindowSize > 1) {
               cooperative_sample_alias[slot][threadIdx.x] = -1;
             }
           }
         }
-        // Invalid columns and padded final-batch samples reach both barriers.
+        // Invalid columns and padded final-window samples reach both barriers.
         __syncthreads();
-        const int slot = threadIdx.y / 4;
         const int hypothesis = threadIdx.y % 4;
-        const int source = cooperative_job.source[slot][threadIdx.x];
-        bool canonical = true;
-        if constexpr (kSampleBatchSize > 1) {
-          canonical = cooperative_sample_alias[slot][threadIdx.x] == slot;
-        }
-        if (col < cost_map.GetWidth() && source >= 0 && canonical) {
-          if constexpr (kGeomConsistencyTerm) {
-            if (hypothesis < 3) {
-              const int depth_hypothesis = hypothesis == 0 ? 2 : hypothesis - 1;
-              cooperative_geometric_costs[slot][hypothesis][threadIdx.x] =
-                  ComputeGeomConsistencyCost(
-                      camera,
-                      poses_texture,
-                      src_depth_maps_texture,
-                      row,
-                      col,
-                      cooperative_job.depths[depth_hypothesis][threadIdx.x],
-                      source,
-                      options.geom_consistency_max_cost);
+        // Worker waves read immutable row state and write disjoint slots.
+        const int worker_limit = kSampleWindowSize == 1 ? 1 : sample_count;
+        for (int slot = threadIdx.y / 4; slot < worker_limit;
+             slot += kSampleBatchSize) {
+          const int source = cooperative_job.source[slot][threadIdx.x];
+          bool canonical = true;
+          if constexpr (kSampleWindowSize > 1) {
+            canonical = cooperative_sample_alias[slot][threadIdx.x] == slot;
+          }
+          if (col < cost_map.GetWidth() && source >= 0 && canonical) {
+            if constexpr (kGeomConsistencyTerm) {
+              if (hypothesis < 3) {
+                const int depth_hypothesis =
+                    hypothesis == 0 ? 2 : hypothesis - 1;
+                cooperative_geometric_costs[slot][hypothesis][threadIdx.x] =
+                    ComputeGeomConsistencyCost(
+                        camera,
+                        poses_texture,
+                        src_depth_maps_texture,
+                        row,
+                        col,
+                        cooperative_job.depths[depth_hypothesis][threadIdx.x],
+                        source,
+                        options.geom_consistency_max_cost);
+              }
             }
+            float hypothesis_normal[3];
+            for (int axis = 0; axis < 3; ++axis) {
+              hypothesis_normal[axis] =
+                  cooperative_job.normals[hypothesis][axis][threadIdx.x];
+            }
+            pcc_computer.src_image_idx = source;
+            pcc_computer.depth =
+                cooperative_job.depths[hypothesis][threadIdx.x];
+            pcc_computer.normal = hypothesis_normal;
+            cooperative_job.results[slot][hypothesis][threadIdx.x] =
+                pcc_computer.Compute();
           }
-          float hypothesis_normal[3];
-          for (int axis = 0; axis < 3; ++axis) {
-            hypothesis_normal[axis] =
-                cooperative_job.normals[hypothesis][axis][threadIdx.x];
-          }
-          pcc_computer.src_image_idx = source;
-          pcc_computer.depth = cooperative_job.depths[hypothesis][threadIdx.x];
-          pcc_computer.normal = hypothesis_normal;
-          cooperative_job.results[slot][hypothesis][threadIdx.x] =
-              pcc_computer.Compute();
         }
         __syncthreads();
         if (owner && col < cost_map.GetWidth()) {
@@ -1386,7 +1395,7 @@ __global__ void SweepFromTopToBottom(
             const int source = cooperative_job.source[slot][threadIdx.x];
             if (source < 0) continue;
             int result_slot = slot;
-            if constexpr (kSampleBatchSize > 1) {
+            if constexpr (kSampleWindowSize > 1) {
               result_slot = cooperative_sample_alias[slot][threadIdx.x];
             }
             // Reuse identical evaluations, but retain every original sample
