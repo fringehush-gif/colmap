@@ -34,6 +34,8 @@ DAMAGE.
 #include <stdlib.h>
 #include <float.h>
 #include <algorithm>
+#include <iterator>
+#include <utility>
 #include <unordered_set>
 #include <list>
 #include "FEMTree.h"
@@ -333,7 +335,7 @@ double PolygonArea( const std::vector< Vertex >& vertices , const std::vector< I
 template< typename Index , class Vertex >
 void RemoveHangingVertices( std::vector< Vertex >& vertices , std::vector< std::vector< Index > >& polygons )
 {
-	std::unordered_map< Index, Index > vMap;
+	std::vector< Index > vMap( vertices.size() );
 	std::vector< bool > vertexFlags( vertices.size() , false );
 	for( size_t i=0 ; i<polygons.size() ; i++ ) for( size_t j=0 ; j<polygons[i].size() ; j++ ) vertexFlags[ polygons[i][j] ] = true;
 	Index vCount = 0;
@@ -342,7 +344,7 @@ void RemoveHangingVertices( std::vector< Vertex >& vertices , std::vector< std::
 
 	std::vector< Vertex > _vertices( vCount );
 	for( Index i=0 ; i<(Index)vertices.size() ; i++ ) if( vertexFlags[i] ) _vertices[ vMap[i] ] = vertices[i];
-	vertices = _vertices;
+	vertices = std::move( _vertices );
 }
 
 template< typename Index >
@@ -455,10 +457,10 @@ int Execute( AuxDataFactories ... auxDataFactories )
 
 			_polygons.reserve( ltPolygons.size() + gtPolygons.size() );
 			_components.reserve( ltComponents.size() + gtComponents.size() );
-			_polygons.insert( _polygons.end() , ltPolygons.begin() , ltPolygons.end() );
-			_polygons.insert( _polygons.end() , gtPolygons.begin() , gtPolygons.end() );
-			_components.insert( _components.end() , ltComponents.begin() , ltComponents.end() );
-			_components.insert( _components.end() , gtComponents.begin() , gtComponents.end() );
+			_polygons.insert( _polygons.end() , std::make_move_iterator( ltPolygons.begin() ) , std::make_move_iterator( ltPolygons.end() ) );
+			_polygons.insert( _polygons.end() , std::make_move_iterator( gtPolygons.begin() ) , std::make_move_iterator( gtPolygons.end() ) );
+			_components.insert( _components.end() , std::make_move_iterator( ltComponents.begin() ) , std::make_move_iterator( ltComponents.end() ) );
+			_components.insert( _components.end() , std::make_move_iterator( gtComponents.begin() ) , std::make_move_iterator( gtComponents.end() ) );
 		}
 		std::vector< typename ComponentGraph< Index >::Node > nodes( _components.size() );
 
@@ -539,21 +541,23 @@ int Execute( AuxDataFactories ... auxDataFactories )
 
 		for( unsigned int i=0 ; i<gtComponentStart ; i++ )
 			if( !nodes[i].neighbors.size() && nodes[i].area<area*IslandAreaRatio.value && RemoveIslands.set ) ; // small island
-			else for( auto iter=nodes[i].polygonIndices.begin() ; iter!=nodes[i].polygonIndices.end() ; iter++ ) ltPolygons.push_back( _polygons[ *iter ] );
+			else for( auto iter=nodes[i].polygonIndices.begin() ; iter!=nodes[i].polygonIndices.end() ; iter++ ) ltPolygons.push_back( std::move( _polygons[ *iter ] ) );
 		for( unsigned int i=(unsigned int)gtComponentStart ; i<nodes.size() ; i++ )
 			if( !nodes[i].neighbors.size() && nodes[i].area<area*IslandAreaRatio.value && RemoveIslands.set ) ; // small island
-			else for( auto iter=nodes[i].polygonIndices.begin() ; iter!=nodes[i].polygonIndices.end() ; iter++ ) gtPolygons.push_back( _polygons[ *iter ] );
+			else for( auto iter=nodes[i].polygonIndices.begin() ; iter!=nodes[i].polygonIndices.end() ; iter++ ) gtPolygons.push_back( std::move( _polygons[ *iter ] ) );
 	}
 
 	if( !PolygonMesh.set )
 	{
 		{
-			std::vector< std::vector< Index > > polys = ltPolygons;
-			Triangulate< Real , Dim , Index , Vertex >( vertices , ltPolygons , polys ) , ltPolygons = polys;
+			std::vector< std::vector< Index > > polys;
+			polys.reserve( ltPolygons.size() );
+			Triangulate< Real , Dim , Index , Vertex >( vertices , ltPolygons , polys ) , ltPolygons = std::move( polys );
 		}
 		{
-			std::vector< std::vector< Index > > polys = gtPolygons;
-			Triangulate< Real , Dim , Index , Vertex >( vertices , gtPolygons , polys ) , gtPolygons = polys;
+			std::vector< std::vector< Index > > polys;
+			polys.reserve( gtPolygons.size() );
+			Triangulate< Real , Dim , Index , Vertex >( vertices , gtPolygons , polys ) , gtPolygons = std::move( polys );
 		}
 	}
 
