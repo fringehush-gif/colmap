@@ -360,19 +360,22 @@ TEST_F(CudaTest, GeometricCostGroupsPreserveOutputs) {
 }
 
 TEST_F(CudaTest, EvenSampleGroupsPreserveOutputs) {
-  // Seventeen sources cover all sixteen groups and one source wrap.
-  Inputs inputs = MakeInputs(0, 17);
-  for (const int num_samples : {2, 4}) {
-    SCOPED_TRACE(num_samples);
-    PatchMatchOptions options = MakeOptions(true, true, false);
-    options.num_iterations = 1;
-    options.num_samples = num_samples;
-    const Result original = RunPatchMatch(&inputs, options);
-    options.rotation_buffer_reuse = true;
-    const Result reused = RunPatchMatch(&inputs, options);
-    ExpectNonempty(original, inputs, true);
-    ExpectNonempty(reused, inputs, true);
-    ExpectEquivalent(original, reused);
+  // One source forces duplicate picks; seventeen cover all groups and a wrap.
+  for (const int num_sources : {1, 17}) {
+    SCOPED_TRACE(num_sources);
+    Inputs inputs = MakeInputs(0, num_sources);
+    for (const int num_samples : {2, 4}) {
+      SCOPED_TRACE(num_samples);
+      PatchMatchOptions options = MakeOptions(true, true, false);
+      options.num_iterations = 1;
+      options.num_samples = num_samples;
+      const Result original = RunPatchMatch(&inputs, options);
+      options.rotation_buffer_reuse = true;
+      const Result reused = RunPatchMatch(&inputs, options);
+      ExpectNonempty(original, inputs, true);
+      ExpectNonempty(reused, inputs, true);
+      ExpectEquivalent(original, reused);
+    }
   }
 }
 

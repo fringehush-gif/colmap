@@ -1029,6 +1029,7 @@ __global__ void SweepFromTopToBottom(
       kCooperative && kBlockWidth == 8 ? kCooperativeSampleBatchSize : 1;
   __shared__ CooperativeNccJob<kCooperative, kBlockWidth, kSampleBatchSize>
       cooperative_job;
+  __shared__ int cooperative_sample_alias[kSampleBatchSize][kBlockWidth];
   __shared__ float
       cooperative_geometric_costs[kSampleBatchSize]
                                  [kCooperative && kGeomConsistencyTerm ? 3 : 1]
@@ -1300,6 +1301,17 @@ __global__ void SweepFromTopToBottom(
           if constexpr (kCooperative) {
             cooperative_job.source[slot][threadIdx.x] =
                 pcc_computer.src_image_idx;
+            if constexpr (kSampleBatchSize > 1) {
+              int canonical_slot = pcc_computer.src_image_idx >= 0 ? slot : -1;
+              for (int previous = 0; previous < slot && canonical_slot == slot;
+                   ++previous) {
+                if (cooperative_job.source[previous][threadIdx.x] ==
+                    pcc_computer.src_image_idx) {
+                  canonical_slot = previous;
+                }
+              }
+              cooperative_sample_alias[slot][threadIdx.x] = canonical_slot;
+            }
           } else if (pcc_computer.src_image_idx >= 0) {
             if constexpr (kGeomConsistencyTerm) {
               for (int i = 0; i < 3; ++i) {
@@ -1327,6 +1339,9 @@ __global__ void SweepFromTopToBottom(
         if (owner && col >= cost_map.GetWidth()) {
           for (int slot = 0; slot < kSampleBatchSize; ++slot) {
             cooperative_job.source[slot][threadIdx.x] = -1;
+            if constexpr (kSampleBatchSize > 1) {
+              cooperative_sample_alias[slot][threadIdx.x] = -1;
+            }
           }
         }
         // Invalid columns and padded final-batch samples reach both barriers.
@@ -1334,7 +1349,11 @@ __global__ void SweepFromTopToBottom(
         const int slot = threadIdx.y / 4;
         const int hypothesis = threadIdx.y % 4;
         const int source = cooperative_job.source[slot][threadIdx.x];
-        if (col < cost_map.GetWidth() && source >= 0) {
+        bool canonical = true;
+        if constexpr (kSampleBatchSize > 1) {
+          canonical = cooperative_sample_alias[slot][threadIdx.x] == slot;
+        }
+        if (col < cost_map.GetWidth() && source >= 0 && canonical) {
           if constexpr (kGeomConsistencyTerm) {
             if (hypothesis < 3) {
               const int depth_hypothesis = hypothesis == 0 ? 2 : hypothesis - 1;
@@ -1366,18 +1385,24 @@ __global__ void SweepFromTopToBottom(
           for (int slot = 0; slot < sample_count; ++slot) {
             const int source = cooperative_job.source[slot][threadIdx.x];
             if (source < 0) continue;
-            // Fold samples in order, preserving every separate photo/geo add.
+            int result_slot = slot;
+            if constexpr (kSampleBatchSize > 1) {
+              result_slot = cooperative_sample_alias[slot][threadIdx.x];
+            }
+            // Reuse identical evaluations, but retain every original sample
+            // add.
             costs[0] += cost_map.Get(row, col, source);
             if constexpr (kGeomConsistencyTerm) {
               for (int i = 0; i < 3; ++i) {
                 geometric_costs[i] =
-                    cooperative_geometric_costs[slot][i][threadIdx.x];
+                    cooperative_geometric_costs[result_slot][i][threadIdx.x];
               }
               costs[0] +=
                   options.geom_consistency_regularizer * geometric_costs[0];
             }
             for (int i = 1; i < kNumCosts; ++i) {
-              costs[i] += cooperative_job.results[slot][i - 1][threadIdx.x];
+              costs[i] +=
+                  cooperative_job.results[result_slot][i - 1][threadIdx.x];
               if (kGeomConsistencyTerm) {
                 costs[i] += options.geom_consistency_regularizer *
                             geometric_costs[i == 3 ? 0 : (i == 4 ? 2 : i)];
