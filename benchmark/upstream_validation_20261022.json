@@ -1,0 +1,1776 @@
+{
+  "schema": "colmap.upstream-validation/v1",
+  "date": "2026-10-22",
+  "classification": "Cumulative performance and correctness validation; no algorithm change",
+  "buildsOn": "afea7fac698d27619a13682eabe60d7e90cc9b58",
+  "timingScope": "Sum of native child wall times; preparation, readback, scoring, and observers outside timed stages. Separate workloads are not pooled.",
+  "platform": {
+    "os": "Linux x86_64 under Windows WSL2",
+    "gpu": "NVIDIA GeForce RTX 3080 Ti, 80 SMs, sm_86",
+    "build": "Release; CUDA, OpenMP and IPO enabled; GCC 12.4.0; CUDA 13.2",
+    "dependencyScope": "Both COLMAP source builds use the same qualified dependencies, including the same optimized Ceres P shared libraries. Pristine denotes COLMAP source, not an entirely pristine dependency stack.",
+    "environment": {
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "LANG": "C",
+      "LC_ALL": "C"
+    },
+    "threadScope": "12 requested COLMAP CPU workers, one CUDA worker (GPU index 0). Fusion logs verify use_cache=0 and 12 effective fusion threads in both builds. OMP_NUM_THREADS=1 is the identical ambient setting, not the COLMAP fusion worker count.",
+    "clockScope": "No global clock or power changes by this experiment. Facade sampled memory clock 9801 MHz in both arms; workload-dependent GPU boost differs. Earlier Fountain used a 9551 MHz memory ceiling, so the two workloads are not pooled."
+  },
+  "counterScope": {
+    "collection": "perf stat attached to each native application PID during the timing pass, with normal inheritance; not machine-wide CPU counts.",
+    "events": [
+      "task-clock",
+      "context-switches",
+      "cpu-migrations",
+      "page-faults",
+      "cycles:u",
+      "instructions:u",
+      "cache-references:u",
+      "cache-misses:u"
+    ],
+    "valueUnits": "task-clock values are native perf nanoseconds (empty CSV unit on this host); all other event values are counts. CPU seconds and RSS bytes are named separately.",
+    "pmuRunningPercent": 100,
+    "coverageLimit": "Post-launch attachment; actual kernel attachment acknowledgement, full-lifetime coverage and every-thread coverage were not proved. Counts describe the captured window, not exact lifetime CPU work.",
+    "interpretation": "CPU instructions/cache events are not GPU instructions/cache events. Reduced CPU driver polling can follow shorter GPU execution. Native CPU time and peak RSS are child lifetime wait4 observations.",
+    "nvml": "Whole-device samples every 6 seconds, including other clients; not process VRAM or attributed energy. Short-stage peaks can be missed. No energy-saving claim."
+  },
+  "facade": {
+    "scope": "76-view dense reconstruction from provided cameras; photometric and geometric PatchMatch, then geometric fusion. No SfM, meshing or texturing.",
+    "maximumImageSidePixels": 1536,
+    "cpuWorkers": 12,
+    "cudaWorkers": 1,
+    "timedReconstructionsPerBuild": 1,
+    "timingOrder": [
+      "baseline",
+      "public"
+    ],
+    "qualityCloudsPerBuild": 2,
+    "qualityRepeatScope": "One additional fusion-only repeat per build, same maps and settings, shared resources; no timing claim from these repeats.",
+    "dataset": {
+      "origin": "ETH3D high-resolution multi-view training Facade",
+      "repositoryUrl": "https://huggingface.co/datasets/PeterDAI/eth3d",
+      "revision": "fb2ddc77390926c335c48dace97533f519fdd571",
+      "sourceOriginLimit": "Pinned mirror bytes; no independent official archive checksum currently available. Do not claim original-archive byte equality."
+    },
+    "datasetSelection": "76 undistorted JPEGs and provided undistorted DSLR calibration; official dslr_scan_eval scan_alignment.mlp and three linked scan PLYs. Mirror files checked against LFS SHA256 or Git blob OIDs. No dataset redistribution.",
+    "preparation": "Run pristine image_undistorter once on the provided PINHOLE model with max_image_size=1536 and num_threads=12. Freeze the resulting images, sparse model and stereo configuration for both arms. Preserve supplied poses exactly; no one-sided quaternion normalization.",
+    "canonicalInputIdentities": {
+      "images/dslr_images_undistorted/DSC_0324.JPG": {
+        "bytes": 1270778,
+        "xxh3_128": "670ddfa513b8b465096d051947b57d32"
+      },
+      "images/dslr_images_undistorted/DSC_0325.JPG": {
+        "bytes": 1290149,
+        "xxh3_128": "1f389e7d385dcdb444b9b4a298377835"
+      },
+      "images/dslr_images_undistorted/DSC_0326.JPG": {
+        "bytes": 1303080,
+        "xxh3_128": "eb657d6d9f1993511b035b082225e135"
+      },
+      "images/dslr_images_undistorted/DSC_0327.JPG": {
+        "bytes": 1395952,
+        "xxh3_128": "cb44e7c013d6212416805c08f00f23c9"
+      },
+      "images/dslr_images_undistorted/DSC_0328.JPG": {
+        "bytes": 1390050,
+        "xxh3_128": "b22552102b167d6f262fa846412c8456"
+      },
+      "images/dslr_images_undistorted/DSC_0329.JPG": {
+        "bytes": 1426948,
+        "xxh3_128": "0f7c38fa3bd51abaa958b01aa0c28538"
+      },
+      "images/dslr_images_undistorted/DSC_0330.JPG": {
+        "bytes": 1420401,
+        "xxh3_128": "ae476b8bf36320e7393673b169591a94"
+      },
+      "images/dslr_images_undistorted/DSC_0331.JPG": {
+        "bytes": 1394644,
+        "xxh3_128": "67e77ea81437e25c5ae138e6d4261879"
+      },
+      "images/dslr_images_undistorted/DSC_0332.JPG": {
+        "bytes": 1380135,
+        "xxh3_128": "415acd1add402ddb7137fe1ac6b2a4f7"
+      },
+      "images/dslr_images_undistorted/DSC_0333.JPG": {
+        "bytes": 1371695,
+        "xxh3_128": "9e083c6c1f5f54ae79c2028dc629bf83"
+      },
+      "images/dslr_images_undistorted/DSC_0334.JPG": {
+        "bytes": 1318635,
+        "xxh3_128": "24dc2affb29b60b56d4c93ad359bcfa6"
+      },
+      "images/dslr_images_undistorted/DSC_0335.JPG": {
+        "bytes": 1323365,
+        "xxh3_128": "c3460e0a6e7e2c74e369a75bdf1c093f"
+      },
+      "images/dslr_images_undistorted/DSC_0336.JPG": {
+        "bytes": 1303902,
+        "xxh3_128": "da8508e375334b45e1d4aaad0541bcbd"
+      },
+      "images/dslr_images_undistorted/DSC_0337.JPG": {
+        "bytes": 1315823,
+        "xxh3_128": "e94412596b48e30988758d890045369e"
+      },
+      "images/dslr_images_undistorted/DSC_0338.JPG": {
+        "bytes": 1315879,
+        "xxh3_128": "41f3719362256ed457683fb0cd8c97fd"
+      },
+      "images/dslr_images_undistorted/DSC_0339.JPG": {
+        "bytes": 1351257,
+        "xxh3_128": "a90063520ab110f7daccb97309eaa893"
+      },
+      "images/dslr_images_undistorted/DSC_0340.JPG": {
+        "bytes": 1352364,
+        "xxh3_128": "39869b83b16cf7289de41cdb803564ed"
+      },
+      "images/dslr_images_undistorted/DSC_0341.JPG": {
+        "bytes": 1319042,
+        "xxh3_128": "03292d0ba0ec1a230d684dc18a8aa161"
+      },
+      "images/dslr_images_undistorted/DSC_0342.JPG": {
+        "bytes": 1319331,
+        "xxh3_128": "f43a3bf731aed772e52faea2dd76f3ba"
+      },
+      "images/dslr_images_undistorted/DSC_0343.JPG": {
+        "bytes": 1332242,
+        "xxh3_128": "ff71be1bf3d9cda0e22fc68485a016be"
+      },
+      "images/dslr_images_undistorted/DSC_0344.JPG": {
+        "bytes": 1332384,
+        "xxh3_128": "c339de4b3e4075833c2c9eae95b2bd14"
+      },
+      "images/dslr_images_undistorted/DSC_0345.JPG": {
+        "bytes": 1334789,
+        "xxh3_128": "dde88ff9f806ac3c4432c487f748f6fd"
+      },
+      "images/dslr_images_undistorted/DSC_0346.JPG": {
+        "bytes": 1335328,
+        "xxh3_128": "e3a16bf7d0762f6f1afa539cde5b4ad1"
+      },
+      "images/dslr_images_undistorted/DSC_0347.JPG": {
+        "bytes": 1360078,
+        "xxh3_128": "08f5b7f5106523d5671097a09e9eff33"
+      },
+      "images/dslr_images_undistorted/DSC_0348.JPG": {
+        "bytes": 1384016,
+        "xxh3_128": "6037bdabdb9cdac87385fb63d094df69"
+      },
+      "images/dslr_images_undistorted/DSC_0349.JPG": {
+        "bytes": 1371812,
+        "xxh3_128": "7957f65b31d383a032c5108cce7919d8"
+      },
+      "images/dslr_images_undistorted/DSC_0350.JPG": {
+        "bytes": 1394586,
+        "xxh3_128": "bea722321033f42cb27cbc0bb4fcfaa2"
+      },
+      "images/dslr_images_undistorted/DSC_0351.JPG": {
+        "bytes": 1420626,
+        "xxh3_128": "68fd9c7bdcae375c429f4d2a56f65894"
+      },
+      "images/dslr_images_undistorted/DSC_0352.JPG": {
+        "bytes": 1409447,
+        "xxh3_128": "75b451c5336735da53fbdccd0db286fd"
+      },
+      "images/dslr_images_undistorted/DSC_0353.JPG": {
+        "bytes": 1413521,
+        "xxh3_128": "ca21de2d77a3cd787514e51169ac2327"
+      },
+      "images/dslr_images_undistorted/DSC_0354.JPG": {
+        "bytes": 1385167,
+        "xxh3_128": "b34b12e3313c0ff0ac17a63ca8dcfc34"
+      },
+      "images/dslr_images_undistorted/DSC_0355.JPG": {
+        "bytes": 1386960,
+        "xxh3_128": "e0f13b326935699dcede730bb8f91bf6"
+      },
+      "images/dslr_images_undistorted/DSC_0356.JPG": {
+        "bytes": 1395245,
+        "xxh3_128": "cd7761ace99d11307c14aab4ccaea551"
+      },
+      "images/dslr_images_undistorted/DSC_0357.JPG": {
+        "bytes": 1439776,
+        "xxh3_128": "fee1c01200d764f4ef0de3619181f0da"
+      },
+      "images/dslr_images_undistorted/DSC_0358.JPG": {
+        "bytes": 1377744,
+        "xxh3_128": "3f2498ec2fb38b32d52efc920902e343"
+      },
+      "images/dslr_images_undistorted/DSC_0359.JPG": {
+        "bytes": 1348967,
+        "xxh3_128": "0fccbcdd8064cb0eb131a2ee0c7f1116"
+      },
+      "images/dslr_images_undistorted/DSC_0360.JPG": {
+        "bytes": 1270612,
+        "xxh3_128": "16a2416f648a5c9b7fb6b1b112bb3bb6"
+      },
+      "images/dslr_images_undistorted/DSC_0361.JPG": {
+        "bytes": 1182905,
+        "xxh3_128": "a25438d38b86eb70f7b73dcdf403ea61"
+      },
+      "images/dslr_images_undistorted/DSC_0362.JPG": {
+        "bytes": 1170600,
+        "xxh3_128": "4c492f22f063324dafece38ab565269d"
+      },
+      "images/dslr_images_undistorted/DSC_0363.JPG": {
+        "bytes": 1226422,
+        "xxh3_128": "47a11d164a510d6eadacaed5b60f23c1"
+      },
+      "images/dslr_images_undistorted/DSC_0364.JPG": {
+        "bytes": 1399378,
+        "xxh3_128": "1db547b83a62725328cfb7cf684bf2c0"
+      },
+      "images/dslr_images_undistorted/DSC_0365.JPG": {
+        "bytes": 1620768,
+        "xxh3_128": "b9dae573fee01a9aeafe94c86be01af0"
+      },
+      "images/dslr_images_undistorted/DSC_0366.JPG": {
+        "bytes": 1813024,
+        "xxh3_128": "e286d627a37b0cd56bda7b3f0d157631"
+      },
+      "images/dslr_images_undistorted/DSC_0386.JPG": {
+        "bytes": 1640592,
+        "xxh3_128": "3091107203db89f648604508e56ddf00"
+      },
+      "images/dslr_images_undistorted/DSC_0387.JPG": {
+        "bytes": 1320508,
+        "xxh3_128": "48b53153aed406f5db10a131c126c27a"
+      },
+      "images/dslr_images_undistorted/DSC_0388.JPG": {
+        "bytes": 1300392,
+        "xxh3_128": "0f100ef9522b23be844563a2a70783cc"
+      },
+      "images/dslr_images_undistorted/DSC_0389.JPG": {
+        "bytes": 1313343,
+        "xxh3_128": "29e1016afaef480e4fa0e138fc0ee692"
+      },
+      "images/dslr_images_undistorted/DSC_0390.JPG": {
+        "bytes": 1490548,
+        "xxh3_128": "939bc1e1384137c6fbb51564ef223854"
+      },
+      "images/dslr_images_undistorted/DSC_0391.JPG": {
+        "bytes": 1488687,
+        "xxh3_128": "b30198df79872a104d80b08dfe602828"
+      },
+      "images/dslr_images_undistorted/DSC_0392.JPG": {
+        "bytes": 1471698,
+        "xxh3_128": "1f1ee6c9563b9cfcb5eecbb05ee4e215"
+      },
+      "images/dslr_images_undistorted/DSC_0393.JPG": {
+        "bytes": 1492509,
+        "xxh3_128": "9c9dbd83d1d50727484686b1c00d7396"
+      },
+      "images/dslr_images_undistorted/DSC_0394.JPG": {
+        "bytes": 1105827,
+        "xxh3_128": "94e32da912917bbc88b7783110d3c5a5"
+      },
+      "images/dslr_images_undistorted/DSC_0395.JPG": {
+        "bytes": 1248085,
+        "xxh3_128": "d75ffdae1391f3173a304b9b8813056c"
+      },
+      "images/dslr_images_undistorted/DSC_0396.JPG": {
+        "bytes": 1320040,
+        "xxh3_128": "ab53e26d88016b207b5c47c4deec7aa7"
+      },
+      "images/dslr_images_undistorted/DSC_0397.JPG": {
+        "bytes": 1352678,
+        "xxh3_128": "5e69e6180922e43f50873bde6b48e8a3"
+      },
+      "images/dslr_images_undistorted/DSC_0398.JPG": {
+        "bytes": 1382972,
+        "xxh3_128": "198bd8760a50a9ff7a020a00fb9bb4ac"
+      },
+      "images/dslr_images_undistorted/DSC_0399.JPG": {
+        "bytes": 1393104,
+        "xxh3_128": "9273e1c279169346070939d6e4edbb42"
+      },
+      "images/dslr_images_undistorted/DSC_0400.JPG": {
+        "bytes": 1376818,
+        "xxh3_128": "5838c815e8b8262807a25b7a7ab4b3a8"
+      },
+      "images/dslr_images_undistorted/DSC_0401.JPG": {
+        "bytes": 1375044,
+        "xxh3_128": "1e7b8769f65e4e4cb90f8908a1dd052e"
+      },
+      "images/dslr_images_undistorted/DSC_0402.JPG": {
+        "bytes": 1325904,
+        "xxh3_128": "405bdb95d12c0115092122be2c42139b"
+      },
+      "images/dslr_images_undistorted/DSC_0404.JPG": {
+        "bytes": 1409452,
+        "xxh3_128": "91e2f385147af0c2673e263ccee3fb85"
+      },
+      "images/dslr_images_undistorted/DSC_0405.JPG": {
+        "bytes": 1382302,
+        "xxh3_128": "40e32bd7233a049ae220808b41c4b814"
+      },
+      "images/dslr_images_undistorted/DSC_0406.JPG": {
+        "bytes": 1418604,
+        "xxh3_128": "a5a211d930412d6a9c96b37dfa37c3b9"
+      },
+      "images/dslr_images_undistorted/DSC_0407.JPG": {
+        "bytes": 1387522,
+        "xxh3_128": "badbcd91812223ae6ddfd0ac604a834a"
+      },
+      "images/dslr_images_undistorted/DSC_0408.JPG": {
+        "bytes": 1369573,
+        "xxh3_128": "3a5294ff30312534ca1354490260b8bd"
+      },
+      "images/dslr_images_undistorted/DSC_0409.JPG": {
+        "bytes": 1344048,
+        "xxh3_128": "6e26fb8dd006b3cd978dff3d0ea9ee66"
+      },
+      "images/dslr_images_undistorted/DSC_0410.JPG": {
+        "bytes": 1285420,
+        "xxh3_128": "d18284326a32e1c33a27bdbcef947bbd"
+      },
+      "images/dslr_images_undistorted/DSC_0411.JPG": {
+        "bytes": 1368145,
+        "xxh3_128": "6e1f05503e6dc111831c1a3724a983e4"
+      },
+      "images/dslr_images_undistorted/DSC_0412.JPG": {
+        "bytes": 1387240,
+        "xxh3_128": "5d7e7fec883122d295dc46c746a1acde"
+      },
+      "images/dslr_images_undistorted/DSC_0413.JPG": {
+        "bytes": 1212489,
+        "xxh3_128": "9bcc68330484d3da2e5bf7ad036c58e8"
+      },
+      "images/dslr_images_undistorted/DSC_0414.JPG": {
+        "bytes": 1223530,
+        "xxh3_128": "a6a06af76d0c8accb3dab70bb9e42976"
+      },
+      "images/dslr_images_undistorted/DSC_0415.JPG": {
+        "bytes": 1301779,
+        "xxh3_128": "11b96bb0663ec4b35911ac05deac186b"
+      },
+      "images/dslr_images_undistorted/DSC_0419.JPG": {
+        "bytes": 1131349,
+        "xxh3_128": "4daaf7944f30b18202d0a38b4d039949"
+      },
+      "images/dslr_images_undistorted/DSC_0420.JPG": {
+        "bytes": 1185498,
+        "xxh3_128": "1c3870659044de1f9c3120ee373a9d3a"
+      },
+      "images/dslr_images_undistorted/DSC_0421.JPG": {
+        "bytes": 1291836,
+        "xxh3_128": "3061ac7be52dc914a7fa4320ac93a49d"
+      },
+      "images/dslr_images_undistorted/DSC_0422.JPG": {
+        "bytes": 1240571,
+        "xxh3_128": "974de87032eeaa779bd7e5fdd9a87a13"
+      },
+      "sparse/cameras.bin": {
+        "bytes": 288,
+        "xxh3_128": "8958ed52c17717fc3a2833b6ce465e6f"
+      },
+      "sparse/frames.bin": {
+        "bytes": 6392,
+        "xxh3_128": "3a50c57fe3ef58f94cc1a232f1935214"
+      },
+      "sparse/images.bin": {
+        "bytes": 19094388,
+        "xxh3_128": "42779906a9d4df83da76cfc1051081ff"
+      },
+      "sparse/points3D.bin": {
+        "bytes": 7678728,
+        "xxh3_128": "e5cc77b4359171225c0af0ad91a3ccda"
+      },
+      "sparse/rigs.bin": {
+        "bytes": 88,
+        "xxh3_128": "d3603487dbbe4fd8e5d0f2132792656d"
+      },
+      "stereo/patch-match.cfg": {
+        "bytes": 3800,
+        "xxh3_128": "f84644c91b2d509f916e119879cf353f"
+      },
+      "stereo/fusion.cfg": {
+        "bytes": 2812,
+        "xxh3_128": "7ffea07af5fb5b8a737286e9fee251b8"
+      }
+    },
+    "sourceConfiguration": "dslr_images_undistorted/DSC_0422.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0421.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0420.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0419.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0415.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0414.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0413.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0412.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0411.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0410.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0409.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0408.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0407.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0406.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0405.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0404.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0402.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0401.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0400.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0399.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0398.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0397.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0396.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0395.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0394.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0393.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0392.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0391.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0390.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0389.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0348.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0349.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0350.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0351.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0352.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0353.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0354.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0355.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0356.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0357.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0358.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0359.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0388.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0387.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0386.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0366.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0365.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0364.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0363.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0362.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0361.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0360.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0347.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0346.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0333.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0332.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0331.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0330.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0329.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0328.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0327.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0326.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0325.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0324.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0334.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0335.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0336.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0337.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0338.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0339.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0340.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0341.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0342.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0343.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0344.JPG\n__auto__, 20\ndslr_images_undistorted/DSC_0345.JPG\n__auto__, 20\n",
+    "defaults": "Original algorithm defaults; auto source count 20 is a maximum (observed 5-20). Radius 5, 15 samples, 5 iterations. Optional lossy storage, rotation-buffer reuse and direct-source uploads off. Existing qualified default-on storage optimizations remain enabled in the fork.",
+    "arms": {
+      "baseline": {
+        "commit": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+        "executableIdentity": {
+          "bytes": 67713089,
+          "xxh3_128": "a0ff324eccc44456c88a0dc9234935b1"
+        },
+        "wallSeconds": 2269.8765937639982,
+        "cpuSeconds": 2472.653861,
+        "peakRssBytes": 3596480512,
+        "stages": {
+          "patchmatch": {
+            "wallSeconds": 2242.1856267679977,
+            "cpuSeconds": 2249.502768,
+            "maxRssBytes": 3471953920,
+            "cpuEvents": {
+              "task-clock": {
+                "value": 2251058492257.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "context-switches": {
+                "value": 245128.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cpu-migrations": {
+                "value": 1957.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "page-faults": {
+                "value": 5178850.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cycles:u": {
+                "value": 8876173650137.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "instructions:u": {
+                "value": 9004714642116.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cache-references:u": {
+                "value": 8382216677.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cache-misses:u": {
+                "value": 1187036634.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              }
+            },
+            "gpuWholeDeviceSampled": {
+              "gpuUtilization": {
+                "mean": 96.82352941176471,
+                "minimum": 9.0,
+                "maximum": 100.0,
+                "samples": 374,
+                "units": [
+                  "%"
+                ]
+              },
+              "gpuMemoryUtilization": {
+                "mean": 1.7700534759358288,
+                "minimum": 1.0,
+                "maximum": 4.0,
+                "samples": 374,
+                "units": [
+                  "%"
+                ]
+              },
+              "gpuMemoryUsed": {
+                "mean": 2406.1334078375667,
+                "minimum": 1460.7578125,
+                "maximum": 2646.5703125,
+                "samples": 374,
+                "units": [
+                  "MiB"
+                ]
+              },
+              "gpuPower": {
+                "mean": 197.67159893048128,
+                "minimum": 105.274,
+                "maximum": 204.422,
+                "samples": 374,
+                "units": [
+                  "W"
+                ]
+              },
+              "gpuSmClock": {
+                "mean": 2034.9866310160428,
+                "minimum": 300.0,
+                "maximum": 2040.0,
+                "samples": 374,
+                "units": [
+                  "MHz"
+                ]
+              },
+              "gpuMemoryClock": {
+                "mean": 9801.0,
+                "minimum": 9801.0,
+                "maximum": 9801.0,
+                "samples": 374,
+                "units": [
+                  "MHz"
+                ]
+              },
+              "gpuTemperature": {
+                "mean": 53.898395721925134,
+                "minimum": 39.0,
+                "maximum": 55.0,
+                "samples": 374,
+                "units": [
+                  "degC"
+                ]
+              },
+              "gpuPcieCurrentGeneration": {
+                "mean": 4.0,
+                "minimum": 4.0,
+                "maximum": 4.0,
+                "samples": 374,
+                "units": [
+                  "generation"
+                ]
+              },
+              "gpuPcieCurrentWidth": {
+                "mean": 16.0,
+                "minimum": 16.0,
+                "maximum": 16.0,
+                "samples": 374,
+                "units": [
+                  "lanes"
+                ]
+              },
+              "gpuPcieRxThroughput": {
+                "mean": 11178.229946524065,
+                "minimum": 244.0,
+                "maximum": 1726416.0,
+                "samples": 374,
+                "units": [
+                  "KB/s"
+                ]
+              },
+              "gpuPcieTxThroughput": {
+                "mean": 5708.620320855615,
+                "minimum": 244.0,
+                "maximum": 1010400.0,
+                "samples": 374,
+                "units": [
+                  "KB/s"
+                ]
+              }
+            }
+          },
+          "fusion": {
+            "wallSeconds": 27.690966996000498,
+            "cpuSeconds": 223.151093,
+            "maxRssBytes": 3596480512,
+            "cpuEvents": {
+              "task-clock": {
+                "value": 229048082406.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "context-switches": {
+                "value": 491971.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cpu-migrations": {
+                "value": 322.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "page-faults": {
+                "value": 3936578.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cycles:u": {
+                "value": 659055240620.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "instructions:u": {
+                "value": 1048099583721.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cache-references:u": {
+                "value": 22518727344.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cache-misses:u": {
+                "value": 2923904105.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              }
+            },
+            "gpuWholeDeviceSampled": {
+              "gpuUtilization": {
+                "mean": 4.8,
+                "minimum": 3.0,
+                "maximum": 6.0,
+                "samples": 5,
+                "units": [
+                  "%"
+                ]
+              },
+              "gpuMemoryUtilization": {
+                "mean": 1.0,
+                "minimum": 1.0,
+                "maximum": 1.0,
+                "samples": 5,
+                "units": [
+                  "%"
+                ]
+              },
+              "gpuMemoryUsed": {
+                "mean": 1566.93984375,
+                "minimum": 1565.65234375,
+                "maximum": 1571.33984375,
+                "samples": 5,
+                "units": [
+                  "MiB"
+                ]
+              },
+              "gpuPower": {
+                "mean": 105.3942,
+                "minimum": 105.348,
+                "maximum": 105.469,
+                "samples": 5,
+                "units": [
+                  "W"
+                ]
+              },
+              "gpuSmClock": {
+                "mean": 300.0,
+                "minimum": 300.0,
+                "maximum": 300.0,
+                "samples": 5,
+                "units": [
+                  "MHz"
+                ]
+              },
+              "gpuMemoryClock": {
+                "mean": 9801.0,
+                "minimum": 9801.0,
+                "maximum": 9801.0,
+                "samples": 5,
+                "units": [
+                  "MHz"
+                ]
+              },
+              "gpuTemperature": {
+                "mean": 39.0,
+                "minimum": 39.0,
+                "maximum": 39.0,
+                "samples": 5,
+                "units": [
+                  "degC"
+                ]
+              },
+              "gpuPcieCurrentGeneration": {
+                "mean": 4.0,
+                "minimum": 4.0,
+                "maximum": 4.0,
+                "samples": 5,
+                "units": [
+                  "generation"
+                ]
+              },
+              "gpuPcieCurrentWidth": {
+                "mean": 16.0,
+                "minimum": 16.0,
+                "maximum": 16.0,
+                "samples": 5,
+                "units": [
+                  "lanes"
+                ]
+              },
+              "gpuPcieRxThroughput": {
+                "mean": 858.8,
+                "minimum": 292.0,
+                "maximum": 1611.0,
+                "samples": 5,
+                "units": [
+                  "KB/s"
+                ]
+              },
+              "gpuPcieTxThroughput": {
+                "mean": 614.8,
+                "minimum": 488.0,
+                "maximum": 732.0,
+                "samples": 5,
+                "units": [
+                  "KB/s"
+                ]
+              }
+            }
+          }
+        },
+        "commands": {
+          "patchmatch": [
+            "$COLMAP",
+            "patch_match_stereo",
+            "--workspace_path",
+            "$RUN/workspace",
+            "--workspace_format",
+            "COLMAP",
+            "--PatchMatchStereo.gpu_index",
+            "0",
+            "--PatchMatchStereo.num_threads",
+            "12",
+            "--PatchMatchStereo.max_image_size",
+            "1536"
+          ],
+          "fusion": [
+            "$COLMAP",
+            "stereo_fusion",
+            "--workspace_path",
+            "$RUN/workspace",
+            "--workspace_format",
+            "COLMAP",
+            "--input_type",
+            "geometric",
+            "--output_path",
+            "$RUN/fused.ply",
+            "--StereoFusion.num_threads",
+            "12",
+            "--StereoFusion.max_image_size",
+            "1536"
+          ]
+        },
+        "completedPatchMatchSolves": 152,
+        "initializations": 152,
+        "sourceCountHistogramPerMode": {
+          "False": {
+            "5": 1,
+            "7": 2,
+            "9": 1,
+            "11": 1,
+            "12": 2,
+            "13": 1,
+            "14": 2,
+            "20": 66
+          },
+          "True": {
+            "5": 1,
+            "7": 2,
+            "9": 1,
+            "11": 1,
+            "12": 2,
+            "13": 1,
+            "14": 2,
+            "20": 66
+          }
+        },
+        "fusedVertexCounts": [
+          2082225,
+          2082131
+        ],
+        "allCoordinatesNormalsAndRgbFinite": true,
+        "scores": [
+          {
+            "Tolerances": [
+              0.01,
+              0.02,
+              0.05,
+              0.1,
+              0.2,
+              0.5
+            ],
+            "Completenesses": [
+              0.10858,
+              0.343906,
+              0.651676,
+              0.729322,
+              0.768852,
+              0.810266
+            ],
+            "Accuracies": [
+              0.585477,
+              0.737734,
+              0.91766,
+              0.973949,
+              0.990844,
+              0.996115
+            ],
+            "F1-scores": [
+              0.183187,
+              0.469123,
+              0.762127,
+              0.834069,
+              0.865845,
+              0.89363
+            ]
+          },
+          {
+            "Tolerances": [
+              0.01,
+              0.02,
+              0.05,
+              0.1,
+              0.2,
+              0.5
+            ],
+            "Completenesses": [
+              0.108569,
+              0.343872,
+              0.651673,
+              0.729323,
+              0.768852,
+              0.810266
+            ],
+            "Accuracies": [
+              0.585497,
+              0.737746,
+              0.917679,
+              0.973959,
+              0.990859,
+              0.996117
+            ],
+            "F1-scores": [
+              0.183172,
+              0.469094,
+              0.762132,
+              0.834073,
+              0.865851,
+              0.893631
+            ]
+          }
+        ],
+        "rawDepthSignCounts": {
+          "photometric": {
+            "negativePixels": 88777,
+            "positivePixels": 119336759,
+            "zeroPixels": 0
+          },
+          "geometric": {
+            "negativePixels": 0,
+            "positivePixels": 92621450,
+            "zeroPixels": 26804086
+          }
+        }
+      },
+      "public": {
+        "commit": "afea7fac698d27619a13682eabe60d7e90cc9b58",
+        "executableIdentity": {
+          "bytes": 68098705,
+          "xxh3_128": "188141f3b77c7dc222e626562bf31bb1"
+        },
+        "wallSeconds": 389.23236723399896,
+        "cpuSeconds": 478.381649,
+        "peakRssBytes": 3079020544,
+        "stages": {
+          "patchmatch": {
+            "wallSeconds": 377.50080820699804,
+            "cpuSeconds": 361.398509,
+            "maxRssBytes": 3079020544,
+            "cpuEvents": {
+              "task-clock": {
+                "value": 362775245769.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "context-switches": {
+                "value": 188888.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cpu-migrations": {
+                "value": 442.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "page-faults": {
+                "value": 3183818.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cycles:u": {
+                "value": 1362846506126.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "instructions:u": {
+                "value": 1474436537271.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cache-references:u": {
+                "value": 5196029481.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cache-misses:u": {
+                "value": 889657156.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              }
+            },
+            "gpuWholeDeviceSampled": {
+              "gpuUtilization": {
+                "mean": 83.14285714285714,
+                "minimum": 3.0,
+                "maximum": 95.0,
+                "samples": 63,
+                "units": [
+                  "%"
+                ]
+              },
+              "gpuMemoryUtilization": {
+                "mean": 6.666666666666667,
+                "minimum": 1.0,
+                "maximum": 11.0,
+                "samples": 63,
+                "units": [
+                  "%"
+                ]
+              },
+              "gpuMemoryUsed": {
+                "mean": 2342.3201264880954,
+                "minimum": 1565.90234375,
+                "maximum": 2562.4140625,
+                "samples": 63,
+                "units": [
+                  "MiB"
+                ]
+              },
+              "gpuPower": {
+                "mean": 267.5981111111111,
+                "minimum": 105.458,
+                "maximum": 304.511,
+                "samples": 63,
+                "units": [
+                  "W"
+                ]
+              },
+              "gpuSmClock": {
+                "mean": 1968.5714285714287,
+                "minimum": 300.0,
+                "maximum": 2025.0,
+                "samples": 63,
+                "units": [
+                  "MHz"
+                ]
+              },
+              "gpuMemoryClock": {
+                "mean": 9801.0,
+                "minimum": 9801.0,
+                "maximum": 9801.0,
+                "samples": 63,
+                "units": [
+                  "MHz"
+                ]
+              },
+              "gpuTemperature": {
+                "mean": 61.0,
+                "minimum": 39.0,
+                "maximum": 66.0,
+                "samples": 63,
+                "units": [
+                  "degC"
+                ]
+              },
+              "gpuPcieCurrentGeneration": {
+                "mean": 4.0,
+                "minimum": 4.0,
+                "maximum": 4.0,
+                "samples": 63,
+                "units": [
+                  "generation"
+                ]
+              },
+              "gpuPcieCurrentWidth": {
+                "mean": 16.0,
+                "minimum": 16.0,
+                "maximum": 16.0,
+                "samples": 63,
+                "units": [
+                  "lanes"
+                ]
+              },
+              "gpuPcieRxThroughput": {
+                "mean": 22054.25396825397,
+                "minimum": 1123.0,
+                "maximum": 189941.0,
+                "samples": 63,
+                "units": [
+                  "KB/s"
+                ]
+              },
+              "gpuPcieTxThroughput": {
+                "mean": 45021.47619047619,
+                "minimum": 244.0,
+                "maximum": 1008642.0,
+                "samples": 63,
+                "units": [
+                  "KB/s"
+                ]
+              }
+            }
+          },
+          "fusion": {
+            "wallSeconds": 11.731559027000912,
+            "cpuSeconds": 116.98313999999999,
+            "maxRssBytes": 2621698048,
+            "cpuEvents": {
+              "task-clock": {
+                "value": 117006861374.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "context-switches": {
+                "value": 9498.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cpu-migrations": {
+                "value": 152.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "page-faults": {
+                "value": 800075.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cycles:u": {
+                "value": 410461700290.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "instructions:u": {
+                "value": 634711712976.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cache-references:u": {
+                "value": 11049177027.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              },
+              "cache-misses:u": {
+                "value": 1373177972.0,
+                "runningPercent": 100.0,
+                "availability": "counted"
+              }
+            },
+            "gpuWholeDeviceSampled": {
+              "gpuUtilization": {
+                "mean": 6.5,
+                "minimum": 5.0,
+                "maximum": 8.0,
+                "samples": 2,
+                "units": [
+                  "%"
+                ]
+              },
+              "gpuMemoryUtilization": {
+                "mean": 1.0,
+                "minimum": 1.0,
+                "maximum": 1.0,
+                "samples": 2,
+                "units": [
+                  "%"
+                ]
+              },
+              "gpuMemoryUsed": {
+                "mean": 1569.02734375,
+                "minimum": 1566.65234375,
+                "maximum": 1571.40234375,
+                "samples": 2,
+                "units": [
+                  "MiB"
+                ]
+              },
+              "gpuPower": {
+                "mean": 109.8685,
+                "minimum": 109.607,
+                "maximum": 110.13,
+                "samples": 2,
+                "units": [
+                  "W"
+                ]
+              },
+              "gpuSmClock": {
+                "mean": 300.0,
+                "minimum": 300.0,
+                "maximum": 300.0,
+                "samples": 2,
+                "units": [
+                  "MHz"
+                ]
+              },
+              "gpuMemoryClock": {
+                "mean": 9801.0,
+                "minimum": 9801.0,
+                "maximum": 9801.0,
+                "samples": 2,
+                "units": [
+                  "MHz"
+                ]
+              },
+              "gpuTemperature": {
+                "mean": 53.5,
+                "minimum": 53.0,
+                "maximum": 54.0,
+                "samples": 2,
+                "units": [
+                  "degC"
+                ]
+              },
+              "gpuPcieCurrentGeneration": {
+                "mean": 4.0,
+                "minimum": 4.0,
+                "maximum": 4.0,
+                "samples": 2,
+                "units": [
+                  "generation"
+                ]
+              },
+              "gpuPcieCurrentWidth": {
+                "mean": 16.0,
+                "minimum": 16.0,
+                "maximum": 16.0,
+                "samples": 2,
+                "units": [
+                  "lanes"
+                ]
+              },
+              "gpuPcieRxThroughput": {
+                "mean": 1488.5,
+                "minimum": 1464.0,
+                "maximum": 1513.0,
+                "samples": 2,
+                "units": [
+                  "KB/s"
+                ]
+              },
+              "gpuPcieTxThroughput": {
+                "mean": 487.5,
+                "minimum": 292.0,
+                "maximum": 683.0,
+                "samples": 2,
+                "units": [
+                  "KB/s"
+                ]
+              }
+            }
+          }
+        },
+        "commands": {
+          "patchmatch": [
+            "$COLMAP",
+            "patch_match_stereo",
+            "--workspace_path",
+            "$RUN/workspace",
+            "--workspace_format",
+            "COLMAP",
+            "--PatchMatchStereo.gpu_index",
+            "0",
+            "--PatchMatchStereo.num_threads",
+            "12",
+            "--PatchMatchStereo.max_image_size",
+            "1536"
+          ],
+          "fusion": [
+            "$COLMAP",
+            "stereo_fusion",
+            "--workspace_path",
+            "$RUN/workspace",
+            "--workspace_format",
+            "COLMAP",
+            "--input_type",
+            "geometric",
+            "--output_path",
+            "$RUN/fused.ply",
+            "--StereoFusion.num_threads",
+            "12",
+            "--StereoFusion.max_image_size",
+            "1536"
+          ]
+        },
+        "completedPatchMatchSolves": 152,
+        "initializations": 152,
+        "sourceCountHistogramPerMode": {
+          "False": {
+            "5": 1,
+            "7": 2,
+            "9": 1,
+            "11": 1,
+            "12": 2,
+            "13": 1,
+            "14": 2,
+            "20": 66
+          },
+          "True": {
+            "5": 1,
+            "7": 2,
+            "9": 1,
+            "11": 1,
+            "12": 2,
+            "13": 1,
+            "14": 2,
+            "20": 66
+          }
+        },
+        "fusedVertexCounts": [
+          2082315,
+          2082250
+        ],
+        "allCoordinatesNormalsAndRgbFinite": true,
+        "scores": [
+          {
+            "Tolerances": [
+              0.01,
+              0.02,
+              0.05,
+              0.1,
+              0.2,
+              0.5
+            ],
+            "Completenesses": [
+              0.108584,
+              0.343907,
+              0.651671,
+              0.729319,
+              0.768849,
+              0.810266
+            ],
+            "Accuracies": [
+              0.585378,
+              0.737635,
+              0.917632,
+              0.97395,
+              0.990846,
+              0.996113
+            ],
+            "F1-scores": [
+              0.183188,
+              0.469104,
+              0.762115,
+              0.834067,
+              0.865845,
+              0.893629
+            ]
+          },
+          {
+            "Tolerances": [
+              0.01,
+              0.02,
+              0.05,
+              0.1,
+              0.2,
+              0.5
+            ],
+            "Completenesses": [
+              0.10859,
+              0.343945,
+              0.651677,
+              0.729322,
+              0.768852,
+              0.810266
+            ],
+            "Accuracies": [
+              0.585527,
+              0.737767,
+              0.917682,
+              0.973944,
+              0.990849,
+              0.996117
+            ],
+            "F1-scores": [
+              0.183203,
+              0.469166,
+              0.762135,
+              0.834067,
+              0.865847,
+              0.893631
+            ]
+          }
+        ],
+        "rawDepthSignCounts": {
+          "photometric": {
+            "negativePixels": 88777,
+            "positivePixels": 119336759,
+            "zeroPixels": 0
+          },
+          "geometric": {
+            "negativePixels": 0,
+            "positivePixels": 92621450,
+            "zeroPixels": 26804086
+          }
+        }
+      }
+    },
+    "comparison": {
+      "wallSpeedupFactor": 5.8316748164969345,
+      "wallReductionPercent": 82.85226746232232,
+      "mapComparison": {
+        "mapFiles": 304,
+        "byteExactFiles": 304,
+        "allByteExact": true
+      },
+      "sameOrderedReferencesAndSourceIdsAll152Solves": true,
+      "canonicalInputsUnchanged": {
+        "files": 83,
+        "allExact": true,
+        "unchangedAfterBothArms": true
+      },
+      "meanPublicMinusPristinePercentagePoints": {
+        "Completenesses": [
+          0.0012500000000012501,
+          0.0037000000000009248,
+          -4.999999999588667e-05,
+          -0.00020000000000575113,
+          -0.00014999999999876223,
+          0.0
+        ],
+        "Accuracies": [
+          -0.0034500000000159403,
+          -0.003900000000012227,
+          -0.001250000000008189,
+          -0.0006999999999979245,
+          -0.00040000000000040004,
+          -9.999999999177334e-05
+        ],
+        "F1-scores": [
+          0.0016000000000016001,
+          0.002649999999998487,
+          -0.00045000000000738893,
+          -0.00040000000000040004,
+          -0.0001999999999946489,
+          -5.00000000069889e-05
+        ]
+      },
+      "withinBuildObservedRangesPercentagePoints": {
+        "Completenesses": {
+          "baseline": [
+            0.0010999999999997123,
+            0.003399999999997849,
+            0.0003000000000086267,
+            0.00010000000000287557,
+            0.0,
+            0.0
+          ],
+          "public": [
+            0.0006000000000006,
+            0.0037999999999982492,
+            0.0005999999999950489,
+            0.00029999999999752447,
+            0.00029999999999752447,
+            0.0
+          ]
+        },
+        "Accuracies": {
+          "baseline": [
+            0.002000000000002,
+            0.0012000000000012,
+            0.0018999999999991246,
+            0.0010000000000065512,
+            0.0015000000000098268,
+            0.00020000000000575113
+          ],
+          "public": [
+            0.014900000000006575,
+            0.013199999999990997,
+            0.004999999999999449,
+            0.0005999999999950489,
+            0.00029999999999752447,
+            0.00040000000000040004
+          ]
+        },
+        "F1-scores": {
+          "baseline": [
+            0.0014999999999987246,
+            0.0029000000000001247,
+            0.0005000000000032756,
+            0.00040000000000040004,
+            0.0006000000000061512,
+            9.999999999177334e-05
+          ],
+          "public": [
+            0.0015000000000015001,
+            0.0062000000000006494,
+            0.002000000000002,
+            0.0,
+            0.00020000000000575113,
+            0.0001999999999946489
+          ]
+        }
+      },
+      "interpretation": "All depth/normal maps byte exact, including unfiltered negative photometric hypotheses also produced by pristine. Parallel fusion clouds are not byte exact. Scores vary slightly on fusion-only repeats; N=2 quality samples do not establish statistical equivalence, nor does N=1 timing establish a confidence interval."
+    },
+    "evaluator": {
+      "repository": "https://github.com/ETH3D/multi-view-evaluation",
+      "commit": "0daa4f4de036d47d37a6ba054c51fd66642ef896",
+      "algorithmSourceUnchanged": true,
+      "buildCompatibilityChangesOnly": [
+        "Drop Boost.System from required compiled components because Boost 1.90 provides it header-only",
+        "Drop a stale appended -std=c++11 flag so the existing CMAKE_CXX_STANDARD 17 takes effect"
+      ],
+      "binarySha256": "58e5cd479edd859114cf388ac7984f392357955f7fb76b548c4efeb4b8b3f4c8",
+      "dependencies": {
+        "PCL": "1.15.1",
+        "FLANN": "1.9.2",
+        "Eigen": "3.4.0",
+        "Boost": "1.90.0",
+        "LZ4": "1.9.4"
+      },
+      "analyticalOracle": {
+        "points": 4,
+        "translationMeters": [
+          2,
+          0,
+          0
+        ],
+        "toleranceMeters": 0.02,
+        "accuracy": 1,
+        "completeness": 1,
+        "f1": 1
+      },
+      "command": [
+        "$ETH3D_EVALUATOR",
+        "--reconstruction_ply_path",
+        "$RUN/fused.ply",
+        "--ground_truth_mlp_path",
+        "$FACADE/dslr_scan_eval/scan_alignment.mlp",
+        "--tolerances",
+        "0.01,0.02,0.05,0.1,0.2,0.5"
+      ],
+      "settings": "Default 0.01 m voxel and laser-beam settings; official beam-aware accuracy and voxel completeness. Native provided world frame; no ICP, scale fitting, or alignment to improve scores."
+    },
+    "executionReadbackCorrection": "Initial native pristine PatchMatch completed successfully; the reader then rejected finite negative unfiltered photometric hypotheses and would have required exactly 20 sources. Corrected reader accepts finite raw hypotheses and the actual up-to-20 source count. Reused completed pristine native outputs/timing; no hidden pristine rerun."
+  },
+  "fountainP11": {
+    "scope": "Earlier seven-stage full pipeline, all 11 original 3072x2048 photos; SIFT, exhaustive matching, fresh SfM/BA, undistortion, photometric and geometric PatchMatch, fusion, Poisson meshing.",
+    "sourcePins": {
+      "upstream": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+      "current": "09a38a91a1ebd606030628d088ce7c0a9c9f2654"
+    },
+    "maximumImageSidePixels": 1500,
+    "cpuWorkers": 12,
+    "cudaWorkers": 1,
+    "observationsPerBuild": 2,
+    "order": [
+      "upstream",
+      "current",
+      "current",
+      "upstream"
+    ],
+    "settings": "Known shared PINHOLE intrinsics from dataset;1500 max feature/undistort/PatchMatch/fusion size;12 CPUworkers;GPU0;Mapper/TwoViewGeometry seed0;remaining algorithm defaults;optional compression/rotation/direct upload flags at defaults. Fresh databases and models each run; no source poses imported.",
+    "performance": {
+      "upstream": {
+        "observations": 2,
+        "wallSeconds": [
+          336.5097181069941,
+          336.18121855500794
+        ],
+        "meanWallSeconds": 336.34546833100103,
+        "wallRangeSeconds": [
+          336.18121855500794,
+          336.5097181069941
+        ],
+        "relativeRangePercent": 0.09766730427980369,
+        "meanCpuSeconds": 554.1132184999999,
+        "maximumRssMiB": 1639.84765625,
+        "meanInstructionsG": 1914.2067928825,
+        "meanCyclesG": 2044.2849586215,
+        "meanCacheMissesM": 4456.6260755,
+        "allHardwarePmuRunning100Percent": true
+      },
+      "current": {
+        "observations": 2,
+        "wallSeconds": [
+          89.51563261101546,
+          92.11203175999981
+        ],
+        "meanWallSeconds": 90.81383218550764,
+        "wallRangeSeconds": [
+          89.51563261101546,
+          92.11203175999981
+        ],
+        "relativeRangePercent": 2.859034892042237,
+        "meanCpuSeconds": 297.646703,
+        "maximumRssMiB": 1569.45703125,
+        "meanInstructionsG": 866.8310210965,
+        "meanCyclesG": 1032.3218145285,
+        "meanCacheMissesM": 4264.3345705,
+        "allHardwarePmuRunning100Percent": true
+      },
+      "comparison": {
+        "meanWallSecondsChangePercent": -72.99983477222389,
+        "meanCpuSecondsChangePercent": -46.28413597391919,
+        "meanInstructionsGChangePercent": -54.71591552597166,
+        "meanCyclesGChangePercent": -49.50205888984214,
+        "meanCacheMissesMChangePercent": -4.314732753934858,
+        "maximumRssMiBChangePercent": -4.292510022605944,
+        "wallSpeedupFactor": 3.7036810388525385
+      }
+    },
+    "stageMeansSeconds": {
+      "features": {
+        "upstream": 2.745241819498915,
+        "current": 2.663447509003163
+      },
+      "matching": {
+        "upstream": 1.0524918055016315,
+        "current": 0.9964875209989259
+      },
+      "mapping": {
+        "upstream": 7.928067675999046,
+        "current": 7.729399773001205
+      },
+      "undistortion": {
+        "upstream": 2.1262983000015083,
+        "current": 2.1254699230012193
+      },
+      "patchmatch": {
+        "upstream": 280.0595607849973,
+        "current": 36.8809725659994
+      },
+      "fusion": {
+        "upstream": 2.7613649224986148,
+        "current": 0.9476325220020954
+      },
+      "meshing": {
+        "upstream": 39.67244302250401,
+        "current": 39.47042237150163
+      }
+    },
+    "commands": {
+      "features": [
+        "$COLMAP",
+        "feature_extractor",
+        "--database_path",
+        "$RUN/database.db",
+        "--image_path",
+        "$FOUNTAIN_IMAGES",
+        "--image_list_path",
+        "$RUN/images.txt",
+        "--ImageReader.camera_model",
+        "PINHOLE",
+        "--ImageReader.single_camera",
+        "1",
+        "--ImageReader.camera_params",
+        "2759.48,2764.16,1520.69,1006.81",
+        "--FeatureExtraction.num_threads",
+        "12",
+        "--FeatureExtraction.gpu_index",
+        "0",
+        "--FeatureExtraction.max_image_size",
+        "1500"
+      ],
+      "matching": [
+        "$COLMAP",
+        "exhaustive_matcher",
+        "--database_path",
+        "$RUN/database.db",
+        "--FeatureMatching.num_threads",
+        "12",
+        "--FeatureMatching.gpu_index",
+        "0",
+        "--TwoViewGeometry.random_seed",
+        "0"
+      ],
+      "mapping": [
+        "$COLMAP",
+        "mapper",
+        "--database_path",
+        "$RUN/database.db",
+        "--image_path",
+        "$FOUNTAIN_IMAGES",
+        "--output_path",
+        "$RUN/sparse",
+        "--Mapper.num_threads",
+        "12",
+        "--Mapper.random_seed",
+        "0"
+      ],
+      "undistortion": [
+        "$COLMAP",
+        "image_undistorter",
+        "--image_path",
+        "$FOUNTAIN_IMAGES",
+        "--input_path",
+        "$RUN/sparse/0",
+        "--output_path",
+        "$RUN/dense",
+        "--output_type",
+        "COLMAP",
+        "--max_image_size",
+        "1500",
+        "--num_threads",
+        "12"
+      ],
+      "patchmatch": [
+        "$COLMAP",
+        "patch_match_stereo",
+        "--workspace_path",
+        "$RUN/dense",
+        "--workspace_format",
+        "COLMAP",
+        "--PatchMatchStereo.gpu_index",
+        "0",
+        "--PatchMatchStereo.num_threads",
+        "12",
+        "--PatchMatchStereo.max_image_size",
+        "1500"
+      ],
+      "fusion": [
+        "$COLMAP",
+        "stereo_fusion",
+        "--workspace_path",
+        "$RUN/dense",
+        "--workspace_format",
+        "COLMAP",
+        "--input_type",
+        "geometric",
+        "--output_path",
+        "$RUN/fused.ply",
+        "--StereoFusion.num_threads",
+        "12",
+        "--StereoFusion.max_image_size",
+        "1500"
+      ],
+      "meshing": [
+        "$COLMAP",
+        "poisson_mesher",
+        "--input_path",
+        "$RUN/fused.ply",
+        "--output_path",
+        "$RUN/meshed-poisson.ply",
+        "--PoissonMeshing.num_threads",
+        "12"
+      ]
+    },
+    "checks": {
+      "fullRuns": 4,
+      "nativeStagesPerRun": 7,
+      "registeredPhotosEveryRun": 11,
+      "allSQLiteLogicalRowsAndBlobsExactAcrossRuns": true,
+      "denseMapsPerRun": 44,
+      "fixedInputCurrentVsPristineByteExactMaps": 44,
+      "allHardwarePMUs100Percent": true,
+      "fusedCloudAndMeshFiniteNonemptyIndicesInBounds": true,
+      "zeroFusedNormalsEveryRun": 0,
+      "effectiveFusionWorkersEveryRun": 12
+    },
+    "renderMethod": "All 11 camera views of four final meshes (44 renders), max side 768; nvdiffrast CUDA z-buffer, full triangles, perspective-correct encoded vertex RGB, no lighting or UV textures. One camera-centre Sim3 per mesh into the first pristine model frame. RGB PSNR on intersecting foreground; Gaussian 11x11 SSIM on foreground eroded by 5 pixels.",
+    "renderComparisons": [
+      {
+        "silhouetteIoU": 0.9801019783770201,
+        "worstViewDepthP95Normalized": 0.0006185263111082286,
+        "kind": "between-versions",
+        "ssim": 0.8487580635330894,
+        "psnrDb": 31.257722854466042,
+        "medianViewDepthP95Normalized": 0.0005555336283774311,
+        "pair": "0-upstream--1-current"
+      },
+      {
+        "silhouetteIoU": 0.9355003331702342,
+        "worstViewDepthP95Normalized": 0.0005873198133750268,
+        "kind": "between-versions",
+        "ssim": 0.8425528407096863,
+        "psnrDb": 31.11957420126929,
+        "medianViewDepthP95Normalized": 0.000518530258000291,
+        "pair": "0-upstream--2-current"
+      },
+      {
+        "silhouetteIoU": 0.9396611791360067,
+        "worstViewDepthP95Normalized": 0.0006091547003338614,
+        "kind": "within-upstream",
+        "ssim": 0.8428487452593717,
+        "psnrDb": 31.182428805102628,
+        "medianViewDepthP95Normalized": 0.0005304138469203647,
+        "pair": "0-upstream--3-upstream"
+      },
+      {
+        "silhouetteIoU": 0.9457240476668948,
+        "worstViewDepthP95Normalized": 0.0005974353561386976,
+        "kind": "within-current",
+        "ssim": 0.8466451059688221,
+        "psnrDb": 31.34935251306437,
+        "medianViewDepthP95Normalized": 0.0005317664505372836,
+        "pair": "1-current--2-current"
+      },
+      {
+        "silhouetteIoU": 0.9468479184415795,
+        "worstViewDepthP95Normalized": 0.0006228739655911823,
+        "kind": "between-versions",
+        "ssim": 0.8459687395529314,
+        "psnrDb": 31.36711642280156,
+        "medianViewDepthP95Normalized": 0.0005442297267217513,
+        "pair": "1-current--3-upstream"
+      },
+      {
+        "silhouetteIoU": 0.9722420740815512,
+        "worstViewDepthP95Normalized": 0.0005275154105983954,
+        "kind": "between-versions",
+        "ssim": 0.8470103198831732,
+        "psnrDb": 31.61580190744521,
+        "medianViewDepthP95Normalized": 0.00046703470601330475,
+        "pair": "2-current--3-upstream"
+      }
+    ],
+    "limitations": [
+      "This earlier workload tested 09a38a91, not afea7fac; do not relabel it as a fresh afea7fac end-to-end run.",
+      "Feature/matching database rows and blobs match, but fresh poses, decoded undistorted images, fused clouds, holes and final meshes vary within and across builds. Pristine repeats differ in 0.2% of decoded undistorted pixels.",
+      "Final meshes have 68-112 degenerate faces among approximately 2.20-2.32 million faces; no clean-topology claim.",
+      "Cross-version PSNR/SSIM comparable to within-pristine/current repeats. Silhouette overlap and depth vary; cross-version values are not uniformly inside a two-repeat scalar envelope. Actual holes change in pristine and fork runs. No identical final mesh, statistical equivalence, independent GT accuracy or photo-texture fidelity claim.",
+      "Fountain has no independent ground truth in this check. Render agreement is not held-out accuracy, photo fidelity or a texture-quality measure."
+    ]
+  },
+  "selectedBoundaryOracle": {
+    "comparedPublishedPins": {
+      "baseline": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+      "public": "afea7fac698d27619a13682eabe60d7e90cc9b58"
+    },
+    "cases": 12,
+    "casesPerMode": [
+      [
+        1,
+        5,
+        15
+      ],
+      [
+        17,
+        5,
+        16
+      ],
+      [
+        32,
+        5,
+        17
+      ],
+      [
+        33,
+        5,
+        17
+      ],
+      [
+        3,
+        9,
+        15
+      ],
+      [
+        3,
+        17,
+        15
+      ]
+    ],
+    "caseColumns": [
+      "sources",
+      "window_radius",
+      "samples"
+    ],
+    "modes": [
+      "photometric",
+      "geometric with consistency graph"
+    ],
+    "settings": "Two iterations, selected odd/non-square mixed input grids, synthetic plane depth range 3-5; immutable seed inputs, fresh outputs.",
+    "outcome": "Raw depth/normal maps and consistency graphs byte exact against independent pristine CLI; same ordered source IDs, finite/nonempty maps, seed inputs unchanged.",
+    "limit": "Selected synthetic branch coverage on sm_86, not exhaustive API coverage or performance evidence. An unpublished prototype also passed privately but contributes no published performance claim."
+  },
+  "limits": [
+    "Cumulative build comparison, not the isolated gain of one commit or only the newest GPU series.",
+    "One GPU architecture and two scenes; no cross-architecture performance or universal reconstruction-quality claim.",
+    "No algorithm or default changes in this validation commit. No new full CTest/pytest claim for this data-only publication.",
+    "No formal statistical noninferiority claim; report the separate observation counts and raw scores."
+  ],
+  "aiDisclosure": "AI-assisted investigation and reporting; measurements were run against the exact listed source pins and figures checked against saved native receipts."
+}
