@@ -7,6 +7,11 @@
 #include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
 
+#include "thirdparty/PoissonRecon/Geometry.h"
+#include "thirdparty/PoissonRecon/RegularTree.h"
+
+#include <array>
+
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -72,6 +77,57 @@ TEST(PoissonMeshing, WithTrimming) {
   // With random data and trimming, we can't make strong assumptions about
   // the number of vertices, but reading the file ensures valid PLY format.
   EXPECT_GE(mesh_vertices.size(), 0);
+}
+
+struct ChildInitializationData {
+  int calls = 0;
+  int serial = -1;
+};
+
+template <unsigned int Dim>
+void CheckThreadSafeChildInitialization() {
+  using Node = PoissonRecon::RegularTreeNode<Dim, ChildInitializationData, int>;
+  constexpr int kChildCount = 1 << Dim;
+  Node root;
+  int callbacks = 0;
+  auto initialize = [&](Node& child) {
+    ++callbacks;
+    ++child.nodeData.calls;
+    child.nodeData.serial = callbacks;
+  };
+
+  ASSERT_TRUE(root.template initChildren<true>(nullptr, initialize));
+  ASSERT_NE(root.children, nullptr);
+  EXPECT_EQ(callbacks, kChildCount);
+  std::array<int, kChildCount> published_serials{};
+  for (int child_index = 0; child_index < kChildCount; ++child_index) {
+    const Node& child = root.children[child_index];
+    const auto position = child.depthAndOffset();
+    EXPECT_EQ(child.parent, &root);
+    EXPECT_EQ(child.children, nullptr);
+    EXPECT_EQ(child.nodeData.calls, 1);
+    EXPECT_EQ(position.depth, 1);
+    for (unsigned int axis = 0; axis < Dim; ++axis) {
+      EXPECT_EQ(position.offset[axis], (child_index >> axis) & 1);
+    }
+    published_serials[child_index] = child.nodeData.serial;
+  }
+
+  // A subsequent attempt loses the CAS and must not modify published nodes.
+  Node* published = root.children;
+  EXPECT_FALSE(root.template initChildren<true>(nullptr, initialize));
+  EXPECT_EQ(root.children, published);
+  for (int child_index = 0; child_index < kChildCount; ++child_index) {
+    EXPECT_EQ(root.children[child_index].nodeData.calls, 1);
+    EXPECT_EQ(root.children[child_index].nodeData.serial,
+              published_serials[child_index]);
+  }
+  root.cleanChildren(true);
+}
+
+TEST(PoissonMeshing, ThreadSafeChildrenInitializedOnce) {
+  CheckThreadSafeChildInitialization<2>();
+  CheckThreadSafeChildInitialization<3>();
 }
 
 }  // namespace
