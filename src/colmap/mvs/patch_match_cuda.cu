@@ -1297,6 +1297,7 @@ __global__ void SweepFromTopToBottom(
                                    : kSampleWindowSize;
       float geometric_costs[3] = {0};
       if (owner && col < cost_map.GetWidth()) {
+        int num_unique_sources = 0;
         for (int slot = 0; slot < kSampleWindowSize; ++slot) {
           pcc_computer.src_image_idx = -1;
           if (slot < sample_count) {
@@ -1312,18 +1313,25 @@ __global__ void SweepFromTopToBottom(
             }
           }
           if constexpr (kCooperative) {
-            cooperative_job.source[slot][threadIdx.x] =
-                pcc_computer.src_image_idx;
             if constexpr (kSampleWindowSize > 1) {
-              int canonical_slot = pcc_computer.src_image_idx >= 0 ? slot : -1;
-              for (int previous = 0; previous < slot && canonical_slot == slot;
-                   ++previous) {
-                if (cooperative_job.source[previous][threadIdx.x] ==
-                    pcc_computer.src_image_idx) {
-                  canonical_slot = previous;
+              int job_slot = -1;
+              if (pcc_computer.src_image_idx >= 0) {
+                job_slot = 0;
+                while (job_slot < num_unique_sources &&
+                       cooperative_job.source[job_slot][threadIdx.x] !=
+                           pcc_computer.src_image_idx) {
+                  ++job_slot;
+                }
+                if (job_slot == num_unique_sources) {
+                  cooperative_job.source[job_slot][threadIdx.x] =
+                      pcc_computer.src_image_idx;
+                  ++num_unique_sources;
                 }
               }
-              cooperative_sample_alias[slot][threadIdx.x] = canonical_slot;
+              cooperative_sample_alias[slot][threadIdx.x] = job_slot;
+            } else {
+              cooperative_job.source[slot][threadIdx.x] =
+                  pcc_computer.src_image_idx;
             }
           } else if (pcc_computer.src_image_idx >= 0) {
             if constexpr (kGeomConsistencyTerm) {
@@ -1346,6 +1354,13 @@ __global__ void SweepFromTopToBottom(
             }
           }
         }
+        if constexpr (kCooperative && kSampleWindowSize > 1) {
+          // Pack unique jobs first; aliases retain every original sample.
+          for (int slot = num_unique_sources; slot < kSampleWindowSize;
+               ++slot) {
+            cooperative_job.source[slot][threadIdx.x] = -1;
+          }
+        }
       }
 
       if constexpr (kCooperative) {
@@ -1360,16 +1375,12 @@ __global__ void SweepFromTopToBottom(
         // Invalid columns and padded final-window samples reach both barriers.
         __syncthreads();
         const int hypothesis = threadIdx.y % 4;
-        // Worker waves read immutable row state and write disjoint slots.
+        // Worker waves evaluate dense unique jobs into disjoint result slots.
         const int worker_limit = kSampleWindowSize == 1 ? 1 : sample_count;
         for (int slot = threadIdx.y / 4; slot < worker_limit;
              slot += kSampleBatchSize) {
           const int source = cooperative_job.source[slot][threadIdx.x];
-          bool canonical = true;
-          if constexpr (kSampleWindowSize > 1) {
-            canonical = cooperative_sample_alias[slot][threadIdx.x] == slot;
-          }
-          if (col < cost_map.GetWidth() && source >= 0 && canonical) {
+          if (col < cost_map.GetWidth() && source >= 0) {
             if constexpr (kGeomConsistencyTerm) {
               if (hypothesis < 3) {
                 const int depth_hypothesis =
@@ -1402,12 +1413,13 @@ __global__ void SweepFromTopToBottom(
         __syncthreads();
         if (owner && col < cost_map.GetWidth()) {
           for (int slot = 0; slot < sample_count; ++slot) {
-            const int source = cooperative_job.source[slot][threadIdx.x];
-            if (source < 0) continue;
             int result_slot = slot;
             if constexpr (kSampleWindowSize > 1) {
               result_slot = cooperative_sample_alias[slot][threadIdx.x];
+              if (result_slot < 0) continue;
             }
+            const int source = cooperative_job.source[result_slot][threadIdx.x];
+            if (source < 0) continue;
             // Reuse identical evaluations, but retain every original sample
             // add.
             costs[0] += cost_map.Get(row, col, source);
@@ -1428,8 +1440,17 @@ __global__ void SweepFromTopToBottom(
               }
             }
           }
-          pcc_computer.src_image_idx =
-              cooperative_job.source[sample_count - 1][threadIdx.x];
+          if constexpr (kSampleWindowSize > 1) {
+            // Workers may overwrite their local source; restore the last draw.
+            const int last_job =
+                cooperative_sample_alias[sample_count - 1][threadIdx.x];
+            pcc_computer.src_image_idx =
+                last_job >= 0 ? cooperative_job.source[last_job][threadIdx.x]
+                              : -1;
+          } else {
+            pcc_computer.src_image_idx =
+                cooperative_job.source[sample_count - 1][threadIdx.x];
+          }
         }
       } else {
         if (pcc_computer.src_image_idx == -1) continue;
