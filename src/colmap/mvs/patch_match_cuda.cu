@@ -1754,8 +1754,9 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 #endif
   // Initial-cost and element-wise kernels retain their existing launch shape.
   // More column tiles can occupy the GPU; wider windows retain the full halo.
-  constexpr int kSweepBlockWidth =
-      kCooperative && kWindowSize / 2 <= 16 ? 16 : THREADS_PER_BLOCK;
+  constexpr int kSweepBlockWidth = !kCooperative || kWindowSize / 2 > 16
+                                       ? THREADS_PER_BLOCK
+                                       : (kWindowSize / 2 <= 8 ? 8 : 16);
   const dim3 sweep_kernel_block_size(kSweepBlockWidth, kCooperative ? 4 : 1, 1);
 
   for (int iter = 0; iter < options_.num_iterations; ++iter) {

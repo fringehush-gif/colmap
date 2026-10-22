@@ -320,8 +320,8 @@ TEST_F(CudaTest, ExplicitAndDefaultStreamHelpers) {
 
 TEST_F(CudaTest, WideWindowsPreserveOutputs) {
   Inputs inputs = MakeInputs(0);
-  // Radius 16 fits the narrow tile; radius 17 requires the wider fallback.
-  for (const int radius : {16, 17}) {
+  // Cover both boundaries between the 8-, 16-, and 32-column tiles.
+  for (const int radius : {8, 9, 16, 17}) {
     SCOPED_TRACE(radius);
     PatchMatchOptions options = MakeOptions(false, false, false);
     options.window_radius = radius;
