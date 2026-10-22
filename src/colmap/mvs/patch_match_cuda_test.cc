@@ -380,7 +380,8 @@ TEST_F(CudaTest, EvenSampleGroupsPreserveOutputs) {
 }
 
 TEST_F(CudaTest, SampleWindowBoundariesPreserveOutputs) {
-  for (const int num_sources : {1, 17}) {
+  // Cover source-mask capacity and its larger-source fallback.
+  for (const int num_sources : {1, 17, 32, 33}) {
     SCOPED_TRACE(num_sources);
     Inputs inputs = MakeInputs(0, num_sources);
     for (const int num_samples : {16, 17}) {
