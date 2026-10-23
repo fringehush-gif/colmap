@@ -2,12 +2,14 @@
 
 #include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/patch_match_rng_perimeter.h"
 #include "colmap/util/cudacc.h"
 
 #include <gtest/gtest.h>
 
 #ifndef COLMAP_HIP_ENABLED
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -29,6 +31,65 @@ TEST(PatchMatchCuda, RotationBufferReuseRequiresCuda) {
   GTEST_SKIP() << "The rotation-buffer option is CUDA-only";
 }
 #else
+
+TEST(PatchMatchCuda, RngPerimeterLayoutPreservesRotatedRowZero) {
+  const std::array<std::pair<std::size_t, std::size_t>, 7> shapes = {
+      {{1, 1}, {1, 9}, {9, 1}, {2, 7}, {7, 2}, {33, 17}, {47, 35}}};
+  for (const auto& [width, height] : shapes) {
+    SCOPED_TRACE(std::to_string(width) + "x" + std::to_string(height));
+    const PatchMatchRngPerimeter layout{width, height};
+    const std::size_t expected_count =
+        width == 1 ? height
+                   : (height == 1 ? width : 2 * width + 2 * height - 4);
+    ASSERT_EQ(layout.Count(), expected_count);
+    std::vector<bool> seen(expected_count, false);
+    using Row = std::vector<std::size_t>;
+    std::vector<Row> rotated(height, Row(width));
+    for (std::size_t row = 0; row < height; ++row) {
+      for (std::size_t col = 0; col < width; ++col) {
+        rotated[row][col] = row * width + col;
+        if (row != 0 && col != 0 && row + 1 != height && col + 1 != width) {
+          continue;
+        }
+        const std::size_t index = layout.Index(row, col);
+        ASSERT_LT(index, expected_count);
+        EXPECT_FALSE(seen[index]);
+        seen[index] = true;
+        std::size_t recovered_row = 0, recovered_col = 0;
+        layout.Coordinates(index, &recovered_row, &recovered_col);
+        EXPECT_EQ(recovered_row, row);
+        EXPECT_EQ(recovered_col, col);
+      }
+    }
+    for (const bool visited : seen) EXPECT_TRUE(visited);
+
+    for (unsigned rotation = 0; rotation < 4; ++rotation) {
+      const std::size_t current_height = rotated.size();
+      const std::size_t current_width = rotated.front().size();
+      std::vector<bool> active(expected_count, false);
+      for (std::size_t col = 0; col < current_width; ++col) {
+        const std::size_t index = layout.SweepIndex(rotation, col);
+        ASSERT_LT(index, expected_count);
+        EXPECT_FALSE(active[index]);
+        active[index] = true;
+        std::size_t original_row = 0, original_col = 0;
+        layout.Coordinates(index, &original_row, &original_col);
+        EXPECT_EQ(original_row * width + original_col, rotated[0][col]);
+      }
+      std::vector<Row> next(current_width, Row(current_height));
+      for (std::size_t row = 0; row < current_height; ++row) {
+        for (std::size_t col = 0; col < current_width; ++col) {
+          next[current_width - 1 - col][row] = rotated[row][col];
+        }
+      }
+      rotated.swap(next);
+    }
+    EXPECT_EQ(layout.SweepIndex(0, width - 1), layout.SweepIndex(1, 0));
+    EXPECT_EQ(layout.SweepIndex(1, height - 1), layout.SweepIndex(2, 0));
+    EXPECT_EQ(layout.SweepIndex(2, width - 1), layout.SweepIndex(3, 0));
+    EXPECT_EQ(layout.SweepIndex(3, height - 1), layout.SweepIndex(0, 0));
+  }
+}
 
 constexpr float kPlaneZ = 4.0f;
 constexpr float kDepthMin = 3.0f;
