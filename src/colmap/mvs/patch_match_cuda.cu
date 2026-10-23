@@ -2356,13 +2356,13 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   // the temporary selection probabilities in the global_workspace_.
   // However, it is useful to keep the probabilities for the entire image
   // in memory, so that it can be exported.
-  sel_prob_map_ = std::make_unique<GpuMat<float>>(
+  sel_prob_map_ = std::make_unique<PatchMatchStateMap>(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
-  prev_sel_prob_map_ = std::make_unique<GpuMat<float>>(
+  prev_sel_prob_map_ = std::make_unique<PatchMatchStateMap>(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
   prev_sel_prob_map_->FillWithScalar(0.5f);
 
-  cost_map_ = std::make_unique<GpuMat<float>>(
+  cost_map_ = std::make_unique<PatchMatchStateMap>(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
 
   const int ref_max_dim = std::max(ref_width_, ref_height_);
@@ -2400,11 +2400,6 @@ void PatchMatchCuda::InitAlternateOrientationMemory() {
   alternate_depth_map_ = std::make_unique<GpuMat<float>>(width, height);
   alternate_normal_map_ = std::make_unique<GpuMat<float>>(width, height, 3);
   alternate_ref_image_ = std::make_unique<GpuMatRefImage>(width, height);
-  alternate_prev_sel_prob_map_ =
-      std::make_unique<GpuMat<float>>(width, height, sources);
-  alternate_sel_prob_map_ =
-      std::make_unique<GpuMat<float>>(width, height, sources);
-  alternate_cost_map_ = std::make_unique<GpuMat<float>>(width, height, sources);
   if (options_.filter) {
     alternate_consistency_mask_ =
         std::make_unique<GpuMat<uint8_t>>(width, height, sources);
@@ -2441,12 +2436,15 @@ void PatchMatchCuda::InitAlternateOrientationMemory() {
   add(alternate_ref_image_->sum_image);
   add(ref_image_->squared_sum_image);
   add(alternate_ref_image_->squared_sum_image);
-  add(prev_sel_prob_map_);
-  add(alternate_prev_sel_prob_map_);
-  add(sel_prob_map_);
-  add(alternate_sel_prob_map_);
-  add(cost_map_);
-  add(alternate_cost_map_);
+  // These owners reserve both layouts; active view spans undercount them.
+  const auto add_state = [&pitched_bytes](const auto& mat) {
+    THROW_CHECK_LE(mat->GetCapacityBytes(),
+                   std::numeric_limits<size_t>::max() - pitched_bytes);
+    pitched_bytes += mat->GetCapacityBytes();
+  };
+  add_state(prev_sel_prob_map_);
+  add_state(sel_prob_map_);
+  add_state(cost_map_);
   add(consistency_mask_);
   add(alternate_consistency_mask_);
   add(global_workspace_);
@@ -2456,6 +2454,18 @@ void PatchMatchCuda::InitAlternateOrientationMemory() {
             << size_t{2} * ref_width_ * ref_height_;
 }
 #endif
+
+// A sweep has finished and synchronized before this call. The previous
+// probability role is now dead; selected becomes dead after its rotation;
+// old cost becomes dead after its rotation. Reuse only those dead allocations.
+void PatchMatchCuda::RotateStateMaps(size_t width, size_t height) {
+  prev_sel_prob_map_->Reorient(width, height);
+  sel_prob_map_->Rotate(prev_sel_prob_map_.get());
+  sel_prob_map_->Reorient(width, height);
+  cost_map_->Rotate(sel_prob_map_.get());
+  cost_map_.swap(sel_prob_map_);
+  sel_prob_map_->Reorient(width, height);
+}
 
 void PatchMatchCuda::Rotate() {
 #ifndef COLMAP_HIP_ENABLED
@@ -2515,20 +2525,7 @@ void PatchMatchCuda::Rotate() {
     BindRefImageTexture();
   }
 
-  // Rotate selection probability map.
-  prev_sel_prob_map_ = std::make_unique<GpuMat<float>>(
-      width, height, problem_.src_image_idxs.size());
-  sel_prob_map_->Rotate(prev_sel_prob_map_.get());
-  sel_prob_map_ = std::make_unique<GpuMat<float>>(
-      width, height, problem_.src_image_idxs.size());
-
-  // Rotate cost map.
-  {
-    std::unique_ptr<GpuMat<float>> rotated_cost_map(
-        new GpuMat<float>(width, height, problem_.src_image_idxs.size()));
-    cost_map_->Rotate(rotated_cost_map.get());
-    cost_map_.swap(rotated_cost_map);
-  }
+  RotateStateMaps(width, height);
 
   // Recompute Cuda configuration for rotated reference image.
   ComputeCudaConfig();
@@ -2562,13 +2559,7 @@ void PatchMatchCuda::RotateWithBufferReuse() {
   std::swap(ref_image_array_, alternate_ref_image_array_);
   BindRefImageTexture();
 
-  // Both probability roles exist independently in BOTH dimensions. A sweep
-  // overwrites selected probabilities completely before consuming them.
-  sel_prob_map_->Rotate(alternate_prev_sel_prob_map_.get());
-  prev_sel_prob_map_.swap(alternate_prev_sel_prob_map_);
-  sel_prob_map_.swap(alternate_sel_prob_map_);
-  cost_map_->Rotate(alternate_cost_map_.get());
-  cost_map_.swap(alternate_cost_map_);
+  RotateStateMaps(width, height);
   if (options_.filter) {
     consistency_mask_.swap(alternate_consistency_mask_);
   }

@@ -10,6 +10,7 @@
 #include "colmap/mvs/image.h"
 #include "colmap/mvs/normal_map.h"
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/patch_match_state_map.h"
 #include "colmap/util/cuda_to_hip.h"
 
 #include <iostream>
@@ -43,6 +44,7 @@ class PatchMatchCuda {
   void InitSourceImages();
   void InitTransforms();
   void InitWorkspaceMemory();
+  void RotateStateMaps(size_t width, size_t height);
 #ifndef COLMAP_HIP_ENABLED
   void InitAlternateOrientationMemory();
   void BindReusableRefImageTexture();
@@ -100,9 +102,9 @@ class PatchMatchCuda {
   std::unique_ptr<GpuMatRefImage> ref_image_;
   std::unique_ptr<GpuMat<float>> depth_map_;
   std::unique_ptr<GpuMat<float>> normal_map_;
-  std::unique_ptr<GpuMat<float>> sel_prob_map_;
-  std::unique_ptr<GpuMat<float>> prev_sel_prob_map_;
-  std::unique_ptr<GpuMat<float>> cost_map_;
+  std::unique_ptr<PatchMatchStateMap> sel_prob_map_;
+  std::unique_ptr<PatchMatchStateMap> prev_sel_prob_map_;
+  std::unique_ptr<PatchMatchStateMap> cost_map_;
   std::unique_ptr<GpuMatPRNG> rand_state_map_;
   std::unique_ptr<GpuMat<uint8_t>> consistency_mask_;
 
@@ -116,9 +118,6 @@ class PatchMatchCuda {
   std::unique_ptr<GpuMat<float>> alternate_depth_map_;
   std::unique_ptr<GpuMat<float>> alternate_normal_map_;
   std::unique_ptr<GpuMatRefImage> alternate_ref_image_;
-  std::unique_ptr<GpuMat<float>> alternate_prev_sel_prob_map_;
-  std::unique_ptr<GpuMat<float>> alternate_sel_prob_map_;
-  std::unique_ptr<GpuMat<float>> alternate_cost_map_;
   std::unique_ptr<GpuMat<uint8_t>> alternate_consistency_mask_;
   std::unique_ptr<CudaArrayLayeredTexture<uint8_t>>
       alternate_ref_image_texture_;
