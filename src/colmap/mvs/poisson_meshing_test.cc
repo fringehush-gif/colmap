@@ -11,16 +11,21 @@
 #include "thirdparty/PoissonRecon/RegularTree.h"
 #include "thirdparty/PoissonRecon/trim_gpu_adapter.h"
 
+// NestedVector requires stream declarations supplied by RegularTree.
+#include "thirdparty/PoissonRecon/NestedVector.h"
+
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
 #include "thirdparty/PoissonRecon/aux_gpu.h"
 #include "thirdparty/PoissonRecon/trim_gpu.h"
 #endif
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -88,6 +93,59 @@ TEST(PoissonMeshing, WithTrimming) {
   // With random data and trimming, we can't make strong assumptions about
   // the number of vertices, but reading the file ensures valid PLY format.
   EXPECT_GE(mesh_vertices.size(), 0);
+}
+
+template <unsigned int Depth>
+void CheckConcurrentNestedVectorSize() {
+  constexpr size_t kCapacity = size_t{1} << (3 * (Depth + 1));
+  constexpr int kReaders = 4;
+  for (int repeat = 0; repeat < 16; ++repeat) {
+    PoissonRecon::NestedVector<int, Depth, 3> values;
+    EXPECT_EQ(values.size(), 0);
+    values.resize(1, -7);
+    const int* first = &values[0];
+    std::atomic<size_t> requested_size{1};
+    std::atomic<int> ready{0};
+    std::atomic<bool> done{false};
+    std::atomic<bool> invalid_size{false};
+    std::array<std::thread, kReaders> readers;
+    for (std::thread& reader : readers) {
+      reader = std::thread([&] {
+        ++ready;
+        do {
+          const size_t observed = values.size();
+          // A lower bound can lag behind growth, but cannot exceed a size
+          // announced before that growth started.
+          if (observed > requested_size.load()) {
+            invalid_size.store(true);
+          }
+        } while (!done.load());
+      });
+    }
+    while (ready.load() != kReaders) {
+      std::this_thread::yield();
+    }
+    for (size_t count = 2; count <= kCapacity; ++count) {
+      requested_size.store(count);
+      values.resize(count, -7);
+    }
+    done.store(true);
+    for (std::thread& reader : readers) {
+      reader.join();
+    }
+    EXPECT_FALSE(invalid_size.load());
+    EXPECT_EQ(values.size(), kCapacity);
+    EXPECT_EQ(&values[0], first);
+    for (size_t i = 0; i < kCapacity; ++i) {
+      EXPECT_EQ(values[i], -7);
+    }
+  }
+}
+
+TEST(PoissonMeshing, ConcurrentNestedVectorSizeRemainsLowerBound) {
+  // Small blocks exercise publication at two recursive nesting depths.
+  CheckConcurrentNestedVectorSize<1>();
+  CheckConcurrentNestedVectorSize<2>();
 }
 
 struct ChildInitializationData {
