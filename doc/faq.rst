@@ -849,7 +849,22 @@ for CUDA-enabled GPUs, e.g., ``--PatchMatchStereo.gpu_index=0,1,2,3`` runs the d
 reconstruction on 4 GPUs in parallel. You can also run multiple dense
 reconstruction threads on the same GPU by specifying the same GPU index twice,
 e.g., ``--PatchMatchStereo.gpu_index=0,0,1,1,2,3``. By default, COLMAP runs one
-dense reconstruction thread per CUDA-enabled GPU.
+dense reconstruction thread per CUDA-enabled GPU. The default GPU index ``-1``
+selects every visible CUDA device; an explicit list restricts that selection.
+
+Each GPU worker processes a complete reference-image problem on its own device.
+The GPUs do not pool their memory, so every selected device must fit the images
+and intermediate buffers needed by its assigned problems. A slower GPU can
+still improve throughput by processing problems concurrently with a faster GPU.
+The benefit depends on the workload, device memory, and transfer costs.
+
+For example, compare ``--PatchMatchStereo.gpu_index 0`` with
+``--PatchMatchStereo.gpu_index 0,1`` with identical inputs and settings.
+Use equivalent fresh output workspaces for timing: completed depth/normal maps
+are skipped on subsequent runs.
+``--PatchMatchStereo.num_threads`` controls the separate CPU input-loading pool;
+it does not set the number of GPU workers. More concurrent GPU workers can
+increase host memory use and CPU work, even when elapsed time decreases.
 
 
 .. _faq-dense-timeout:
