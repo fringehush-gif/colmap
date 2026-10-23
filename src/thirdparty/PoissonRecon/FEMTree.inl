@@ -916,8 +916,25 @@ SparseNodeData< OutData , UIntPack< DataSigs ... > > FEMTree< Dim , Real >::setI
 	pointDepthAndWeight.weight = 0;
 	SparseNodeData< OutData , UIntPack< DataSigs ... > > dataField;
 	std::vector< Point< Real , 2 > > pointDepthAndWeightSums( ThreadPool::NumThreads() , Point< Real , 2 >() );
+#if defined(POISSON_NORMAL_NATIVE_GPU)
+    constexpr bool normal_shape=Dim==3 && std::is_same_v<Real,float> &&
+        std::is_same_v<OutData,Point<Real,Dim>> && DensityDegree==2 &&
+        DataDegrees::Min()==2 && DataDegrees::Max()==2;
+    const bool normal_gpu=normal_shape && density && ThreadPool::NumThreads()>0 &&
+        ::PoissonNormalCapture::admitted &&
+        samples.size()>=400000 && samples.size()<=4000000;
+    std::vector<std::vector<PoissonNormalGpu::Record>> normal_records(
+        normal_gpu ? ThreadPool::NumThreads() : 0);
+    if(normal_gpu)
+        for(auto& records:normal_records)
+            records.reserve(2*(samples.size()/normal_records.size()+1));
+#endif // POISSON_NORMAL_NATIVE_GPU
 	ThreadPool::ParallelFor( 0 , samples.size() , [&]( unsigned int thread , size_t i )
 		{
+#if defined(POISSON_NORMAL_NATIVE_GPU)
+            ::PoissonNormalCapture::ThreadScope normal_scope(
+                normal_gpu ? &normal_records[thread] : nullptr);
+#endif
 			DensityKey& densityKey = densityKeys[ thread ];
 			DataKey& dataKey = dataKeys[ thread ];
 			const ProjectiveData< Point< Real , Dim > , Real >& sample = samples[i].sample;
@@ -966,6 +983,89 @@ SparseNodeData< OutData , UIntPack< DataSigs ... > > FEMTree< Dim , Real >::setI
 	for( unsigned int i=0 ; i<depthAndWeightSums.size() ; i++ ) pointDepthAndWeight.data += pointDepthAndWeightSums[i];
 	pointDepthAndWeight.weight = 0;
 	for( unsigned int i=0 ; i<depthAndWeightSums.size() ; i++ ) pointDepthAndWeight.weight += depthAndWeightSums[i];
+#if defined(POISSON_NORMAL_NATIVE_GPU)
+    if constexpr(normal_shape) if(normal_gpu)
+    {
+        const std::size_t count=(std::size_t)_nodeCount;
+        std::vector<const PoissonNormalGpu::Record*> blocks;
+        std::vector<std::size_t> counts;
+        std::size_t record_count=0;
+        for(const auto& records:normal_records)
+        {
+            blocks.push_back(records.data());
+            counts.push_back(records.size());
+            record_count+=records.size();
+        }
+        bool completed=false;
+        if(count && count<=128000000 && record_count && record_count<=8000000)
+        {
+            std::vector<float> field;
+            std::vector<std::uint32_t> touched;
+            try
+            {
+                field.resize(count*3);
+                touched.resize(count);
+            }
+            catch(const std::bad_alloc&)
+            {
+                // No device submission or native field write has occurred.
+                std::vector<float>().swap(field);
+                std::vector<std::uint32_t>().swap(touched);
+            }
+            if(field.size()==count*3 && touched.size()==count)
+            {
+                PoissonNormalGpu::Stats stats{};
+                completed=PoissonNormalGpu::Reduce(
+                    blocks.data(),counts.data(),blocks.size(),count,
+                    field.data(),touched.data(),stats);
+                if(completed)
+                {
+                    SparseNodeData<OutData,UIntPack<DataSigs...>> assembled;
+                    assembled._indices.resize(count,-1);
+                    std::size_t entries=0;
+                    for(std::size_t i=0;i<count;++i)
+                        if(touched[i])assembled._indices[i]=(node_index_type)entries++;
+                    assembled._data.resize(entries,zero);
+                    ThreadPool::ParallelFor(0,count,[&](unsigned int,std::size_t i){
+                        if(touched[i])
+                        {
+                            OutData value;
+                            for(int c=0;c<3;++c)value[c]=field[3*i+c];
+                            assembled._data[assembled._indices[i]]=value;
+                        }
+                    });
+                    dataField=std::move(assembled);
+                }
+            }
+        }
+        if(!completed)
+        {
+            // The conversion callback and tree growth have already happened.
+            // Replay only captured splats, never the sample loop.
+            if(dataField.size())
+                throw std::runtime_error("normal GPU replay after native field write");
+            std::vector<FEMTreeNode*> raw_nodes(count,nullptr);
+            _tree.processNodes([&](FEMTreeNode* current){
+                const node_index_type index=current->nodeData.nodeIndex;
+                if(index>=0)
+                {
+                    if(std::uint64_t(index)>=count || raw_nodes[index])
+                        throw std::runtime_error("normal GPU replay node index map");
+                    raw_nodes[index]=current;
+                }
+            });
+            ::PoissonNormalCapture::Replay(
+                normal_records,count,
+                [&](std::uint32_t index){return raw_nodes[index];},
+                [&](FEMTreeNode* node,const float* components,float coefficient){
+                    OutData value;
+                    for(int c=0;c<3;++c)value[c]=components[c];
+                    Atomic<OutData>::Add(
+                        dataField.at(node,zero),value*(Real)coefficient);
+                });
+        }
+    }
+#endif // POISSON_NORMAL_NATIVE_GPU
 	return dataField;
 }
 

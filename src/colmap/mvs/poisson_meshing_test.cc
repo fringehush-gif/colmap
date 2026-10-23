@@ -7,6 +7,10 @@
 #include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
 
+#include "thirdparty/PoissonRecon/PreProcessor.h"
+
+// FEM declarations require the preceding vendor configuration.
+#include "thirdparty/PoissonRecon/FEMTree.h"
 #include "thirdparty/PoissonRecon/Geometry.h"
 #include "thirdparty/PoissonRecon/RegularTree.h"
 #include "thirdparty/PoissonRecon/trim_gpu_adapter.h"
@@ -16,14 +20,19 @@
 
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
 #include "thirdparty/PoissonRecon/aux_gpu.h"
+#include "thirdparty/PoissonRecon/normal_capture.h"
 #include "thirdparty/PoissonRecon/trim_gpu.h"
 #endif
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <iterator>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -325,6 +334,145 @@ TEST(PoissonMeshing, GpuTrimBoundaryGraphAndNonmanifoldRejection) {
   EXPECT_STREQ(stats.reason, "nonmanifold");
   ASSERT_EQ(graph.size(), 1);
   EXPECT_EQ(graph.front(), std::uint64_t(0x0000000200000001));
+}
+
+PoissonNormalGpu::Record MakeNormalRecord() {
+  PoissonNormalGpu::Record record{};
+  std::fill(std::begin(record.node), std::end(record.node), UINT32_MAX);
+  return record;
+}
+
+TEST(PoissonMeshing, NormalReplayRetainsNativeFirstTouchAndRepeatedSlots) {
+  using Tree = PoissonRecon::FEMTree<3, float>;
+  using Node = Tree::FEMTreeNode;
+  using Value = PoissonRecon::Point<float, 3>;
+  Node nodes[2];
+  nodes[0].nodeData.nodeIndex = 0;
+  nodes[1].nodeData.nodeIndex = 1;
+  PoissonRecon::SparseNodeData<Value, PoissonRecon::UIntPack<0, 0, 0>> field;
+  const Value zero;
+
+  auto record = MakeNormalRecord();
+  record.node[0] = 1;
+  record.coefficient[0] = 0.5f;
+  record.node[1] = 0;
+  record.coefficient[1] = 1.0f;
+  record.node[26] = 1;
+  record.coefficient[26] = 0.25f;
+  record.value[0] = 2.0f;
+  record.value[1] = 4.0f;
+  record.value[2] = 8.0f;
+  const std::vector<std::vector<PoissonNormalGpu::Record>> blocks{{record}};
+  std::vector<std::uint32_t> order;
+  PoissonNormalCapture::Replay(
+      blocks,
+      2,
+      [&](std::uint32_t index) { return &nodes[index]; },
+      [&](Node* node, const float* components, float coefficient) {
+        order.push_back(node->nodeData.nodeIndex);
+        Value value;
+        for (int channel = 0; channel < 3; ++channel) {
+          value[channel] = components[channel];
+        }
+        PoissonRecon::Atomic<Value>::Add(field.at(node, zero),
+                                         value * coefficient);
+      });
+  EXPECT_EQ(order, (std::vector<std::uint32_t>{1, 0, 1}));
+  EXPECT_EQ(field.size(), 2);
+  EXPECT_EQ(field.index(&nodes[1]), 0);
+  EXPECT_EQ(field.index(&nodes[0]), 1);
+  for (int channel = 0; channel < 3; ++channel) {
+    EXPECT_EQ(field.at(&nodes[0], zero)[channel], record.value[channel]);
+    EXPECT_EQ(field.at(&nodes[1], zero)[channel],
+              record.value[channel] * 0.75f);
+  }
+}
+
+TEST(PoissonMeshing, GpuNormalPrelaunchRefusalPreservesOutputs) {
+  const auto record = MakeNormalRecord();
+  const PoissonNormalGpu::Record* blocks[] = {&record};
+  const std::size_t counts[] = {1};
+  std::array<float, 3> output{7, 8, 9};
+  std::uint32_t touched = 77;
+  PoissonNormalGpu::Stats stats;
+  EXPECT_FALSE(PoissonNormalGpu::Reduce(
+      blocks, counts, 1, 128000001, output.data(), &touched, stats));
+  EXPECT_STREQ(stats.reason, "shape");
+  EXPECT_EQ(output, (std::array<float, 3>{7, 8, 9}));
+  EXPECT_EQ(touched, 77);
+
+  // This is rejected from metadata before reading the claimed record array.
+  const std::size_t oversized_counts[] = {8000000};
+  EXPECT_FALSE(PoissonNormalGpu::Reduce(
+      blocks, oversized_counts, 1, 128000000, output.data(), &touched, stats));
+  EXPECT_STREQ(stats.reason, "workspace-budget");
+  EXPECT_EQ(output, (std::array<float, 3>{7, 8, 9}));
+  EXPECT_EQ(touched, 77);
+}
+
+TEST(PoissonMeshing, GpuNormalReductionRetainsSlotsAndSubnormalBits) {
+  PoissonNormalGpu::Stats stats;
+  if (!PoissonNormalGpu::Available(stats)) {
+    GTEST_SKIP() << stats.reason;
+  }
+  std::array<PoissonNormalGpu::Record, 3> records;
+  for (auto& record : records) {
+    record = MakeNormalRecord();
+  }
+  records[0].node[0] = 0;
+  records[0].coefficient[0] = 0.5f;
+  records[0].node[26] = 2;
+  records[0].coefficient[26] = 1;
+  records[0].value[0] = 1;
+  records[0].value[1] = 2;
+  records[0].value[2] = 3;
+  records[1].node[0] = 0;
+  records[1].coefficient[0] = 0.25f;
+  records[1].value[0] = 4;
+  records[1].value[1] = 8;
+  records[1].value[2] = 12;
+  records[2].node[12] = 3;
+  records[2].coefficient[12] = 1;
+  const std::uint32_t denormal_bits = 1;
+  std::memcpy(&records[2].value[0], &denormal_bits, sizeof(denormal_bits));
+  const PoissonNormalGpu::Record* blocks[] = {records.data(), nullptr};
+  const std::size_t counts[] = {records.size(), 0};
+  std::array<float, 12> output;
+  output.fill(-7);
+  std::array<std::uint32_t, 4> touched{77, 77, 77, 77};
+  ASSERT_TRUE(PoissonNormalGpu::Reduce(
+      blocks, counts, 2, 4, output.data(), touched.data(), stats));
+  EXPECT_EQ(touched, (std::array<std::uint32_t, 4>{1, 0, 1, 1}));
+  EXPECT_EQ(output[0], 1.5f);
+  EXPECT_EQ(output[1], 3.0f);
+  EXPECT_EQ(output[2], 4.5f);
+  for (int channel = 0; channel < 3; ++channel) {
+    EXPECT_EQ(output[3 + channel], 0);
+    EXPECT_EQ(output[6 + channel], records[0].value[channel]);
+  }
+  std::uint32_t result_bits = 0;
+  std::memcpy(&result_bits, &output[9], sizeof(result_bits));
+  EXPECT_EQ(result_bits, denormal_bits);
+}
+
+TEST(PoissonMeshing, GpuNormalInvalidNodeRemainsAnError) {
+  PoissonNormalGpu::Stats stats;
+  if (!PoissonNormalGpu::Available(stats)) {
+    GTEST_SKIP() << stats.reason;
+  }
+  auto record = MakeNormalRecord();
+  record.node[0] = 1;
+  record.coefficient[0] = 1;
+  record.value[0] = 1;
+  const PoissonNormalGpu::Record* blocks[] = {&record};
+  const std::size_t counts[] = {1};
+  std::array<float, 3> output{7, 8, 9};
+  std::uint32_t touched = 77;
+  EXPECT_THROW(PoissonNormalGpu::Reduce(
+                   blocks, counts, 1, 1, output.data(), &touched, stats),
+               std::runtime_error);
+  EXPECT_EQ(output, (std::array<float, 3>{7, 8, 9}));
+  EXPECT_EQ(touched, 77);
 }
 
 #endif

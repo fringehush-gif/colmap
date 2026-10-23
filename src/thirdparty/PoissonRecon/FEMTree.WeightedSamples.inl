@@ -289,6 +289,43 @@ void FEMTree< Dim , Real >::_splatPointData( V zero , Allocator< FEMTreeNode > *
 	Real w;
 	_startAndWidth( node , start , w );
 	__SetBSplineComponentValues< Real , FEMSignature< DataSigs >::Degree ... >( &position[0] , &start[0] , w , &values[0][0] , SupportSizes::Max() );
+#if defined(POISSON_NORMAL_NATIVE_GPU)
+    constexpr bool normal_shape = Dim==3 && std::is_same_v<Real,float> &&
+        std::is_same_v<V,Point<Real,Dim>> && SupportSizes::Min()==3 &&
+        SupportSizes::Max()==3;
+    if constexpr(normal_shape)
+    {
+        if(auto* records=::PoissonNormalCapture::target)
+        {
+            PoissonNormalGpu::Record captured{};
+            for(int j=0;j<27;++j)captured.node[j]=UINT32_MAX;
+            for(int j=0;j<3;++j)captured.value[j]=v[j];
+            unsigned slot=0;
+            double capture_scratch[Dim+1];
+            capture_scratch[0]=1;
+            WindowLoop< Dim >::Run
+            (
+                ZeroUIntPack< Dim >() , UIntPack< BSplineSupportSizes< FEMSignature< DataSigs >::Degree >::SupportSize ... >() ,
+                [&]( int d , int i ){ capture_scratch[d+1]=capture_scratch[d]*values[d][i]; } ,
+                [&]( FEMTreeNode* neighbor ){
+                    if(IsActiveNode<Dim>(neighbor))
+                    {
+                        const node_index_type index=neighbor->nodeData.nodeIndex;
+                        if(index<0 || std::uint64_t(index)>=UINT32_MAX)
+                            throw std::runtime_error("normal GPU node index exceeds record ABI");
+                        captured.node[slot]=(std::uint32_t)index;
+                        captured.coefficient[slot]=(Real)capture_scratch[Dim];
+                    }
+                    ++slot;
+                } ,
+                neighbors.neighbors()
+            );
+            if(slot!=27)throw std::runtime_error("normal GPU stencil shape");
+            records->push_back(captured);
+            return;
+        }
+    }
+#endif // POISSON_NORMAL_NATIVE_GPU
 	double scratch[Dim+1];
 	scratch[0] = 1;
 	WindowLoop< Dim >::Run

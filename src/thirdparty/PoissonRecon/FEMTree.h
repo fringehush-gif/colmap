@@ -74,6 +74,9 @@ DAMAGE.
 #define POISSON_AUX_NATIVE_DECL
 #include "native_aux.h.inc"
 #undef POISSON_AUX_NATIVE_DECL
+#if defined(POISSON_NORMAL_NATIVE_GPU)
+#include "normal_capture.h"
+#endif
 namespace PoissonRecon
 {
 
