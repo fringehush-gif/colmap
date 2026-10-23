@@ -809,6 +809,14 @@ namespace PoissonRecon
 							out = n / l;
 							return true;
 						};
+#if defined(POISSON_NORMAL_NATIVE_GPU)
+					PoissonNormalGpu::Stats normal_gpu_admission{};
+					const bool use_normal_gpu =
+						Dim==3 && std::is_same_v<Real,float> && implicit.density &&
+						samples->size()>=400000 && samples->size()<=4000000 &&
+						PoissonNormalGpu::Available( normal_gpu_admission );
+					PoissonNormalCapture::Scope normal_gpu_scope( use_normal_gpu );
+#endif
 					*normalInfo = implicit.tree.setInterpolatedDataField( Point< Real , Dim >() , NormalSigs() , *samples , *sampleNormalAndAuxData , implicit.density , params.baseDepth , params.depth , params.lowDepthCutOff , pointDepthAndWeight , ConversionFunction );
 
 					ThreadPool::ParallelFor( 0 , normalInfo->size() , [&]( unsigned int , size_t i ){ (*normalInfo)[i] *= (Real)-1.; } );
