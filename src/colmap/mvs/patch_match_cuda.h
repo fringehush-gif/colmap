@@ -107,7 +107,10 @@ class PatchMatchCuda {
   std::unique_ptr<PatchMatchStateMap> cost_map_;
   // Canonical original-image perimeter; corners retain one shared state.
   std::unique_ptr<GpuMat<curandState>> rand_state_map_;
+  // Packed source-membership bits, one byte plane per eight source slots.
+  // Tail bits stay zero; source identities/order still live in problem_.
   std::unique_ptr<GpuMat<uint8_t>> consistency_mask_;
+  bool consistency_mask_valid_ = false;
 
   // Shared memory is too small to hold local state for each thread,
   // so this is workspace memory in global memory.

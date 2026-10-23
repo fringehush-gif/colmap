@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/consistency_graph.h"
+#include "colmap/mvs/packed_consistency_mask.h"
 #include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/patch_match_rng_perimeter.h"
 #include "colmap/util/cudacc.h"
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <future>
+#include <limits>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -31,6 +33,22 @@ TEST(PatchMatchCuda, RotationBufferReuseRequiresCuda) {
   GTEST_SKIP() << "The rotation-buffer option is CUDA-only";
 }
 #else
+
+TEST(PatchMatchCuda, PackedConsistencyMaskDepthCoversSourceTails) {
+  for (const auto& [sources, expected] :
+       std::array<std::pair<std::size_t, std::size_t>, 8>{{{0, 0},
+                                                           {1, 1},
+                                                           {7, 1},
+                                                           {8, 1},
+                                                           {9, 2},
+                                                           {17, 3},
+                                                           {32, 4},
+                                                           {33, 5}}}) {
+    EXPECT_EQ(PackedConsistencyMaskDepth(sources), expected) << sources;
+  }
+  constexpr std::size_t kMax = std::numeric_limits<std::size_t>::max();
+  EXPECT_EQ(PackedConsistencyMaskDepth(kMax), kMax / 8 + 1);
+}
 
 TEST(PatchMatchCuda, RngPerimeterLayoutPreservesRotatedRowZero) {
   const std::array<std::pair<std::size_t, std::size_t>, 7> shapes = {

@@ -9,6 +9,7 @@
 
 #define _USE_MATH_DEFINES
 
+#include "colmap/mvs/packed_consistency_mask.h"
 #include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/mvs/patch_match_rng_perimeter.h"
 #include "colmap/util/cuda.h"
@@ -1045,7 +1046,7 @@ __global__ void SweepFromTopToBottom(
     GpuMatView<float> cost_map,
     GpuMatView<float> depth_map,
     GpuMatView<float> normal_map,
-    GpuMatView<uint8_t> consistency_mask,
+    PackedConsistencyMaskView consistency_mask,
     GpuMatView<float> sel_prob_map,
     const GpuMatView<float> prev_sel_prob_map,
     const cudaTextureObject_t ref_image_texture,
@@ -1755,6 +1756,8 @@ PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
 }
 
 void PatchMatchCuda::Run() {
+  // Only publish masks after a completed filtered sweep and final rotation.
+  consistency_mask_valid_ = false;
 #define CASE_WINDOW_RADIUS(window_radius, window_step)              \
   case window_radius:                                               \
     RunWithWindowSizeAndStep<2 * window_radius + 1, window_step>(); \
@@ -1818,15 +1821,17 @@ Mat<float> PatchMatchCuda::GetSelProbMap() const {
 }
 
 std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
+  if (!consistency_mask_valid_) return {};
   const Mat<uint8_t> mask = consistency_mask_->CopyToMat();
   std::vector<int> consistent_image_idxs;
   std::vector<int> pixel_consistent_image_idxs;
-  pixel_consistent_image_idxs.reserve(mask.GetDepth());
+  pixel_consistent_image_idxs.reserve(problem_.src_image_idxs.size());
   for (size_t r = 0; r < mask.GetHeight(); ++r) {
     for (size_t c = 0; c < mask.GetWidth(); ++c) {
       pixel_consistent_image_idxs.clear();
-      for (size_t d = 0; d < mask.GetDepth(); ++d) {
-        if (mask.Get(r, c, d)) {
+      for (size_t d = 0; d < problem_.src_image_idxs.size(); ++d) {
+        if ((mask.Get(r, c, d / 8) & static_cast<uint8_t>(1u << (d % 8))) !=
+            0) {
           pixel_consistent_image_idxs.push_back(problem_.src_image_idxs[d]);
         }
       }
@@ -1931,44 +1936,44 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
       const bool last_sweep = iter == options_.num_iterations - 1 && sweep == 3;
 
-#define CALL_SWEEP_FUNC                                         \
-  SweepFromTopToBottom<kWindowSize,                             \
-                       kWindowStep,                             \
-                       kGeomConsistencyTerm,                    \
-                       kFilterPhotoConsistency,                 \
-                       kFilterGeomConsistency,                  \
-                       kCooperative,                            \
-                       kSweepBlockWidth>                        \
-      <<<sweep_kernel_grid_size, sweep_kernel_block_size>>>(    \
-          MakeRefCamera(ref_K_host_[rotation_in_half_pi_],      \
-                        ref_inv_K_host_[rotation_in_half_pi_]), \
-          global_workspace_->View(),                            \
-          rand_state_map_->View(),                              \
-          (PatchMatchRngPerimeter{ref_width_, ref_height_}),    \
-          static_cast<unsigned int>(rotation_in_half_pi_),      \
-          cost_map_->View(),                                    \
-          depth_map_->View(),                                   \
-          normal_map_->View(),                                  \
-          consistency_mask_->View(),                            \
-          sel_prob_map_->View(),                                \
-          prev_sel_prob_map_->View(),                           \
-          ref_image_texture_->GetObj(),                         \
-          ref_image_->sum_image->View(),                        \
-          ref_image_->squared_sum_image->View(),                \
-          src_images_texture_->GetObj(),                        \
-          src_depth_maps_texture_ == nullptr                    \
-              ? 0                                               \
-              : src_depth_maps_texture_->GetObj(),              \
-          poses_texture_[rotation_in_half_pi_]->GetObj(),       \
+#define CALL_SWEEP_FUNC                                           \
+  SweepFromTopToBottom<kWindowSize,                               \
+                       kWindowStep,                               \
+                       kGeomConsistencyTerm,                      \
+                       kFilterPhotoConsistency,                   \
+                       kFilterGeomConsistency,                    \
+                       kCooperative,                              \
+                       kSweepBlockWidth>                          \
+      <<<sweep_kernel_grid_size, sweep_kernel_block_size>>>(      \
+          MakeRefCamera(ref_K_host_[rotation_in_half_pi_],        \
+                        ref_inv_K_host_[rotation_in_half_pi_]),   \
+          global_workspace_->View(),                              \
+          rand_state_map_->View(),                                \
+          (PatchMatchRngPerimeter{ref_width_, ref_height_}),      \
+          static_cast<unsigned int>(rotation_in_half_pi_),        \
+          cost_map_->View(),                                      \
+          depth_map_->View(),                                     \
+          normal_map_->View(),                                    \
+          (PackedConsistencyMaskView{consistency_mask_->View()}), \
+          sel_prob_map_->View(),                                  \
+          prev_sel_prob_map_->View(),                             \
+          ref_image_texture_->GetObj(),                           \
+          ref_image_->sum_image->View(),                          \
+          ref_image_->squared_sum_image->View(),                  \
+          src_images_texture_->GetObj(),                          \
+          src_depth_maps_texture_ == nullptr                      \
+              ? 0                                                 \
+              : src_depth_maps_texture_->GetObj(),                \
+          poses_texture_[rotation_in_half_pi_]->GetObj(),         \
           sweep_options);
 
       if (last_sweep) {
         if (options_.filter) {
           if (!options_.rotation_buffer_reuse) {
-            consistency_mask_ =
-                std::make_unique<GpuMat<uint8_t>>(cost_map_->GetWidth(),
-                                                  cost_map_->GetHeight(),
-                                                  cost_map_->GetDepth());
+            consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
+                cost_map_->GetWidth(),
+                cost_map_->GetHeight(),
+                PackedConsistencyMaskDepth(cost_map_->GetDepth()));
           }
           consistency_mask_->FillWithScalar(0);
         }
@@ -2022,12 +2027,14 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 #endif
         {
           std::unique_ptr<GpuMat<uint8_t>> rot_consistency_mask_(
-              new GpuMat<uint8_t>(cost_map_->GetWidth(),
-                                  cost_map_->GetHeight(),
-                                  cost_map_->GetDepth()));
+              new GpuMat<uint8_t>(
+                  cost_map_->GetWidth(),
+                  cost_map_->GetHeight(),
+                  PackedConsistencyMaskDepth(cost_map_->GetDepth())));
           consistency_mask_->Rotate(rot_consistency_mask_.get());
           consistency_mask_.swap(rot_consistency_mask_);
         }
+        consistency_mask_valid_ = true;
       }
 
       sweep_timer.Print(" Sweep " + std::to_string(sweep + 1));
@@ -2448,7 +2455,9 @@ void PatchMatchCuda::InitWorkspaceMemory() {
 
   if (options_.rotation_buffer_reuse && options_.filter) {
     consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
-        ref_width_, ref_height_, problem_.src_image_idxs.size());
+        ref_width_,
+        ref_height_,
+        PackedConsistencyMaskDepth(problem_.src_image_idxs.size()));
   } else {
     consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(0, 0, 0);
   }
@@ -2462,8 +2471,8 @@ void PatchMatchCuda::InitAlternateOrientationMemory() {
   alternate_normal_map_ = std::make_unique<GpuMat<float>>(width, height, 3);
   alternate_ref_image_ = std::make_unique<GpuMatRefImage>(width, height);
   if (options_.filter) {
-    alternate_consistency_mask_ =
-        std::make_unique<GpuMat<uint8_t>>(width, height, sources);
+    alternate_consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
+        width, height, PackedConsistencyMaskDepth(sources));
   }
   // Construct the array/texture by dimensions only. Never copy uninitialized
   // alternate_ref_image_ pixels to create it. Its first copy follows Rotate.
