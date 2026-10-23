@@ -11,6 +11,8 @@
 #include "thirdparty/PoissonRecon/RegularTree.h"
 
 #include <array>
+#include <cmath>
+#include <string>
 
 #include <gtest/gtest.h>
 
@@ -128,6 +130,38 @@ void CheckThreadSafeChildInitialization() {
 TEST(PoissonMeshing, ThreadSafeChildrenInitializedOnce) {
   CheckThreadSafeChildInitialization<2>();
   CheckThreadSafeChildInitialization<3>();
+}
+
+TEST(PoissonMeshing, FinalizerWorkerCountsRetainFiniteColoredMesh) {
+  const auto test_dir = CreateTestDir();
+  const auto input_path = test_dir / "points.ply";
+  WriteRandomPlyPoints(input_path);
+
+  PoissonMeshingOptions options;
+  options.point_weight = 1.0;
+  options.depth = 3;
+  options.trim = 0.0;
+  options.color = true;
+
+  for (const int workers : std::array<int, 3>{1, 3, 12}) {
+    SCOPED_TRACE(workers);
+    options.num_threads = workers;
+    const auto output_path =
+        test_dir / ("mesh-workers-" + std::to_string(workers) + ".ply");
+    ASSERT_TRUE(PoissonMeshing(options, input_path, output_path));
+    ASSERT_TRUE(ExistsFile(output_path));
+
+    const std::vector<PlyPoint> vertices = ReadPly(output_path);
+    ASSERT_GE(vertices.size(), 3);
+    for (const PlyPoint& vertex : vertices) {
+      EXPECT_TRUE(std::isfinite(vertex.x));
+      EXPECT_TRUE(std::isfinite(vertex.y));
+      EXPECT_TRUE(std::isfinite(vertex.z));
+      EXPECT_EQ(vertex.r, 0);
+      EXPECT_LE(std::abs(static_cast<int>(vertex.g) - 64), 1);
+      EXPECT_LE(std::abs(static_cast<int>(vertex.b) - 128), 1);
+    }
+  }
 }
 
 }  // namespace
