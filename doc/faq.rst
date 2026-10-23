@@ -866,6 +866,25 @@ are skipped on subsequent runs.
 it does not set the number of GPU workers. More concurrent GPU workers can
 increase host memory use and CPU work, even when elapsed time decreases.
 
+The CUDA options ``--PatchMatchStereo.rotation_buffer_reuse 1`` and
+``--PatchMatchStereo.checkpoint_hmm 1`` can change this tradeoff without changing
+the reconstruction settings. Rotation reuse retains additional GPU buffers to
+avoid repeated allocation. HMM checkpointing reduces retained message storage
+but adds recurrence replay and source-plane copies. Both default to false;
+measure elapsed time and peak memory on the intended workload and hardware.
+Keep these options fixed when comparing GPU worker counts. For example::
+
+    colmap patch_match_stereo \
+        --workspace_path path/to/fresh-workspace \
+        --PatchMatchStereo.num_threads 12 \
+        --PatchMatchStereo.gpu_index 0,0 \
+        --PatchMatchStereo.rotation_buffer_reuse 1 \
+        --PatchMatchStereo.checkpoint_hmm 1
+
+Change only ``--PatchMatchStereo.gpu_index`` to ``0`` for the single-worker
+comparison. Concurrent workers need enough device memory for their combined
+problems; the faster configuration depends on the hardware and scene.
+
 
 .. _faq-dense-timeout:
 
