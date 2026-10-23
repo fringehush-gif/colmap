@@ -2169,7 +2169,8 @@ public:
 				return;
 			}
 			std::exception_ptr errors[3];
-#pragma omp parallel sections num_threads(3)
+			// Keep the configured team warm between extraction loops and key joins.
+#pragma omp parallel sections num_threads(std::max(3u, ThreadPool::NumThreads()))
 			{
 #pragma omp section
 				{ try { vertices(); } catch( ... ) { errors[0] = std::current_exception(); } }
