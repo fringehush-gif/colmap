@@ -182,6 +182,51 @@ __global__ void Flatten(std::uint32_t* parents,
   if (j < count) roots[j] = Root(parents, std::uint32_t(j));
 }
 
+__global__ void BoundaryEdges(const std::uint64_t* offsets,
+                              const std::uint32_t* vertices,
+                              const std::uint32_t* components,
+                              std::size_t polygons,
+                              std::uint64_t* keys,
+                              std::uint64_t* values) {
+  const std::size_t face = blockIdx.x * blockDim.x + threadIdx.x;
+  if (face >= polygons) return;
+  const std::uint64_t begin = offsets[face], end = offsets[face + 1];
+  for (std::uint64_t j = begin; j < end; ++j) {
+    const std::uint32_t a = vertices[j];
+    const std::uint32_t b = vertices[j + 1 == end ? begin : j + 1];
+    keys[j] = (std::uint64_t(min(a, b)) << 32) | max(a, b);
+    values[j] = (std::uint64_t(components[face]) << 1) | std::uint64_t(a > b);
+  }
+}
+
+__global__ void BoundaryPairs(const std::uint64_t* keys,
+                              const std::uint64_t* values,
+                              std::size_t count,
+                              std::uint64_t* pairs,
+                              std::uint32_t* invalid) {
+  const std::size_t j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= count) return;
+  pairs[j] = ~std::uint64_t(0);
+  if (j && keys[j] == keys[j - 1]) return;
+  // Native sets erase a self edge as its own reverse.
+  if (std::uint32_t(keys[j] >> 32) == std::uint32_t(keys[j])) return;
+  if (j + 2 < count && keys[j] == keys[j + 2]) {
+    atomicExch(invalid, 1u);
+    return;
+  }
+  if (j + 1 == count || keys[j] != keys[j + 1]) return;
+  const std::uint32_t a = std::uint32_t(values[j] >> 1);
+  const std::uint32_t b = std::uint32_t(values[j + 1] >> 1);
+  if (a != b && ((values[j] ^ values[j + 1]) & 1))
+    pairs[j] = (std::uint64_t(min(a, b)) << 32) | max(a, b);
+}
+
+struct ValidPair {
+  __host__ __device__ bool operator()(std::uint64_t x) const {
+    return x != ~std::uint64_t(0);
+  }
+};
+
 template <class Kernel>
 bool PreflightKernel(Kernel function, Stats& stats) {
   cudaFuncAttributes attributes{};
@@ -236,7 +281,9 @@ bool Available(Stats& stats) {
   }
   Check(pending);
   if (!PreflightKernel(Edges, stats) || !PreflightKernel(Unite, stats) ||
-      !PreflightKernel(Flatten, stats)) {
+      !PreflightKernel(Flatten, stats) ||
+      !PreflightKernel(BoundaryEdges, stats) ||
+      !PreflightKernel(BoundaryPairs, stats)) {
     stats.total_ms = ElapsedMs(began);
     return false;
   }
@@ -363,6 +410,174 @@ bool ConnectedComponents(std::size_t polygons,
     stats.union_ms = Duration(sorted.value, joined.value);
     stats.download_ms = Duration(joined.value, downloaded.value);
     std::copy(result.begin(), result.end(), roots);
+  } catch (const PrelaunchAllocationFailure&) {
+    ClearExpected(cudaErrorMemoryAllocation);
+    return reject("device-allocation");
+  } catch (const PrelaunchUnavailable& unavailable) {
+    ClearExpected(unavailable.error);
+    return reject(unavailable.reason);
+  }
+  stats.reason = "complete";
+  stats.total_ms = ElapsedMs(began);
+  return true;
+}
+
+bool BoundaryGraph(std::size_t polygons,
+                   std::size_t entries,
+                   const std::uint64_t* offsets,
+                   const std::uint32_t* vertices,
+                   const std::uint32_t* components,
+                   std::vector<std::uint64_t>& graph,
+                   Stats& stats) {
+  stats = Stats{};
+  const auto began = Clock::now();
+  auto reject = [&](const char* reason) {
+    stats.reason = reason;
+    stats.total_ms = ElapsedMs(began);
+    return false;
+  };
+  ValidateShape(polygons, entries, offsets, vertices);
+  if (polygons && !components)
+    throw std::runtime_error("GPU boundary null components");
+  if (!polygons || !entries) {
+    graph.clear();
+    stats.reason = "complete";
+    stats.total_ms = ElapsedMs(began);
+    return true;
+  }
+  if (!Available(stats)) return reject(stats.reason);
+
+  std::size_t sort_bytes = 0, select_bytes = 0;
+  std::uint64_t key_in = 0, key_out = 0, value_in = 0, value_out = 0;
+  std::uint64_t pair = 0, selected = 0;
+  int selected_count = 0;
+  try {
+    CheckPrelaunch(cub::DeviceRadixSort::SortPairs(nullptr,
+                                                   sort_bytes,
+                                                   &key_in,
+                                                   &key_out,
+                                                   &value_in,
+                                                   &value_out,
+                                                   int(entries),
+                                                   0,
+                                                   64));
+    CheckPrelaunch(cub::DeviceSelect::If(nullptr,
+                                         select_bytes,
+                                         &pair,
+                                         &selected,
+                                         &selected_count,
+                                         int(entries),
+                                         ValidPair{}));
+  } catch (const PrelaunchAllocationFailure&) {
+    ClearExpected(cudaErrorMemoryAllocation);
+    return reject("device-allocation");
+  } catch (const PrelaunchUnavailable& unavailable) {
+    ClearExpected(unavailable.error);
+    return reject(unavailable.reason);
+  }
+  const std::size_t scratch_bytes = std::max(sort_bytes, select_bytes);
+  const std::uint64_t fixed_bytes =
+      (polygons + 1ull) * sizeof(std::uint64_t) +
+      6ull * entries * sizeof(std::uint64_t) + entries * sizeof(std::uint32_t) +
+      polygons * sizeof(std::uint32_t) + sizeof(std::uint32_t) + sizeof(int);
+  stats.device_bytes = fixed_bytes + scratch_bytes;
+  if (!HasCapacity(stats.device_bytes, stats)) return reject(stats.reason);
+
+  try {
+    Stream stream;
+    Event start, uploaded, sorted, joined, downloaded;
+    Device<std::uint64_t> d_offsets(polygons + 1), keys_a(entries),
+        keys_b(entries), values_a(entries), values_b(entries), pairs(entries),
+        d_selected(entries);
+    Device<std::uint32_t> d_vertices(entries), d_components(polygons),
+        invalid(1);
+    Device<int> d_count(1);
+    Device<unsigned char> scratch(scratch_bytes);
+
+    Check(cudaEventRecord(start.value, stream.value));
+    Check(cudaMemcpyAsync(d_offsets.value,
+                          offsets,
+                          d_offsets.bytes,
+                          cudaMemcpyHostToDevice,
+                          stream.value));
+    Check(cudaMemcpyAsync(d_vertices.value,
+                          vertices,
+                          d_vertices.bytes,
+                          cudaMemcpyHostToDevice,
+                          stream.value));
+    Check(cudaMemcpyAsync(d_components.value,
+                          components,
+                          d_components.bytes,
+                          cudaMemcpyHostToDevice,
+                          stream.value));
+    Check(cudaMemsetAsync(invalid.value, 0, invalid.bytes, stream.value));
+    BoundaryEdges<<<(polygons + 255) / 256, 256, 0, stream.value>>>(
+        d_offsets.value,
+        d_vertices.value,
+        d_components.value,
+        polygons,
+        keys_a.value,
+        values_a.value);
+    Check(cudaGetLastError());
+    Check(cudaEventRecord(uploaded.value, stream.value));
+    Check(cub::DeviceRadixSort::SortPairs(scratch.value,
+                                          sort_bytes,
+                                          keys_a.value,
+                                          keys_b.value,
+                                          values_a.value,
+                                          values_b.value,
+                                          int(entries),
+                                          0,
+                                          64,
+                                          stream.value));
+    Check(cudaEventRecord(sorted.value, stream.value));
+    BoundaryPairs<<<(entries + 255) / 256, 256, 0, stream.value>>>(
+        keys_b.value, values_b.value, entries, pairs.value, invalid.value);
+    Check(cudaGetLastError());
+    Check(cub::DeviceSelect::If(scratch.value,
+                                select_bytes,
+                                pairs.value,
+                                d_selected.value,
+                                d_count.value,
+                                int(entries),
+                                ValidPair{},
+                                stream.value));
+    Check(cudaEventRecord(joined.value, stream.value));
+    int count = 0;
+    std::uint32_t rejected = 0;
+    Check(cudaMemcpyAsync(&count,
+                          d_count.value,
+                          sizeof(count),
+                          cudaMemcpyDeviceToHost,
+                          stream.value));
+    Check(cudaMemcpyAsync(&rejected,
+                          invalid.value,
+                          sizeof(rejected),
+                          cudaMemcpyDeviceToHost,
+                          stream.value));
+    Check(cudaStreamSynchronize(stream.value));
+    if (count < 0 || std::size_t(count) > entries)
+      throw std::runtime_error("GPU boundary selection count");
+    std::vector<std::uint64_t> result;
+    if (!rejected) {
+      result.resize(count);
+      if (count)
+        Check(cudaMemcpyAsync(result.data(),
+                              d_selected.value,
+                              count * sizeof(std::uint64_t),
+                              cudaMemcpyDeviceToHost,
+                              stream.value));
+    }
+    Check(cudaEventRecord(downloaded.value, stream.value));
+    Check(cudaStreamSynchronize(stream.value));
+    if (rejected) return reject("nonmanifold");
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    stats.upload_ms = Duration(start.value, uploaded.value);
+    stats.sort_ms = Duration(uploaded.value, sorted.value);
+    stats.union_ms = Duration(sorted.value, joined.value);
+    stats.download_ms = Duration(joined.value, downloaded.value);
+    graph.swap(result);
   } catch (const PrelaunchAllocationFailure&) {
     ClearExpected(cudaErrorMemoryAllocation);
     return reject("device-allocation");

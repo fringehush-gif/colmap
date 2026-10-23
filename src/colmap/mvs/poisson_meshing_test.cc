@@ -9,6 +9,7 @@
 
 #include "thirdparty/PoissonRecon/Geometry.h"
 #include "thirdparty/PoissonRecon/RegularTree.h"
+#include "thirdparty/PoissonRecon/trim_gpu_adapter.h"
 
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
 #include "thirdparty/PoissonRecon/aux_gpu.h"
@@ -18,6 +19,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -235,7 +237,139 @@ TEST(PoissonMeshing, GpuTrimConnectedComponentsUsesMaximumFaceRoots) {
   EXPECT_EQ(roots[3], 3);
 }
 
+TEST(PoissonMeshing, GpuTrimBoundaryGraphAndNonmanifoldRejection) {
+  ::PoissonTrimGpu::Stats admission;
+  if (!::PoissonTrimGpu::Available(admission)) {
+    GTEST_SKIP() << "CUDA trim kernel unavailable: " << admission.reason;
+  }
+
+  const std::uint64_t offsets[] = {0, 3, 6, 9};
+  const std::uint32_t vertices[] = {0, 1, 2, 1, 0, 3, 4, 5, 6};
+  const std::uint32_t components[] = {0, 1, 1};
+  std::vector<std::uint64_t> graph;
+  ::PoissonTrimGpu::Stats stats;
+  ASSERT_TRUE(::PoissonTrimGpu::BoundaryGraph(
+      3, 9, offsets, vertices, components, graph, stats));
+  ASSERT_EQ(graph.size(), 1);
+  EXPECT_EQ(graph.front(), std::uint64_t(1));
+
+  const std::uint64_t nonmanifold_offsets[] = {0, 3, 6, 9};
+  const std::uint32_t nonmanifold_vertices[] = {0, 1, 2, 1, 0, 3, 0, 1, 4};
+  const std::uint32_t nonmanifold_components[] = {0, 1, 2};
+  graph.front() = std::uint64_t(0x0000000200000001);
+  EXPECT_FALSE(::PoissonTrimGpu::BoundaryGraph(3,
+                                               9,
+                                               nonmanifold_offsets,
+                                               nonmanifold_vertices,
+                                               nonmanifold_components,
+                                               graph,
+                                               stats));
+  EXPECT_STREQ(stats.reason, "nonmanifold");
+  ASSERT_EQ(graph.size(), 1);
+  EXPECT_EQ(graph.front(), std::uint64_t(0x0000000200000001));
+}
+
 #endif
+
+struct TrimReplayNode {
+  double area = 0;
+  std::vector<TrimReplayNode*> neighbors;
+  std::vector<int> polygonIndices;
+};
+
+void ConnectTrimReplayNodes(std::vector<TrimReplayNode>& nodes,
+                            std::size_t first,
+                            std::size_t second) {
+  nodes[first].neighbors.push_back(&nodes[second]);
+  nodes[second].neighbors.push_back(&nodes[first]);
+}
+
+TEST(PoissonMeshing, TrimMergeReplayCompletesNewDegreeOneChain) {
+  std::vector<TrimReplayNode> nodes(3);
+  nodes[0].area = 1;
+  nodes[1].area = 2;
+  nodes[2].area = 10;
+  for (std::size_t i = 0; i < nodes.size(); ++i) {
+    nodes[i].polygonIndices.push_back(static_cast<int>(i));
+  }
+  ConnectTrimReplayNodes(nodes, 0, 1);
+  ConnectTrimReplayNodes(nodes, 1, 2);
+
+  std::size_t completed_merges = 99;
+  EXPECT_TRUE(::PoissonTrimGpu::HasOrderIndependentMerges(
+      nodes, 5.0, completed_merges));
+  EXPECT_EQ(completed_merges, 2);
+  EXPECT_EQ(nodes[0].area, 1);
+  EXPECT_EQ(nodes[1].area, 2);
+  EXPECT_EQ(nodes[2].area, 10);
+  EXPECT_EQ(nodes[1].neighbors.size(), 2);
+}
+
+TEST(PoissonMeshing, TrimMergeReplayRejectsSelectedBranchingNode) {
+  std::vector<TrimReplayNode> nodes(3);
+  nodes[0].area = 2;
+  nodes[1].area = 1;
+  nodes[2].area = 3;
+  for (std::size_t i = 0; i < nodes.size(); ++i) {
+    nodes[i].polygonIndices.push_back(static_cast<int>(i));
+  }
+  ConnectTrimReplayNodes(nodes, 0, 1);
+  ConnectTrimReplayNodes(nodes, 1, 2);
+
+  std::size_t completed_merges = 99;
+  EXPECT_FALSE(::PoissonTrimGpu::HasOrderIndependentMerges(
+      nodes, 5.0, completed_merges));
+  EXPECT_EQ(completed_merges, 0);
+}
+
+TEST(PoissonMeshing, TrimMergeReplayUsesMinimumIndexForTiesAndIgnoresIsolated) {
+  std::vector<TrimReplayNode> tied_nodes(3);
+  tied_nodes[0].area = 1;
+  tied_nodes[1].area = 1;
+  tied_nodes[2].area = 10;
+  for (std::size_t i = 0; i < tied_nodes.size(); ++i) {
+    tied_nodes[i].polygonIndices.push_back(static_cast<int>(i));
+  }
+  ConnectTrimReplayNodes(tied_nodes, 0, 1);
+  ConnectTrimReplayNodes(tied_nodes, 1, 2);
+
+  std::size_t completed_merges = 99;
+  EXPECT_TRUE(::PoissonTrimGpu::HasOrderIndependentMerges(
+      tied_nodes, 1.5, completed_merges));
+  EXPECT_EQ(completed_merges, 1);
+
+  std::vector<TrimReplayNode> isolated_nodes(2);
+  isolated_nodes[0].area = 0.5;
+  isolated_nodes[1].area = 1;
+  isolated_nodes[0].polygonIndices.push_back(0);
+  isolated_nodes[1].polygonIndices.push_back(1);
+  EXPECT_TRUE(::PoissonTrimGpu::HasOrderIndependentMerges(
+      isolated_nodes, 5.0, completed_merges));
+  EXPECT_EQ(completed_merges, 0);
+}
+
+TEST(PoissonMeshing, TrimMergeReplayRejectsNonfiniteAreaAndThreshold) {
+  std::vector<TrimReplayNode> nodes(1);
+  nodes[0].area = 1;
+  nodes[0].polygonIndices.push_back(0);
+  std::size_t completed_merges = 99;
+
+  EXPECT_FALSE(::PoissonTrimGpu::HasOrderIndependentMerges(
+      nodes, std::numeric_limits<double>::quiet_NaN(), completed_merges));
+  EXPECT_EQ(completed_merges, 0);
+  EXPECT_FALSE(::PoissonTrimGpu::HasOrderIndependentMerges(
+      nodes, std::numeric_limits<double>::infinity(), completed_merges));
+  EXPECT_EQ(completed_merges, 0);
+
+  nodes[0].area = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(::PoissonTrimGpu::HasOrderIndependentMerges(
+      nodes, 5.0, completed_merges));
+  EXPECT_EQ(completed_merges, 0);
+  nodes[0].area = std::numeric_limits<double>::infinity();
+  EXPECT_FALSE(::PoissonTrimGpu::HasOrderIndependentMerges(
+      nodes, 5.0, completed_merges));
+  EXPECT_EQ(completed_merges, 0);
+}
 
 }  // namespace
 }  // namespace mvs
