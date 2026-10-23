@@ -632,6 +632,19 @@ int RunPoissonRecon( int argc , char* argv[] )
 		if( !factory.template plyValidReadProperties<0>( readFlags ) ) MK_THROW( "Ply file does not contain positions" );
 		if( !factory.template plyValidReadProperties<1>( readFlags ) ) MK_THROW( "Ply file does not contain normals" );
 		delete[] readFlags;
+#if defined(POISSON_AUX_NATIVE_GPU)
+        const bool standard_rgb = unprocessedProperties.size()==3 &&
+            unprocessedProperties[0].name=="red" &&
+            unprocessedProperties[1].name=="green" &&
+            unprocessedProperties[2].name=="blue" &&
+            unprocessedProperties[0].external_type==PLY_UCHAR &&
+            unprocessedProperties[1].external_type==PLY_UCHAR &&
+            unprocessedProperties[2].external_type==PLY_UCHAR &&
+            !unprocessedProperties[0].is_list &&
+            !unprocessedProperties[1].is_list &&
+            !unprocessedProperties[2].is_list;
+        const ::AuxNativeInput::Scope rgb_input_scope(standard_rgb);
+#endif
 
 		if( unprocessedProperties.size() ) Execute< Real , Dim , FEMSig >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
 		else                               Execute< Real , Dim , FEMSig >( VertexFactory::EmptyFactory< Real >() );
@@ -655,6 +668,19 @@ int RunPoissonRecon( int argc , char* argv[] )
 		if( !factory.template plyValidReadProperties<0>( readFlags ) ) MK_THROW( "Ply file does not contain positions" );
 		if( !factory.template plyValidReadProperties<1>( readFlags ) ) MK_THROW( "Ply file does not contain normals" );
 		delete[] readFlags;
+#if defined(POISSON_AUX_NATIVE_GPU)
+        const bool standard_rgb = unprocessedProperties.size()==3 &&
+            unprocessedProperties[0].name=="red" &&
+            unprocessedProperties[1].name=="green" &&
+            unprocessedProperties[2].name=="blue" &&
+            unprocessedProperties[0].external_type==PLY_UCHAR &&
+            unprocessedProperties[1].external_type==PLY_UCHAR &&
+            unprocessedProperties[2].external_type==PLY_UCHAR &&
+            !unprocessedProperties[0].is_list &&
+            !unprocessedProperties[1].is_list &&
+            !unprocessedProperties[2].is_list;
+        const ::AuxNativeInput::Scope rgb_input_scope(standard_rgb);
+#endif
 
 		if( unprocessedProperties.size() ) Execute< DEFAULT_DIMENSION , Real >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
 		else                               Execute< DEFAULT_DIMENSION , Real >( VertexFactory::EmptyFactory< Real >() );

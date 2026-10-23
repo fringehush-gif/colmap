@@ -10,8 +10,13 @@
 #include "thirdparty/PoissonRecon/Geometry.h"
 #include "thirdparty/PoissonRecon/RegularTree.h"
 
+#if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
+#include "thirdparty/PoissonRecon/aux_gpu.h"
+#endif
+
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -163,6 +168,50 @@ TEST(PoissonMeshing, FinalizerWorkerCountsRetainFiniteColoredMesh) {
     }
   }
 }
+
+#if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
+TEST(PoissonMeshing, EmptyGpuAuxiliaryViewPreservesOutput) {
+  const ::AuxNativeGpu::View view{};
+  ::AuxNativeGpu::Four output{{-777, -777, -777, -777}};
+  ::AuxNativeGpu::Stats stats;
+  EXPECT_FALSE(::AuxNativeGpu::Reduce(view, &output, stats));
+  EXPECT_STREQ(stats.reason, "shape");
+  for (const float value : output.v) {
+    EXPECT_EQ(value, -777);
+  }
+}
+
+TEST(PoissonMeshing, GpuAuxiliaryReductionRetainsExactSmallTree) {
+  ::AuxNativeGpu::Stats admission;
+  if (!::AuxNativeGpu::Available(admission)) {
+    GTEST_SKIP() << "CUDA auxiliary kernel unavailable: " << admission.reason;
+  }
+  const std::uint32_t level_offsets[] = {0, 1, 3};
+  const std::uint32_t child_offsets[] = {0, 2, 2, 2};
+  const std::uint32_t children[] = {1, 2};
+  const std::uint32_t seed_offsets[] = {0, 0, 1, 2};
+  const std::uint32_t seed_ids[] = {0, 1};
+  const ::AuxNativeGpu::Four seeds[] = {{{1, 2, 3, 1}}, {{4, 5, 6, 1}}};
+  const ::AuxNativeGpu::View view{3,
+                                  2,
+                                  1,
+                                  level_offsets,
+                                  child_offsets,
+                                  children,
+                                  seed_offsets,
+                                  seed_ids,
+                                  seeds};
+  std::array<::AuxNativeGpu::Four, 3> output;
+  ::AuxNativeGpu::Stats stats;
+  ASSERT_TRUE(::AuxNativeGpu::Reduce(view, output.data(), stats));
+  const float expected[3][4] = {{5, 7, 9, 2}, {4, 8, 12, 4}, {16, 20, 24, 4}};
+  for (size_t node = 0; node < output.size(); ++node) {
+    for (int channel = 0; channel < 4; ++channel) {
+      EXPECT_EQ(output[node].v[channel], expected[node][channel]);
+    }
+  }
+}
+#endif
 
 }  // namespace
 }  // namespace mvs

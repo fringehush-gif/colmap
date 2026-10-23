@@ -916,6 +916,9 @@ namespace PoissonRecon
 				if constexpr( sizeof...(AuxData) )
 				{
 					profiler.reset();
+#if defined(POISSON_AUX_NATIVE_GPU)
+					::AuxNativeScale::Scope aux_scale_scope( &implicit.tree , ::AuxNativeGuard::DefaultScale(params.perLevelDataScaleFactor) );
+#endif
 					auto PointSampleFunctor = [&]( size_t i ) -> const typename FEMTree< Dim , Real >::PointSample & { return (*samples)[i]; };
 					auto AuxDataSampleFunctor = [&]( size_t i ) -> const typename Reconstructor::Implicit< Real , Dim , UIntPack< FEMSigs... > , AuxData... >::InternalAuxData & { return (*sampleNormalAndAuxData)[i].template get<1>(); };
 					implicit._auxData = new SparseNodeData< ProjectiveData< InternalAuxData , Real > , IsotropicUIntPack< Dim , DataSig > >
@@ -934,6 +937,9 @@ namespace PoissonRecon
 							ProjectiveData< InternalAuxData , Real >* clr = (*implicit._auxData)( n );
 							if( clr ) (*clr) *= (Real)pow( (Real)params.perLevelDataScaleFactor , implicit.tree.depth( n ) );
 						};
+#if defined(POISSON_AUX_NATIVE_GPU)
+					if( !aux_scale_scope.template Apply< RegularTreeNode< Dim , FEMTreeNodeData , depth_and_offset_type > >( implicit.tree , *implicit._auxData , nodeFunctor ) )
+#endif
 					implicit.tree.tree().processNodes( nodeFunctor );
 					if( params.verbose ) std::cout << "#         Got aux data: " << profiler << std::endl;
 				}
@@ -1211,6 +1217,9 @@ namespace PoissonRecon
 				if constexpr( sizeof...(AuxData) )
 				{
 					profiler.reset();
+#if defined(POISSON_AUX_NATIVE_GPU)
+					::AuxNativeScale::Scope aux_scale_scope( &implicit.tree , ::AuxNativeGuard::DefaultScale(params.perLevelDataScaleFactor) );
+#endif
 					auto PointSampleFunctor = [&]( size_t i ) -> const typename FEMTree< Dim , Real >::PointSample & { return (*samples)[i]; };
 					auto AuxDataSampleFunctor = [&]( size_t i ) -> const typename Reconstructor::Implicit< Real , Dim , UIntPack< FEMSigs... > , AuxData... >::InternalAuxData & { return (*sampleNormalAndAuxData)[i].template get<1>(); };
 					implicit._auxData = new SparseNodeData< ProjectiveData< InternalAuxData , Real > , IsotropicUIntPack< Dim , DataSig > >
@@ -1229,6 +1238,9 @@ namespace PoissonRecon
 							ProjectiveData< InternalAuxData , Real >* clr = (*implicit._auxData)( n );
 							if( clr ) (*clr) *= (Real)pow( (Real)params.perLevelDataScaleFactor , implicit.tree.depth( n ) );
 						};
+#if defined(POISSON_AUX_NATIVE_GPU)
+					if( !aux_scale_scope.template Apply< RegularTreeNode< Dim , FEMTreeNodeData , depth_and_offset_type > >( implicit.tree , *implicit._auxData , nodeFunctor ) )
+#endif
 					implicit.tree.tree().processNodes( nodeFunctor );
 					if( params.verbose ) std::cout << "#         Got aux data: " << profiler << std::endl;
 				}
