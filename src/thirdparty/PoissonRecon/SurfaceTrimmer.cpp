@@ -26,6 +26,9 @@ ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF S
 DAMAGE.
 */
 
+#if defined(POISSON_TRIM_NATIVE_GPU) && !defined(__HIPCC__)
+#include "trim_gpu_adapter.h"
+#endif
 #include "PreProcessor.h"
 
 #define DEFAULT_DIMENSION 3
@@ -348,7 +351,7 @@ void RemoveHangingVertices( std::vector< Vertex >& vertices , std::vector< std::
 }
 
 template< typename Index >
-void SetConnectedComponents( const std::vector< std::vector< Index > >& polygons , std::vector< std::vector< Index > >& components )
+void NativeSetConnectedComponents( const std::vector< std::vector< Index > >& polygons , std::vector< std::vector< Index > >& components )
 {
 	std::vector< Index > polygonRoots( polygons.size() );
 	for( size_t i=0 ; i<polygons.size() ; i++ ) polygonRoots[i] = (Index)i;
@@ -394,6 +397,26 @@ void SetConnectedComponents( const std::vector< std::vector< Index > >& polygons
 	for( Index i=0 ; i<(Index)polygonRoots.size() ; i++ ) if( polygonRoots[i]==i ) vMap[i] = cCount++;
 	components.resize( cCount );
 	for( Index i=0 ; i<(Index)polygonRoots.size() ; i++ ) components[ vMap[ polygonRoots[i] ] ].push_back(i);
+}
+
+template< typename Index >
+void SetConnectedComponents( const std::vector< std::vector< Index > >& polygons , std::vector< std::vector< Index > >& components )
+{
+#if defined(POISSON_TRIM_NATIVE_GPU) && !defined(__HIPCC__)
+    PoissonTrimGpu::Stats stats;
+    if( PoissonTrimGpu::TryConnectedComponents( polygons , components , stats ) )
+    {
+        if( PoissonTrimGpu::Verify() )
+        {
+            std::vector< std::vector< Index > > reference;
+            NativeSetConnectedComponents( polygons , reference );
+            if( components!=reference ) MK_THROW( "GPU trim component order differs from native" );
+        }
+        if( Verbose.set || PoissonTrimGpu::Verify() ) std::cout << "# TrimNativeGPU components polygons=" << polygons.size() << " deviceBytes=" << stats.device_bytes << std::endl;
+        return;
+    }
+#endif
+    NativeSetConnectedComponents( polygons , components );
 }
 
 template< typename Real , unsigned int Dim , typename Index , typename ... AuxDataFactories >
@@ -597,6 +620,17 @@ int RunSurfaceTrimmer( int argc , char* argv[] )
 	if( !factory.template plyValidReadProperties<1>( readFlags ) ) MK_THROW( "Ply file does not contain values" );
 	delete[] readFlags;
 
+    // Preserve arbitrary PLY metadata through the dynamic factory. Only the
+    // standard ordered three-byte RGB layout uses inline colour storage.
+    const bool fixedRgb = unprocessedProperties.size()==3 &&
+        unprocessedProperties[0].name=="red" && unprocessedProperties[1].name=="green" && unprocessedProperties[2].name=="blue" &&
+        unprocessedProperties[0].external_type==PLY_UCHAR && unprocessedProperties[1].external_type==PLY_UCHAR && unprocessedProperties[2].external_type==PLY_UCHAR &&
+        !unprocessedProperties[0].is_list && !unprocessedProperties[1].is_list && !unprocessedProperties[2].is_list;
+    if( fixedRgb )
+    {
+        if( Long.set ) return Execute< Real , Dim , long long >( VertexFactory::RGBColorFactory< Real >() );
+        else           return Execute< Real , Dim , int       >( VertexFactory::RGBColorFactory< Real >() );
+    }
 	if( Long.set ) return Execute< Real , Dim , long long >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
 	else           return Execute< Real , Dim , int       >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
 
