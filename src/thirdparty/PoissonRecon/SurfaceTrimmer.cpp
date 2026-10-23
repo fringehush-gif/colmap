@@ -496,6 +496,9 @@ int Execute( AuxDataFactories ... auxDataFactories )
 
 		// Compute the connectivity
 
+        using ComponentEdges = std::unordered_set< EdgeKey< Index > , typename EdgeKey< Index >::Hasher >;
+        auto BuildNativeComponentEdges = [&]( ComponentEdges &componentEdges )
+        {
 		// A map identifying half-edges along the boundaries of components and associating them with the component
 		std::unordered_map< HalfEdgeKey< Index > , Index , typename HalfEdgeKey< Index >::Hasher > componentBoundaryHalfEdges;
 		for( unsigned int i=0 ; i<_components.size() ; i++ )
@@ -521,7 +524,6 @@ int Execute( AuxDataFactories ... auxDataFactories )
 		}
 
 		// A set identify the dual edges of the component graph
-		std::unordered_set< EdgeKey< Index > , typename EdgeKey< Index >::Hasher > componentEdges;
 		for( auto iter=componentBoundaryHalfEdges.begin() ; iter!=componentBoundaryHalfEdges.end() ; iter++ )
 		{
 			HalfEdgeKey< Index > key = iter->first;
@@ -529,6 +531,25 @@ int Execute( AuxDataFactories ... auxDataFactories )
 			auto _iter = componentBoundaryHalfEdges.find( _key );
 			if( _iter!=componentBoundaryHalfEdges.end() ) componentEdges.insert( EdgeKey< Index >( iter->second , _iter->second ) );
 		}
+        };
+        ComponentEdges componentEdges;
+        bool gpuBoundary = false;
+#if defined(POISSON_TRIM_NATIVE_GPU) && !defined(__HIPCC__)
+        PoissonTrimGpu::Stats boundaryStats;
+        std::vector< std::uint64_t > graph;
+        gpuBoundary = PoissonTrimGpu::TryBoundaryGraph( _polygons , _components , graph , boundaryStats );
+        if( gpuBoundary )
+        {
+            for( const auto edge : graph ) componentEdges.insert( EdgeKey< Index >( Index(edge>>32) , Index(std::uint32_t(edge)) ) );
+            if( PoissonTrimGpu::Verify() )
+            {
+                ComponentEdges reference;
+                BuildNativeComponentEdges( reference );
+                if( componentEdges!=reference ) MK_THROW( "GPU trim boundary differs from native" );
+            }
+        }
+#endif
+        if( !gpuBoundary ) BuildNativeComponentEdges( componentEdges );
 		for( auto iter=componentEdges.begin() ; iter!=componentEdges.end() ; iter++ )
 		{
 			nodes[ iter->key1 ].neighbors.push_back( &nodes[ iter->key2 ] );
@@ -545,6 +566,28 @@ int Execute( AuxDataFactories ... auxDataFactories )
 
 		double area = 0;
 		for( unsigned int i=0 ; i<nodes.size() ; i++ ) area += nodes[i].area;
+
+#if defined(POISSON_TRIM_NATIVE_GPU) && !defined(__HIPCC__)
+        if( gpuBoundary )
+        {
+            std::size_t completedMerges = 0;
+            const bool orderIndependent = PoissonTrimGpu::HasOrderIndependentMerges( nodes , area*IslandAreaRatio.value , completedMerges );
+            if( !orderIndependent )
+            {
+                ComponentEdges nativeEdges;
+                BuildNativeComponentEdges( nativeEdges );
+                componentEdges.swap( nativeEdges );
+                for( auto &node : nodes ) node.neighbors.clear();
+                for( const auto &edge : componentEdges )
+                {
+                    nodes[edge.key1].neighbors.push_back( &nodes[edge.key2] );
+                    nodes[edge.key2].neighbors.push_back( &nodes[edge.key1] );
+                }
+                if( Debug.set ) ComponentGraph< Index >::SanityCheck( nodes.size() , [&]( size_t i ){ return &nodes[i]; } );
+            }
+            if( Verbose.set || PoissonTrimGpu::Verify() ) std::cout << "# TrimNativeGPU boundary polygons=" << _polygons.size() << " deviceBytes=" << boundaryStats.device_bytes << " nativeOrderFallback=" << (!orderIndependent) << " replayedUniqueMerges=" << completedMerges << std::endl;
+        }
+#endif
 
 		bool done = false;
 		while( !done )

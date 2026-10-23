@@ -30,4 +30,13 @@ bool ConnectedComponents(std::size_t polygons,
                          std::uint32_t* roots,
                          Stats& stats);
 
+// A nonmanifold edge incidence returns false and leaves graph untouched.
+bool BoundaryGraph(std::size_t polygons,
+                   std::size_t entries,
+                   const std::uint64_t* offsets,
+                   const std::uint32_t* vertices,
+                   const std::uint32_t* components,
+                   std::vector<std::uint64_t>& graph,
+                   Stats& stats);
+
 }  // namespace PoissonTrimGpu
