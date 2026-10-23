@@ -10,6 +10,7 @@
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/string.h"
 
+#include <algorithm>
 #include <fstream>
 #include <utility>
 
@@ -230,8 +231,11 @@ std::vector<std::map<int, float>> Model::ComputeTriangulationAngles(
               proj_centers.at(image_idx1),
               proj_centers.at(image_idx2),
               Eigen::Vector3d(point.x, point.y, point.z));
-          all_triangulation_angles.at(image_idx1)[image_idx2].push_back(angle);
-          all_triangulation_angles.at(image_idx2)[image_idx1].push_back(angle);
+          // Both directed lists receive exactly this same sample. Retain one
+          // ordered list per unordered pair without changing the calculation.
+          const int first = std::min(image_idx1, image_idx2);
+          const int second = std::max(image_idx1, image_idx2);
+          all_triangulation_angles.at(first)[second].push_back(angle);
         }
       }
     }
@@ -242,8 +246,9 @@ std::vector<std::map<int, float>> Model::ComputeTriangulationAngles(
        ++image_idx) {
     auto& overlapping_images = all_triangulation_angles[image_idx];
     for (auto& [other_image_idx, angles] : overlapping_images) {
-      triangulation_angles[image_idx].emplace(other_image_idx,
-                                              Percentile(angles, percentile));
+      const float angle = Percentile(angles, percentile);
+      triangulation_angles[image_idx].emplace(other_image_idx, angle);
+      triangulation_angles[other_image_idx].emplace(image_idx, angle);
     }
   }
 
