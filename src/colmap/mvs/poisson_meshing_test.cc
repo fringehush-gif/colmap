@@ -35,6 +35,8 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -577,6 +579,140 @@ TEST(PoissonMeshing, TrimMergeReplayRejectsNonfiniteAreaAndThreshold) {
   EXPECT_EQ(completed_merges, 0);
 }
 
+using ScratchPoint = ::PoissonRecon::Point<float>;
+using ScratchData = ::PoissonRecon::DirectSum<float, ScratchPoint>;
+using ScratchExtractor =
+    ::PoissonRecon::_LevelSetExtractor<true, float, 3, ScratchData>;
+
+ScratchExtractor::Key ScratchKey(unsigned int index) {
+  ScratchExtractor::Key key;
+  key[0] = index;
+  key[1] = index + 100;
+  key[2] = index + 200;
+  return key;
+}
+
+ScratchPoint ScratchRgb(float value) {
+  ScratchPoint result(std::size_t(3));
+  result[0] = value;
+  result[1] = value + 0.25f;
+  result[2] = value + 0.5f;
+  return result;
+}
+
+ScratchExtractor::Vertex ScratchVertex(float value) {
+  ScratchExtractor::Vertex result;
+  for (int axis = 0; axis < 3; ++axis) {
+    result.template get<0>()[axis] = value + static_cast<float>(axis);
+    result.template get<1>()[axis] = value + static_cast<float>(axis) + 0.125f;
+  }
+  result.template get<2>() = value + 0.75f;
+  result.template get<3>().template get<0>() = ScratchRgb(value);
+  return result;
+}
+
+TEST(PoissonMeshing, DynamicPointMoveRetainsOwnershipAndDimensions) {
+  EXPECT_TRUE(std::is_nothrow_move_constructible_v<ScratchPoint>);
+  EXPECT_TRUE(std::is_nothrow_move_constructible_v<ScratchExtractor::Vertex>);
+  ScratchPoint source = ScratchRgb(1.0f);
+  float* owned = &source[0];
+  ScratchPoint moved(std::move(source));
+  EXPECT_EQ(source.dim(), 0);
+  ASSERT_EQ(moved.dim(), 3);
+  EXPECT_EQ(&moved[0], owned);
+  EXPECT_FLOAT_EQ(moved[2], 1.5f);
+  moved = std::move(moved);
+  ASSERT_EQ(moved.dim(), 3);
+  EXPECT_EQ(&moved[0], owned);
+
+  ScratchPoint target = ScratchRgb(5.0f);
+  target = std::move(moved);
+  EXPECT_EQ(moved.dim(), 0);
+  ASSERT_EQ(target.dim(), 3);
+  EXPECT_EQ(&target[0], owned);
+  ScratchPoint empty;
+  target = std::move(empty);
+  EXPECT_EQ(target.dim(), 0);
+  EXPECT_EQ(empty.dim(), 0);
+
+  ScratchPoint three = ScratchRgb(7.0f);
+  ScratchPoint two(std::size_t(2));
+  two[0] = 9.0f;
+  two[1] = 10.0f;
+  float* three_owned = &three[0];
+  float* two_owned = &two[0];
+  EXPECT_THROW(three = std::move(two), std::exception);
+  EXPECT_EQ(three.dim(), 3);
+  EXPECT_EQ(two.dim(), 2);
+  EXPECT_EQ(&three[0], three_owned);
+  EXPECT_EQ(&two[0], two_owned);
+
+  std::vector<ScratchPoint> points;
+  points.reserve(1);
+  points.push_back(ScratchRgb(0.0f));
+  float* first_owned = &points[0][0];
+  for (int i = 1; i < 128; ++i)
+    points.push_back(ScratchRgb(static_cast<float>(i)));
+  EXPECT_EQ(&points[0][0], first_owned);
+  for (int i = 0; i < 128; ++i) {
+    ASSERT_EQ(points[i].dim(), 3);
+    EXPECT_FLOAT_EQ(points[i][2], static_cast<float>(i) + 0.5f);
+  }
+}
+
+template <typename Values>
+void CheckScratchMovesAcrossWorkers() {
+  const unsigned int prior_threads = ::PoissonRecon::ThreadPool::NumThreads();
+  ::PoissonRecon::ThreadPool::SetNumThreads(2);
+  struct RestoreThreads {
+    unsigned int count;
+    ~RestoreThreads() { ::PoissonRecon::ThreadPool::SetNumThreads(count); }
+  } restore{prior_threads};
+  Values values;
+  typename Values::Scratch scratch;
+  const auto edge_key = ScratchKey(3);
+  scratch.eKeyValues[0].emplace_back(edge_key,
+                                     std::make_pair(10, ScratchVertex(11.0f)));
+  scratch.eKeyValues[1].emplace_back(edge_key,
+                                     std::make_pair(20, ScratchVertex(21.0f)));
+  float* last_owned = &scratch.eKeyValues[1]
+                           .back()
+                           .second.second.template get<3>()
+                           .template get<0>()[0];
+  values.setFromScratch(scratch.eKeyValues);
+  auto edge = values.edgeVertexMap.find(edge_key);
+  ASSERT_NE(edge, values.edgeVertexMap.end());
+  EXPECT_EQ(edge->second.first, 20);
+  EXPECT_FLOAT_EQ(edge->second.second.template get<3>().template get<0>()[0],
+                  21.0f);
+  EXPECT_EQ(&edge->second.second.template get<3>().template get<0>()[0],
+            last_owned);
+
+  const auto face_key = ScratchKey(4);
+  std::vector<ScratchExtractor::IsoEdge> first;
+  first.reserve(2);
+  first.emplace_back(ScratchKey(31), ScratchKey(32));
+  scratch.fKeyValues[0].emplace_back(face_key, std::move(first));
+  scratch.fKeyValues[1].emplace_back(
+      face_key,
+      std::vector<ScratchExtractor::IsoEdge>{
+          ScratchExtractor::IsoEdge(ScratchKey(33), ScratchKey(34))});
+  const auto* first_owned = scratch.fKeyValues[0][0].second.data();
+  values.setFromScratch(scratch.fKeyValues);
+  auto face = values.faceEdgeMap.find(face_key);
+  ASSERT_NE(face, values.faceEdgeMap.end());
+  ASSERT_EQ(face->second.size(), 2);
+  EXPECT_EQ(face->second.data(), first_owned);
+  EXPECT_EQ(face->second[0][0], ScratchKey(31));
+  EXPECT_EQ(face->second[0][1], ScratchKey(32));
+  EXPECT_EQ(face->second[1][0], ScratchKey(33));
+  EXPECT_EQ(face->second[1][1], ScratchKey(34));
+}
+
+TEST(PoissonMeshing, ExtractionScratchMovesPreserveDuplicateOrder) {
+  CheckScratchMovesAcrossWorkers<ScratchExtractor::SliceValues>();
+  CheckScratchMovesAcrossWorkers<ScratchExtractor::XSliceValues>();
+}
 }  // namespace
 }  // namespace mvs
 }  // namespace colmap
