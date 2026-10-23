@@ -126,6 +126,7 @@ if(CUDA_ENABLED)
             patch_match_cuda.h patch_match_cuda.cu
             patch_match_state_map.h
             patch_match_rng_perimeter.h
+            packed_consistency_mask.h
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
@@ -323,6 +324,7 @@ if(HIP_ENABLED)
             patch_match_cuda.h patch_match_cuda.cu
             patch_match_state_map.h
             patch_match_rng_perimeter.h
+            packed_consistency_mask.h
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
