@@ -1,0 +1,1583 @@
+{
+  "schema": "colmap.haswellPascalDenseValidation/v1",
+  "classification": "validation-only; cumulative historical source comparisons",
+  "sourceBase": "1440f0737ef7c083c6624313215ccce0cad8d6da",
+  "hardware": {
+    "cpu": "Intel Core i7-4790K",
+    "physicalCores": 4,
+    "logicalProcessors": 8,
+    "ramGiB": 31.88,
+    "gpu": "NVIDIA GeForce GTX1080",
+    "computeCapability": "6.1",
+    "vramMiB": 8192
+  },
+  "toolchain": {
+    "msvc": "19.39.33523 x64 / toolset14.39.33519",
+    "cuda": "12.9.86 / CUDA12.9.1",
+    "architecture": "sm61",
+    "cmake": "3.31.6-msvc6",
+    "ninja": "1.12.1",
+    "vcpkgBaseline": "c748cb44f2a435fcf015c35225c9d5545fe0021c",
+    "numpy": "2.2.6",
+    "scipy": "1.15.3"
+  },
+  "settings": {
+    "cpuWorkers": 4,
+    "cudaWorkers": 1,
+    "gpuIndex": 0,
+    "ambientOMP": 1,
+    "ambientOpenBLAS": 1,
+    "ambientMKL": 1,
+    "fusionUseCache": false,
+    "fusionEffectiveThreads": 4,
+    "qualityModes": "Algorithm defaults; no optional compression/direct upload/rotation reuse or bounded cache modes enabled."
+  },
+  "scope": "Native Windows within-host dense reconstruction from fixed public Fountain poses/images; no fresh SfM, meshing, ground-truth accuracy or cross-host absolute timing comparison.",
+  "counterScope": "Native Windows process times/peak working set/peak commit/scheduled cycle count/logical I/O. NVML samples are whole-board, include other clients and can miss short peaks; no attributed energy or GPU instruction/cache claim.",
+  "builds": {
+    "pristine": {
+      "sourcePin": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+      "sourceTree": "d5d1bcd34a2fd1e131b02109ad97224de5e50cd3",
+      "executableSHA256": "D75BCE9CA819E75E8922002EF7B367528D96EC58632C67AFF2108A2E488F2EF8",
+      "arguments": [
+        "-S",
+        "$WORKSPACE\\colmap-comparison",
+        "-B",
+        "$WORKSPACE\\build-native",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DCMAKE_TOOLCHAIN_FILE=$WORKSPACE\\toolchain\\vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "-DVCPKG_INSTALLED_DIR=$WORKSPACE/dependencies",
+        "-DVCPKG_MANIFEST_INSTALL=OFF",
+        "-DVCPKG_TARGET_TRIPLET=x64-windows-release",
+        "-DVCPKG_HOST_TRIPLET=x64-windows-release",
+        "-DVCPKG_OVERLAY_TRIPLETS=$WORKSPACE/toolchain/triplets",
+        "-DCMAKE_INSTALL_PREFIX=$WORKSPACE/install-native",
+        "-DBUILD_SHARED_LIBS=OFF",
+        "-DCUDA_ENABLED=ON",
+        "-DMVS_ENABLED=ON",
+        "-DOPENMP_ENABLED=ON",
+        "-DIPO_ENABLED=ON",
+        "-DSIMD_ENABLED=ON",
+        "-DTESTS_ENABLED=ON",
+        "-DCMAKE_CUDA_ARCHITECTURES=61",
+        "-DCMAKE_CUDA_COMPILER=C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9/bin/nvcc.exe",
+        "-DCUDAToolkit_ROOT=C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9",
+        "-DFETCHCONTENT_SOURCE_DIR_POSELIB=$WORKSPACE/toolchain/vendor/PoseLib-1bb8881f08e68f0b3d9b2ecc411fc15e7766ef1b",
+        "-DFETCHCONTENT_SOURCE_DIR_FAISS=$WORKSPACE/toolchain/vendor/faiss-1.15.1",
+        "-DGUI_ENABLED=OFF",
+        "-DONNX_ENABLED=OFF",
+        "-DCGAL_ENABLED=OFF",
+        "-DOPENGL_ENABLED=OFF",
+        "-DDOWNLOAD_ENABLED=OFF",
+        "-DCASPAR_ENABLED=OFF",
+        "-DHIP_ENABLED=OFF",
+        "-DBLA_VENDOR=All"
+      ]
+    },
+    "custom": {
+      "sourcePin": "c188247daddae63e681b3469e304dfc9f925a58b",
+      "sourceTree": "87eae3279bbbe735d5b9f578657ae1012aec07c2",
+      "executableSHA256": "F069E356284BBBBCC6658560D72EE09E5FF86582F070330529D367DA3CEB1A1B",
+      "arguments": [
+        "-S",
+        "$WORKSPACE\\colmap-comparison",
+        "-B",
+        "$WORKSPACE\\build-native",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DCMAKE_TOOLCHAIN_FILE=$WORKSPACE\\toolchain\\vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "-DVCPKG_INSTALLED_DIR=$WORKSPACE/dependencies",
+        "-DVCPKG_MANIFEST_INSTALL=OFF",
+        "-DVCPKG_TARGET_TRIPLET=x64-windows-release",
+        "-DVCPKG_HOST_TRIPLET=x64-windows-release",
+        "-DVCPKG_OVERLAY_TRIPLETS=$WORKSPACE/toolchain/triplets",
+        "-DCMAKE_INSTALL_PREFIX=$WORKSPACE/install-native",
+        "-DBUILD_SHARED_LIBS=OFF",
+        "-DCUDA_ENABLED=ON",
+        "-DMVS_ENABLED=ON",
+        "-DOPENMP_ENABLED=ON",
+        "-DIPO_ENABLED=ON",
+        "-DSIMD_ENABLED=ON",
+        "-DTESTS_ENABLED=ON",
+        "-DCMAKE_CUDA_ARCHITECTURES=61",
+        "-DCMAKE_CUDA_COMPILER=C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9/bin/nvcc.exe",
+        "-DCUDAToolkit_ROOT=C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9",
+        "-DFETCHCONTENT_SOURCE_DIR_POSELIB=$WORKSPACE/toolchain/vendor/PoseLib-1bb8881f08e68f0b3d9b2ecc411fc15e7766ef1b",
+        "-DFETCHCONTENT_SOURCE_DIR_FAISS=$WORKSPACE/toolchain/vendor/faiss-1.15.1",
+        "-DGUI_ENABLED=OFF",
+        "-DONNX_ENABLED=OFF",
+        "-DCGAL_ENABLED=OFF",
+        "-DOPENGL_ENABLED=OFF",
+        "-DDOWNLOAD_ENABLED=OFF",
+        "-DCASPAR_ENABLED=OFF",
+        "-DHIP_ENABLED=OFF",
+        "-DBLA_VENDOR=All"
+      ]
+    }
+  },
+  "input": {
+    "scene": "Fountain P11",
+    "originalPhotos": 11,
+    "frozenPosesAndImages": true,
+    "archiveSHA256": "ac2fe536467090e0c8312df9aa38ab90b43d0d5f9464b80881f39caf567d0c79",
+    "verifiedMembers": 36,
+    "orderedProblemsSHA256": "7d7e9a50d725955279afc4f817e6a1ccc1a9614b058123a7d82e3da9c3ab1756"
+  },
+  "cases": {
+    "1536": {
+      "maximumImageSidePixels": 1536,
+      "cpuWorkers": 4,
+      "cudaWorkers": 1,
+      "stages": {
+        "patchMatch": {
+          "pristine": {
+            "observations": 2,
+            "wallSeconds": [
+              404.2368231,
+              405.6040241
+            ],
+            "meanWallSeconds": 404.9204236,
+            "cpuSeconds": [
+              403.6875,
+              404.859375
+            ],
+            "peakWorkingSetMiB": 788.359375,
+            "peakCommitMiB": 1548.9609375,
+            "processCycles": [
+              1623106168872,
+              1626461680113
+            ],
+            "wholeBoardPeakVramMiB": 1044.7734375,
+            "wholeBoardMaxTemperatureC": 69,
+            "wholeBoardSmClockMHzRange": [
+              1151,
+              1645
+            ],
+            "meanCpuSeconds": 404.2734375,
+            "meanProcessCycles": 1624783924492.5
+          },
+          "custom": {
+            "observations": 2,
+            "wallSeconds": [
+              139.3387986,
+              137.8422396
+            ],
+            "meanWallSeconds": 138.5905191,
+            "cpuSeconds": [
+              137.265625,
+              135.625
+            ],
+            "peakWorkingSetMiB": 606.88671875,
+            "peakCommitMiB": 1359.3046875,
+            "processCycles": [
+              550608389952,
+              544498848306
+            ],
+            "wholeBoardPeakVramMiB": 1053.0234375,
+            "wholeBoardMaxTemperatureC": 68,
+            "wholeBoardSmClockMHzRange": [
+              1151,
+              1645
+            ],
+            "meanCpuSeconds": 136.4453125,
+            "meanProcessCycles": 547553619129
+          },
+          "wallReductionPercent": 65.77339372812017,
+          "speedup": 2.9217036362193696,
+          "order": "ABBA"
+        },
+        "fusion": {
+          "pristine": {
+            "observations": 2,
+            "wallSeconds": [
+              9.3329668,
+              9.885258
+            ],
+            "meanWallSeconds": 9.6091124,
+            "cpuSeconds": [
+              31.78125,
+              33.8125
+            ],
+            "peakWorkingSetMiB": 569.34375,
+            "peakCommitMiB": 570.8984375,
+            "processCycles": [
+              128523805323,
+              136546631564
+            ],
+            "wholeBoardPeakVramMiB": 503.5,
+            "wholeBoardMaxTemperatureC": 64,
+            "wholeBoardSmClockMHzRange": [
+              1151,
+              1151
+            ],
+            "meanCpuSeconds": 32.796875,
+            "meanProcessCycles": 132535218443.5
+          },
+          "custom": {
+            "observations": 2,
+            "wallSeconds": [
+              3.8895807,
+              4.2541749
+            ],
+            "meanWallSeconds": 4.071877799999999,
+            "cpuSeconds": [
+              14.09375,
+              14.734375
+            ],
+            "peakWorkingSetMiB": 374.59375,
+            "peakCommitMiB": 370.44140625,
+            "processCycles": [
+              57208528218,
+              60325647235
+            ],
+            "wholeBoardPeakVramMiB": 503.9375,
+            "wholeBoardMaxTemperatureC": 64,
+            "wholeBoardSmClockMHzRange": [
+              1151,
+              1151
+            ],
+            "meanCpuSeconds": 14.4140625,
+            "meanProcessCycles": 58767087726.5
+          },
+          "wallReductionPercent": 57.62482911533016,
+          "speedup": 2.359872489297199,
+          "order": "ABBA"
+        }
+      },
+      "mapComparisons": [
+        {
+          "pair": 1,
+          "status": "pass-byte-exact",
+          "filesCompared": 44,
+          "byteExactFiles": 44
+        },
+        {
+          "pair": 2,
+          "status": "pass-byte-exact",
+          "filesCompared": 44,
+          "byteExactFiles": 44
+        }
+      ],
+      "fusionQuality": {
+        "method": "Exact scipy cKDTree k=2, eps=0; both directed queries; no ICP, alignment, subsampling or reconstruction rerun.",
+        "distanceUnits": "Existing fixed scene units; normalized distances divide by the common union-bounds diagonal.",
+        "sceneDiagonal": 30.265473936815965,
+        "normalColorScope": "Oriented normal angle and Euclidean RGB code distance (0-255 channel codes) at the selected nearest point. Equal-distance ties may make attribute correspondences nonunique; not a photo/texture-fidelity metric.",
+        "acceptance": "Descriptive comparisons against each build own repeat variability; no approximate equivalence threshold or ground-truth claim.",
+        "pointCounts": {
+          "r1-pristine": 434083,
+          "r2-pristine": 434112,
+          "r1-custom": 434076,
+          "r2-custom": 434101
+        },
+        "comparisons": [
+          {
+            "a": "r1-pristine",
+            "b": "r2-pristine",
+            "kind": "within-build",
+            "symmetricDistance": {
+              "mean": 3.498413437212965e-05,
+              "rms": 0.0004400968228640499,
+              "median": 0.0,
+              "p95": 0.0,
+              "p99": 0.0004768625623382268,
+              "max": 0.024580019185865692,
+              "zeroFraction": 0.9862807318632335
+            },
+            "orientedNormalAngleDegrees": {
+              "mean": 0.010769624048083548,
+              "rms": 0.20748881243984987,
+              "p99": 0.10893780085311283,
+              "max": 38.2236388823014
+            },
+            "rgbCodeL2": {
+              "mean": 0.04471567702596057,
+              "rms": 0.7063436311585936,
+              "p99": 1.0,
+              "max": 77.30459236035075
+            }
+          },
+          {
+            "a": "r1-pristine",
+            "b": "r1-custom",
+            "kind": "cross-build",
+            "symmetricDistance": {
+              "mean": 2.49621646385597e-05,
+              "rms": 0.0003571146309657692,
+              "median": 0.0,
+              "p95": 0.0,
+              "p99": 0.00013342241115270524,
+              "max": 0.024580019185865692,
+              "zeroFraction": 0.9891989831355777
+            },
+            "orientedNormalAngleDegrees": {
+              "mean": 0.008683567750569705,
+              "rms": 0.18465364197424122,
+              "p99": 0.009551441499188103,
+              "max": 38.2236388823014
+            },
+            "rgbCodeL2": {
+              "mean": 0.030778906872235025,
+              "rms": 0.5626157542941005,
+              "p99": 0.0,
+              "max": 75.05331438384317
+            }
+          },
+          {
+            "a": "r1-pristine",
+            "b": "r2-custom",
+            "kind": "cross-build",
+            "symmetricDistance": {
+              "mean": 2.637151765850835e-05,
+              "rms": 0.0003727518588177125,
+              "median": 0.0,
+              "p95": 0.0,
+              "p99": 0.0001714776000664178,
+              "max": 0.024580019185865692,
+              "zeroFraction": 0.9887097665932567
+            },
+            "orientedNormalAngleDegrees": {
+              "mean": 0.009635191365285173,
+              "rms": 0.2009467327385543,
+              "p99": 0.024190746758702215,
+              "max": 38.2236388823014
+            },
+            "rgbCodeL2": {
+              "mean": 0.032759306929598345,
+              "rms": 0.574415439816923,
+              "p99": 0.0,
+              "max": 99.36800289831733
+            }
+          },
+          {
+            "a": "r2-pristine",
+            "b": "r1-custom",
+            "kind": "cross-build",
+            "symmetricDistance": {
+              "mean": 2.107277597939058e-05,
+              "rms": 0.0003421443187119186,
+              "median": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "max": 0.021392102439478113,
+              "zeroFraction": 0.9919925177496118
+            },
+            "orientedNormalAngleDegrees": {
+              "mean": 0.006627478720687498,
+              "rms": 0.16768806389151453,
+              "p99": 1.2074182697257333e-06,
+              "max": 31.77189466206478
+            },
+            "rgbCodeL2": {
+              "mean": 0.027974032050533486,
+              "rms": 0.5582677777908926,
+              "p99": 0.0,
+              "max": 77.30459236035075
+            }
+          },
+          {
+            "a": "r2-pristine",
+            "b": "r2-custom",
+            "kind": "cross-build",
+            "symmetricDistance": {
+              "mean": 2.132018476714955e-05,
+              "rms": 0.00035067110043108786,
+              "median": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "max": 0.021097680455484213,
+              "zeroFraction": 0.9921943117645095
+            },
+            "orientedNormalAngleDegrees": {
+              "mean": 0.007155250225544399,
+              "rms": 0.18179480213440527,
+              "p99": 1.2074182697257333e-06,
+              "max": 31.77189466206478
+            },
+            "rgbCodeL2": {
+              "mean": 0.02956424106034618,
+              "rms": 0.6038140507381444,
+              "p99": 0.0,
+              "max": 99.36800289831733
+            }
+          },
+          {
+            "a": "r1-custom",
+            "b": "r2-custom",
+            "kind": "within-build",
+            "symmetricDistance": {
+              "mean": 1.3077137573213179e-05,
+              "rms": 0.0002507933807577356,
+              "median": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "max": 0.021392102439478113,
+              "zeroFraction": 0.9932490724817635
+            },
+            "orientedNormalAngleDegrees": {
+              "mean": 0.005439618443410384,
+              "rms": 0.15195548016765054,
+              "p99": 1.2074182697257333e-06,
+              "max": 23.792440843620064
+            },
+            "rgbCodeL2": {
+              "mean": 0.017708011160579754,
+              "rms": 0.4287634409742652,
+              "p99": 0.0,
+              "max": 99.36800289831733
+            }
+          }
+        ]
+      }
+    },
+    "3072": {
+      "maximumImageSidePixels": 3072,
+      "cpuWorkers": 4,
+      "cudaWorkers": 1,
+      "stages": {
+        "patchMatch": {
+          "pristine": {
+            "observations": 1,
+            "wallSeconds": [
+              1370.8895737
+            ],
+            "meanWallSeconds": 1370.8895737,
+            "cpuSeconds": [
+              1375.578125
+            ],
+            "peakWorkingSetMiB": 2651.92578125,
+            "peakCommitMiB": 4515.44921875,
+            "processCycles": [
+              5520839093403
+            ],
+            "wholeBoardPeakVramMiB": 2428.3671875,
+            "wholeBoardMaxTemperatureC": 71,
+            "wholeBoardSmClockMHzRange": [
+              721,
+              1645
+            ],
+            "meanCpuSeconds": 1375.578125,
+            "meanProcessCycles": 5520839093403
+          },
+          "custom": {
+            "observations": 1,
+            "wallSeconds": [
+              723.0309446
+            ],
+            "meanWallSeconds": 723.0309446,
+            "cpuSeconds": [
+              713.9375
+            ],
+            "peakWorkingSetMiB": 1929.765625,
+            "peakCommitMiB": 3733.74609375,
+            "processCycles": [
+              2861464468333
+            ],
+            "wholeBoardPeakVramMiB": 2357.77734375,
+            "wholeBoardMaxTemperatureC": 65,
+            "wholeBoardSmClockMHzRange": [
+              329,
+              1645
+            ],
+            "meanCpuSeconds": 713.9375,
+            "meanProcessCycles": 2861464468333
+          },
+          "wallReductionPercent": 47.258265109672124,
+          "speedup": 1.8960316760141058,
+          "order": "pristine then custom"
+        },
+        "fusion": {
+          "pristine": {
+            "observations": 2,
+            "wallSeconds": [
+              39.2647728,
+              38.4304889
+            ],
+            "meanWallSeconds": 38.84763085,
+            "cpuSeconds": [
+              140.640625,
+              138.078125
+            ],
+            "peakWorkingSetMiB": 2741.078125,
+            "peakCommitMiB": 2752.2890625,
+            "processCycles": [
+              569399644356,
+              559245489090
+            ],
+            "wholeBoardPeakVramMiB": 495.34765625,
+            "wholeBoardMaxTemperatureC": 64,
+            "wholeBoardSmClockMHzRange": [
+              1151,
+              1151
+            ],
+            "meanCpuSeconds": 139.359375,
+            "meanProcessCycles": 564322566723
+          },
+          "custom": {
+            "observations": 2,
+            "wallSeconds": [
+              14.2715422,
+              14.5784054
+            ],
+            "meanWallSeconds": 14.4249738,
+            "cpuSeconds": [
+              52.140625,
+              52.15625
+            ],
+            "peakWorkingSetMiB": 1351.6796875,
+            "peakCommitMiB": 1353.76171875,
+            "processCycles": [
+              212748757303,
+              212237692526
+            ],
+            "wholeBoardPeakVramMiB": 499.41015625,
+            "wholeBoardMaxTemperatureC": 63,
+            "wholeBoardSmClockMHzRange": [
+              1151,
+              1151
+            ],
+            "meanCpuSeconds": 52.1484375,
+            "meanProcessCycles": 212493224914.5
+          },
+          "wallReductionPercent": 62.86781591469948,
+          "speedup": 2.6930815534652828,
+          "order": "ABBA"
+        }
+      },
+      "mapComparisons": [
+        {
+          "pair": 1,
+          "status": "pass-byte-exact",
+          "filesCompared": 44,
+          "byteExactFiles": 44
+        }
+      ],
+      "fusionQuality": {
+        "method": "Exact scipy cKDTree k=2, eps=0; both directed queries; no ICP, alignment, subsampling or reconstruction rerun.",
+        "distanceUnits": "Existing fixed scene units; normalized distances divide by the common union-bounds diagonal.",
+        "sceneDiagonal": 30.625780620054012,
+        "normalColorScope": "Oriented normal angle and Euclidean RGB code distance (0-255 channel codes) at the selected nearest point. Equal-distance ties may make attribute correspondences nonunique; not a photo/texture-fidelity metric.",
+        "acceptance": "Descriptive comparisons against each build own repeat variability; no approximate equivalence threshold or ground-truth claim.",
+        "pointCounts": {
+          "r1-pristine": 1678626,
+          "r2-pristine": 1678637,
+          "r1-custom": 1678694,
+          "r2-custom": 1678729
+        },
+        "comparisons": [
+          {
+            "a": "r1-pristine",
+            "b": "r2-pristine",
+            "kind": "within-build",
+            "symmetricDistance": {
+              "mean": 7.0065134748907146e-06,
+              "rms": 0.000126213350739509,
+              "median": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "max": 0.021394351796343664,
+              "zeroFraction": 0.9934527023947781
+            },
+            "orientedNormalAngleDegrees": {
+              "mean": 0.0105064753761084,
+              "rms": 0.27245958673271375,
+              "p99": 1.2074182697257333e-06,
+              "max": 63.98376356783069
+            },
+            "rgbCodeL2": {
+              "mean": 0.016640577244926087,
+              "rms": 0.36496231113561894,
+              "p99": 0.0,
+              "max": 47.56048780237646
+            }
+          },
+          {
+            "a": "r1-pristine",
+            "b": "r1-custom",
+            "kind": "cross-build",
+            "symmetricDistance": {
+              "mean": 5.9678031312485215e-06,
+              "rms": 0.0001161261860286534,
+              "median": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "max": 0.021394351796343664,
+              "zeroFraction": 0.9939529148249199
+            },
+            "orientedNormalAngleDegrees": {
+              "mean": 0.008588796837289967,
+              "rms": 0.23801424615451677,
+              "p99": 1.2074182697257333e-06,
+              "max": 57.91829829151742
+            },
+            "rgbCodeL2": {
+              "mean": 0.014102621178117749,
+              "rms": 0.33423882865608584,
+              "p99": 0.0,
+              "max": 100.70253224224304
+            }
+          },
+          {
+            "a": "r1-pristine",
+            "b": "r2-custom",
+            "kind": "cross-build",
+            "symmetricDistance": {
+              "mean": 6.319061104669465e-06,
+              "rms": 0.00012678009044594593,
+              "median": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "max": 0.026528955167744863,
+              "zeroFraction": 0.9938847694092522
+            },
+            "orientedNormalAngleDegrees": {
+              "mean": 0.008539331644945365,
+              "rms": 0.24165566783111414,
+              "p99": 1.2074182697257333e-06,
+              "max": 73.6198909417269
+            },
+            "rgbCodeL2": {
+              "mean": 0.01554001691645298,
+              "rms": 0.37966042773241276,
+              "p99": 0.0,
+              "max": 51.20546845796843
+            }
+          },
+          {
+            "a": "r2-pristine",
+            "b": "r1-custom",
+            "kind": "cross-build",
+            "symmetricDistance": {
+              "mean": 8.653160777517439e-06,
+              "rms": 0.0001391505306950986,
+              "median": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "max": 0.014455418593855546,
+              "zeroFraction": 0.9917848433770754
+            },
+            "orientedNormalAngleDegrees": {
+              "mean": 0.012635472459345421,
+              "rms": 0.2936760157417696,
+              "p99": 1.2074182697257333e-06,
+              "max": 63.98376356783069
+            },
+            "rgbCodeL2": {
+              "mean": 0.020821046457364725,
+              "rms": 0.4102054176849848,
+              "p99": 0.0,
+              "max": 100.70253224224304
+            }
+          },
+          {
+            "a": "r2-pristine",
+            "b": "r2-custom",
+            "kind": "cross-build",
+            "symmetricDistance": {
+              "mean": 9.205977723403838e-06,
+              "rms": 0.00015165184683732058,
+              "median": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "max": 0.026528955167744863,
+              "zeroFraction": 0.9916654901491229
+            },
+            "orientedNormalAngleDegrees": {
+              "mean": 0.012824924936343038,
+              "rms": 0.29900319579858414,
+              "p99": 1.2074182697257333e-06,
+              "max": 73.6198909417269
+            },
+            "rgbCodeL2": {
+              "mean": 0.022436348847062526,
+              "rms": 0.4533908140034821,
+              "p99": 0.0,
+              "max": 51.20546845796843
+            }
+          },
+          {
+            "a": "r1-custom",
+            "b": "r2-custom",
+            "kind": "within-build",
+            "symmetricDistance": {
+              "mean": 7.669551991671581e-06,
+              "rms": 0.00013957721348228675,
+              "median": 0.0,
+              "p95": 0.0,
+              "p99": 0.0,
+              "max": 0.026528955167744863,
+              "zeroFraction": 0.993000881926406
+            },
+            "orientedNormalAngleDegrees": {
+              "mean": 0.010246925662959486,
+              "rms": 0.2627000956328646,
+              "p99": 1.2074182697257333e-06,
+              "max": 73.6198909417269
+            },
+            "rgbCodeL2": {
+              "mean": 0.018441358459723563,
+              "rms": 0.4176284603015845,
+              "p99": 0.0,
+              "max": 100.70253224224304
+            }
+          }
+        ]
+      }
+    }
+  },
+  "gpuTestsPassed": 19,
+  "limits": [
+    "1536 PatchMatch: two observations per build in ABBA order. 3072 PatchMatch: one observation per build in pristine/custom order.",
+    "Fusion has two observations per build per resolution. Cloud nearest-neighbor evidence is descriptive; no ground-truth accuracy, texture fidelity or statistical-equivalence claim.",
+    "At3072 cross-build point-count differences68-103 exceed own repeat spreads11(pristine)/35(custom); maximum cross symmetric distance RMS0.00015165185 exceeds maximum within RMS0.00013957721 sceneunits. P99distance0 in all3072 pairs; maximum distance matches own custom repeat maximum."
+  ],
+  "laterPoissonCpuComparison": {
+    "classification": "Cumulative once-per-child initializer04140758 plus finalizer/runtime537a3f32 versus immutablec188; not incremental finalizer-only.",
+    "sourceCommit": "537a3f329df0e7e136400ea8bebcfb9b2d8e22a3",
+    "parentCommit": "0414075805a115df79d70f7b9f54e2e86d80f938",
+    "controlCommit": "c188247daddae63e681b3469e304dfc9f925a58b",
+    "fourWorkerN2ABBA": {
+      "arms": {
+        "control": {
+          "observations": 2,
+          "meanNativeSeconds": 42.909667999999996,
+          "meanCpuSeconds": 119.3828125,
+          "meanKernelSeconds": 7.8515625,
+          "meanProcessCycles": 476306231071.5,
+          "maxPeakWorkingSetBytes": 1189281792,
+          "maxPeakCommitBytes": 1206726656,
+          "pageFaultCounts": [
+            1051946,
+            1096766
+          ]
+        },
+        "published": {
+          "observations": 2,
+          "meanNativeSeconds": 42.0263317,
+          "meanCpuSeconds": 115.0078125,
+          "meanKernelSeconds": 7.296875,
+          "meanProcessCycles": 459929991918.5,
+          "maxPeakWorkingSetBytes": 1056305152,
+          "maxPeakCommitBytes": 1122037760,
+          "pageFaultCounts": [
+            1033918,
+            1050482
+          ]
+        }
+      },
+      "order": [
+        "control",
+        "published",
+        "published",
+        "control"
+      ],
+      "elapsedReductionPercent": 2.0585950466920355,
+      "cpuReductionPercent": 3.6646816307833285,
+      "peakWorkingSetReductionPercent": 11.181255854962258,
+      "peakWorkingSetReductionMiB": 126.81640625,
+      "peakCommitReductionPercent": 7.018067892916424
+    },
+    "outputVariation": {
+      "controlVertices": [
+        1255786,
+        1255786
+      ],
+      "publishedVertices": [
+        1255784,
+        1255787
+      ],
+      "controlFaces": [
+        2471066,
+        2471066
+      ],
+      "publishedFaces": [
+        2471062,
+        2471068
+      ],
+      "note": "Entire one-worker published file is identical to retainedc188golden. Four-worker counts/hashes vary: no ordered parallel equality, all-vertex-to-triangle/RGB-tail or broad geometry/quality equivalence claim. Raw meshes/logs retained for review; no extra reconstruction/giant quality sweep."
+    },
+    "limits": [
+      "One retained1536cloud434083points; defaultdepth13/pointweight1/color1/trim10. Four configured Poissonworkers, ambientOMP/BLAS1, actual native process lifetime/cycles/CPU/peakWS/commit/pagefault/logicalIO counters from same pass.",
+      "Only one fresh published configured-one-worker call; retained same-inputc188golden is correctness reference, not a fresh paired serial timing control.",
+      "Frozen original Ninja manifest is byte-identical; only two affected production headerconsumers, test, library/CLI/test links rebuilt. Generated COLMAP banner remainscachedc188 because no configure; captured actualHEAD/tree/header/executable hashes identify537production.",
+      "Windows peak working set/commit and process cycles are reported as such; no Linuxperf hardwareinstruction/cache/migration equivalents or GPU speed claim.",
+      "This is cumulative04140758+537a3f32 againstc188, not a subtraction of separate experiments. No independent contribution estimate for either fix."
+    ],
+    "settings": {
+      "depth": 13,
+      "point_weight": 1,
+      "color": true,
+      "trim": 10,
+      "random_seed": 0,
+      "ambientOMP": 1,
+      "ambientOpenBLAS": 1,
+      "ambientMKL": 1
+    },
+    "inputCloudSHA256": "f2d296c85fdac850a776f285943ece334030945320df6ee129ef9f0912519ad6",
+    "executables": {
+      "executableSHA256": "dd17bc05dc088eefdf545d3902eb15d3775f2a89c145a4bf3b3a1b9ed29c7733",
+      "controlSHA256": "f069e356284bbbbcc6658560d72ee09e5ff86582f070330529d367da3ceb1a1b"
+    },
+    "testsPassed": 4,
+    "oneWorkerGoldenCheck": {
+      "status": "pass-exact-ordered-mesh",
+      "schemaExact": true,
+      "orderedPayloadExact": true,
+      "payloadSHA256": [
+        "574d7b2cfbaf84a835fa0876049e496894700673690884ecfb2e81ed042d4864",
+        "574d7b2cfbaf84a835fa0876049e496894700673690884ecfb2e81ed042d4864"
+      ],
+      "method": "Compare full ordered vertex records including value/RGB and oriented face lists byte-for-byte; ignore PLY header comment lines only. Finite vertex fields, face bounds and complete payload lengths checked. No sorting, alignment, tolerance, sampling or face reorientation."
+    }
+  },
+  "nativeCalls": [
+    {
+      "case": "timings/full1536/pair1-custom",
+      "sourcePin": "c188247daddae63e681b3469e304dfc9f925a58b",
+      "executableSHA256": "f069e356284bbbbcc6658560d72ee09e5ff86582f070330529d367da3ceb1a1b",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T20:16:22Z",
+      "nativeCounters": {
+        "PageFaultCount": 996120,
+        "PeakWorkingSetSize": 636366848,
+        "WorkingSetSize": 32768,
+        "QuotaPeakPagedPoolUsage": 421216,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 40704,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 77824,
+        "PeakPagefileUsage": 1423470592,
+        "PrivateUsage": 77824,
+        "kernelSeconds": 3.65625,
+        "userSeconds": 133.609375,
+        "nativeLifetimeSeconds": 139.3387986,
+        "processCycles": 550608389952,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 74480,
+          "WriteOperationCount": 136608,
+          "OtherOperationCount": 2529,
+          "ReadTransferCount": 306534716,
+          "WriteTransferCount": 553854642,
+          "OtherTransferCount": 4212
+        }
+      },
+      "resultSHA256": "7fc131152708e8de0ec27857d043e57a3ee77025fd010e5705469210fbcff4c6"
+    },
+    {
+      "case": "timings/full1536/pair1-pristine",
+      "sourcePin": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+      "executableSHA256": "d75bce9ca819e75e8922002ef7b367528d96ec58632c67aff2108a2e488f2ef8",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T20:09:38Z",
+      "nativeCounters": {
+        "PageFaultCount": 1504762,
+        "PeakWorkingSetSize": 826032128,
+        "WorkingSetSize": 36864,
+        "QuotaPeakPagedPoolUsage": 422744,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 41928,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 81920,
+        "PeakPagefileUsage": 1617252352,
+        "PrivateUsage": 81920,
+        "kernelSeconds": 4.09375,
+        "userSeconds": 399.59375,
+        "nativeLifetimeSeconds": 404.2368231,
+        "processCycles": 1623106168872,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 74404,
+          "WriteOperationCount": 136546,
+          "OtherOperationCount": 2213,
+          "ReadTransferCount": 306242454,
+          "WriteTransferCount": 553842806,
+          "OtherTransferCount": 3516
+        }
+      },
+      "resultSHA256": "b92392885d0c017f334142f9c2acd96f8d8e5ce8be37a3d3d577692255011339"
+    },
+    {
+      "case": "timings/full1536/pair2-custom",
+      "sourcePin": "c188247daddae63e681b3469e304dfc9f925a58b",
+      "executableSHA256": "f069e356284bbbbcc6658560d72ee09e5ff86582f070330529d367da3ceb1a1b",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T20:20:20Z",
+      "nativeCounters": {
+        "PageFaultCount": 995488,
+        "PeakWorkingSetSize": 636239872,
+        "WorkingSetSize": 32768,
+        "QuotaPeakPagedPoolUsage": 421216,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 40704,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 77824,
+        "PeakPagefileUsage": 1425334272,
+        "PrivateUsage": 77824,
+        "kernelSeconds": 3.625,
+        "userSeconds": 132.0,
+        "nativeLifetimeSeconds": 137.8422396,
+        "processCycles": 544498848306,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 74480,
+          "WriteOperationCount": 136608,
+          "OtherOperationCount": 2427,
+          "ReadTransferCount": 306534716,
+          "WriteTransferCount": 553854642,
+          "OtherTransferCount": 4212
+        }
+      },
+      "resultSHA256": "26375672dda09d1289284a0dc940165615d5d7667bfea745f9c34241305a58fd"
+    },
+    {
+      "case": "timings/full1536/pair2-pristine",
+      "sourcePin": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+      "executableSHA256": "d75bce9ca819e75e8922002ef7b367528d96ec58632c67aff2108a2e488f2ef8",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T20:22:38Z",
+      "nativeCounters": {
+        "PageFaultCount": 1504256,
+        "PeakWorkingSetSize": 826654720,
+        "WorkingSetSize": 36864,
+        "QuotaPeakPagedPoolUsage": 422744,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 42336,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 81920,
+        "PeakPagefileUsage": 1624203264,
+        "PrivateUsage": 81920,
+        "kernelSeconds": 4.125,
+        "userSeconds": 400.734375,
+        "nativeLifetimeSeconds": 405.6040241,
+        "processCycles": 1626461680113,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 74403,
+          "WriteOperationCount": 136547,
+          "OtherOperationCount": 2257,
+          "ReadTransferCount": 306219588,
+          "WriteTransferCount": 553842806,
+          "OtherTransferCount": 3340
+        }
+      },
+      "resultSHA256": "a64535e08bb09bb0650f354109e7e28cea8a664d882d93e4b617b321c85d03ed"
+    },
+    {
+      "case": "timings/fusion1536/r1-custom",
+      "sourcePin": "c188247daddae63e681b3469e304dfc9f925a58b",
+      "executableSHA256": "f069e356284bbbbcc6658560d72ee09e5ff86582f070330529d367da3ceb1a1b",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T20:30:49Z",
+      "nativeCounters": {
+        "PageFaultCount": 114192,
+        "PeakWorkingSetSize": 392790016,
+        "WorkingSetSize": 32768,
+        "QuotaPeakPagedPoolUsage": 284024,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 26512,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 77824,
+        "PeakPagefileUsage": 388435968,
+        "PrivateUsage": 77824,
+        "kernelSeconds": 0.640625,
+        "userSeconds": 13.453125,
+        "nativeLifetimeSeconds": 3.8895807,
+        "processCycles": 57208528218,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 74420,
+          "WriteOperationCount": 1563,
+          "OtherOperationCount": 938,
+          "ReadTransferCount": 304701690,
+          "WriteTransferCount": 24144121,
+          "OtherTransferCount": 12304
+        }
+      },
+      "resultSHA256": "3fee47d253eb2ba3ace19b94792237c084b7819a90699803fb6c02d7b110c341"
+    },
+    {
+      "case": "timings/fusion1536/r1-pristine",
+      "sourcePin": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+      "executableSHA256": "d75bce9ca819e75e8922002ef7b367528d96ec58632c67aff2108a2e488f2ef8",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T20:30:39Z",
+      "nativeCounters": {
+        "PageFaultCount": 588611,
+        "PeakWorkingSetSize": 597000192,
+        "WorkingSetSize": 32768,
+        "QuotaPeakPagedPoolUsage": 285552,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 42560,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 77824,
+        "PeakPagefileUsage": 598630400,
+        "PrivateUsage": 77824,
+        "kernelSeconds": 1.078125,
+        "userSeconds": 30.703125,
+        "nativeLifetimeSeconds": 9.3329668,
+        "processCycles": 128523805323,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 75493,
+          "WriteOperationCount": 5941,
+          "OtherOperationCount": 1010,
+          "ReadTransferCount": 309082662,
+          "WriteTransferCount": 24142612,
+          "OtherTransferCount": 25840
+        }
+      },
+      "resultSHA256": "0ed23b467c3d49d3942b8bc10af5f44cf3d1a3a2514bb5485ec4b6b9ffc9e0d4"
+    },
+    {
+      "case": "timings/fusion1536/r2-custom",
+      "sourcePin": "c188247daddae63e681b3469e304dfc9f925a58b",
+      "executableSHA256": "f069e356284bbbbcc6658560d72ee09e5ff86582f070330529d367da3ceb1a1b",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T20:30:53Z",
+      "nativeCounters": {
+        "PageFaultCount": 114272,
+        "PeakWorkingSetSize": 392658944,
+        "WorkingSetSize": 32768,
+        "QuotaPeakPagedPoolUsage": 284024,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 26512,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 77824,
+        "PeakPagefileUsage": 388308992,
+        "PrivateUsage": 77824,
+        "kernelSeconds": 0.640625,
+        "userSeconds": 14.09375,
+        "nativeLifetimeSeconds": 4.2541749,
+        "processCycles": 60325647235,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 74420,
+          "WriteOperationCount": 1563,
+          "OtherOperationCount": 878,
+          "ReadTransferCount": 304701690,
+          "WriteTransferCount": 24144752,
+          "OtherTransferCount": 12304
+        }
+      },
+      "resultSHA256": "e98ac4d31fff7bb235cf2098a7c41aa44c4b9099d8a651b5a8cd868b5eeacc20"
+    },
+    {
+      "case": "timings/fusion1536/r2-pristine",
+      "sourcePin": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+      "executableSHA256": "d75bce9ca819e75e8922002ef7b367528d96ec58632c67aff2108a2e488f2ef8",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T20:30:58Z",
+      "nativeCounters": {
+        "PageFaultCount": 588253,
+        "PeakWorkingSetSize": 596979712,
+        "WorkingSetSize": 32768,
+        "QuotaPeakPagedPoolUsage": 285536,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 42560,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 77824,
+        "PeakPagefileUsage": 598519808,
+        "PrivateUsage": 77824,
+        "kernelSeconds": 0.875,
+        "userSeconds": 32.9375,
+        "nativeLifetimeSeconds": 9.885258,
+        "processCycles": 136546631564,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 75493,
+          "WriteOperationCount": 5941,
+          "OtherOperationCount": 958,
+          "ReadTransferCount": 309082662,
+          "WriteTransferCount": 24143743,
+          "OtherTransferCount": 25840
+        }
+      },
+      "resultSHA256": "2035a801f6db7c9a4d4323aabc9485b9eb5f62639aa4b8b5046c8d1eda9ca485"
+    },
+    {
+      "case": "timings/full3072/pair1-custom",
+      "sourcePin": "c188247daddae63e681b3469e304dfc9f925a58b",
+      "executableSHA256": "f069e356284bbbbcc6658560d72ee09e5ff86582f070330529d367da3ceb1a1b",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T20:56:19Z",
+      "nativeCounters": {
+        "PageFaultCount": 3886503,
+        "PeakWorkingSetSize": 2023505920,
+        "WorkingSetSize": 40960,
+        "QuotaPeakPagedPoolUsage": 425824,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 43016,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 86016,
+        "PeakPagefileUsage": 3915116544,
+        "PrivateUsage": 86016,
+        "kernelSeconds": 11.8125,
+        "userSeconds": 702.125,
+        "nativeLifetimeSeconds": 723.0309446,
+        "processCycles": 2861464468333,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 289176,
+          "WriteOperationCount": 542128,
+          "OtherOperationCount": 2530,
+          "ReadTransferCount": 1185924317,
+          "WriteTransferCount": 2214799072,
+          "OtherTransferCount": 4476
+        }
+      },
+      "resultSHA256": "4dbecd41fccc83a641e567c0274ea6cc95a32ac306a87d04fd95b8e78111fa3f"
+    },
+    {
+      "case": "timings/full3072/pair1-pristine",
+      "sourcePin": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+      "executableSHA256": "d75bce9ca819e75e8922002ef7b367528d96ec58632c67aff2108a2e488f2ef8",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T20:33:28Z",
+      "nativeCounters": {
+        "PageFaultCount": 5937168,
+        "PeakWorkingSetSize": 2780745728,
+        "WorkingSetSize": 40960,
+        "QuotaPeakPagedPoolUsage": 427352,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 44512,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 86016,
+        "PeakPagefileUsage": 4734791680,
+        "PrivateUsage": 86016,
+        "kernelSeconds": 15.78125,
+        "userSeconds": 1359.796875,
+        "nativeLifetimeSeconds": 1370.8895737,
+        "processCycles": 5520839093403,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 289099,
+          "WriteOperationCount": 542063,
+          "OtherOperationCount": 2163,
+          "ReadTransferCount": 1185609189,
+          "WriteTransferCount": 2214787302,
+          "OtherTransferCount": 3724
+        }
+      },
+      "resultSHA256": "3176e8275c9762993628c549b62991cedb9a06190a61dd7d4bf04c906d9a4376"
+    },
+    {
+      "case": "timings/fusion3072/r1-custom",
+      "sourcePin": "c188247daddae63e681b3469e304dfc9f925a58b",
+      "executableSHA256": "f069e356284bbbbcc6658560d72ee09e5ff86582f070330529d367da3ceb1a1b",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T21:09:58Z",
+      "nativeCounters": {
+        "PageFaultCount": 426540,
+        "PeakWorkingSetSize": 1417338880,
+        "WorkingSetSize": 32768,
+        "QuotaPeakPagedPoolUsage": 284024,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 26648,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 77824,
+        "PeakPagefileUsage": 1419522048,
+        "PrivateUsage": 77824,
+        "kernelSeconds": 1.96875,
+        "userSeconds": 50.171875,
+        "nativeLifetimeSeconds": 14.2715422,
+        "processCycles": 212748757303,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 289117,
+          "WriteOperationCount": 5703,
+          "OtherOperationCount": 937,
+          "ReadTransferCount": 1184132971,
+          "WriteTransferCount": 90704956,
+          "OtherTransferCount": 36624
+        }
+      },
+      "resultSHA256": "dc393270dac6ab0fe3dad896ef13e5698dbadb56e68dcc6c85bf397765a2826c"
+    },
+    {
+      "case": "timings/fusion3072/r1-pristine",
+      "sourcePin": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+      "executableSHA256": "d75bce9ca819e75e8922002ef7b367528d96ec58632c67aff2108a2e488f2ef8",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T21:09:18Z",
+      "nativeCounters": {
+        "PageFaultCount": 4018052,
+        "PeakWorkingSetSize": 2874228736,
+        "WorkingSetSize": 36864,
+        "QuotaPeakPagedPoolUsage": 285552,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 56704,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 81920,
+        "PeakPagefileUsage": 2885984256,
+        "PrivateUsage": 81920,
+        "kernelSeconds": 4.53125,
+        "userSeconds": 136.109375,
+        "nativeLifetimeSeconds": 39.2647728,
+        "processCycles": 569399644356,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 290190,
+          "WriteOperationCount": 22190,
+          "OtherOperationCount": 961,
+          "ReadTransferCount": 1188524739,
+          "WriteTransferCount": 90697262,
+          "OtherTransferCount": 91736
+        }
+      },
+      "resultSHA256": "3d96e539d76e3d4b841f25aebe19a8280da292d0ea89a90dfabbb80987b65a88"
+    },
+    {
+      "case": "timings/fusion3072/r2-custom",
+      "sourcePin": "c188247daddae63e681b3469e304dfc9f925a58b",
+      "executableSHA256": "f069e356284bbbbcc6658560d72ee09e5ff86582f070330529d367da3ceb1a1b",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T21:10:13Z",
+      "nativeCounters": {
+        "PageFaultCount": 427151,
+        "PeakWorkingSetSize": 1417232384,
+        "WorkingSetSize": 32768,
+        "QuotaPeakPagedPoolUsage": 284008,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 26784,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 77824,
+        "PeakPagefileUsage": 1419014144,
+        "PrivateUsage": 77824,
+        "kernelSeconds": 2.4375,
+        "userSeconds": 49.71875,
+        "nativeLifetimeSeconds": 14.5784054,
+        "processCycles": 212237692526,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 289116,
+          "WriteOperationCount": 5703,
+          "OtherOperationCount": 938,
+          "ReadTransferCount": 1184091291,
+          "WriteTransferCount": 90704657,
+          "OtherTransferCount": 36624
+        }
+      },
+      "resultSHA256": "1d177acd373b5777cb9b7d7e74cb26ac97a7db858eaba2407f97bf6035d8ed2f"
+    },
+    {
+      "case": "timings/fusion3072/r2-pristine",
+      "sourcePin": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+      "executableSHA256": "d75bce9ca819e75e8922002ef7b367528d96ec58632c67aff2108a2e488f2ef8",
+      "collectorSHA256": "989db32c5a956b679f2f470d871e7013b59fb72c1d67ca76ee036a2a2aca2a14",
+      "startedUtc": "2026-10-22T21:10:28Z",
+      "nativeCounters": {
+        "PageFaultCount": 4017721,
+        "PeakWorkingSetSize": 2873962496,
+        "WorkingSetSize": 36864,
+        "QuotaPeakPagedPoolUsage": 285536,
+        "QuotaPagedPoolUsage": 0,
+        "QuotaPeakNonPagedPoolUsage": 56840,
+        "QuotaNonPagedPoolUsage": 0,
+        "PagefileUsage": 81920,
+        "PeakPagefileUsage": 2885869568,
+        "PrivateUsage": 81920,
+        "kernelSeconds": 4.4375,
+        "userSeconds": 133.640625,
+        "nativeLifetimeSeconds": 38.4304889,
+        "processCycles": 559245489090,
+        "ioLogicalCounters": {
+          "ReadOperationCount": 290190,
+          "WriteOperationCount": 22191,
+          "OtherOperationCount": 966,
+          "ReadTransferCount": 1188534704,
+          "WriteTransferCount": 90701091,
+          "OtherTransferCount": 91736
+        }
+      },
+      "resultSHA256": "4c30bfc245669f2b7c594bbf2258d1d8c372458a87a29ef38fa15e301058e2c8"
+    }
+  ],
+  "commandExamples": [
+    [
+      "$WORKSPACE\\artifacts\\custom\\colmap.exe",
+      "patch_match_stereo",
+      "--workspace_path",
+      "$WORKSPACE\\runs\\full1536\\pair1-custom",
+      "--workspace_format",
+      "COLMAP",
+      "--PatchMatchStereo.gpu_index",
+      "0",
+      "--PatchMatchStereo.num_threads",
+      "4",
+      "--PatchMatchStereo.max_image_size",
+      "1536",
+      "--PatchMatchStereo.geom_consistency",
+      "1"
+    ],
+    [
+      "$WORKSPACE\\artifacts\\custom\\colmap.exe",
+      "stereo_fusion",
+      "--workspace_path",
+      "$WORKSPACE\\runs\\full1536\\pair1-custom",
+      "--workspace_format",
+      "COLMAP",
+      "--input_type",
+      "geometric",
+      "--output_path",
+      "$WORKSPACE\\runs\\full1536\\pair1-custom\\fused-r1-custom.ply",
+      "--StereoFusion.num_threads",
+      "4",
+      "--StereoFusion.max_image_size",
+      "1536",
+      "--StereoFusion.use_cache",
+      "0"
+    ],
+    [
+      "$WORKSPACE\\artifacts\\custom\\colmap.exe",
+      "patch_match_stereo",
+      "--workspace_path",
+      "$WORKSPACE\\runs\\full3072\\pair1-custom",
+      "--workspace_format",
+      "COLMAP",
+      "--PatchMatchStereo.gpu_index",
+      "0",
+      "--PatchMatchStereo.num_threads",
+      "4",
+      "--PatchMatchStereo.max_image_size",
+      "3072",
+      "--PatchMatchStereo.geom_consistency",
+      "1"
+    ],
+    [
+      "$WORKSPACE\\artifacts\\custom\\colmap.exe",
+      "stereo_fusion",
+      "--workspace_path",
+      "$WORKSPACE\\runs\\full3072\\pair1-custom",
+      "--workspace_format",
+      "COLMAP",
+      "--input_type",
+      "geometric",
+      "--output_path",
+      "$WORKSPACE\\runs\\full3072\\pair1-custom\\fused-r1-custom.ply",
+      "--StereoFusion.num_threads",
+      "4",
+      "--StereoFusion.max_image_size",
+      "3072",
+      "--StereoFusion.use_cache",
+      "0"
+    ]
+  ],
+  "coverage": "The v7 packet covers dense stages at8dd74ef6/c188247d and cumulativeCPU Poisson at537a3f32. A separate compact remote receipt covers cumulative trimming changes555bde40 to1440f073; no new bulk packet was transferred.",
+  "currentPoissonTrimmingComparison": {
+    "aggregation": "Arm means of per-run peaks, not maxima across the arm.",
+    "inputCloudSHA256": "f2d296c85fdac850a776f285943ece334030945320df6ee129ef9f0912519ad6",
+    "sourceCommits": {
+      "control": "555bde4036be9af778ca0adc15494e091e360fc6",
+      "candidate": "1440f0737ef7c083c6624313215ccce0cad8d6da"
+    },
+    "sourceTree": "9d0e44e79ab8e3ba1da3e1b941a7f3c44288d648",
+    "cliSHA256": {
+      "control": "8ffd88567928cc9ac2c9d7937e293de7d0ec1b4f8d496d2f0e7c04c683a6bcaa",
+      "candidate": "cca623de182ac96630e034adbcfe5c990f57e2846c1a738ea6a126acbafeec59"
+    },
+    "reportSHA256": "b24685a417aaddcba5a93b2a99e7fa8054c3c878cd0d93beea61b929624b1280",
+    "observations": [
+      {
+        "case": "r1-control",
+        "nativeWallSeconds": 46.3762503,
+        "cpuSeconds": 119.59375,
+        "processCycles": 481206600339,
+        "peakWSBytes": 1143771136,
+        "peakCommitBytes": 1348665344
+      },
+      {
+        "case": "r1-candidate",
+        "nativeWallSeconds": 40.877334,
+        "cpuSeconds": 114.734375,
+        "processCycles": 462064130353,
+        "peakWSBytes": 1144360960,
+        "peakCommitBytes": 1733349376
+      },
+      {
+        "case": "r2-candidate",
+        "nativeWallSeconds": 40.2797147,
+        "cpuSeconds": 115.203125,
+        "processCycles": 462882274417,
+        "peakWSBytes": 1143640064,
+        "peakCommitBytes": 1740480512
+      },
+      {
+        "case": "r2-control",
+        "nativeWallSeconds": 46.0856781,
+        "cpuSeconds": 120.421875,
+        "processCycles": 484458318058,
+        "peakWSBytes": 1142833152,
+        "peakCommitBytes": 1347817472
+      }
+    ],
+    "rgbSubsetCoverage": [
+      {
+        "a": "r1-control",
+        "b": "r1-candidate",
+        "sharedUniqueExactXYZ": 1250712,
+        "totalVertices": [
+          1255785,
+          1255786
+        ],
+        "fractionOfAllVertices": [
+          0.9959602957512631,
+          0.9959595026541146
+        ],
+        "fractionOfUniqueXYZ": [
+          0.9960887941683133,
+          0.9960864142666686
+        ]
+      },
+      {
+        "a": "r1-control",
+        "b": "r2-candidate",
+        "sharedUniqueExactXYZ": 1250445,
+        "totalVertices": [
+          1255785,
+          1255785
+        ],
+        "fractionOfAllVertices": [
+          0.9957476797381717,
+          0.9957476797381717
+        ],
+        "fractionOfUniqueXYZ": [
+          0.995876150723585,
+          0.9958745644599303
+        ]
+      },
+      {
+        "a": "r1-control",
+        "b": "r2-control",
+        "sharedUniqueExactXYZ": 1250550,
+        "totalVertices": [
+          1255785,
+          1255787
+        ],
+        "fractionOfAllVertices": [
+          0.9958312927770279,
+          0.9958297067894476
+        ],
+        "fractionOfUniqueXYZ": [
+          0.9959597745501635,
+          0.99595818815331
+        ]
+      },
+      {
+        "a": "r1-candidate",
+        "b": "r2-candidate",
+        "sharedUniqueExactXYZ": 1250968,
+        "totalVertices": [
+          1255786,
+          1255785
+        ],
+        "fractionOfAllVertices": [
+          0.9961633590436587,
+          0.996164152303141
+        ],
+        "fractionOfUniqueXYZ": [
+          0.9962902966329146,
+          0.9962910900945744
+        ]
+      },
+      {
+        "a": "r1-candidate",
+        "b": "r2-control",
+        "sharedUniqueExactXYZ": 1250884,
+        "totalVertices": [
+          1255786,
+          1255787
+        ],
+        "fractionOfAllVertices": [
+          0.9960964686658396,
+          0.9960956754608863
+        ],
+        "fractionOfUniqueXYZ": [
+          0.9962233977314902,
+          0.9962241911398706
+        ]
+      },
+      {
+        "a": "r2-candidate",
+        "b": "r2-control",
+        "sharedUniqueExactXYZ": 1250889,
+        "totalVertices": [
+          1255785,
+          1255787
+        ],
+        "fractionOfAllVertices": [
+          0.996101243445335,
+          0.996099657027824
+        ],
+        "fractionOfUniqueXYZ": [
+          0.9962281732205077,
+          0.9962281732205077
+        ]
+      }
+    ],
+    "coverageScope": "Exact-bit XYZ keys unique within each mesh and present in both; duplicate XYZ excluded. Fractions supplied separately against all vertices and within-mesh unique XYZ. RGB statistics cover this subset only; no broad attribute or surface equivalence claim.",
+    "classification": "Cumulative14c71a29+1440f073 trimming changes versus555bde40; auxiliary GPU path unchanged. Not a GPU-only attribution.",
+    "receiptScope": "Four native observations and hashes supplied by the independent machine through authorized chat; original complete report retained there. Coordinator recomputed arithmetic, not full remote execution.",
+    "settings": {
+      "cpuWorkers": 4,
+      "cudaDeviceVisible": true,
+      "maximumImageSidePixels": 1536,
+      "depth": 13,
+      "pointWeight": 1,
+      "color": true,
+      "trim": 10,
+      "randomSeed": 0,
+      "ambientOmpBlasMklThreads": 1,
+      "poissonOverrides": false,
+      "order": "ABBA",
+      "observationsPerBuild": 2
+    },
+    "means": {
+      "control": {
+        "nativeWallSeconds": 46.2309642,
+        "cpuSeconds": 120.0078125,
+        "processCycles": 482832459198.5,
+        "peakWSBytes": 1143302144,
+        "peakCommitBytes": 1348241408
+      },
+      "candidate": {
+        "nativeWallSeconds": 40.578524349999995,
+        "cpuSeconds": 114.96875,
+        "processCycles": 462473202385,
+        "peakWSBytes": 1144000512,
+        "peakCommitBytes": 1736914944
+      }
+    },
+    "changePercent": {
+      "nativeWallSeconds": -12.226523819721692,
+      "cpuSeconds": -4.19894538116008,
+      "processCycles": -4.2166296870960736,
+      "peakWSBytes": 0.061083415583973455,
+      "peakCommitBytes": 28.82818564195886
+    },
+    "tests": {
+      "gpuVisiblePassed": 12,
+      "maskedPassed": 9,
+      "maskedExpectedSkipped": 3,
+      "actualGpuTests": 3
+    },
+    "oneWorkerGoldenCheck": {
+      "status": "pass-exact-ordered-mesh",
+      "scope": "Whole ordered XYZ/value/RGB/oriented faces against retained537/555 golden; not fresh paired timing",
+      "wholeSHA256": "41e6488826e5ff1727d4eda4ec6b50be7f359d28f9f594f28b7b91763f75af7b"
+    },
+    "parallelQuality": {
+      "method": "All vertices, exact nearest neighbors, six pairs including within-build repeats, no alignment or subsampling; descriptive comparison",
+      "finiteAndTriangleBoundsPassed": 4,
+      "distanceUnits": "scene units",
+      "allPairP99Distance": 0,
+      "maxCrossDistance": 0.005393720747272752,
+      "maxWithinDistance": 0.005393720747272752,
+      "worstCrossRms": 8.223727281515175e-06,
+      "controlRepeatRms": 7.483395462314267e-06,
+      "candidateRepeatRms": 6.837967624775332e-06,
+      "rgbScope": "Shared unique exact XYZ only; duplicate XYZ and unmatched vertices excluded",
+      "rgbP99AbsCodes": 2,
+      "rgbMaxCrossCodes": 140,
+      "rgbMaxControlRepeatCodes": 140,
+      "rgbMaxCandidateRepeatCodes": 131,
+      "claim": "No blanket geometry, attribute, statistical or ground-truth equivalence"
+    },
+    "deviceAdmission": "Auxiliary GPU path active in both arms. Production trim GPU automatic admission is silent and was not directly confirmed in default CLI logs; test execution proves kernel correctness only.",
+    "wholeBoardNvml": "1Hz peaks659-661MB across arms; whole board, not process VRAM. Short allocations may be missed."
+  },
+  "checks": "Reported means and counts reconciled with retained native receipts; source/build identities reviewed. No new CTest/pytest or reconstruction was run for this data-only report.",
+  "aiDisclosure": "AI-assisted investigation and reporting; measurements used the listed source pins and figures were checked against saved native receipts."
+}
