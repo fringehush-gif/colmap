@@ -12,12 +12,14 @@
 
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
 #include "thirdparty/PoissonRecon/aux_gpu.h"
+#include "thirdparty/PoissonRecon/trim_gpu.h"
 #endif
 
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -211,6 +213,28 @@ TEST(PoissonMeshing, GpuAuxiliaryReductionRetainsExactSmallTree) {
     }
   }
 }
+
+TEST(PoissonMeshing, GpuTrimConnectedComponentsUsesMaximumFaceRoots) {
+  ::PoissonTrimGpu::Stats admission;
+  if (!::PoissonTrimGpu::Available(admission)) {
+    GTEST_SKIP() << "CUDA trim kernel unavailable: " << admission.reason;
+  }
+
+  // Faces 0 and 1 share an edge, face 2 is disconnected, and face 3 has
+  // repeated and self edges. Representatives must be the maximum face index.
+  const std::uint64_t offsets[] = {0, 3, 6, 9, 12};
+  const std::uint32_t vertices[] = {0, 1, 2, 2, 1, 3, 4, 5, 6, 7, 7, 8};
+  std::uint32_t roots[4] = {};
+  ::PoissonTrimGpu::Stats stats;
+  ASSERT_TRUE(::PoissonTrimGpu::ConnectedComponents(
+      4, 12, offsets, vertices, roots, stats));
+  EXPECT_STREQ(stats.reason, "complete");
+  EXPECT_EQ(roots[0], 1);
+  EXPECT_EQ(roots[1], 1);
+  EXPECT_EQ(roots[2], 2);
+  EXPECT_EQ(roots[3], 3);
+}
+
 #endif
 
 }  // namespace
