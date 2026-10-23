@@ -2136,6 +2136,54 @@ public:
 			}
 		};
 
+		// The three key maps and their scratch vectors are independent. Keep
+		// the same join and vertex > edge > face exception priority as
+		// ThreadPool::ParallelSections, while allowing OpenMP to reuse its team.
+		auto FinalizeKeySections = [&]( auto& scratch , auto&& vertices , auto&& edges , auto&& faces )
+		{
+#ifdef _OPENMP
+#ifdef _MSC_VER
+			// MSVC's async helper already uses a pool. Keep that path for a
+			// single configured worker, where the OpenMP team adds overhead.
+			if( ThreadPool::NumThreads()<=1 )
+			{
+				ThreadPool::ParallelSections( vertices , edges , faces );
+				return;
+			}
+#endif // _MSC_VER
+			auto HasEntries = []( const auto& group )
+			{
+				for( const auto& entries : group ) if( !entries.empty() ) return true;
+				return false;
+			};
+			const bool hasVertices = HasEntries( scratch.vKeyValues );
+			const bool hasEdges = HasEntries( scratch.eKeyValues );
+			const bool hasFaces = HasEntries( scratch.fKeyValues );
+			// Empty inner vectors have nothing to transfer or clear. Avoid a
+			// parallel region unless at least two key maps have actual work.
+			if( int(hasVertices) + int(hasEdges) + int(hasFaces)<=1 )
+			{
+				if( hasVertices ) vertices();
+				else if( hasEdges ) edges();
+				else if( hasFaces ) faces();
+				return;
+			}
+			std::exception_ptr errors[3];
+#pragma omp parallel sections num_threads(3)
+			{
+#pragma omp section
+				{ try { vertices(); } catch( ... ) { errors[0] = std::current_exception(); } }
+#pragma omp section
+				{ try { edges(); } catch( ... ) { errors[1] = std::current_exception(); } }
+#pragma omp section
+				{ try { faces(); } catch( ... ) { errors[2] = std::current_exception(); } }
+			}
+			for( unsigned int i=0 ; i<3 ; i++ ) if( errors[i] ) std::rethrow_exception( errors[i] );
+#else
+			ThreadPool::ParallelSections( vertices , edges , faces );
+#endif // _OPENMP
+		};
+
 		auto FinalizeSlice = [&]( unsigned int sliceAtMaxDepth )
 		{
 
@@ -2147,8 +2195,9 @@ public:
 				{
 					if( d<=tree._maxDepth )
 					{
-						ThreadPool::ParallelSections
+						FinalizeKeySections
 						(
+							slabValues[d].sliceScratch(o) ,
 							[ &slabValues , d , o ]( void ){ slabValues[d].sliceValues(o).setFromScratch( slabValues[d].sliceScratch(o).vKeyValues ); } ,
 							[ &slabValues , d , o ]( void ){ slabValues[d].sliceValues(o).setFromScratch( slabValues[d].sliceScratch(o).eKeyValues ); } ,
 							[ &slabValues , d , o ]( void ){ slabValues[d].sliceValues(o).setFromScratch( slabValues[d].sliceScratch(o).fKeyValues ); }
@@ -2167,8 +2216,9 @@ public:
 			{
 				if( d<=tree._maxDepth )
 				{
-					ThreadPool::ParallelSections
+					FinalizeKeySections
 					(
+						slabValues[d].xSliceScratch(o) ,
 						[ &slabValues , d , o ]( void ){ slabValues[d].xSliceValues(o).setFromScratch( slabValues[d].xSliceScratch(o).vKeyValues ); } ,
 						[ &slabValues , d , o ]( void ){ slabValues[d].xSliceValues(o).setFromScratch( slabValues[d].xSliceScratch(o).eKeyValues ); } ,
 						[ &slabValues , d , o ]( void ){ slabValues[d].xSliceValues(o).setFromScratch( slabValues[d].xSliceScratch(o).fKeyValues ); }
