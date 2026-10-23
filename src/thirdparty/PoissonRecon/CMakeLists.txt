@@ -7,6 +7,7 @@ COLMAP_ADD_LIBRARY(
     SRCS
         PoissonRecon.h PoissonRecon.cpp
         SurfaceTrimmer.h SurfaceTrimmer.cpp
+        PolygonIndexChain.h
 )
 target_compile_definitions(colmap_poisson_recon PRIVATE RELEASE)
 target_include_directories(colmap_poisson_recon PRIVATE .)
