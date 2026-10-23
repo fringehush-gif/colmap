@@ -12,6 +12,7 @@
 // FEM declarations require the preceding vendor configuration.
 #include "thirdparty/PoissonRecon/FEMTree.h"
 #include "thirdparty/PoissonRecon/Geometry.h"
+#include "thirdparty/PoissonRecon/PolygonIndexChain.h"
 #include "thirdparty/PoissonRecon/RegularTree.h"
 #include "thirdparty/PoissonRecon/trim_gpu_adapter.h"
 
@@ -34,6 +35,7 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <list>
 #include <locale>
 #include <stdexcept>
 #include <string>
@@ -826,6 +828,64 @@ void CheckScratchMovesAcrossWorkers() {
 TEST(PoissonMeshing, ExtractionScratchMovesPreserveDuplicateOrder) {
   CheckScratchMovesAcrossWorkers<ScratchExtractor::SliceValues>();
   CheckScratchMovesAcrossWorkers<ScratchExtractor::XSliceValues>();
+}
+
+template <typename Index>
+void CheckPolygonIndexChainSpliceOrder() {
+  using Chain = PoissonRecon::PolygonIndexChain<Index>;
+  auto links = Chain::MakeArena(12);
+  std::array<Chain, 6> chains;
+  std::array<std::list<Index>, 6> expected;
+  const std::array<std::vector<Index>, 6> components = {
+      std::vector<Index>{0, 3, 6},
+      std::vector<Index>{1, 4},
+      std::vector<Index>{},
+      std::vector<Index>{2, 5},
+      std::vector<Index>{7, 8},
+      std::vector<Index>{9, 10, 11}};
+
+  const auto check = [&](size_t index) {
+    const Chain& chain = chains[index];
+    const std::vector<Index> actual(chain.begin(), chain.end());
+    const std::vector<Index> oracle(expected[index].begin(),
+                                    expected[index].end());
+    EXPECT_EQ(actual, oracle) << "component " << index;
+    EXPECT_EQ(chain.size(), oracle.size()) << "component " << index;
+    EXPECT_EQ(chain.empty(), chain.begin() == chain.end())
+        << "component " << index;
+  };
+  for (size_t i = 0; i < chains.size(); ++i) {
+    chains[i].bind(links);
+    check(i);
+    chains[i].append(components[i].begin(), components[i].end());
+    expected[i].insert(
+        expected[i].end(), components[i].begin(), components[i].end());
+    check(i);
+  }
+
+  const auto merge = [&](size_t destination, size_t source) {
+    chains[destination].append(chains[source]);
+    expected[destination].splice(expected[destination].end(), expected[source]);
+    check(destination);
+    check(source);
+  };
+  merge(0, 1);  // Nonempty destination and donor.
+  merge(0, 2);  // Empty donor.
+  merge(2, 0);  // Empty destination; donor becomes empty.
+  merge(2, 3);
+  merge(4, 5);
+  merge(2, 4);  // Preserve the order of two prior merged chains.
+  for (size_t i = 0; i < chains.size(); ++i) {
+    check(i);
+  }
+}
+
+TEST(PoissonMeshing, PolygonIndexChainIntPreservesSpliceOrder) {
+  CheckPolygonIndexChainSpliceOrder<int>();
+}
+
+TEST(PoissonMeshing, PolygonIndexChainLongLongPreservesSpliceOrder) {
+  CheckPolygonIndexChainSpliceOrder<long long>();
 }
 }  // namespace
 }  // namespace mvs

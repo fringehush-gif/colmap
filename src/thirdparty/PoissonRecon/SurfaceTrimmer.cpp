@@ -30,6 +30,7 @@ DAMAGE.
 #include "trim_gpu_adapter.h"
 #endif
 #include "PreProcessor.h"
+#include "PolygonIndexChain.h"
 
 #define DEFAULT_DIMENSION 3
 
@@ -96,7 +97,7 @@ struct ComponentGraph
 	{
 		double area;
 		std::vector< Node * > neighbors;
-		std::list< Index > polygonIndices;
+		PolygonIndexChain< Index > polygonIndices;
 
 		Node( void ) : area(0) {}
 
@@ -117,13 +118,13 @@ struct ComponentGraph
 			// Merge the node into its first neighbor
 			Node *first = neighbors[0];
 			first->area += area;
-			first->polygonIndices.splice( first->polygonIndices.end() , polygonIndices );
+			first->polygonIndices.append( polygonIndices );
 
 			// Merge the remaining neighbors into the first neighbor
 			for( unsigned int i=1 ; i<neighbors.size() ; i++ )
 			{
 				first->area += neighbors[i]->area;
-				first->polygonIndices.splice( first->polygonIndices.end() , neighbors[i]->polygonIndices );
+				first->polygonIndices.append( neighbors[i]->polygonIndices );
 				for( unsigned int j=0 ; j<neighbors[i]->neighbors.size() ; j++ )
 				{
 					bool foundNeighbor = false;
@@ -439,9 +440,7 @@ int Execute( AuxDataFactories ... auxDataFactories )
 	min = max = vertices[0].template get<1>();
 	for( size_t i=0 ; i<vertices.size() ; i++ ) min = std::min< Real >( min , vertices[i].template get<1>() ) , max = std::max< Real >( max , vertices[i].template get<1>() );
 
-	std::unordered_map< EdgeKey< Index > , Index , typename EdgeKey< Index >::Hasher > vertexTable;
 	std::vector< std::vector< Index > > ltPolygons , gtPolygons;
-	std::vector< bool > ltFlags , gtFlags;
 
 	if( Verbose.set )
 	{
@@ -465,7 +464,18 @@ int Execute( AuxDataFactories ... auxDataFactories )
 	if( Verbose.set ) printf( "Value Range: [%f,%f]\n" , min , max );
 
 	double t=Time();
-	for( size_t i=0 ; i<polygons.size() ; i++ ) SplitPolygon( polygons[i] , vertices , &ltPolygons , &gtPolygons , &ltFlags , &gtFlags , vertexTable , Trim.value );
+	{
+		// Split outputs own their index arrays; edge IDs and flags are split-local.
+		std::unordered_map< EdgeKey< Index > , Index , typename EdgeKey< Index >::Hasher > vertexTable;
+		std::vector< bool > ltFlags , gtFlags;
+		for( size_t i=0 ; i<polygons.size() ; i++ )
+		{
+			SplitPolygon( polygons[i] , vertices , &ltPolygons , &gtPolygons , &ltFlags , &gtFlags , vertexTable , Trim.value );
+			// Retire each consumed input face before allocating later split faces.
+			std::vector< Index >().swap( polygons[i] );
+		}
+	}
+	std::vector< std::vector< Index > >().swap( polygons );
 
 	if( IslandAreaRatio.value>0 )
 	{
@@ -485,12 +495,14 @@ int Execute( AuxDataFactories ... auxDataFactories )
 			_components.insert( _components.end() , std::make_move_iterator( ltComponents.begin() ) , std::make_move_iterator( ltComponents.end() ) );
 			_components.insert( _components.end() , std::make_move_iterator( gtComponents.begin() ) , std::make_move_iterator( gtComponents.end() ) );
 		}
+		auto polygonLinks = PolygonIndexChain< Index >::MakeArena( _polygons.size() );
 		std::vector< typename ComponentGraph< Index >::Node > nodes( _components.size() );
 
 		// Set the polygons within each component and compute areas
 		for( unsigned int i=0 ; i<_components.size() ; i++ )
 		{
-			nodes[i].polygonIndices.insert( nodes[i].polygonIndices.end() , _components[i].begin() , _components[i].end() );
+			nodes[i].polygonIndices.bind( polygonLinks );
+			nodes[i].polygonIndices.append( _components[i].begin() , _components[i].end() );
 			for( auto iter=nodes[i].polygonIndices.begin() ; iter!=nodes[i].polygonIndices.end() ; iter++ ) nodes[i].area += PolygonArea< Real , Dim , Index , Vertex >( vertices , _polygons[ *iter ] );
 		}
 
@@ -619,6 +631,8 @@ int Execute( AuxDataFactories ... auxDataFactories )
 			std::vector< std::vector< Index > > polys;
 			polys.reserve( ltPolygons.size() );
 			Triangulate< Real , Dim , Index , Vertex >( vertices , ltPolygons , polys ) , ltPolygons = std::move( polys );
+			// Keep validation/triangulation behavior, then retire the rejected side.
+			std::vector< std::vector< Index > >().swap( ltPolygons );
 		}
 		{
 			std::vector< std::vector< Index > > polys;
@@ -626,6 +640,9 @@ int Execute( AuxDataFactories ... auxDataFactories )
 			Triangulate< Real , Dim , Index , Vertex >( vertices , gtPolygons , polys ) , gtPolygons = std::move( polys );
 		}
 	}
+
+	// Polygon-mesh mode bypasses the triangulation scopes above.
+	std::vector< std::vector< Index > >().swap( ltPolygons );
 
 	RemoveHangingVertices( vertices , gtPolygons );
 	char comment[1024];
