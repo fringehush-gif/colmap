@@ -222,7 +222,7 @@ ValuedPointData< Real , Dim , AuxData ... > InterpolateVertices( const ValuedPoi
 template< typename Real , unsigned int Dim , typename Index , typename ... AuxData >
 void SplitPolygon
 (
-	const std::vector< Index >& polygon ,
+	std::vector< Index >& polygon ,
 	std::vector< ValuedPointData< Real , Dim , AuxData ... > >& vertices ,
 	std::vector< std::vector< Index > >* ltPolygons , std::vector< std::vector< Index > >* gtPolygons ,
 	std::vector< bool >* ltFlags , std::vector< bool >* gtFlags ,
@@ -238,8 +238,8 @@ void SplitPolygon
 		gt[j] = ( vertices[ polygon[j] ].template get<1>()>trimValue );
 		if( gt[j] ) gtCount++;
 	}
-	if     ( gtCount==sz ){ if( gtPolygons ) gtPolygons->push_back( polygon ) ; if( gtFlags ) gtFlags->push_back( false ); }
-	else if( gtCount==0  ){ if( ltPolygons ) ltPolygons->push_back( polygon ) ; if( ltFlags ) ltFlags->push_back( false ); }
+	if     ( gtCount==sz ){ if( gtPolygons ) gtPolygons->push_back( std::move( polygon ) ) ; if( gtFlags ) gtFlags->push_back( false ); }
+	else if( gtCount==0  ){ if( ltPolygons ) ltPolygons->push_back( std::move( polygon ) ) ; if( ltFlags ) ltFlags->push_back( false ); }
 	else
 	{
 		int start;
@@ -288,7 +288,7 @@ void SplitPolygon
 }
 
 template< class Real , unsigned int Dim , typename Index , class Vertex >
-void Triangulate( const std::vector< Vertex >& vertices , const std::vector< std::vector< Index > >& polygons , std::vector< std::vector< Index > >& triangles )
+void Triangulate( const std::vector< Vertex >& vertices , std::vector< std::vector< Index > >& polygons , std::vector< std::vector< Index > >& triangles )
 {
 	triangles.clear();
 	for( size_t i=0 ; i<polygons.size() ; i++ )
@@ -307,7 +307,7 @@ void Triangulate( const std::vector< Vertex >& vertices , const std::vector< std
 				for( int k=0 ; k<3 ; k++ ) triangles[idx+j][k] = polygons[i][ _triangles[j].idx[k] ];
 			}
 		}
-		else if( polygons[i].size()==3 ) triangles.push_back( polygons[i] );
+		else if( polygons[i].size()==3 ) triangles.push_back( std::move( polygons[i] ) );
 }
 
 template< class Real , unsigned int Dim , typename Index , class Vertex >
@@ -494,6 +494,7 @@ int Execute( AuxDataFactories ... auxDataFactories )
 			_polygons.insert( _polygons.end() , std::make_move_iterator( gtPolygons.begin() ) , std::make_move_iterator( gtPolygons.end() ) );
 			_components.insert( _components.end() , std::make_move_iterator( ltComponents.begin() ) , std::make_move_iterator( ltComponents.end() ) );
 			_components.insert( _components.end() , std::make_move_iterator( gtComponents.begin() ) , std::make_move_iterator( gtComponents.end() ) );
+			std::vector< std::vector< Index > >().swap( ltPolygons );
 		}
 		auto polygonLinks = PolygonIndexChain< Index >::MakeArena( _polygons.size() );
 		std::vector< typename ComponentGraph< Index >::Node > nodes( _components.size() );
@@ -615,34 +616,22 @@ int Execute( AuxDataFactories ... auxDataFactories )
 			}
 		}
 
-		ltPolygons.clear() , gtPolygons.clear();
+		gtPolygons.clear();
 
-		for( unsigned int i=0 ; i<gtComponentStart ; i++ )
-			if( !nodes[i].neighbors.size() && nodes[i].area<area*IslandAreaRatio.value && RemoveIslands.set ) ; // small island
-			else for( auto iter=nodes[i].polygonIndices.begin() ; iter!=nodes[i].polygonIndices.end() ; iter++ ) ltPolygons.push_back( std::move( _polygons[ *iter ] ) );
 		for( unsigned int i=(unsigned int)gtComponentStart ; i<nodes.size() ; i++ )
 			if( !nodes[i].neighbors.size() && nodes[i].area<area*IslandAreaRatio.value && RemoveIslands.set ) ; // small island
 			else for( auto iter=nodes[i].polygonIndices.begin() ; iter!=nodes[i].polygonIndices.end() ; iter++ ) gtPolygons.push_back( std::move( _polygons[ *iter ] ) );
 	}
+	else std::vector< std::vector< Index > >().swap( ltPolygons );
 
 	if( !PolygonMesh.set )
 	{
-		{
-			std::vector< std::vector< Index > > polys;
-			polys.reserve( ltPolygons.size() );
-			Triangulate< Real , Dim , Index , Vertex >( vertices , ltPolygons , polys ) , ltPolygons = std::move( polys );
-			// Keep validation/triangulation behavior, then retire the rejected side.
-			std::vector< std::vector< Index > >().swap( ltPolygons );
-		}
 		{
 			std::vector< std::vector< Index > > polys;
 			polys.reserve( gtPolygons.size() );
 			Triangulate< Real , Dim , Index , Vertex >( vertices , gtPolygons , polys ) , gtPolygons = std::move( polys );
 		}
 	}
-
-	// Polygon-mesh mode bypasses the triangulation scopes above.
-	std::vector< std::vector< Index > >().swap( ltPolygons );
 
 	RemoveHangingVertices( vertices , gtPolygons );
 	char comment[1024];

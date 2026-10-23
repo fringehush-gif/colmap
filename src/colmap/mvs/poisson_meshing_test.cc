@@ -833,6 +833,10 @@ TEST(PoissonMeshing, ExtractionScratchMovesPreserveDuplicateOrder) {
 template <typename Index>
 void CheckPolygonIndexChainSpliceOrder() {
   using Chain = PoissonRecon::PolygonIndexChain<Index>;
+  static_assert(
+      std::is_same_v<typename std::iterator_traits<
+                         typename Chain::const_iterator>::iterator_category,
+                     std::input_iterator_tag>);
   auto links = Chain::MakeArena(12);
   std::array<Chain, 6> chains;
   std::array<std::list<Index>, 6> expected;
