@@ -215,8 +215,10 @@ namespace PoissonRecon
 		// This function is guaranteed to return a lower-bound on the actual size
 		size_t size( void ) const
 		{
-			if( !_size ) return 0;
-			else return ( (_size-1)<<(Depth*LogSize) ) + _data[_size-1]->size();
+			// Use one published block count for both the prefix and child.
+			const size_t blocks = _size.load();
+			if( !blocks ) return 0;
+			else return ( (blocks-1)<<(Depth*LogSize) ) + _data[blocks-1]->size();
 		}
 
 		const T& operator[]( size_t idx ) const { return ( *_data[ idx>>(LogSize*Depth) ] )[ idx & NestedVector< T , Depth-1 , LogSize >::_Mask ] ; }
