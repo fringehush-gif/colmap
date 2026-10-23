@@ -71,6 +71,9 @@ DAMAGE.
 #include <unordered_map>
 #include "MAT.h"
 
+#define POISSON_AUX_NATIVE_DECL
+#include "native_aux.h.inc"
+#undef POISSON_AUX_NATIVE_DECL
 namespace PoissonRecon
 {
 

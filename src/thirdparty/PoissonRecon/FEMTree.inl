@@ -1085,6 +1085,10 @@ template< unsigned int Dim , class Real >
 template< unsigned int DataSig , bool CreateNodes , unsigned int DensityDegree , class Data , class SampleFunctor /* = std::function< const PointSample & (size_t) >*/ , class SampleDataFunctor /* = std::function< const Data & (size_t) > */ >
 void FEMTree< Dim , Real >::updateExtrapolatedDataField( Data zero , SparseNodeData< ProjectiveData< Data , Real > , IsotropicUIntPack< Dim , DataSig > > &dataField , size_t sampleNum , SampleFunctor sampleFunctor , SampleDataFunctor sampleDataFunctor , const DensityEstimator< DensityDegree >* density , bool nearest )
 {
+#define POISSON_AUX_NATIVE_BODY
+#include "native_aux.h.inc"
+#undef POISSON_AUX_NATIVE_BODY
+
 	Allocator< FEMTreeNode > *nodeAllocator = nodeAllocators.size() ? nodeAllocators[0] : NULL;
 	LocalDepth maxDepth = _spaceRoot->maxDepth();
 
