@@ -251,7 +251,7 @@ public:
 		{
 			for( unsigned int t=0 ; t<scratch.size() ; t++ )
 			{
-				for( int i=0 ; i<scratch[t].size() ; i++ ) edgeVertexMap[ scratch[t][i].first ] = scratch[t][i].second;
+				for( int i=0 ; i<scratch[t].size() ; i++ ) edgeVertexMap[ scratch[t][i].first ] = std::move( scratch[t][i].second );
 				scratch[t].clear();
 			}
 		}
@@ -262,8 +262,8 @@ public:
 			{
 				for( int i=0 ; i<scratch[t].size() ; i++ )
 				{
-					std::vector< IsoEdge > &faceEdges = faceEdgeMap[ scratch[t][i].first ];
-					faceEdges.insert( faceEdges.end() , scratch[t][i].second.begin() , scratch[t][i].second.end() );
+					auto result = faceEdgeMap.try_emplace( scratch[t][i].first , std::move( scratch[t][i].second ) );
+					if( !result.second ) result.first->second.insert( result.first->second.end() , scratch[t][i].second.begin() , scratch[t][i].second.end() );
 				}
 				scratch[t].clear();
 			}
@@ -496,7 +496,7 @@ public:
 		{
 			for( unsigned int t=0 ; t<scratch.size() ; t++ )
 			{
-				for( int i=0 ; i<scratch[t].size() ; i++ ) edgeVertexMap[ scratch[t][i].first ] = scratch[t][i].second;
+				for( int i=0 ; i<scratch[t].size() ; i++ ) edgeVertexMap[ scratch[t][i].first ] = std::move( scratch[t][i].second );
 				scratch[t].clear();
 			}
 		}
@@ -507,9 +507,8 @@ public:
 			{
 				for( int i=0 ; i<scratch[t].size() ; i++ )
 				{
-					auto iter = faceEdgeMap.find( scratch[t][i].first );
-					if( iter==faceEdgeMap.end() ) faceEdgeMap[ scratch[t][i].first ] = scratch[t][i].second;
-					else for( int j=0 ; j<scratch[t][i].second.size() ; j++ ) iter->second.push_back( scratch[t][i].second[j] );
+					auto result = faceEdgeMap.try_emplace( scratch[t][i].first , std::move( scratch[t][i].second ) );
+					if( !result.second ) for( int j=0 ; j<scratch[t][i].second.size() ; j++ ) result.first->second.push_back( scratch[t][i].second[j] );
 				}
 				scratch[t].clear();
 			}

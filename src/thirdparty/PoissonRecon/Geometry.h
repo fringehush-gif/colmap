@@ -34,6 +34,7 @@ DAMAGE.
 #include <vector>
 #include <stdlib.h>
 #include <unordered_map>
+#include <utility>
 #include <string.h>
 #ifdef _WIN32
 #include <io.h>
@@ -197,7 +198,7 @@ namespace PoissonRecon
 	public:
 		Real coords[Dim];
 		Point( void ) { memset( coords , 0 , sizeof(Real)*Dim ); }
-		Point( const Point& p ){ memcpy( coords , p.coords , sizeof(Real)*Dim ); }
+		Point( const Point& p ) noexcept { memcpy( coords , p.coords , sizeof(Real)*Dim ); }
 		template< class ... _Reals > Point( _Reals ... values ){ static_assert( sizeof...(values)==Dim || sizeof...(values)==0 , "[ERROR] Point::Point: Invalid number of coefficients" ) ; _init( 0 , values... ); }
 		template< class _Real > Point( const Point< _Real , Dim >& p ){ for( unsigned int d=0 ; d<Dim ; d++ ) coords[d] = (Real) p.coords[d]; }
 		Point( Real *values ){ for( unsigned int d=0 ; d<Dim ; d++ ) coords[d] = values[d]; }
@@ -270,6 +271,7 @@ namespace PoissonRecon
 		Point( void ) : _coords( NullPointer(Real) ) , _dim(0){}
 		Point( size_t dim ) : _coords( NullPointer(Real) ) , _dim(0) { if( dim ){ _resize( (unsigned int)dim ) ; memset( _coords , 0 , sizeof(Real)*_dim ); } }
 		Point( const Point &p ) : _coords( NullPointer(Real) ) , _dim(0) { if( p._dim ){ _resize( p._dim ) ; memcpy( _coords , p._coords , sizeof(Real)*_dim ); } }
+		Point( Point &&p ) noexcept : _coords( p._coords ) , _dim( p._dim ) { p._coords = NullPointer(Real) ; p._dim = 0; }
 		~Point( void ){ DeletePointer( _coords ); }
 
 		Point &operator = ( const Point &p )
@@ -277,6 +279,17 @@ namespace PoissonRecon
 			if( !_dim || !p._dim ){ _resize( p._dim ) ; memcpy( _coords , p._coords , sizeof(Real)*_dim ); }
 			else if( _dim==p._dim ) memcpy( _coords , p._coords , sizeof(Real)*_dim );
 			else MK_THROW( "Dimensions don't match: " , _dim , " != " , p._dim );
+			return *this;
+		}
+		Point &operator = ( Point &&p )
+		{
+			if( this!=&p )
+			{
+				if( _dim && p._dim && _dim!=p._dim ) MK_THROW( "Dimensions don't match: " , _dim , " != " , p._dim );
+				DeletePointer( _coords );
+				_coords = p._coords , _dim = p._dim;
+				p._coords = NullPointer(Real) , p._dim = 0;
+			}
 			return *this;
 		}
 
