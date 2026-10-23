@@ -646,6 +646,10 @@ int RunPoissonRecon( int argc , char* argv[] )
         const ::AuxNativeInput::Scope rgb_input_scope(standard_rgb);
 #endif
 
+#if defined(POISSON_AUX_NATIVE_GPU)
+		if( standard_rgb ) Execute< Real , Dim , FEMSig >( VertexFactory::RGBColorFactory< Real >() );
+		else
+#endif
 		if( unprocessedProperties.size() ) Execute< Real , Dim , FEMSig >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
 		else                               Execute< Real , Dim , FEMSig >( VertexFactory::EmptyFactory< Real >() );
 	}
@@ -682,6 +686,10 @@ int RunPoissonRecon( int argc , char* argv[] )
         const ::AuxNativeInput::Scope rgb_input_scope(standard_rgb);
 #endif
 
+#if defined(POISSON_AUX_NATIVE_GPU)
+		if( standard_rgb ) Execute< DEFAULT_DIMENSION , Real >( VertexFactory::RGBColorFactory< Real >() );
+		else
+#endif
 		if( unprocessedProperties.size() ) Execute< DEFAULT_DIMENSION , Real >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
 		else                               Execute< DEFAULT_DIMENSION , Real >( VertexFactory::EmptyFactory< Real >() );
 	}
