@@ -2,11 +2,18 @@
 
 #include "colmap/mvs/model.h"
 
+#include "colmap/geometry/pose.h"
+#include "colmap/geometry/triangulation.h"
+#include "colmap/math/math.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/testing.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <map>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -14,6 +21,100 @@
 namespace colmap {
 namespace mvs {
 namespace {
+
+std::vector<std::map<int, float>> LegacyTriangulationAngles(
+    const Model& model, const float percentile) {
+  const auto& images = model.images;
+  const auto& points = model.points;
+  std::vector<Eigen::Vector3d> proj_centers(images.size());
+  for (size_t image_idx = 0; image_idx < images.size(); ++image_idx) {
+    const auto& image = images[image_idx];
+    Eigen::Vector3f C;
+    ComputeProjectionCenter(image.GetR(), image.GetT(), C.data());
+    proj_centers[image_idx] = C.cast<double>();
+  }
+
+  std::vector<std::map<int, std::vector<float>>> all_triangulation_angles(
+      images.size());
+  for (const auto& point : points) {
+    for (size_t i = 0; i < point.track.size(); ++i) {
+      const int image_idx1 = point.track[i];
+      for (size_t j = 0; j < i; ++j) {
+        const int image_idx2 = point.track[j];
+        if (image_idx1 != image_idx2) {
+          const float angle = CalculateTriangulationAngle(
+              proj_centers.at(image_idx1),
+              proj_centers.at(image_idx2),
+              Eigen::Vector3d(point.x, point.y, point.z));
+          all_triangulation_angles.at(image_idx1)[image_idx2].push_back(angle);
+          all_triangulation_angles.at(image_idx2)[image_idx1].push_back(angle);
+        }
+      }
+    }
+  }
+
+  std::vector<std::map<int, float>> triangulation_angles(images.size());
+  for (size_t image_idx = 0; image_idx < all_triangulation_angles.size();
+       ++image_idx) {
+    auto& overlapping_images = all_triangulation_angles[image_idx];
+    for (auto& [other_image_idx, angles] : overlapping_images) {
+      triangulation_angles[image_idx].emplace(other_image_idx,
+                                              Percentile(angles, percentile));
+    }
+  }
+
+  return triangulation_angles;
+}
+
+TEST(Model, TriangulationAnglesRetainLegacyBitsAndDirectedMembership) {
+  Model model;
+  const float K[9] = {100, 0, 50, 0, 100, 50, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  for (int i = 0; i < 12; ++i) {
+    const float T[3] = {
+        -static_cast<float>(i) * 0.375f, static_cast<float>(i % 3) * 0.125f, 0};
+    model.images.emplace_back("img.jpg", 100, 100, K, R, T);
+  }
+  for (int i = 0; i < 96; ++i) {
+    Model::Point point{static_cast<float>(i % 7) * 0.125f,
+                       static_cast<float>(i % 5) * 0.25f,
+                       2.0f + static_cast<float>(i % 11),
+                       {}};
+    // Repeated observations and opposite pair orientations must retain every
+    // original sample and its ordering; equal indices remain excluded.
+    for (int j = 0; j < 2 + i % 10; ++j)
+      point.track.push_back((i * 7 + j * 5) % 12);
+    if (i % 3 == 0) std::reverse(point.track.begin(), point.track.end());
+    if (i % 7 == 0) point.track.push_back(point.track.front());
+    model.points.push_back(std::move(point));
+  }
+  for (const float percentile : {0.f, 1.f, 25.f, 50.f, 75.f, 99.f, 100.f}) {
+    const auto expected = LegacyTriangulationAngles(model, percentile);
+    const auto actual = model.ComputeTriangulationAngles(percentile);
+    ASSERT_EQ(actual.size(), expected.size());
+    for (size_t i = 0; i < actual.size(); ++i) {
+      ASSERT_EQ(actual[i].size(), expected[i].size());
+      for (const auto& [other, value] : expected[i]) {
+        const float observed = actual[i].at(other);
+        EXPECT_EQ(std::memcmp(&value, &observed, sizeof(float)), 0)
+            << i << " " << other << " percentile " << percentile;
+      }
+    }
+  }
+}
+
+TEST(Model, TriangulationAnglesKeepIsolatedAndDuplicateOnlyTracksEmpty) {
+  Model empty;
+  EXPECT_TRUE(empty.ComputeTriangulationAngles().empty());
+  const float K[9] = {100, 0, 50, 0, 100, 50, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const float T[3] = {0, 0, 0};
+  empty.images.emplace_back("img.jpg", 100, 100, K, R, T);
+  empty.points.push_back(Model::Point{0, 0, 1, {0, 0, 0}});
+  const auto result = empty.ComputeTriangulationAngles();
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_TRUE(result.front().empty());
+}
 
 TEST(Model, ReadCOLMAP) {
   Reconstruction reconstruction;
