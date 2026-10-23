@@ -30,8 +30,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <limits>
+#include <locale>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -65,6 +68,57 @@ void WriteRandomPlyPoints(const std::filesystem::path& path,
   }
   WriteBinaryPlyPoints(
       path, ply_points, /*write_normal=*/true, /*write_rgb=*/true);
+}
+
+std::vector<PlyPoint> MakeDeterministicColoredCubePoints() {
+  std::vector<PlyPoint> points;
+  points.reserve(96);
+  for (int axis = 0; axis < 3; ++axis) {
+    for (int sign : std::array<int, 2>{-1, 1}) {
+      for (int u = 0; u < 4; ++u) {
+        for (int v = 0; v < 4; ++v) {
+          std::array<float, 3> position{};
+          std::array<float, 3> normal{};
+          position[axis] = static_cast<float>(sign);
+          position[(axis + 1) % 3] = static_cast<float>(2 * u - 3) * 0.25f;
+          position[(axis + 2) % 3] = static_cast<float>(2 * v - 3) * 0.25f;
+          normal[axis] = static_cast<float>(sign);
+          PlyPoint point;
+          point.x = position[0];
+          point.y = position[1];
+          point.z = position[2];
+          point.nx = normal[0];
+          point.ny = normal[1];
+          point.nz = normal[2];
+          point.r = 17;
+          point.g = 109;
+          point.b = 233;
+          points.push_back(point);
+        }
+      }
+    }
+  }
+  return points;
+}
+
+bool WriteReorderedRgbAsciiPly(const std::filesystem::path& path,
+                               const std::vector<PlyPoint>& points) {
+  std::ofstream output(path);
+  output.imbue(std::locale::classic());
+  output << std::setprecision(std::numeric_limits<float>::max_digits10);
+  output << "ply\nformat ascii 1.0\nelement vertex " << points.size()
+         << "\nproperty float x\nproperty float y\nproperty float z"
+         << "\nproperty float nx\nproperty float ny\nproperty float nz"
+         << "\nproperty uchar blue\nproperty uchar red"
+         << "\nproperty uchar green\nend_header\n";
+  for (const PlyPoint& point : points) {
+    output << point.x << ' ' << point.y << ' ' << point.z << ' ' << point.nx
+           << ' ' << point.ny << ' ' << point.nz << ' '
+           << static_cast<int>(point.b) << ' ' << static_cast<int>(point.r)
+           << ' ' << static_cast<int>(point.g) << '\n';
+  }
+  output.close();
+  return output.good();
 }
 
 TEST(PoissonMeshing, Integration) {
@@ -239,6 +293,66 @@ TEST(PoissonMeshing, FinalizerWorkerCountsRetainFiniteColoredMesh) {
       EXPECT_LE(std::abs(static_cast<int>(vertex.g) - 64), 1);
       EXPECT_LE(std::abs(static_cast<int>(vertex.b) - 128), 1);
     }
+  }
+}
+
+TEST(PoissonMeshing, StandardAndReorderedRgbInputsRetainOrderedGeometry) {
+  const auto test_dir = CreateTestDir();
+  const auto standard_input = test_dir / "standard-rgb.ply";
+  const auto reordered_input = test_dir / "reordered-rgb.ply";
+  const auto standard_output = test_dir / "standard-mesh.ply";
+  const auto reordered_output = test_dir / "reordered-mesh.ply";
+  const auto points = MakeDeterministicColoredCubePoints();
+  WriteBinaryPlyPoints(standard_input, points, true, true);
+  ASSERT_TRUE(WriteReorderedRgbAsciiPly(reordered_input, points));
+
+  // The ASCII fallback must decode the same samples before comparing meshes.
+  const auto standard_points = ReadPly(standard_input);
+  const auto reordered_points = ReadPly(reordered_input);
+  ASSERT_EQ(standard_points.size(), points.size());
+  ASSERT_EQ(reordered_points.size(), points.size());
+  for (size_t index = 0; index < points.size(); ++index) {
+    SCOPED_TRACE(index);
+    EXPECT_EQ(standard_points[index].x, reordered_points[index].x);
+    EXPECT_EQ(standard_points[index].y, reordered_points[index].y);
+    EXPECT_EQ(standard_points[index].z, reordered_points[index].z);
+    EXPECT_EQ(standard_points[index].nx, reordered_points[index].nx);
+    EXPECT_EQ(standard_points[index].ny, reordered_points[index].ny);
+    EXPECT_EQ(standard_points[index].nz, reordered_points[index].nz);
+    EXPECT_EQ(standard_points[index].r, reordered_points[index].r);
+    EXPECT_EQ(standard_points[index].g, reordered_points[index].g);
+    EXPECT_EQ(standard_points[index].b, reordered_points[index].b);
+  }
+
+  PoissonMeshingOptions options;
+  options.point_weight = 1.0;
+  options.depth = 4;
+  options.trim = 0.0;
+  options.color = true;
+  options.num_threads = 1;
+  ASSERT_TRUE(PoissonMeshing(options, standard_input, standard_output));
+  ASSERT_TRUE(PoissonMeshing(options, reordered_input, reordered_output));
+
+  const auto standard_mesh = ReadPly(standard_output);
+  const auto reordered_mesh = ReadPly(reordered_output);
+  ASSERT_EQ(standard_mesh.size(), reordered_mesh.size());
+  ASSERT_GE(standard_mesh.size(), 3);
+  for (size_t index = 0; index < standard_mesh.size(); ++index) {
+    SCOPED_TRACE(index);
+    const PlyPoint& standard = standard_mesh[index];
+    const PlyPoint& reordered = reordered_mesh[index];
+    EXPECT_TRUE(std::isfinite(standard.x));
+    EXPECT_TRUE(std::isfinite(standard.y));
+    EXPECT_TRUE(std::isfinite(standard.z));
+    EXPECT_TRUE(std::isfinite(reordered.x));
+    EXPECT_TRUE(std::isfinite(reordered.y));
+    EXPECT_TRUE(std::isfinite(reordered.z));
+    EXPECT_EQ(standard.x, reordered.x);
+    EXPECT_EQ(standard.y, reordered.y);
+    EXPECT_EQ(standard.z, reordered.z);
+    EXPECT_LE(std::abs(static_cast<int>(standard.r) - reordered.r), 1);
+    EXPECT_LE(std::abs(static_cast<int>(standard.g) - reordered.g), 1);
+    EXPECT_LE(std::abs(static_cast<int>(standard.b) - reordered.b), 1);
   }
 }
 

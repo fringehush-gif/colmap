@@ -817,7 +817,35 @@ namespace PoissonRecon
 						PoissonNormalGpu::Available( normal_gpu_admission );
 					PoissonNormalCapture::Scope normal_gpu_scope( use_normal_gpu );
 #endif
+					// Keep the original dynamic-data arithmetic for the normal-field splat.
+					// Static RGB storage is retained for input and the remaining reconstruction.
+					if constexpr( Dim==3 && std::is_same_v< std::tuple< AuxData... > , std::tuple< Point< Real , 3 > > > )
+					{
+						using DynamicAuxData = DirectSum< Real , Point< Real > >;
+						using DynamicNormalAndAuxData = DirectSum< Real , Normal< Real , Dim > , DynamicAuxData >;
+						std::vector< DynamicNormalAndAuxData > normalSamples( sampleNormalAndAuxData->size() );
+						ThreadPool::ParallelFor( 0 , normalSamples.size() , [&]( unsigned int , size_t i )
+						{
+							const auto &input = (*sampleNormalAndAuxData)[i];
+							Point< Real > rgb( 3 );
+							for( unsigned int c=0 ; c<3 ; c++ ) rgb[c] = input.template get<1>().template get<0>()[c];
+							normalSamples[i] = DynamicNormalAndAuxData( input.template get<0>() , DynamicAuxData( rgb ) );
+						} );
+						std::function< bool ( DynamicNormalAndAuxData , Point< Real , Dim > & ) > DynamicConversionFunction =
+							[]( DynamicNormalAndAuxData in , Normal< Real , Dim > &out )
+							{
+								Normal< Real , Dim > n = in.template get<0>();
+								Real l = (Real)Length( n );
+								if( !l ) return false;
+								out = n / l;
+								return true;
+							};
+						*normalInfo = implicit.tree.setInterpolatedDataField( Point< Real , Dim >() , NormalSigs() , *samples , normalSamples , implicit.density , params.baseDepth , params.depth , params.lowDepthCutOff , pointDepthAndWeight , DynamicConversionFunction );
+					}
+					else
+					{
 					*normalInfo = implicit.tree.setInterpolatedDataField( Point< Real , Dim >() , NormalSigs() , *samples , *sampleNormalAndAuxData , implicit.density , params.baseDepth , params.depth , params.lowDepthCutOff , pointDepthAndWeight , ConversionFunction );
+					}
 
 					ThreadPool::ParallelFor( 0 , normalInfo->size() , [&]( unsigned int , size_t i ){ (*normalInfo)[i] *= (Real)-1.; } );
 					if( params.verbose )

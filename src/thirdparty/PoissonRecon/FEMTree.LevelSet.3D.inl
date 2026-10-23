@@ -1923,6 +1923,41 @@ public:
 					}
 			if( isCoplanar )
 			{
+				if constexpr( HasData && std::is_same_v< Real , float > && std::is_same_v< Data , DirectSum< float , Point< float , 3 > > > )
+				{
+					using DynamicData = DirectSum< Real , Point< Real > >;
+					using DynamicExtractor = _LevelSetExtractor< true , Real , 3 , DynamicData >;
+					using DynamicVertex = typename DynamicExtractor::Vertex;
+					using StaticTuple = std::tuple< Point< Real , 3 > , Point< Real , 3 > , Real , Data >;
+					using DynamicTuple = std::tuple< Point< Real , 3 > , Point< Real , 3 > , Real , DynamicData >;
+
+					std::vector< std::pair< node_index_type , DynamicVertex > > dynamicPolygon;
+					dynamicPolygon.reserve( polygon.size() );
+					for( const auto &entry : polygon )
+					{
+						Point< Real > color( 3 );
+						for( unsigned int channel=0 ; channel<3 ; channel++ )
+							color[channel] = entry.second.template get<3>().template get<0>()[channel];
+						dynamicPolygon.emplace_back( entry.first , DynamicVertex(
+							entry.second.template get<0>() , entry.second.template get<1>() ,
+							entry.second.template get<2>() , DynamicData( color ) ) );
+					}
+
+					OutputDataStream< Point< Real , 3 > , Point< Real , 3 > , Real , Data > &staticStream = vertexStream;
+					OutputDataStreamConverter< StaticTuple , DynamicTuple > convertedStream(
+						staticStream , []( const DynamicTuple &dynamic ) -> StaticTuple
+						{
+							const Point< Real > &dynamicColor = std::get<3>( dynamic ).template get<0>();
+							if( dynamicColor.dim()!=3 ) MK_THROW( "Barycenter RGB dimension is not three: " , dynamicColor.dim() );
+							Point< Real , 3 > color;
+							for( unsigned int channel=0 ; channel<3 ; channel++ ) color[channel] = dynamicColor[channel];
+							return StaticTuple( std::get<0>( dynamic ) , std::get<1>( dynamic ) ,
+								std::get<2>( dynamic ) , Data( color ) );
+						} );
+					OutputDataStream< Point< Real , 3 > , Point< Real , 3 > , Real , DynamicData > &dynamicStream = convertedStream;
+					return DynamicExtractor::AddIsoPolygons( thread , dynamicStream , polygonStream ,
+						dynamicPolygon , polygonMesh , addBarycenter );
+				}
 				Vertex c;
 				c *= 0;
 				for( unsigned int i=0 ; i<polygon.size() ; i++ ) c += polygon[i].second;
