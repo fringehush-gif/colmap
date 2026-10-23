@@ -108,6 +108,10 @@ struct PatchMatchOptions {
   // CUDA only; leave disabled when GPU memory is limited.
   bool rotation_buffer_reuse = false;
 
+  // Save GPU memory by checkpointing backward HMM messages and replaying
+  // each stripe. Adds recurrence work and rotation copies; defaults to false.
+  bool checkpoint_hmm = false;
+
   void Print() const;
   bool Check() const;
 };

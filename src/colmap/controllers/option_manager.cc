@@ -1122,6 +1122,12 @@ void OptionManager::AddPatchMatchStereoOptions() {
       &patch_match_stereo->rotation_buffer_reuse,
       "Retain rotated CUDA buffers between sweeps. Increases GPU memory "
       "with image size and source count; disable for memory-limited jobs.");
+  AddDefaultOption(
+      "PatchMatchStereo.checkpoint_hmm",
+      &patch_match_stereo->checkpoint_hmm,
+      "Reduce GPU memory by checkpointing backward HMM messages. Replays "
+      "each stripe and copies rotated planes; runtime depends on the "
+      "workload.");
   AddDefaultOption("PatchMatchStereo.num_threads",
                    &patch_match_stereo->num_threads);
 }

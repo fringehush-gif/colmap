@@ -125,6 +125,7 @@ if(CUDA_ENABLED)
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu
             patch_match_state_map.h
+            patch_match_hmm_checkpoint.h
             patch_match_rng_perimeter.h
             packed_consistency_mask.h
         PUBLIC_LINK_LIBS
@@ -323,6 +324,7 @@ if(HIP_ENABLED)
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu
             patch_match_state_map.h
+            patch_match_hmm_checkpoint.h
             patch_match_rng_perimeter.h
             packed_consistency_mask.h
         PUBLIC_LINK_LIBS
