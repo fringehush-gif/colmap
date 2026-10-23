@@ -105,7 +105,8 @@ class PatchMatchCuda {
   std::unique_ptr<PatchMatchStateMap> sel_prob_map_;
   std::unique_ptr<PatchMatchStateMap> prev_sel_prob_map_;
   std::unique_ptr<PatchMatchStateMap> cost_map_;
-  std::unique_ptr<GpuMatPRNG> rand_state_map_;
+  // Canonical original-image perimeter; corners retain one shared state.
+  std::unique_ptr<GpuMat<curandState>> rand_state_map_;
   std::unique_ptr<GpuMat<uint8_t>> consistency_mask_;
 
   // Shared memory is too small to hold local state for each thread,
@@ -114,7 +115,6 @@ class PatchMatchCuda {
 
 #ifndef COLMAP_HIP_ENABLED
   // Per-problem storage for the opposite reference-image orientation.
-  std::unique_ptr<GpuMatPRNG> alternate_rand_state_map_;
   std::unique_ptr<GpuMat<float>> alternate_depth_map_;
   std::unique_ptr<GpuMat<float>> alternate_normal_map_;
   std::unique_ptr<GpuMatRefImage> alternate_ref_image_;

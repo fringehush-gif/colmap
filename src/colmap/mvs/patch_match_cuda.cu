@@ -10,6 +10,7 @@
 #define _USE_MATH_DEFINES
 
 #include "colmap/mvs/patch_match_cuda.h"
+#include "colmap/mvs/patch_match_rng_perimeter.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/cudacc.h"
 #include "colmap/util/logging.h"
@@ -877,19 +878,42 @@ class LikelihoodComputer {
   const float ncc_norm_factor_;
 };
 
-// Generate random normals for each pixel in the normal map.
-__global__ void InitNormalMap(const RefCamera camera,
-                              GpuMatView<float> normal_map,
-                              GpuMatView<curandState> rand_state_map) {
-  const int row = blockDim.y * blockIdx.y + threadIdx.y;
-  const int col = blockDim.x * blockIdx.x + threadIdx.x;
-  if (col < normal_map.GetWidth() && row < normal_map.GetHeight()) {
-    curandState rand_state = rand_state_map.Get(row, col);
-    float normal[3];
-    GenerateRandomNormal(camera, row, col, &rand_state, normal);
-    normal_map.SetSlice(row, col, normal);
-    rand_state_map.Set(row, col, rand_state);
-  }
+// Reproduce original block-major seeds, retaining only live perimeter state.
+__device__ size_t OriginalSeed(size_t r, size_t c, size_t w) {
+  return ((r / 16) * ((w + 31) / 32) + c / 32) * 512 + (r % 16) * 32 + c % 32;
+}
+
+__global__ void FusedInitialize(RefCamera camera,
+                                GpuMatView<float> depth,
+                                GpuMatView<float> normals,
+                                GpuMatView<curandState> perimeter,
+                                PatchMatchRngPerimeter layout,
+                                float depth_min,
+                                float depth_max) {
+  const size_t r = blockIdx.y * blockDim.y + threadIdx.y;
+  const size_t c = blockIdx.x * blockDim.x + threadIdx.x;
+  if (r >= depth.height || c >= depth.width) return;
+  curandState state;
+  curand_init(OriginalSeed(r, c, depth.width), 0, 0, &state);
+  // Same expression, order and number of draws as FillWithRandomNumbersKernel.
+  depth.Set(r, c, GenerateRandomDepth(depth_min, depth_max, &state));
+  float normal[3];
+  GenerateRandomNormal(
+      camera, static_cast<int>(r), static_cast<int>(c), &state, normal);
+  normals.SetSlice(r, c, normal);
+  if (r == 0 || c == 0 || r + 1 == depth.height || c + 1 == depth.width)
+    perimeter.Set(0, layout.Index(r, c), state);
+}
+
+__global__ void SeedPerimeter(GpuMatView<curandState> out,
+                              PatchMatchRngPerimeter layout) {
+  const size_t slot = blockIdx.x * blockDim.x + threadIdx.x;
+  if (slot >= layout.Count()) return;
+  size_t row, col;
+  layout.Coordinates(slot, &row, &col);
+  curandState state;
+  curand_init(OriginalSeed(row, col, layout.width), 0, 0, &state);
+  out.Set(0, slot, state);
 }
 
 // Rotate normals by 90deg around z-axis in counter-clockwise direction.
@@ -1016,6 +1040,8 @@ __global__ void SweepFromTopToBottom(
     const RefCamera camera,
     GpuMatView<float> global_workspace,
     GpuMatView<curandState> rand_state_map,
+    const PatchMatchRngPerimeter rand_state_layout,
+    const unsigned int rand_state_rotation,
     GpuMatView<float> cost_map,
     GpuMatView<float> depth_map,
     GpuMatView<float> normal_map,
@@ -1122,7 +1148,8 @@ __global__ void SweepFromTopToBottom(
 
   if (owner && col < cost_map.GetWidth()) {
     // Read random state for current column.
-    rand_state = rand_state_map.Get(0, col);
+    rand_state = rand_state_map.Get(
+        0, rand_state_layout.SweepIndex(rand_state_rotation, col));
     // Parameters for first row in column.
     prev_param_state.depth = depth_map.Get(0, col);
     normal_map.GetSlice(0, col, prev_param_state.normal);
@@ -1659,7 +1686,8 @@ __global__ void SweepFromTopToBottom(
   }
 
   if (owner && col < cost_map.GetWidth()) {
-    rand_state_map.Set(0, col, rand_state);
+    rand_state_map.Set(
+        0, rand_state_layout.SweepIndex(rand_state_rotation, col), rand_state);
   }
 }
 
@@ -1887,6 +1915,13 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
       const dim3 sweep_kernel_grid_size(
           (cost_map_->GetWidth() - 1) / kSweepBlockWidth + 1, 1, 1);
 
+      THROW_CHECK_GE(rotation_in_half_pi_, 0);
+      THROW_CHECK_LT(rotation_in_half_pi_, 4);
+      THROW_CHECK_EQ(cost_map_->GetWidth(),
+                     rotation_in_half_pi_ % 2 == 0 ? ref_width_ : ref_height_);
+      THROW_CHECK_EQ(cost_map_->GetHeight(),
+                     rotation_in_half_pi_ % 2 == 0 ? ref_height_ : ref_width_);
+
       // Expenentially reduce amount of perturbation during the optimization.
       sweep_options.perturbation = 1.0f / std::pow(2.0f, iter + sweep / 4.0f);
 
@@ -1909,6 +1944,8 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
                         ref_inv_K_host_[rotation_in_half_pi_]), \
           global_workspace_->View(),                            \
           rand_state_map_->View(),                              \
+          (PatchMatchRngPerimeter{ref_width_, ref_height_}),    \
+          static_cast<unsigned int>(rotation_in_half_pi_),      \
           cost_map_->View(),                                    \
           depth_map_->View(),                                   \
           normal_map_->View(),                                  \
@@ -2336,20 +2373,60 @@ void PatchMatchCuda::InitTransforms() {
 }
 
 void PatchMatchCuda::InitWorkspaceMemory() {
-  rand_state_map_ = std::make_unique<GpuMatPRNG>(ref_width_, ref_height_);
+  // Validate helper arithmetic and the original PRNG's int dimensions.
+  THROW_CHECK_GT(ref_width_, 0);
+  THROW_CHECK_GT(ref_height_, 0);
+  THROW_CHECK_LE(ref_width_, std::numeric_limits<int>::max());
+  THROW_CHECK_LE(ref_height_, std::numeric_limits<int>::max());
+  const size_t max_size = std::numeric_limits<size_t>::max();
+  THROW_CHECK_LE(ref_width_, max_size / sizeof(curandState));
+  THROW_CHECK_LE(ref_height_, max_size / (ref_width_ * sizeof(curandState)));
+  THROW_CHECK_LE(ref_width_, max_size / 4);
+  THROW_CHECK_LE(ref_height_, max_size / 4);
+  const PatchMatchRngPerimeter layout{ref_width_, ref_height_};
+  const size_t perimeter_states = layout.Count();
+  THROW_CHECK_LE(perimeter_states, max_size / sizeof(curandState));
 
+  // Each pixel consumes the original seed/depth/normal sequence locally.
+  // Only perimeter states survive initialization; no full RNG image or gather.
+  rand_state_map_ = std::make_unique<GpuMat<curandState>>(perimeter_states, 1);
   depth_map_ = std::make_unique<GpuMat<float>>(ref_width_, ref_height_);
+  normal_map_ = std::make_unique<GpuMat<float>>(ref_width_, ref_height_, 3);
+  ComputeCudaConfig();
   if (options_.geom_consistency) {
     const DepthMap& init_depth_map =
         problem_.depth_maps->at(problem_.ref_image_idx);
     depth_map_->CopyToDevice(init_depth_map.GetPtr(),
                              init_depth_map.GetWidth() * sizeof(float));
+    const NormalMap& init_normal_map =
+        problem_.normal_maps->at(problem_.ref_image_idx);
+    normal_map_->CopyToDevice(init_normal_map.GetPtr(),
+                              init_normal_map.GetWidth() * sizeof(float));
+    constexpr size_t kThreads = 256;
+    const size_t blocks = (perimeter_states - 1) / kThreads + 1;
+    THROW_CHECK_LE(blocks, std::numeric_limits<int>::max());
+    SeedPerimeter<<<static_cast<unsigned int>(blocks), kThreads>>>(
+        rand_state_map_->View(), layout);
   } else {
-    depth_map_->FillWithRandomNumbers(
-        options_.depth_min, options_.depth_max, *rand_state_map_);
+    // Match the original PRNG tile, independently of rotation-kernel grids.
+    const dim3 block_size(32, 16);
+    const dim3 grid_size((ref_width_ - 1) / block_size.x + 1,
+                         (ref_height_ - 1) / block_size.y + 1);
+    FusedInitialize<<<grid_size, block_size>>>(
+        MakeRefCamera(ref_K_host_[rotation_in_half_pi_],
+                      ref_inv_K_host_[rotation_in_half_pi_]),
+        depth_map_->View(),
+        normal_map_->View(),
+        rand_state_map_->View(),
+        layout,
+        options_.depth_min,
+        options_.depth_max);
   }
-
-  normal_map_ = std::make_unique<GpuMat<float>>(ref_width_, ref_height_, 3);
+  CUDA_SYNC_AND_CHECK();
+  VLOG(1) << "Perimeter RNG initialization states: " << perimeter_states
+          << ", retained pitched bytes: " << rand_state_map_->GetPitch()
+          << ", avoided full-map logical bytes: "
+          << ref_width_ * ref_height_ * sizeof(curandState);
 
   // Note that it is not necessary to keep the selection probability map in
   // memory for all pixels. Theoretically, it is possible to incorporate
@@ -2375,28 +2452,12 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   } else {
     consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(0, 0, 0);
   }
-
-  ComputeCudaConfig();
-
-  if (options_.geom_consistency) {
-    const NormalMap& init_normal_map =
-        problem_.normal_maps->at(problem_.ref_image_idx);
-    normal_map_->CopyToDevice(init_normal_map.GetPtr(),
-                              init_normal_map.GetWidth() * sizeof(float));
-  } else {
-    InitNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
-        MakeRefCamera(ref_K_host_[rotation_in_half_pi_],
-                      ref_inv_K_host_[rotation_in_half_pi_]),
-        normal_map_->View(),
-        rand_state_map_->View());
-  }
 }
 
 #ifndef COLMAP_HIP_ENABLED
 void PatchMatchCuda::InitAlternateOrientationMemory() {
   const size_t width = ref_height_, height = ref_width_;
   const size_t sources = problem_.src_image_idxs.size();
-  alternate_rand_state_map_ = std::make_unique<GpuMatPRNG>(width, height);
   alternate_depth_map_ = std::make_unique<GpuMat<float>>(width, height);
   alternate_normal_map_ = std::make_unique<GpuMat<float>>(width, height, 3);
   alternate_ref_image_ = std::make_unique<GpuMatRefImage>(width, height);
@@ -2425,7 +2486,6 @@ void PatchMatchCuda::InitAlternateOrientationMemory() {
     pitched_bytes += bytes;
   };
   add(rand_state_map_);
-  add(alternate_rand_state_map_);
   add(depth_map_);
   add(alternate_depth_map_);
   add(normal_map_);
@@ -2487,13 +2547,8 @@ void PatchMatchCuda::Rotate() {
     height = ref_width_;
   }
 
-  // Rotate random map.
-  {
-    std::unique_ptr<GpuMatPRNG> rotated_rand_state_map(
-        new GpuMatPRNG(width, height));
-    rand_state_map_->Rotate(rotated_rand_state_map.get());
-    rand_state_map_.swap(rotated_rand_state_map);
-  }
+  // RNG state remains in original perimeter coordinates; the sweep maps
+  // its row-zero columns through rotation_in_half_pi_.
 
   // Rotate depth map.
   {
@@ -2540,10 +2595,8 @@ void PatchMatchCuda::RotateWithBufferReuse() {
   THROW_CHECK_EQ(alternate_depth_map_->GetWidth(), width);
   THROW_CHECK_EQ(alternate_depth_map_->GetHeight(), height);
 
-  // Preserve original producer/kernel/wait order. Every destination element,
-  // including every logical PRNG state, is overwritten by the existing Rotate.
-  rand_state_map_->Rotate(alternate_rand_state_map_.get());
-  rand_state_map_.swap(alternate_rand_state_map_);
+  // Preserve producer/kernel/wait order for the remaining rotated fields.
+  // RNG state has one canonical perimeter owner and needs no rotation bank.
   depth_map_->Rotate(alternate_depth_map_.get());
   depth_map_.swap(alternate_depth_map_);
   RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
