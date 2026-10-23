@@ -10,6 +10,7 @@
 #include "colmap/mvs/image.h"
 #include "colmap/mvs/normal_map.h"
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/patch_match_hmm_checkpoint.h"
 #include "colmap/mvs/patch_match_state_map.h"
 #include "colmap/util/cuda_to_hip.h"
 
@@ -33,7 +34,7 @@ class PatchMatchCuda {
   std::vector<int> GetConsistentImageIdxs() const;
 
  private:
-  template <int kWindowSize, int kWindowStep>
+  template <int kWindowSize, int kWindowStep, bool kCheckpointHmm>
   void RunWithWindowSizeAndStep();
 
   void ComputeCudaConfig();
@@ -105,6 +106,7 @@ class PatchMatchCuda {
   std::unique_ptr<PatchMatchStateMap> sel_prob_map_;
   std::unique_ptr<PatchMatchStateMap> prev_sel_prob_map_;
   std::unique_ptr<PatchMatchStateMap> cost_map_;
+  std::unique_ptr<PatchMatchHmmCheckpoint> hmm_checkpoint_;
   // Canonical original-image perimeter; corners retain one shared state.
   std::unique_ptr<GpuMat<curandState>> rand_state_map_;
   // Packed source-membership bits, one byte plane per eight source slots.

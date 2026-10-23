@@ -71,6 +71,38 @@ class PatchMatchStateMap {
     CUDA_SYNC_AND_CHECK();
   }
 
+  // All source slices remain live. Stage each source in independent scratch
+  // before replacing it. Copy in stride-dependent order so no unread plane
+  // can overlap a destination, including odd shapes with unequal pitches.
+  void RotateWithPlaneScratch(float* scratch, size_t scratch_bytes) {
+    THROW_CHECK(scratch != nullptr);
+    THROW_CHECK_NE(scratch, ptr_);
+    const size_t new_width = height_, new_height = width_;
+    const size_t new_pitch = Pitch(new_width);
+    const size_t old_plane = CheckedBytes(pitch_, height_, 1);
+    const size_t new_plane = CheckedBytes(new_pitch, new_height, 1);
+    THROW_CHECK_LE(new_plane, scratch_bytes);
+    THROW_CHECK_LE(CheckedBytes(new_pitch, new_height, depth_), capacity_);
+    for (size_t ordinal = 0; ordinal < depth_; ++ordinal) {
+      const size_t slice =
+          new_plane > old_plane ? depth_ - 1 - ordinal : ordinal;
+      float* input = reinterpret_cast<float*>(reinterpret_cast<char*>(ptr_) +
+                                              slice * old_plane);
+      float* output = reinterpret_cast<float*>(reinterpret_cast<char*>(ptr_) +
+                                               slice * new_plane);
+      CudaRotate(input, scratch, width_, height_, pitch_, new_pitch);
+      CUDA_SAFE_CALL(cudaMemcpy2D(output,
+                                  new_pitch,
+                                  scratch,
+                                  new_pitch,
+                                  new_width * sizeof(float),
+                                  new_height,
+                                  cudaMemcpyDeviceToDevice));
+    }
+    CUDA_SYNC_AND_CHECK();
+    Reorient(new_width, new_height);
+  }
+
   void Rotate(PatchMatchStateMap* output) const {
     THROW_CHECK_NE(this, output);
     THROW_CHECK_EQ(output->width_, height_);

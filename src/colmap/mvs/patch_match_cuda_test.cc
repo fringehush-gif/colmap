@@ -3,6 +3,7 @@
 #include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/packed_consistency_mask.h"
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/patch_match_hmm_checkpoint.h"
 #include "colmap/mvs/patch_match_rng_perimeter.h"
 #include "colmap/util/cudacc.h"
 
@@ -48,6 +49,49 @@ TEST(PatchMatchCuda, PackedConsistencyMaskDepthCoversSourceTails) {
   }
   constexpr std::size_t kMax = std::numeric_limits<std::size_t>::max();
   EXPECT_EQ(PackedConsistencyMaskDepth(kMax), kMax / 8 + 1);
+}
+
+TEST(PatchMatchCuda, CheckpointHmmStripeRowsRoundsUpWithoutOverflow) {
+  const std::array<std::size_t, 17> heights = {
+      1,
+      2,
+      3,
+      4,
+      5,
+      8,
+      9,
+      10,
+      17,
+      35,
+      47,
+      129,
+      1024,
+      1536,
+      2048,
+      3072,
+      std::numeric_limits<std::size_t>::max()};
+  for (const std::size_t height : heights) {
+    SCOPED_TRACE(height);
+    const std::size_t rows = PatchMatchHmmCheckpoint::StripeRows(height);
+    ASSERT_GT(rows, 0);
+    // Characterize ceil(sqrt(height)) without squaring and overflowing.
+    EXPECT_GE(rows, height / rows + (height % rows != 0));
+    if (rows > 1) {
+      const std::size_t previous = rows - 1;
+      EXPECT_LT(previous, height / previous + (height % previous != 0));
+    }
+  }
+}
+
+TEST(PatchMatchCuda, CheckpointHmmRejectsInvalidAllocationShapes) {
+  // Every rejection occurs before attempting a device allocation.
+  EXPECT_ANY_THROW(PatchMatchHmmCheckpoint::StripeRows(0));
+  EXPECT_ANY_THROW(PatchMatchHmmCheckpoint(0, 1, 1));
+  EXPECT_ANY_THROW(PatchMatchHmmCheckpoint(1, 0, 1));
+  EXPECT_ANY_THROW(PatchMatchHmmCheckpoint(
+      std::size_t(std::numeric_limits<int>::max()) + 1, 1, 1));
+  EXPECT_ANY_THROW(PatchMatchHmmCheckpoint(
+      128, 128, std::numeric_limits<std::size_t>::max()));
 }
 
 TEST(PatchMatchCuda, RngPerimeterLayoutPreservesRotatedRowZero) {
@@ -474,6 +518,28 @@ TEST_F(CudaTest, SampleWindowBoundariesPreserveOutputs) {
       ExpectNonempty(original, inputs, true);
       ExpectNonempty(reused, inputs, true);
       ExpectEquivalent(original, reused);
+    }
+  }
+}
+
+TEST_P(PatchMatchCudaTest, CheckpointHmmPreservesAlgorithmOutputs) {
+  const auto [geometry, filter] = GetParam();
+  for (const int num_sources : {9, 17}) {
+    for (const bool reuse : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "sources=" << num_sources << ", reuse=" << reuse);
+      // The 47x35 reference has stripe tails in both orientations, unequal
+      // plane strides, and odd sizes; source counts also cross packed tails.
+      Inputs inputs = MakeInputs(0, num_sources);
+      PatchMatchOptions options = MakeOptions(geometry, filter, reuse);
+      options.window_radius = 5;
+      options.checkpoint_hmm = false;
+      const Result original = RunPatchMatch(&inputs, options);
+      options.checkpoint_hmm = true;
+      const Result checkpointed = RunPatchMatch(&inputs, options);
+      ExpectNonempty(original, inputs, filter);
+      ExpectNonempty(checkpointed, inputs, filter);
+      ExpectEquivalent(original, checkpointed);
     }
   }
 }

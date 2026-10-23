@@ -1036,7 +1036,8 @@ template <int kWindowSize,
           bool kFilterPhotoConsistency = false,
           bool kFilterGeomConsistency = false,
           bool kCooperative = false,
-          int kBlockWidth = THREADS_PER_BLOCK>
+          int kBlockWidth = THREADS_PER_BLOCK,
+          bool kCheckpointHmm = false>
 __global__ void SweepFromTopToBottom(
     const RefCamera camera,
     GpuMatView<float> global_workspace,
@@ -1049,6 +1050,8 @@ __global__ void SweepFromTopToBottom(
     PackedConsistencyMaskView consistency_mask,
     GpuMatView<float> sel_prob_map,
     const GpuMatView<float> prev_sel_prob_map,
+    GpuMatView<float> checkpoint_beta,
+    GpuMatView<float> checkpoint_stripe,
     const cudaTextureObject_t ref_image_texture,
     const GpuMatView<float> ref_sum_image,
     const GpuMatView<float> ref_squared_sum_image,
@@ -1104,7 +1107,13 @@ __global__ void SweepFromTopToBottom(
       for (int row = cost_map.GetHeight() - 1; row >= 0; --row) {
         const float cost = cost_map.Get(row, col, image_idx);
         beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
-        sel_prob_map.Set(row, col, image_idx, beta);
+        if constexpr (kCheckpointHmm) {
+          if (row % checkpoint_stripe.GetHeight() == 0)
+            checkpoint_beta.Set(
+                row / checkpoint_stripe.GetHeight(), col, image_idx, beta);
+        } else {
+          sel_prob_map.Set(row, col, image_idx, beta);
+        }
       }
 
       // Initialize forward message.
@@ -1160,6 +1169,31 @@ __global__ void SweepFromTopToBottom(
     if constexpr (!kCooperative) {
       // The scalar refresh has no end-of-row barrier before tile reuse.
       __syncthreads();
+    }
+    if constexpr (kCheckpointHmm) {
+      if (row % checkpoint_stripe.GetHeight() == 0 &&
+          col < cost_map.GetWidth()) {
+        const int count = min(static_cast<int>(checkpoint_stripe.GetHeight()),
+                              static_cast<int>(cost_map.GetHeight()) - row);
+        const int end = row + count;
+        const int first_source = kCooperative ? threadIdx.y : 0;
+        const int source_step = kCooperative ? blockDim.y : 1;
+        for (int image_idx = first_source; image_idx < cost_map.GetDepth();
+             image_idx += source_step) {
+          float beta =
+              end == cost_map.GetHeight()
+                  ? kUniformProb
+                  : checkpoint_beta.Get(
+                        end / checkpoint_stripe.GetHeight(), col, image_idx);
+          for (int beta_row = end - 1; beta_row >= row; --beta_row) {
+            const float cost = cost_map.Get(beta_row, col, image_idx);
+            beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
+            checkpoint_stripe.Set(beta_row - row, col, image_idx, beta);
+          }
+        }
+      }
+      // The existing reference/weight publication barriers below publish the
+      // stripe before source workers consume it. No checkpoint reads old rows.
     }
     // Note that this must be executed even for pixels outside the borders,
     // since pixels are used in the local neighborhood of the current pixel.
@@ -1233,7 +1267,11 @@ __global__ void SweepFromTopToBottom(
         const float cost = cost_map.Get(row, col, image_idx);
         const float alpha = likelihood_computer.ComputeForwardMessage(
             cost, forward_message[image_idx * source_stride]);
-        const float beta = sel_prob_map.Get(row, col, image_idx);
+        const float beta =
+            kCheckpointHmm
+                ? checkpoint_stripe.Get(
+                      row % checkpoint_stripe.GetHeight(), col, image_idx)
+                : sel_prob_map.Get(row, col, image_idx);
         const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
         const float sel_prob = likelihood_computer.ComputeSelProb(
             alpha, beta, prev_prob, options.prev_sel_prob_weight);
@@ -1567,7 +1605,11 @@ __global__ void SweepFromTopToBottom(
 
           const float alpha = likelihood_computer.ComputeForwardMessage(
               cost, source_forward_message[image_idx * source_stride]);
-          const float beta = sel_prob_map.Get(row, col, image_idx);
+          const float beta =
+              kCheckpointHmm
+                  ? checkpoint_stripe.Get(
+                        row % checkpoint_stripe.GetHeight(), col, image_idx)
+                  : sel_prob_map.Get(row, col, image_idx);
           const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
           const float prob = likelihood_computer.ComputeSelProb(
               alpha, beta, prev_prob, options.prev_sel_prob_weight);
@@ -1596,7 +1638,11 @@ __global__ void SweepFromTopToBottom(
 
         const float alpha = likelihood_computer.ComputeForwardMessage(
             cost, forward_message[image_idx * source_stride]);
-        const float beta = sel_prob_map.Get(row, col, image_idx);
+        const float beta =
+            kCheckpointHmm
+                ? checkpoint_stripe.Get(
+                      row % checkpoint_stripe.GetHeight(), col, image_idx)
+                : sel_prob_map.Get(row, col, image_idx);
         const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
         const float prob = likelihood_computer.ComputeSelProb(
             alpha, beta, prev_prob, options.prev_sel_prob_weight);
@@ -1758,9 +1804,13 @@ PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
 void PatchMatchCuda::Run() {
   // Only publish masks after a completed filtered sweep and final rotation.
   consistency_mask_valid_ = false;
-#define CASE_WINDOW_RADIUS(window_radius, window_step)              \
-  case window_radius:                                               \
-    RunWithWindowSizeAndStep<2 * window_radius + 1, window_step>(); \
+#define CASE_WINDOW_RADIUS(window_radius, window_step)                       \
+  case window_radius:                                                        \
+    if (options_.checkpoint_hmm) {                                           \
+      RunWithWindowSizeAndStep<2 * window_radius + 1, window_step, true>();  \
+    } else {                                                                 \
+      RunWithWindowSizeAndStep<2 * window_radius + 1, window_step, false>(); \
+    }                                                                        \
     break;
 
 #define CASE_WINDOW_STEP(window_step)                          \
@@ -1848,7 +1898,7 @@ std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
   return consistent_image_idxs;
 }
 
-template <int kWindowSize, int kWindowStep>
+template <int kWindowSize, int kWindowStep, bool kCheckpointHmm>
 void PatchMatchCuda::RunWithWindowSizeAndStep() {
   // Wait for all initializations to finish.
   CUDA_SYNC_AND_CHECK();
@@ -1935,6 +1985,15 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           static_cast<float>(iter * 4 + sweep) / total_num_steps;
 
       const bool last_sweep = iter == options_.num_iterations - 1 && sweep == 3;
+      const GpuMatView<float> no_checkpoint{nullptr, 0, 0, 0, 0};
+      const auto checkpoints =
+          kCheckpointHmm ? hmm_checkpoint_->Checkpoints(cost_map_->GetWidth(),
+                                                        cost_map_->GetHeight())
+                         : no_checkpoint;
+      const auto beta_stripe =
+          kCheckpointHmm ? hmm_checkpoint_->Stripe(cost_map_->GetWidth(),
+                                                   cost_map_->GetHeight())
+                         : no_checkpoint;
 
 #define CALL_SWEEP_FUNC                                           \
   SweepFromTopToBottom<kWindowSize,                               \
@@ -1943,7 +2002,8 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
                        kFilterPhotoConsistency,                   \
                        kFilterGeomConsistency,                    \
                        kCooperative,                              \
-                       kSweepBlockWidth>                          \
+                       kSweepBlockWidth,                          \
+                       kCheckpointHmm>                            \
       <<<sweep_kernel_grid_size, sweep_kernel_block_size>>>(      \
           MakeRefCamera(ref_K_host_[rotation_in_half_pi_],        \
                         ref_inv_K_host_[rotation_in_half_pi_]),   \
@@ -1955,8 +2015,11 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           depth_map_->View(),                                     \
           normal_map_->View(),                                    \
           (PackedConsistencyMaskView{consistency_mask_->View()}), \
-          sel_prob_map_->View(),                                  \
+          (kCheckpointHmm ? prev_sel_prob_map_->View()            \
+                          : sel_prob_map_->View()),               \
           prev_sel_prob_map_->View(),                             \
+          checkpoints,                                            \
+          beta_stripe,                                            \
           ref_image_texture_->GetObj(),                           \
           ref_image_->sum_image->View(),                          \
           ref_image_->squared_sum_image->View(),                  \
@@ -2440,8 +2503,13 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   // the temporary selection probabilities in the global_workspace_.
   // However, it is useful to keep the probabilities for the entire image
   // in memory, so that it can be exported.
-  sel_prob_map_ = std::make_unique<PatchMatchStateMap>(
-      ref_width_, ref_height_, problem_.src_image_idxs.size());
+  if (options_.checkpoint_hmm) {
+    hmm_checkpoint_ = std::make_unique<PatchMatchHmmCheckpoint>(
+        ref_width_, ref_height_, problem_.src_image_idxs.size());
+  } else {
+    sel_prob_map_ = std::make_unique<PatchMatchStateMap>(
+        ref_width_, ref_height_, problem_.src_image_idxs.size());
+  }
   prev_sel_prob_map_ = std::make_unique<PatchMatchStateMap>(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
   prev_sel_prob_map_->FillWithScalar(0.5f);
@@ -2507,6 +2575,7 @@ void PatchMatchCuda::InitAlternateOrientationMemory() {
   add(alternate_ref_image_->squared_sum_image);
   // These owners reserve both layouts; active view spans undercount them.
   const auto add_state = [&pitched_bytes](const auto& mat) {
+    if (!mat) return;
     THROW_CHECK_LE(mat->GetCapacityBytes(),
                    std::numeric_limits<size_t>::max() - pitched_bytes);
     pitched_bytes += mat->GetCapacityBytes();
@@ -2514,6 +2583,7 @@ void PatchMatchCuda::InitAlternateOrientationMemory() {
   add_state(prev_sel_prob_map_);
   add_state(sel_prob_map_);
   add_state(cost_map_);
+  add_state(hmm_checkpoint_);
   add(consistency_mask_);
   add(alternate_consistency_mask_);
   add(global_workspace_);
@@ -2528,6 +2598,16 @@ void PatchMatchCuda::InitAlternateOrientationMemory() {
 // probability role is now dead; selected becomes dead after its rotation;
 // old cost becomes dead after its rotation. Reuse only those dead allocations.
 void PatchMatchCuda::RotateStateMaps(size_t width, size_t height) {
+  if (options_.checkpoint_hmm) {
+    // Sweep is synchronized; checkpoint/stripe data are now dead.
+    prev_sel_prob_map_->RotateWithPlaneScratch(
+        hmm_checkpoint_->GetPtr(), hmm_checkpoint_->GetCapacityBytes());
+    cost_map_->RotateWithPlaneScratch(hmm_checkpoint_->GetPtr(),
+                                      hmm_checkpoint_->GetCapacityBytes());
+    THROW_CHECK_EQ(cost_map_->GetWidth(), width);
+    THROW_CHECK_EQ(cost_map_->GetHeight(), height);
+    return;
+  }
   prev_sel_prob_map_->Reorient(width, height);
   sel_prob_map_->Rotate(prev_sel_prob_map_.get());
   sel_prob_map_->Reorient(width, height);
