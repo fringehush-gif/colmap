@@ -2937,7 +2937,6 @@ void FEMTree< Dim , Real >::_addFEMConstraints( UIntPack< FEMSigs ... > , UIntPa
 	static const WindowLoopData< UIntPack< BSplineOverlapSizes< CDegrees , FEMDegrees >::OverlapSize ... > > cfemLoopData( []( int c , int* start , int* end ){ BaseFEMIntegrator::ParentOverlapBounds( UIntPack< CDegrees ... >() , UIntPack< FEMDegrees ... >() , c , start , end ); } );
 	static const WindowLoopData< UIntPack< BSplineOverlapSizes< FEMDegrees , CDegrees >::OverlapSize ... > > femcLoopData( []( int c , int* start , int* end ){ BaseFEMIntegrator::ParentOverlapBounds( UIntPack< FEMDegrees ... >() , UIntPack< CDegrees ... >() , c , start , end ); } );
 
-	std::atomic< bool > hasCoarserCoefficients = true;
 	// Iterate from fine to coarse, setting the constraints @(depth) and the cumulative constraints @(depth-1)
 	for( LocalDepth d=maxDepth ; d>=0 ; d-- )
 	{
@@ -3010,7 +3009,6 @@ void FEMTree< Dim , Real >::_addFEMConstraints( UIntPack< FEMSigs ... > , UIntPa
 			if( !_isValidFEM2Node( node ) ) return;
 			const D* _data = coefficients( node );
 			if( !_data ) return;
-			else if( d<maxDepth ) hasCoarserCoefficients = true;
 			const D& data = *_data;
 			if( _IsZero( data ) ) return;
 
@@ -3054,7 +3052,7 @@ void FEMTree< Dim , Real >::_addFEMConstraints( UIntPack< FEMSigs ... > , UIntPa
 		if( d>0 && d<maxDepth ) _downSample( UIntPack< FEMSigs ... >() , F.tRestrictionProlongation() , d , ( ConstPointer(T) )_constraints + _sNodesBegin(d) , _constraints + _sNodesBegin(d-1) );
 	}
 	FreePointer( _constraints );
-	if( hasCoarserCoefficients )
+	// Include contributions from coefficients at all coarser depths.
 	{
 		Pointer( D ) _coefficients = AllocPointer< D >( _sNodesEnd( maxDepth-1 ) );
 		memset( _coefficients , 0 , sizeof(D) * _sNodesEnd(maxDepth-1) );
