@@ -61,4 +61,60 @@ void SetBestCudaDevice(const int gpu_index) {
   CUDA_SAFE_CALL(cudaSetDevice(selected));
 }
 
+void SetCudaDevicesBlockingSync(const std::vector<int>& gpu_indices) {
+#if defined(COLMAP_CUDA_ENABLED) && CUDART_VERSION >= 12000
+  const int num_devices = GetNumCudaDevices();
+  THROW_CHECK_GT(num_devices, 0) << "No CUDA devices available";
+  THROW_CHECK(!gpu_indices.empty()) << "No CUDA GPU selected";
+  std::vector<int> selected = gpu_indices;
+  if (selected.size() == 1 && selected.front() == -1) {
+    selected.resize(num_devices);
+    for (int device = 0; device < num_devices; ++device) {
+      selected[device] = device;
+    }
+  }
+  for (const int device : selected) {
+    THROW_CHECK_GE(device, 0) << "Invalid CUDA GPU selected";
+    THROW_CHECK_LT(device, num_devices) << "Invalid CUDA GPU selected";
+  }
+  std::sort(selected.begin(), selected.end());
+  selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
+
+  int previous_device = 0;
+  CUDA_SAFE_CALL(cudaGetDevice(&previous_device));
+  try {
+    for (const int device : selected) {
+      CUDA_SAFE_CALL(cudaSetDevice(device));
+      unsigned int previous_flags = 0;
+      CUDA_SAFE_CALL(cudaGetDeviceFlags(&previous_flags));
+      constexpr unsigned int kOtherFlags =
+          cudaDeviceLmemResizeToMax | cudaDeviceSyncMemops;
+      constexpr unsigned int kKnownFlags =
+          cudaDeviceScheduleMask | cudaDeviceMapHost | kOtherFlags;
+      THROW_CHECK_EQ(previous_flags & ~kKnownFlags, 0)
+          << "Unsupported CUDA device flags";
+      // MapHost can be implicit in readback and is not a setter input.
+      CUDA_SAFE_CALL(cudaSetDeviceFlags((previous_flags & kOtherFlags) |
+                                        cudaDeviceScheduleBlockingSync));
+      unsigned int actual_flags = 0;
+      CUDA_SAFE_CALL(cudaGetDeviceFlags(&actual_flags));
+      THROW_CHECK_EQ(actual_flags & cudaDeviceScheduleMask,
+                     cudaDeviceScheduleBlockingSync);
+      THROW_CHECK_EQ(actual_flags & ~cudaDeviceScheduleMask,
+                     previous_flags & ~cudaDeviceScheduleMask);
+      LOG(INFO) << "CUDA device " << device
+                << " uses blocking host synchronization (flags " << actual_flags
+                << ")";
+    }
+  } catch (...) {
+    // Preserve the original error if restoring the current device also fails.
+    cudaSetDevice(previous_device);
+    throw;
+  }
+  CUDA_SAFE_CALL(cudaSetDevice(previous_device));
+#else
+  LOG(FATAL_THROW) << "Blocking CUDA host synchronization requires CUDA >= 12";
+#endif
+}
+
 }  // namespace colmap
