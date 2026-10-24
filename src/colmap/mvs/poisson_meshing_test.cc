@@ -1222,6 +1222,88 @@ TEST(PoissonMeshing, CachedNeighborWindowsMatchSparseTree3D) {
   CheckCachedNeighborRadii<3>();
 }
 
+template <unsigned int Dim, bool Mutable>
+void CheckNeighborKeyCopyAssignment() {
+  using Node = PoissonRecon::RegularTreeNode<Dim, int, int>;
+  using Radius = ParameterPack::IsotropicUIntPack<Dim, 1>;
+  using Key = std::conditional_t<
+      Mutable,
+      typename Node::template NeighborKey<Radius, Radius>,
+      typename Node::template ConstNeighborKey<Radius, Radius>>;
+  SCOPED_TRACE(Dim);
+
+  Node root;
+  auto initialize = [](Node&) {};
+  ASSERT_TRUE(root.template initChildren<false>(nullptr, initialize));
+  ASSERT_TRUE(
+      root.children[0].template initChildren<false>(nullptr, initialize));
+  Node* leaf = &root.children[0].children[0];
+
+  auto cached_slots = [](const Key& key) {
+    std::vector<const Node*> slots;
+    for (int depth = 0; depth <= key.depth(); ++depth) {
+      const auto& window = key.neighbors[depth].neighbors;
+      for (unsigned int slot = 0; slot < window.Size(); ++slot) {
+        slots.push_back(window.data[slot]);
+      }
+    }
+    return slots;
+  };
+
+  Key source;
+  source.set(2);
+  if constexpr (Mutable) {
+    source.template getNeighbors<false, false>(leaf, nullptr);
+  } else {
+    source.getNeighbors(leaf);
+  }
+  const std::vector<const Node*> expected = cached_slots(source);
+  ASSERT_FALSE(expected.empty());
+  {
+    Key destination;
+    destination.set(1);
+    EXPECT_EQ(&(destination = source), &destination);
+    EXPECT_EQ(destination.depth(), source.depth());
+    EXPECT_NE(destination.neighbors, source.neighbors);
+    EXPECT_EQ(cached_slots(destination), expected);
+
+    EXPECT_EQ(&(destination = destination), &destination);
+    EXPECT_EQ(cached_slots(destination), expected);
+    destination.set(-1);
+    EXPECT_EQ(cached_slots(source), expected);
+  }
+  EXPECT_EQ(cached_slots(source), expected);
+  {
+    Key destination;
+    destination = source;
+    EXPECT_EQ(cached_slots(destination), expected);
+  }
+  EXPECT_EQ(cached_slots(source), expected);
+  EXPECT_EQ(&(source = source), &source);
+  EXPECT_EQ(cached_slots(source), expected);
+
+  Key empty;
+  Key previously_allocated;
+  previously_allocated.set(0);
+  EXPECT_EQ(&(previously_allocated = empty), &previously_allocated);
+  EXPECT_EQ(previously_allocated.depth(), -1);
+  EXPECT_EQ(previously_allocated.neighbors, nullptr);
+  EXPECT_EQ(&(empty = empty), &empty);
+  root.cleanChildren(true);
+}
+
+TEST(PoissonMeshing, ConstNeighborKeyCopyAssignmentOwnsCachedWindows) {
+  CheckNeighborKeyCopyAssignment<1, false>();
+  CheckNeighborKeyCopyAssignment<2, false>();
+  CheckNeighborKeyCopyAssignment<3, false>();
+}
+
+TEST(PoissonMeshing, NeighborKeyCopyAssignmentOwnsCachedWindows) {
+  CheckNeighborKeyCopyAssignment<1, true>();
+  CheckNeighborKeyCopyAssignment<2, true>();
+  CheckNeighborKeyCopyAssignment<3, true>();
+}
+
 }  // namespace
 }  // namespace mvs
 }  // namespace colmap
