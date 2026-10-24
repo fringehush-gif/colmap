@@ -999,44 +999,52 @@ SparseNodeData< OutData , UIntPack< DataSigs ... > > FEMTree< Dim , Real >::setI
         bool completed=false;
         if(count && count<=128000000 && record_count && record_count<=8000000)
         {
-            std::vector<float> field;
-            std::vector<std::uint32_t> touched;
-            try
-            {
-                field.resize(count*3);
-                touched.resize(count);
-            }
-            catch(const std::bad_alloc&)
-            {
-                // No device submission or native field write has occurred.
-                std::vector<float>().swap(field);
-                std::vector<std::uint32_t>().swap(touched);
-            }
-            if(field.size()==count*3 && touched.size()==count)
-            {
-                PoissonNormalGpu::Stats stats{};
-                completed=PoissonNormalGpu::Reduce(
-                    blocks.data(),counts.data(),blocks.size(),count,
-                    field.data(),touched.data(),stats);
-                if(completed)
-                {
-                    SparseNodeData<OutData,UIntPack<DataSigs...>> assembled;
-                    assembled._indices.resize(count,-1);
-                    std::size_t entries=0;
+            // Bound host readback to 4 MiB and retire capture storage before
+            // allocating the final typed field; ascending slabs retain IDs.
+            static constexpr std::size_t kReadbackSlabNodes=262144;
+            SparseNodeData<OutData,UIntPack<DataSigs...>> assembled;
+            struct ImportState {
+                SparseNodeData<OutData,UIntPack<DataSigs...>>* field;
+                std::vector<std::vector<PoissonNormalGpu::Record>>* records;
+                std::size_t count;
+                OutData zero;
+            } state{&assembled,&normal_records,count,zero};
+            PoissonNormalGpu::SlabCallbacks callbacks{
+                &state,
+                [](void* context) {
+                    auto& s=*static_cast<ImportState*>(context);
+                    std::size_t released=0;
+                    for(auto& records:*s.records) {
+                        released+=records.capacity()*sizeof(PoissonNormalGpu::Record);
+                        std::vector<PoissonNormalGpu::Record>().swap(records);
+                    }
+                    // Release captures before allocating the final typed field.
+                    s.field->_indices.resize(s.count,-1);
+                    std::cout << "# NormalSlabReadback nodes=" << s.count
+                              << " released_capture_capacity_bytes=" << released
+                              << " host_slab_bytes=" << std::min<std::size_t>(s.count,kReadbackSlabNodes)*16u << std::endl;
+                },
+                [](void* context,std::size_t begin,std::size_t count,
+                   const float* field,const std::uint32_t* touched) {
+                    auto& s=*static_cast<ImportState*>(context);
+                    std::size_t entries=s.field->_data.size();
                     for(std::size_t i=0;i<count;++i)
-                        if(touched[i])assembled._indices[i]=(node_index_type)entries++;
-                    assembled._data.resize(entries,zero);
-                    ThreadPool::ParallelFor(0,count,[&](unsigned int,std::size_t i){
-                        if(touched[i])
-                        {
+                        if(touched[i])s.field->_indices[begin+i]=(node_index_type)entries++;
+                    s.field->_data.resize(entries,s.zero);
+                    ThreadPool::ParallelFor(0,count,[&](unsigned int,std::size_t i) {
+                        if(touched[i]) {
                             OutData value;
                             for(int c=0;c<3;++c)value[c]=field[3*i+c];
-                            assembled._data[assembled._indices[i]]=value;
+                            s.field->_data[s.field->_indices[begin+i]]=value;
                         }
                     });
-                    dataField=std::move(assembled);
                 }
-            }
+            };
+            PoissonNormalGpu::Stats stats{};
+            completed=PoissonNormalGpu::ReduceSlabs(
+                blocks.data(),counts.data(),blocks.size(),count,kReadbackSlabNodes,
+                callbacks,stats);
+            if(completed)dataField=std::move(assembled);
         }
         if(!completed)
         {
