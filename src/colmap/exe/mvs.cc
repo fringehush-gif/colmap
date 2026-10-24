@@ -13,7 +13,11 @@
 #include "colmap/mvs/poisson_meshing.h"
 #include "colmap/mvs/texture_mapping.h"
 #include "colmap/scene/reconstruction.h"
+#if defined(COLMAP_CUDA_ENABLED)
+#include "colmap/util/cuda.h"
+#endif
 #include "colmap/util/file.h"
+#include "colmap/util/misc.h"
 #include "colmap/util/ply.h"
 
 #include <utility>
@@ -204,6 +208,8 @@ int RunPatchMatchStereo(int argc, char** argv) {
   std::string pmvs_option_name = "option-all";
   std::filesystem::path config_path;
 
+  bool blocking_cuda_wait = false;
+
   OptionManager options;
   options.AddRequiredOption(
       "workspace_path",
@@ -214,8 +220,22 @@ int RunPatchMatchStereo(int argc, char** argv) {
   options.AddDefaultOption("pmvs_option_name", &pmvs_option_name);
   options.AddDefaultOption("config_path", &config_path);
   options.AddPatchMatchStereoOptions();
+  options.AddDefaultOption(
+      "PatchMatchStereo.blocking_cuda_wait",
+      &blocking_cuda_wait,
+      "Block CPU threads waiting for CUDA instead of the default scheduling "
+      "policy. May reduce CPU work or increase latency; CUDA >= 12, CLI only.");
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
+  }
+  if (blocking_cuda_wait) {
+#if defined(COLMAP_CUDA_ENABLED)
+    SetCudaDevicesBlockingSync(
+        CSVToVector<int>(options.patch_match_stereo->gpu_index));
+#else
+    LOG(ERROR) << "Blocking CUDA host synchronization requires CUDA >= 12";
+    return EXIT_FAILURE;
+#endif
   }
   RunPatchMatchStereoImpl(workspace_path,
                           workspace_format,

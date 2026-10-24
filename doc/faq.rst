@@ -940,3 +940,18 @@ Finally, you can restart your desktop environment with the following command::
 
 If the dense reconstruction still crashes after these changes, the reason is
 probably insufficient GPU memory, as discussed in a separate item in this list.
+
+Blocking CUDA waits during dense stereo
+---------------------------------------
+
+The command-line option ``PatchMatchStereo.blocking_cuda_wait=1`` selects
+blocking host synchronization for the primary CUDA contexts of the selected
+GPUs before PatchMatch workers start. It requires CUDA 12 or newer and defaults
+to off. It does not change PatchMatch arithmetic, reconstruction parameters or
+the scheduling policy of other processes. It applies to ``patch_match_stereo``
+only, not automatic reconstruction, the GUI or Python calls.
+
+This can reduce CPU work while waiting for the GPU on native Windows, but may
+increase wake-up latency. WSL can instead shift work from user mode into kernel
+mode without reducing total process CPU time. Compare wall time and total
+user-plus-kernel CPU time on the target system before enabling it.

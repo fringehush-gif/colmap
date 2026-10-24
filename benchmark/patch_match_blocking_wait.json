@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "incrementalBase": "edc228faf577ecc2daf7001357d26d4f16716ae6",
+  "change": "Explicit direct-CLI blocking CUDA waits, default off, CUDA12+",
+  "benchmark": "complete 11-image Fountain P11 photometric then geometric PatchMatch",
+  "primaryHardware": "Ryzen9 3900X / RTX3080Ti / WSL2 / CUDA13.2",
+  "primary": {
+    "workers": 12,
+    "CUDAWorkers": 2,
+    "nPerArmPerResolution": 1,
+    "panels": {
+      "1536": {
+        "baseline": {
+          "wallSeconds": 24.45885417298996,
+          "cpuUserSeconds": 42.881038,
+          "cpuKernelSeconds": 3.144984,
+          "cpuTotalSeconds": 46.026022,
+          "peakRssMiB": 1206.7109375,
+          "majorFaults": 1283,
+          "userModeCounters": {
+            "cycles:u": 166729722793.0,
+            "instructions:u": 186026536457.0,
+            "cache-references:u": 565556387.0,
+            "cache-misses:u": 76196403.0
+          },
+          "mapsExact": 44
+        },
+        "candidate": {
+          "wallSeconds": 22.80178955901647,
+          "cpuUserSeconds": 11.418082,
+          "cpuKernelSeconds": 33.409501,
+          "cpuTotalSeconds": 44.827583,
+          "peakRssMiB": 1257.70703125,
+          "majorFaults": 111,
+          "userModeCounters": {
+            "cycles:u": 40879084473.0,
+            "instructions:u": 58061398973.0,
+            "cache-references:u": 610402144.0,
+            "cache-misses:u": 67050983.0
+          },
+          "mapsExact": 44
+        }
+      },
+      "3072": {
+        "baseline": {
+          "wallSeconds": 78.82406522202655,
+          "cpuUserSeconds": 147.603154,
+          "cpuKernelSeconds": 11.737706,
+          "cpuTotalSeconds": 159.34086,
+          "peakRssMiB": 2789.4296875,
+          "majorFaults": 111,
+          "userModeCounters": {
+            "cycles:u": 586451433809.0,
+            "instructions:u": 664998266786.0,
+            "cache-references:u": 1728842683.0,
+            "cache-misses:u": 158696946.0
+          },
+          "mapsExact": 44
+        },
+        "candidate": {
+          "wallSeconds": 77.17295694199856,
+          "cpuUserSeconds": 41.14582,
+          "cpuKernelSeconds": 115.529958,
+          "cpuTotalSeconds": 156.67577799999998,
+          "peakRssMiB": 2744.015625,
+          "majorFaults": 110,
+          "userModeCounters": {
+            "cycles:u": 143559573083.0,
+            "instructions:u": 217456811387.0,
+            "cache-references:u": 1956596140.0,
+            "cache-misses:u": 157397878.0
+          },
+          "mapsExact": 44
+        }
+      }
+    }
+  },
+  "olderHardwareFinalSource": {
+    "hardware": "i7-4790K / GTX1080 / native Windows10 / CUDA12.9.86 / MSVC19.39.33523",
+    "workers": 4,
+    "CUDAWorkers": 2,
+    "resolution": 1536,
+    "warmupCallsExcluded": 2,
+    "order": "ABBA",
+    "nPerArm": 2,
+    "means": {
+      "off": {
+        "wallSeconds": 82.73621105000001,
+        "userSeconds": 156.6015625,
+        "kernelSeconds": 1.9765625,
+        "CPUSeconds": 158.578125,
+        "processCycles": 635841979827,
+        "peakWorkingSetBytes": 783446016,
+        "peakCommitBytes": 1650995200
+      },
+      "on": {
+        "wallSeconds": 84.19566405,
+        "userSeconds": 13.3125,
+        "kernelSeconds": 2.0,
+        "CPUSeconds": 15.3125,
+        "processCycles": 62518906731,
+        "peakWorkingSetBytes": 787189760,
+        "peakCommitBytes": 1640988672
+      }
+    },
+    "percentChangeOnVsOff": {
+      "wallSeconds": 1.7639833652981718,
+      "userSeconds": -91.49912696433026,
+      "kernelSeconds": 1.1857707509881354,
+      "CPUSeconds": -90.34387624396493,
+      "processCycles": -90.16754025143005,
+      "peakWorkingSetBytes": 0.4778560262663989,
+      "peakCommitBytes": -0.60609067791354
+    },
+    "rawTimedCalls": [
+      {
+        "arm": "off",
+        "wallSeconds": 82.452814,
+        "userSeconds": 155.84375,
+        "kernelSeconds": 2.09375,
+        "CPUSeconds": 157.9375,
+        "processCycles": 632926816737,
+        "peakWorkingSetBytes": 786677760,
+        "peakCommitBytes": 1655918592,
+        "all44MapsExact": true
+      },
+      {
+        "arm": "on",
+        "wallSeconds": 83.2522598,
+        "userSeconds": 12.8125,
+        "kernelSeconds": 1.890625,
+        "CPUSeconds": 14.703125,
+        "processCycles": 60299083831,
+        "peakWorkingSetBytes": 787288064,
+        "peakCommitBytes": 1638191104,
+        "all44MapsExact": true
+      },
+      {
+        "arm": "on",
+        "wallSeconds": 85.1390683,
+        "userSeconds": 13.8125,
+        "kernelSeconds": 2.109375,
+        "CPUSeconds": 15.921875,
+        "processCycles": 64738729631,
+        "peakWorkingSetBytes": 787091456,
+        "peakCommitBytes": 1643786240,
+        "all44MapsExact": true
+      },
+      {
+        "arm": "off",
+        "wallSeconds": 83.0196081,
+        "userSeconds": 157.359375,
+        "kernelSeconds": 1.859375,
+        "CPUSeconds": 159.21875,
+        "processCycles": 638757142917,
+        "peakWorkingSetBytes": 780214272,
+        "peakCommitBytes": 1646071808,
+        "all44MapsExact": true
+      }
+    ],
+    "counterScope": "QueryProcessCycleTime OS process cycles, not PMU. Process CPU excludes all System/DPC/driver CPU; no energy claim.",
+    "sourceClosure": "Exact current changed host source/header/test and unchanged qualified SM61 kernel archive; inherited unrelated host/Poisson closure, not whole-current-main build.",
+    "outputReference": "Local protected44-map reference; no cross-machine bitidentity claim."
+  },
+  "settings": {
+    "rotationBufferReuse": 1,
+    "checkpointHmm": 0,
+    "directSourceUpload": 0,
+    "otherOptionalSettings": "defaults",
+    "contrast": "Same final CLI; default-off vs blocking_cuda_wait=1"
+  },
+  "validation": {
+    "cudaHelperTestsLinux": 3,
+    "allPrimaryMapsExact": 176,
+    "cudaHelperTestsWindows": 3,
+    "olderCalls44MapsExact": 6,
+    "allPrimaryMapWorkspacesRemoved": true,
+    "allOlderMapWorkspacesRemoved": true
+  },
+  "limits": [
+    "Primary N1 ordered A/B, no WSL speed or CPU efficiency claim;1536 majorfaults1283vs111 indicate cold-order asymmetry.",
+    "User-mode PMU changes do not measure total CPU work; wait4 includes user+kernel. All8same-pass events counted100%, no multiplexing, attach gap remains.",
+    "One scene; no energy/universal hardware/whole-pipeline quality claim.",
+    "NativeWindows paired wall costs+0.970%/+2.553%, observed N2 not universal latency prediction. Same41selected providers on bounded module snapshots; no full image-load trace."
+  ]
+}

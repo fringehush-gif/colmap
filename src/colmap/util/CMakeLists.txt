@@ -76,6 +76,11 @@ if(CUDA_ENABLED)
             colmap_util
             CUDA::cudart
     )
+    COLMAP_ADD_TEST(
+        NAME cuda_test
+        SRCS cuda_test.cc
+        LINK_LIBS colmap_util_cuda
+    )
 endif()
 
 if(TESTS_ENABLED)
