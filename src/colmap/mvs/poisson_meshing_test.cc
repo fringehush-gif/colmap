@@ -1149,7 +1149,7 @@ void CheckCachedNeighborWindows() {
     }
   };
   collect(collect, &root);
-  const std::vector<const Node*> queries = {
+  std::vector<const Node*> queries = {
       &root,
       &root.children[0],
       &root.children[kChildren - 1],
@@ -1163,6 +1163,11 @@ void CheckCachedNeighborWindows() {
       &root.children[0].children[0],
       &root.children[0].children[0].children[0],
   };
+  for (int child = 0; child < kChildren; ++child) {
+    queries.push_back(&root.children[child]);
+    queries.push_back(&root.children[0].children[child]);
+    queries.push_back(&root.children[kChildren - 1].children[child]);
+  }
   Key key;
   key.set(3);
   for (const Node* query : queries) {

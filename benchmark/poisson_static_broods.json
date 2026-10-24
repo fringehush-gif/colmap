@@ -1,0 +1,1117 @@
+{
+  "schema": "colmap.poissonStaticBroodsBenchmark/v1",
+  "baselineCommit": "b990ad0b5d7e9da2e06d65e7377e66c844309276",
+  "method": "Complete fixed 11-image FountainP11 fused inputs. Default Poisson meshing including trimming; 12 workers. Initial AB and reversed BA, N=2 per arm at each resolution. No warmup observations. Supplementary 3072/24 N=1 per arm in separate isolated windows; interrupted candidate excluded.",
+  "hardware": "Ryzen 9 3900X / RTX 3080 Ti; WSL2, GCC 12.4, CUDA 13.2. CPU meshing change.",
+  "controlBinary": {
+    "bytes": 85421033,
+    "xxh3_128": "aa9ac6ba57fe946e28d1a17a1c5b9ae7"
+  },
+  "candidateBinary": {
+    "bytes": 85437417,
+    "xxh3_128": "6e9aa8f43e4f92c5fe886090352b5428"
+  },
+  "observations": [
+    {
+      "arm": "control",
+      "resolution": 1536,
+      "workers": 12,
+      "wallSeconds": 17.450550795998424,
+      "cpuSeconds": 111.536348,
+      "peakRssBytes": 1472970752,
+      "events": {
+        "task-clock": {
+          "value": 112000335686.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted",
+          "seconds": 112.00033568600001
+        },
+        "context-switches": {
+          "value": 4428.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cpu-migrations": {
+          "value": 224.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "page-faults": {
+          "value": 524041.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cycles:u": {
+          "value": 423563891076.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "instructions:u": {
+          "value": 339819877144.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-references:u": {
+          "value": 10215080044.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-misses:u": {
+          "value": 2211657900.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        }
+      },
+      "perfLaunchGapSeconds": 0.002194530999986455
+    },
+    {
+      "arm": "candidate",
+      "resolution": 1536,
+      "workers": 12,
+      "wallSeconds": 17.506363407010213,
+      "cpuSeconds": 111.59102,
+      "peakRssBytes": 1463644160,
+      "events": {
+        "task-clock": {
+          "value": 112060148856.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted",
+          "seconds": 112.06014885600001
+        },
+        "context-switches": {
+          "value": 4570.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cpu-migrations": {
+          "value": 235.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "page-faults": {
+          "value": 520355.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cycles:u": {
+          "value": 419500524813.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "instructions:u": {
+          "value": 307041049822.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-references:u": {
+          "value": 10670996449.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-misses:u": {
+          "value": 2296282781.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        }
+      },
+      "perfLaunchGapSeconds": 0.0015620170161128044
+    },
+    {
+      "arm": "control",
+      "resolution": 3072,
+      "workers": 12,
+      "wallSeconds": 51.76658322600997,
+      "cpuSeconds": 331.91999500000003,
+      "peakRssBytes": 2922565632,
+      "events": {
+        "task-clock": {
+          "value": 332550576694.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted",
+          "seconds": 332.55057669400003
+        },
+        "context-switches": {
+          "value": 10336.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cpu-migrations": {
+          "value": 548.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "page-faults": {
+          "value": 1687079.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cycles:u": {
+          "value": 1242222113533.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "instructions:u": {
+          "value": 1095249756222.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-references:u": {
+          "value": 32251663331.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-misses:u": {
+          "value": 7264052378.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        }
+      },
+      "perfLaunchGapSeconds": 0.0015427370090037584
+    },
+    {
+      "arm": "candidate",
+      "resolution": 3072,
+      "workers": 12,
+      "wallSeconds": 50.11522101800074,
+      "cpuSeconds": 332.135814,
+      "peakRssBytes": 2924421120,
+      "events": {
+        "task-clock": {
+          "value": 332831472163.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted",
+          "seconds": 332.831472163
+        },
+        "context-switches": {
+          "value": 11021.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cpu-migrations": {
+          "value": 551.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "page-faults": {
+          "value": 1788976.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cycles:u": {
+          "value": 1230877074034.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "instructions:u": {
+          "value": 987751046197.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-references:u": {
+          "value": 33059248033.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-misses:u": {
+          "value": 7453685867.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        }
+      },
+      "perfLaunchGapSeconds": 0.0017570490017533302
+    },
+    {
+      "arm": "candidate",
+      "resolution": 1536,
+      "workers": 12,
+      "wallSeconds": 17.849006102973362,
+      "cpuSeconds": 105.060573,
+      "peakRssBytes": 1464434688,
+      "events": {
+        "task-clock": {
+          "value": 105546871910.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted",
+          "seconds": 105.54687191000001
+        },
+        "context-switches": {
+          "value": 5639.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cpu-migrations": {
+          "value": 209.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "page-faults": {
+          "value": 523986.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cycles:u": {
+          "value": 400454971138.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "instructions:u": {
+          "value": 307131622505.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-references:u": {
+          "value": 10293446512.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-misses:u": {
+          "value": 2220592790.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        }
+      },
+      "perfLaunchGapSeconds": 0.002330180985154584
+    },
+    {
+      "arm": "control",
+      "resolution": 1536,
+      "workers": 12,
+      "wallSeconds": 17.798204113001702,
+      "cpuSeconds": 111.498673,
+      "peakRssBytes": 1466396672,
+      "events": {
+        "task-clock": {
+          "value": 111945689750.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted",
+          "seconds": 111.94568975000001
+        },
+        "context-switches": {
+          "value": 4203.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cpu-migrations": {
+          "value": 198.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "page-faults": {
+          "value": 525009.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cycles:u": {
+          "value": 423257644403.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "instructions:u": {
+          "value": 340553049236.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-references:u": {
+          "value": 10194526446.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-misses:u": {
+          "value": 2199557386.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        }
+      },
+      "perfLaunchGapSeconds": 0.0018024089804384857
+    },
+    {
+      "arm": "candidate",
+      "resolution": 3072,
+      "workers": 12,
+      "wallSeconds": 48.014469043002464,
+      "cpuSeconds": 307.558553,
+      "peakRssBytes": 2902425600,
+      "events": {
+        "task-clock": {
+          "value": 308216593767.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted",
+          "seconds": 308.216593767
+        },
+        "context-switches": {
+          "value": 9876.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cpu-migrations": {
+          "value": 448.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "page-faults": {
+          "value": 1722764.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cycles:u": {
+          "value": 1157157442201.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "instructions:u": {
+          "value": 986789689345.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-references:u": {
+          "value": 32797464291.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-misses:u": {
+          "value": 7298412954.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        }
+      },
+      "perfLaunchGapSeconds": 0.0015815270016901195
+    },
+    {
+      "arm": "control",
+      "resolution": 3072,
+      "workers": 12,
+      "wallSeconds": 48.565435172989964,
+      "cpuSeconds": 325.94064799999995,
+      "peakRssBytes": 2920304640,
+      "events": {
+        "task-clock": {
+          "value": 326570071279.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted",
+          "seconds": 326.57007127900005
+        },
+        "context-switches": {
+          "value": 11453.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cpu-migrations": {
+          "value": 531.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "page-faults": {
+          "value": 1793780.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cycles:u": {
+          "value": 1224727716915.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "instructions:u": {
+          "value": 1095408640392.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-references:u": {
+          "value": 32426531706.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-misses:u": {
+          "value": 7310842789.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        }
+      },
+      "perfLaunchGapSeconds": 0.0018458690028637648
+    }
+  ],
+  "means12Workers": {
+    "1536": {
+      "control": {
+        "wallSeconds": 17.624377454500063,
+        "cpuSeconds": 111.5175105,
+        "peakRssBytes": 1469683712,
+        "events": {
+          "task-clock": 111973012718.0,
+          "context-switches": 4315.5,
+          "cpu-migrations": 211.0,
+          "page-faults": 524525.0,
+          "cycles:u": 423410767739.5,
+          "instructions:u": 340186463190.0,
+          "cache-references:u": 10204803245.0,
+          "cache-misses:u": 2205607643.0
+        }
+      },
+      "candidate": {
+        "wallSeconds": 17.677684754991787,
+        "cpuSeconds": 108.3257965,
+        "peakRssBytes": 1464039424,
+        "events": {
+          "task-clock": 108803510383.0,
+          "context-switches": 5104.5,
+          "cpu-migrations": 222.0,
+          "page-faults": 522170.5,
+          "cycles:u": 409977747975.5,
+          "instructions:u": 307086336163.5,
+          "cache-references:u": 10482221480.5,
+          "cache-misses:u": 2258437785.5
+        }
+      }
+    },
+    "3072": {
+      "control": {
+        "wallSeconds": 50.16600919949997,
+        "cpuSeconds": 328.9303215,
+        "peakRssBytes": 2921435136,
+        "events": {
+          "task-clock": 329560323986.5,
+          "context-switches": 10894.5,
+          "cpu-migrations": 539.5,
+          "page-faults": 1740429.5,
+          "cycles:u": 1233474915224.0,
+          "instructions:u": 1095329198307.0,
+          "cache-references:u": 32339097518.5,
+          "cache-misses:u": 7287447583.5
+        }
+      },
+      "candidate": {
+        "wallSeconds": 49.0648450305016,
+        "cpuSeconds": 319.8471835,
+        "peakRssBytes": 2913423360,
+        "events": {
+          "task-clock": 320524032965.0,
+          "context-switches": 10448.5,
+          "cpu-migrations": 499.5,
+          "page-faults": 1755870.0,
+          "cycles:u": 1194017258117.5,
+          "instructions:u": 987270367771.0,
+          "cache-references:u": 32928356162.0,
+          "cache-misses:u": 7376049410.5
+        }
+      }
+    }
+  },
+  "supplementary24Workers": [
+    {
+      "arm": "control",
+      "resolution": 3072,
+      "workers": 24,
+      "wallSeconds": 134.51589909099857,
+      "cpuSeconds": 2509.770517,
+      "peakRssBytes": 2934591488,
+      "events": {
+        "task-clock": {
+          "value": 2516701429870.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted",
+          "seconds": 2516.70142987
+        },
+        "context-switches": {
+          "value": 101341.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cpu-migrations": {
+          "value": 1250.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "page-faults": {
+          "value": 2018847.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cycles:u": {
+          "value": 8701533552212.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "instructions:u": {
+          "value": 1436154106038.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-references:u": {
+          "value": 36321620582.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-misses:u": {
+          "value": 8268985665.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        }
+      },
+      "perfLaunchGapSeconds": 0.002022710017627105
+    },
+    {
+      "arm": "candidate",
+      "resolution": 3072,
+      "workers": 24,
+      "wallSeconds": 139.42379762401106,
+      "cpuSeconds": 2627.968305,
+      "peakRssBytes": 2952372224,
+      "events": {
+        "task-clock": {
+          "value": 2634994649393.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted",
+          "seconds": 2634.994649393
+        },
+        "context-switches": {
+          "value": 105518.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cpu-migrations": {
+          "value": 1389.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "page-faults": {
+          "value": 2015112.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cycles:u": {
+          "value": 9051632593344.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "instructions:u": {
+          "value": 1343410720117.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-references:u": {
+          "value": 36383314034.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        },
+        "cache-misses:u": {
+          "value": 8480739304.0,
+          "unit": "",
+          "runningPercent": 100.0,
+          "availability": "counted"
+        }
+      },
+      "perfLaunchGapSeconds": 0.0020863790123257786
+    }
+  ],
+  "counterScope": "Same timing pass, exact native PID with inherited threads. Four hardware events are user-mode; task-clock/software events retain perf scope. Event running percentage does not acknowledge complete process-lifetime attachment; a startup attachment gap remains.",
+  "quality": {
+    "method": "Existing complete all-vertex bidirectional closest-triangle surface distances and interpolated RGB; both own repeats and cross-arm. No alignment, subsampling, or postprocessing.",
+    "finiteValidColoredMeshes": 10,
+    "cases": {
+      "1536": {
+        "control-repeat": {
+          "vertexCount": [
+            1266577,
+            1266575
+          ],
+          "faceCount": [
+            2501851,
+            2501847
+          ],
+          "candidateToBaseline": {
+            "surfaceDistance": {
+              "count": 1266575,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 9.555351461101412e-07,
+              "max": 9.5367431640625e-06,
+              "rms": 6.340864689300781e-08,
+              "mean": 2.8205203210924585e-09,
+              "bboxDiagonal": 12.777580397097367,
+              "maxRelative": 7.463653420822087e-07,
+              "above1eMinus6Diagonal": 0,
+              "above1eMinus5Diagonal": 0
+            },
+            "colourAbsolute0to255": {
+              "count": 3799725,
+              "p50": 0.0,
+              "p99": 0.0001806943956762552,
+              "p999": 13.0,
+              "max": 151.0,
+              "rms": 0.9295267462730408,
+              "mean": 0.05516767129302025
+            }
+          },
+          "baselineToCandidate": {
+            "surfaceDistance": {
+              "count": 1266577,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 9.555351461101412e-07,
+              "max": 3.210073982182853e-05,
+              "rms": 7.089363970296535e-08,
+              "mean": 2.8352857218280034e-09,
+              "bboxDiagonal": 12.777580397097367,
+              "maxRelative": 2.512270619648829e-06,
+              "above1eMinus6Diagonal": 2,
+              "above1eMinus5Diagonal": 0
+            },
+            "colourAbsolute0to255": {
+              "count": 3799731,
+              "p50": 0.0,
+              "p99": 0.00018225312232972302,
+              "p999": 13.0,
+              "max": 151.0,
+              "rms": 0.9295573830604553,
+              "mean": 0.055168990045785904
+            }
+          }
+        },
+        "candidate-repeat": {
+          "vertexCount": [
+            1266576,
+            1266576
+          ],
+          "faceCount": [
+            2501850,
+            2501849
+          ],
+          "candidateToBaseline": {
+            "surfaceDistance": {
+              "count": 1266576,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 9.541398640621973e-07,
+              "max": 0.0017920716638481285,
+              "rms": 1.594458683937382e-06,
+              "mean": 4.2541376445297765e-09,
+              "bboxDiagonal": 12.777580397097367,
+              "maxRelative": 0.00014025125322281097,
+              "above1eMinus6Diagonal": 2,
+              "above1eMinus5Diagonal": 1
+            },
+            "colourAbsolute0to255": {
+              "count": 3799728,
+              "p50": 0.0,
+              "p99": 0.00011788189411163219,
+              "p999": 14.0,
+              "max": 136.0,
+              "rms": 0.9387356042861938,
+              "mean": 0.05593571066856384
+            }
+          },
+          "baselineToCandidate": {
+            "surfaceDistance": {
+              "count": 1266576,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 9.541398640621973e-07,
+              "max": 5.841255187988281e-06,
+              "rms": 6.242949354513219e-08,
+              "mean": 2.8089935741028384e-09,
+              "bboxDiagonal": 12.777580397097367,
+              "maxRelative": 4.571487720253528e-07,
+              "above1eMinus6Diagonal": 0,
+              "above1eMinus5Diagonal": 0
+            },
+            "colourAbsolute0to255": {
+              "count": 3799728,
+              "p50": 0.0,
+              "p99": 0.00010940287036646551,
+              "p999": 14.0,
+              "max": 136.0,
+              "rms": 0.9378803968429565,
+              "mean": 0.055909931659698486
+            }
+          }
+        },
+        "control-candidate": {
+          "vertexCount": [
+            1266577,
+            1266576
+          ],
+          "faceCount": [
+            2501851,
+            2501850
+          ],
+          "candidateToBaseline": {
+            "surfaceDistance": {
+              "count": 1266576,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 9.5367431640625e-07,
+              "max": 4.271620003502111e-06,
+              "rms": 6.124798383084277e-08,
+              "mean": 2.724848358839531e-09,
+              "bboxDiagonal": 12.777580397097367,
+              "maxRelative": 3.343058600102785e-07,
+              "above1eMinus6Diagonal": 0,
+              "above1eMinus5Diagonal": 0
+            },
+            "colourAbsolute0to255": {
+              "count": 3799728,
+              "p50": 0.0,
+              "p99": 0.00018072841747196247,
+              "p999": 14.0,
+              "max": 150.9994659423828,
+              "rms": 0.9448854923248291,
+              "mean": 0.05638718232512474
+            }
+          },
+          "baselineToCandidate": {
+            "surfaceDistance": {
+              "count": 1266577,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 9.5367431640625e-07,
+              "max": 0.0017920716638481285,
+              "rms": 1.5943946608567184e-06,
+              "mean": 4.165285766412954e-09,
+              "bboxDiagonal": 12.777580397097367,
+              "maxRelative": 0.00014025125322281097,
+              "above1eMinus6Diagonal": 2,
+              "above1eMinus5Diagonal": 1
+            },
+            "colourAbsolute0to255": {
+              "count": 3799731,
+              "p50": 0.0,
+              "p99": 0.00017879618826555435,
+              "p999": 14.0,
+              "max": 150.99893188476562,
+              "rms": 0.9448547959327698,
+              "mean": 0.05637495219707489
+            }
+          }
+        }
+      },
+      "3072": {
+        "control-repeat": {
+          "vertexCount": [
+            4605347,
+            4605341
+          ],
+          "faceCount": [
+            9178929,
+            9178917
+          ],
+          "candidateToBaseline": {
+            "surfaceDistance": {
+              "count": 4605341,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 4.76837158203125e-07,
+              "max": 0.000508338495142784,
+              "rms": 2.449408647131835e-07,
+              "mean": 1.5340426144265175e-09,
+              "bboxDiagonal": 13.42552524289281,
+              "maxRelative": 3.786358343126185e-05,
+              "above1eMinus6Diagonal": 4,
+              "above1eMinus5Diagonal": 1
+            },
+            "colourAbsolute0to255": {
+              "count": 13816023,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 11.0,
+              "max": 120.0,
+              "rms": 0.7663915157318115,
+              "mean": 0.046483926475048065
+            }
+          },
+          "baselineToCandidate": {
+            "surfaceDistance": {
+              "count": 4605347,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 4.76837158203125e-07,
+              "max": 5.598891960870574e-05,
+              "rms": 7.355039870546531e-08,
+              "mean": 1.4490046245433612e-09,
+              "bboxDiagonal": 13.42552524289281,
+              "maxRelative": 4.1703336439924455e-06,
+              "above1eMinus6Diagonal": 8,
+              "above1eMinus5Diagonal": 0
+            },
+            "colourAbsolute0to255": {
+              "count": 13816041,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 11.0,
+              "max": 120.0,
+              "rms": 0.7659744620323181,
+              "mean": 0.04646791145205498
+            }
+          }
+        },
+        "candidate-repeat": {
+          "vertexCount": [
+            4605348,
+            4605349
+          ],
+          "faceCount": [
+            9178930,
+            9178933
+          ],
+          "candidateToBaseline": {
+            "surfaceDistance": {
+              "count": 4605349,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 2.384185791015625e-07,
+              "max": 0.0008722197385348472,
+              "rms": 4.1091064578562494e-07,
+              "mean": 1.461783246308432e-09,
+              "bboxDiagonal": 13.42552524289281,
+              "maxRelative": 6.496727113127897e-05,
+              "above1eMinus6Diagonal": 7,
+              "above1eMinus5Diagonal": 1
+            },
+            "colourAbsolute0to255": {
+              "count": 13816047,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 11.0,
+              "max": 134.0,
+              "rms": 0.7717991471290588,
+              "mean": 0.04684179648756981
+            }
+          },
+          "baselineToCandidate": {
+            "surfaceDistance": {
+              "count": 4605348,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 2.384185791015625e-07,
+              "max": 0.000508338495142784,
+              "rms": 2.406816213615567e-07,
+              "mean": 1.3404791400453382e-09,
+              "bboxDiagonal": 13.42552524289281,
+              "maxRelative": 3.786358343126185e-05,
+              "above1eMinus6Diagonal": 1,
+              "above1eMinus5Diagonal": 1
+            },
+            "colourAbsolute0to255": {
+              "count": 13816044,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 11.0,
+              "max": 134.0,
+              "rms": 0.7722131609916687,
+              "mean": 0.04685655236244202
+            }
+          }
+        },
+        "control-candidate": {
+          "vertexCount": [
+            4605347,
+            4605348
+          ],
+          "faceCount": [
+            9178929,
+            9178930
+          ],
+          "candidateToBaseline": {
+            "surfaceDistance": {
+              "count": 4605348,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 2.384185791015625e-07,
+              "max": 0.000508338495142784,
+              "rms": 2.436165612170218e-07,
+              "mean": 1.428620369996416e-09,
+              "bboxDiagonal": 13.42552524289281,
+              "maxRelative": 3.786358343126185e-05,
+              "above1eMinus6Diagonal": 4,
+              "above1eMinus5Diagonal": 1
+            },
+            "colourAbsolute0to255": {
+              "count": 13816044,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 11.0,
+              "max": 128.0,
+              "rms": 0.7694520950317383,
+              "mean": 0.04724142700433731
+            }
+          },
+          "baselineToCandidate": {
+            "surfaceDistance": {
+              "count": 4605347,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 2.384185791015625e-07,
+              "max": 0.0008722197385348472,
+              "rms": 4.110485103329263e-07,
+              "mean": 1.5092374112357848e-09,
+              "bboxDiagonal": 13.42552524289281,
+              "maxRelative": 6.496727113127897e-05,
+              "above1eMinus6Diagonal": 7,
+              "above1eMinus5Diagonal": 1
+            },
+            "colourAbsolute0to255": {
+              "count": 13816041,
+              "p50": 0.0,
+              "p99": 0.0,
+              "p999": 11.0,
+              "max": 128.0,
+              "rms": 0.769091784954071,
+              "mean": 0.04723208770155907
+            }
+          }
+        }
+      }
+    },
+    "supplementary24Workers": {
+      "vertexCount": [
+        4605347,
+        4605341
+      ],
+      "faceCount": [
+        9178928,
+        9178916
+      ],
+      "candidateToBaseline": {
+        "surfaceDistance": {
+          "count": 4605341,
+          "p50": 0.0,
+          "p99": 0.0,
+          "p999": 2.384185791015625e-07,
+          "max": 0.0008722197385348472,
+          "rms": 4.741921901910786e-07,
+          "mean": 1.5918511075368036e-09,
+          "bboxDiagonal": 13.42552524289281,
+          "maxRelative": 6.496727113127897e-05,
+          "above1eMinus6Diagonal": 8,
+          "above1eMinus5Diagonal": 2
+        },
+        "colourAbsolute0to255": {
+          "count": 13816023,
+          "p50": 0.0,
+          "p99": 0.0,
+          "p999": 11.0,
+          "max": 163.0,
+          "rms": 0.7847493290901184,
+          "mean": 0.046389028429985046
+        }
+      },
+      "baselineToCandidate": {
+        "surfaceDistance": {
+          "count": 4605347,
+          "p50": 0.0,
+          "p99": 0.0,
+          "p999": 2.384185791015625e-07,
+          "max": 6.585879009483165e-05,
+          "rms": 6.502368809173881e-08,
+          "mean": 1.3020726789871837e-09,
+          "bboxDiagonal": 13.42552524289281,
+          "maxRelative": 4.905490765040712e-06,
+          "above1eMinus6Diagonal": 6,
+          "above1eMinus5Diagonal": 0
+        },
+        "colourAbsolute0to255": {
+          "count": 13816041,
+          "p50": 0.0,
+          "p99": 0.0,
+          "p999": 11.0,
+          "max": 163.0,
+          "rms": 0.784691333770752,
+          "mean": 0.046383313834667206
+        }
+      }
+    },
+    "limits": "Parallel meshes are not byte-identical. Own-repeat comparisons are descriptive, not an equivalence proof. No 24-worker own-repeat baseline, rendered-quality or ground-truth claim."
+  },
+  "tests": {
+    "gpuVisible": {
+      "count": 32,
+      "failures": 0,
+      "skipped": 0
+    },
+    "serial4096PointWholeFileExact": true,
+    "sparseWindows": 390,
+    "sparseSlots": 8994,
+    "nativeTreeNodes": 12915457,
+    "nativeOrderedQueryWindows": 4096,
+    "nativeOrderedSlots": 110592,
+    "clangFormat": "23.1.3; changed COLMAP test only; upstream format script excludes thirdparty"
+  },
+  "limits": "Small descriptive timing sample; wall ranges overlap. 1536 is flat/slightly slower and 24-worker supplementary arm regresses. No general speedup, RAM saving, full pipeline, full C++/Python suite or cross-hardware performance claim."
+}

@@ -846,6 +846,74 @@ void RegularTreeNode< Dim , NodeData , DepthAndOffsetType >::NeighborKey< Parame
 	);
 }
 
+// Fill a 3x3x3 child window one parent brood at a time. Corner, brood, and
+// output slot are template indices, so every selected child/output offset is
+// constant; only the parent pointer and the existence of its brood vary.
+namespace StaticOneRingBroods
+{
+	template< unsigned int Corner , unsigned int Group , unsigned int Slot , typename Node , typename ChildSlice >
+	void FillSlot( const Node* brood , ChildSlice& children )
+	{
+		static constexpr int cx = Corner&1 , cy = (Corner>>1)&1 , cz = (Corner>>2)&1;
+		static constexpr int gx = Group&1 , gy = (Group>>1)&1 , gz = (Group>>2)&1;
+		static constexpr int x = Slot&1 , y = (Slot>>1)&1 , z = (Slot>>2)&1;
+		static constexpr int nx = gx==cx ? 1 : 2 , ny = gy==cy ? 1 : 2 , nz = gz==cz ? 1 : 2;
+		if constexpr( x<nx && y<ny && z<nz )
+		{
+			static constexpr int sx = gx ? 1+cx : 0 , sy = gy ? 1+cy : 0 , sz = gz ? 1+cz : 0;
+			static constexpr int bx = gx ? 0 : 1-cx , by = gy ? 0 : 1-cy , bz = gz ? 0 : 1-cz;
+			static constexpr int childIndex = (bx+x) | ( (by+y)<<1 ) | ( (bz+z)<<2 );
+			children[sx+x][sy+y][sz+z] = brood ? brood+childIndex : NULL;
+		}
+	}
+
+	template< unsigned int Corner , unsigned int Group , typename ParentSlice , typename ChildSlice >
+	void FillGroup( ParentSlice& parents , ChildSlice& children )
+	{
+		static constexpr int cx = Corner&1 , cy = (Corner>>1)&1 , cz = (Corner>>2)&1;
+		static constexpr int gx = Group&1 , gy = (Group>>1)&1 , gz = (Group>>2)&1;
+		const auto* parent = parents[gx+cx][gy+cy][gz+cz];
+		const auto* brood = parent ? parent->children : NULL;
+		FillSlot< Corner , Group , 0 >( brood , children );
+		FillSlot< Corner , Group , 1 >( brood , children );
+		FillSlot< Corner , Group , 2 >( brood , children );
+		FillSlot< Corner , Group , 3 >( brood , children );
+		FillSlot< Corner , Group , 4 >( brood , children );
+		FillSlot< Corner , Group , 5 >( brood , children );
+		FillSlot< Corner , Group , 6 >( brood , children );
+		FillSlot< Corner , Group , 7 >( brood , children );
+	}
+
+	template< unsigned int Corner , typename ParentSlice , typename ChildSlice >
+	void FillCorner( ParentSlice& parents , ChildSlice& children )
+	{
+		FillGroup< Corner , 0 >( parents , children );
+		FillGroup< Corner , 1 >( parents , children );
+		FillGroup< Corner , 2 >( parents , children );
+		FillGroup< Corner , 3 >( parents , children );
+		FillGroup< Corner , 4 >( parents , children );
+		FillGroup< Corner , 5 >( parents , children );
+		FillGroup< Corner , 6 >( parents , children );
+		FillGroup< Corner , 7 >( parents , children );
+	}
+
+	template< typename ParentSlice , typename ChildSlice >
+	void Fill( int corner , ParentSlice& parents , ChildSlice& children )
+	{
+		switch( corner )
+		{
+			case 0: FillCorner< 0 >( parents , children ); break;
+			case 1: FillCorner< 1 >( parents , children ); break;
+			case 2: FillCorner< 2 >( parents , children ); break;
+			case 3: FillCorner< 3 >( parents , children ); break;
+			case 4: FillCorner< 4 >( parents , children ); break;
+			case 5: FillCorner< 5 >( parents , children ); break;
+			case 6: FillCorner< 6 >( parents , children ); break;
+			case 7: FillCorner< 7 >( parents , children ); break;
+		}
+	}
+}
+
 ///////////////////////////////////////
 // RegularTreeNode::ConstNeighborKey //
 ///////////////////////////////////////
@@ -958,6 +1026,12 @@ typename RegularTreeNode< Dim , NodeData , DepthAndOffsetType >::template ConstN
 		for( int d=node->depth()+1 ; d<=_depth && this->neighbors[d].neighbors.data[ CenterIndex ] ; d++ ) this->neighbors[d].neighbors.data[ CenterIndex ] = NULL;
 		// Child windows are fully assigned by _NeighborsLoop, including nulls.
 		if( !node->parent ) neighbors.clear() , neighbors.neighbors.data[ CenterIndex ] = node;
+		else if constexpr( Dim==3 && ( ( LeftRadii==1 ) && ... ) && ( ( RightRadii==1 ) && ... ) )
+		{
+			auto parents = getNeighbors( node->parent ).neighbors();
+			auto children = neighbors.neighbors();
+			StaticOneRingBroods::Fill( (int)( node - node->parent->children ) , parents , children );
+		}
 		else _NeighborsLoop( ParameterPack::UIntPack< LeftRadii ... >() , ParameterPack::UIntPack< RightRadii ... >() , ParameterPack::UIntPack< LeftRadii ... >() , ParameterPack::UIntPack< RightRadii ... >() , getNeighbors( node->parent ).neighbors() , neighbors.neighbors() , (int)( node - node->parent->children ) );
 	}
 	return neighbors;
