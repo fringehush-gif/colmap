@@ -1,0 +1,663 @@
+{
+  "schema": "colmap.poissonNeighborClearsBenchmark/v1",
+  "comparisonBase": "f9abe7808a4021e8419b49eb02d97001920ba080",
+  "mechanism": "Skip redundant clearing of nonroot cached neighbor windows. The fill assigns every slot, including nulls. Root clearing and external-output overloads retain their existing behavior.",
+  "workload": "Complete Poisson mesher including default trimming; fixed complete FountainP11 fused clouds at 1536/3072, plus full ETH3D Facade at 1536.",
+  "settings": {
+    "depth": 13,
+    "pointWeight": 1,
+    "color": true,
+    "trim": 10,
+    "otherOptions": "defaults"
+  },
+  "primary": {
+    "cpu": "AMD Ryzen 9 3900X",
+    "gpu": "NVIDIA RTX 3080 Ti",
+    "platform": "WSL2 Linux",
+    "compiler": "GCC 12.4",
+    "cuda": "13.2",
+    "workers": 12,
+    "fountainObservationsPerArm": 2,
+    "order": "AB then BA at each resolution",
+    "cases": {
+      "1536": {
+        "observations": {
+          "control": [
+            {
+              "wallSeconds": 17.331663912016666,
+              "cpuSeconds": 108.35682600000001,
+              "userCpuSeconds": 103.873315,
+              "systemCpuSeconds": 4.483511,
+              "peakRssMiB": 1394.38671875,
+              "instructions": 341398555383.0,
+              "userCycles": 415165442678.0,
+              "cacheReferences": 10059297569.0,
+              "cacheMisses": 2179050331.0,
+              "contextSwitches": 4493.0,
+              "pageFaults": 527274.0
+            },
+            {
+              "wallSeconds": 17.30325602600351,
+              "cpuSeconds": 111.65056799999999,
+              "userCpuSeconds": 107.258229,
+              "systemCpuSeconds": 4.392339,
+              "peakRssMiB": 1401.93359375,
+              "instructions": 341274189168.0,
+              "userCycles": 424965720117.0,
+              "cacheReferences": 10294760447.0,
+              "cacheMisses": 2223428172.0,
+              "contextSwitches": 5496.0,
+              "pageFaults": 531333.0
+            }
+          ],
+          "candidate": [
+            {
+              "wallSeconds": 17.748407653009053,
+              "cpuSeconds": 109.773055,
+              "userCpuSeconds": 105.330233,
+              "systemCpuSeconds": 4.442822,
+              "peakRssMiB": 1401.13671875,
+              "instructions": 340176892050.0,
+              "userCycles": 416809240023.0,
+              "cacheReferences": 10210427656.0,
+              "cacheMisses": 2206125718.0,
+              "contextSwitches": 4087.0,
+              "pageFaults": 527325.0
+            },
+            {
+              "wallSeconds": 17.353392936027376,
+              "cpuSeconds": 111.880398,
+              "userCpuSeconds": 107.55052,
+              "systemCpuSeconds": 4.329878,
+              "peakRssMiB": 1405.48828125,
+              "instructions": 340521632018.0,
+              "userCycles": 422666369781.0,
+              "cacheReferences": 10134576632.0,
+              "cacheMisses": 2236456492.0,
+              "contextSwitches": 5419.0,
+              "pageFaults": 532751.0
+            }
+          ]
+        },
+        "means": {
+          "control": {
+            "wallSeconds": 17.317459969010088,
+            "cpuSeconds": 110.003697,
+            "userCpuSeconds": 105.56577200000001,
+            "systemCpuSeconds": 4.437925,
+            "peakRssMiB": 1398.16015625,
+            "instructions": 341336372275.5,
+            "userCycles": 420065581397.5,
+            "cacheReferences": 10177029008.0,
+            "cacheMisses": 2201239251.5,
+            "contextSwitches": 4994.5,
+            "pageFaults": 529303.5
+          },
+          "candidate": {
+            "wallSeconds": 17.550900294518215,
+            "cpuSeconds": 110.8267265,
+            "userCpuSeconds": 106.44037650000001,
+            "systemCpuSeconds": 4.38635,
+            "peakRssMiB": 1403.3125,
+            "instructions": 340349262034.0,
+            "userCycles": 419737804902.0,
+            "cacheReferences": 10172502144.0,
+            "cacheMisses": 2221291105.0,
+            "contextSwitches": 4753.0,
+            "pageFaults": 530038.0
+          }
+        },
+        "percentChangeCandidateVsControl": {
+          "wallSeconds": 1.3480055731375895,
+          "cpuSeconds": 0.7481834905966878,
+          "userCpuSeconds": 0.828492496602018,
+          "systemCpuSeconds": -1.162142217365092,
+          "peakRssMiB": 0.36850883834502746,
+          "instructions": -0.28918987886332737,
+          "userCycles": -0.0780298386765077,
+          "cacheReferences": -0.04448119383801963,
+          "cacheMisses": 0.9109347603326601,
+          "contextSwitches": -4.835318850735815,
+          "pageFaults": 0.1387672667949591
+        },
+        "matchedPairWallPercentChanges": [
+          2.4045223996262965,
+          0.2897541939419934
+        ]
+      },
+      "3072": {
+        "observations": {
+          "control": [
+            {
+              "wallSeconds": 53.565393188007874,
+              "cpuSeconds": 338.637411,
+              "userCpuSeconds": 325.659022,
+              "systemCpuSeconds": 12.978389,
+              "peakRssMiB": 2784.85546875,
+              "instructions": 1098629635795.0,
+              "userCycles": 1265913414258.0,
+              "cacheReferences": 32387141272.0,
+              "cacheMisses": 7314919383.0,
+              "contextSwitches": 11422.0,
+              "pageFaults": 1780829.0
+            },
+            {
+              "wallSeconds": 53.617143715004204,
+              "cpuSeconds": 347.334818,
+              "userCpuSeconds": 333.209124,
+              "systemCpuSeconds": 14.125694,
+              "peakRssMiB": 2787.50390625,
+              "instructions": 1098917425115.0,
+              "userCycles": 1271982023031.0,
+              "cacheReferences": 33133117612.0,
+              "cacheMisses": 7531430428.0,
+              "contextSwitches": 14205.0,
+              "pageFaults": 1686467.0
+            }
+          ],
+          "candidate": [
+            {
+              "wallSeconds": 51.27361175802071,
+              "cpuSeconds": 328.756668,
+              "userCpuSeconds": 316.201714,
+              "systemCpuSeconds": 12.554954,
+              "peakRssMiB": 2788.09375,
+              "instructions": 1095429388182.0,
+              "userCycles": 1228261276454.0,
+              "cacheReferences": 32442488410.0,
+              "cacheMisses": 7248358368.0,
+              "contextSwitches": 11117.0,
+              "pageFaults": 1672811.0
+            },
+            {
+              "wallSeconds": 50.77159886600566,
+              "cpuSeconds": 323.777886,
+              "userCpuSeconds": 311.110451,
+              "systemCpuSeconds": 12.667435,
+              "peakRssMiB": 2784.3828125,
+              "instructions": 1095201344147.0,
+              "userCycles": 1218569624089.0,
+              "cacheReferences": 32216138186.0,
+              "cacheMisses": 7321278896.0,
+              "contextSwitches": 14475.0,
+              "pageFaults": 1793425.0
+            }
+          ]
+        },
+        "means": {
+          "control": {
+            "wallSeconds": 53.59126845150604,
+            "cpuSeconds": 342.9861145,
+            "userCpuSeconds": 329.434073,
+            "systemCpuSeconds": 13.5520415,
+            "peakRssMiB": 2786.1796875,
+            "instructions": 1098773530455.0,
+            "userCycles": 1268947718644.5,
+            "cacheReferences": 32760129442.0,
+            "cacheMisses": 7423174905.5,
+            "contextSwitches": 12813.5,
+            "pageFaults": 1733648.0
+          },
+          "candidate": {
+            "wallSeconds": 51.022605312013184,
+            "cpuSeconds": 326.26727700000004,
+            "userCpuSeconds": 313.6560825,
+            "systemCpuSeconds": 12.6111945,
+            "peakRssMiB": 2786.23828125,
+            "instructions": 1095315366164.5,
+            "userCycles": 1223415450271.5,
+            "cacheReferences": 32329313298.0,
+            "cacheMisses": 7284818632.0,
+            "contextSwitches": 12796.0,
+            "pageFaults": 1733118.0
+          }
+        },
+        "percentChangeCandidateVsControl": {
+          "wallSeconds": -4.793062776293866,
+          "cpuSeconds": -4.874493978968342,
+          "userCpuSeconds": -4.789422768664242,
+          "systemCpuSeconds": -6.942474312818481,
+          "peakRssMiB": 0.0021030140397115815,
+          "instructions": -0.3147294865273986,
+          "userCycles": -3.5881910423888774,
+          "cacheReferences": -1.315062398525424,
+          "cacheMisses": -1.8638422947233613,
+          "contextSwitches": -0.13657470636437852,
+          "pageFaults": -0.03057137319686376
+        },
+        "matchedPairWallPercentChanges": [
+          -4.278474017624212,
+          -5.30715486099691
+        ]
+      }
+    },
+    "facadeScreen": {
+      "observationsPerArm": 1,
+      "observations": {
+        "control": {
+          "wallSeconds": 71.37632889000815,
+          "cpuSeconds": 441.681326,
+          "instructions": 1375966033575.0,
+          "userCycles": 1656146139277.0,
+          "cacheMisses": 9207484377.0,
+          "peakRssMiB": 3776.3203125
+        },
+        "candidate": {
+          "wallSeconds": 69.8985661730112,
+          "cpuSeconds": 438.57881000000003,
+          "instructions": 1371682198671.0,
+          "userCycles": 1627724299212.0,
+          "cacheMisses": 9230712666.0,
+          "peakRssMiB": 3776.7421875
+        }
+      },
+      "percentChangeCandidateVsControl": {
+        "wallSeconds": -2.070382072009058,
+        "cpuSeconds": -0.7024331384116511,
+        "instructions": -0.31133289626851246,
+        "userCycles": -1.7161432430961465,
+        "cacheMisses": 0.25227617065550767,
+        "peakRssMiB": 0.011171589406844262
+      },
+      "limits": "Single matched pair; descriptive alternate-scene screen, no repeatability claim."
+    },
+    "counterScope": "Per-native-process same-pass perf user events and wait4 CPU/RSS. perf attach excludes a small unacknowledged startup gap; 100% event running does not mean full lifetime coverage.",
+    "minimumEventRunningPercent": 100.0
+  },
+  "quality": {
+    "method": "Complete all-vertex bidirectional closest-triangle surface and interpolated RGB comparison; no alignment, subsampling or postprocessing. All 10 primary meshes have finite XYZ/RGB and valid triangle indices.",
+    "fountainOwnRepeatsAndCrossArm": {
+      "1536": {
+        "control-repeat": {
+          "vertices": [
+            1266574,
+            1266576
+          ],
+          "faces": [
+            2501846,
+            2501850
+          ],
+          "surfaceP99": 0.0,
+          "surfaceP999": 9.555351461101412e-07,
+          "surfaceMax": 1.9091731524149826e-05,
+          "surfaceRms": 6.5220957230465e-08,
+          "maxRelative": 1.4941585911278493e-06,
+          "above1eMinus5Diagonal": [
+            0,
+            0
+          ],
+          "rgbRms": 0.8842563033103943,
+          "rgbMax": 125.0
+        },
+        "candidate-repeat": {
+          "vertices": [
+            1266576,
+            1266577
+          ],
+          "faces": [
+            2501850,
+            2501851
+          ],
+          "surfaceP99": 0.0,
+          "surfaceP999": 9.610960183499514e-07,
+          "surfaceMax": 0.0017920716638481285,
+          "surfaceRms": 1.594523485096783e-06,
+          "maxRelative": 0.00014025125322281097,
+          "above1eMinus5Diagonal": [
+            1,
+            0
+          ],
+          "rgbRms": 0.8929256796836853,
+          "rgbMax": 136.0
+        },
+        "control-candidate": {
+          "vertices": [
+            1266574,
+            1266576
+          ],
+          "faces": [
+            2501846,
+            2501850
+          ],
+          "surfaceP99": 0.0,
+          "surfaceP999": 9.610960183499514e-07,
+          "surfaceMax": 1.9091731524149826e-05,
+          "surfaceRms": 6.511003977390146e-08,
+          "maxRelative": 1.4941585911278493e-06,
+          "above1eMinus5Diagonal": [
+            0,
+            0
+          ],
+          "rgbRms": 0.8764638304710388,
+          "rgbMax": 117.0
+        }
+      },
+      "3072": {
+        "control-repeat": {
+          "vertices": [
+            4605347,
+            4605345
+          ],
+          "faces": [
+            9178929,
+            9178926
+          ],
+          "surfaceP99": 0.0,
+          "surfaceP999": 2.384185791015625e-07,
+          "surfaceMax": 0.0008722197385348472,
+          "surfaceRms": 4.1838263607740473e-07,
+          "maxRelative": 6.496727113127897e-05,
+          "above1eMinus5Diagonal": [
+            2,
+            1
+          ],
+          "rgbRms": 0.7770684957504272,
+          "rgbMax": 118.0
+        },
+        "candidate-repeat": {
+          "vertices": [
+            4605348,
+            4605348
+          ],
+          "faces": [
+            9178930,
+            9178931
+          ],
+          "surfaceP99": 0.0,
+          "surfaceP999": 2.384185791015625e-07,
+          "surfaceMax": 0.000508338495142784,
+          "surfaceRms": 2.475555290601093e-07,
+          "maxRelative": 3.786358343126185e-05,
+          "above1eMinus5Diagonal": [
+            1,
+            0
+          ],
+          "rgbRms": 0.7859469056129456,
+          "rgbMax": 173.0
+        },
+        "control-candidate": {
+          "vertices": [
+            4605347,
+            4605348
+          ],
+          "faces": [
+            9178929,
+            9178930
+          ],
+          "surfaceP99": 0.0,
+          "surfaceP999": 2.384185791015625e-07,
+          "surfaceMax": 0.0008722197385348472,
+          "surfaceRms": 4.183457806199412e-07,
+          "maxRelative": 6.496727113127897e-05,
+          "above1eMinus5Diagonal": [
+            2,
+            1
+          ],
+          "rgbRms": 0.7682231068611145,
+          "rgbMax": 116.0
+        }
+      }
+    },
+    "facade": {
+      "cross": {
+        "vertices": [
+          5406555,
+          5406551
+        ],
+        "faces": [
+          10722945,
+          10722939
+        ],
+        "surfaceP99": 0.0,
+        "surfaceP999": 2.1333134374825097e-06,
+        "surfaceMax": 0.0022120830901432935,
+        "surfaceRms": 1.4605481488042546e-06,
+        "maxRelative": 2.857380635303997e-05,
+        "above1eMinus5Diagonal": [
+          5,
+          2
+        ],
+        "rgbRms": 1.683122992515564,
+        "rgbMax": 195.0
+      },
+      "limits": "N1 per arm; no same-panel own-repeat assessment for this alternate scene."
+    },
+    "serialTinyOrderedMeshExact": true,
+    "limits": "Parallel meshes are not byte-identical. Façade has no same-panel own-repeat comparison. No rendered-image or ground-truth equivalence claim.",
+    "tinySerialSettings": {
+      "points": 4096,
+      "workers": 1,
+      "depth": 13,
+      "trim": 0,
+      "reason": "Keep the tiny serial surface; performance panels use default trim=10."
+    }
+  },
+  "tests": {
+    "linuxFocused": 30,
+    "linuxFailures": 0,
+    "linuxSkipped": 0,
+    "OpenMPBackendCovered": true,
+    "windowsFocused": 30,
+    "fullCppSuiteRun": false,
+    "pythonSuiteRun": false,
+    "clangFormatVersion": "23.1.3",
+    "clangFormatDryRunWerrorPassed": true,
+    "windowsFailures": 0,
+    "windowsSkipped": 0
+  },
+  "costs": {
+    "linuxCliBytes": [
+      85421033,
+      85421033
+    ],
+    "memory": "No peak-RAM saving demonstrated.",
+    "build": "Incremental CPU header consumers only; CUDA and unrelated dependencies reused."
+  },
+  "olderPc": {
+    "status": "completed-descriptive-single-pair",
+    "cpu": "Intel Core i7-4790K",
+    "gpu": "NVIDIA GTX 1080",
+    "platform": "Windows 10",
+    "compiler": "MSVC 19.39",
+    "cuda": "12.9",
+    "workers": 4,
+    "resolution": 3072,
+    "observationsPerArm": 1,
+    "fullWarmups": 0,
+    "order": [
+      "control",
+      "candidate"
+    ],
+    "input": {
+      "bytes": 45323150,
+      "sha256": "cf1323ade37ade7de5e4a3a76d764e7b6363dda29dbe3078d0cd52f7dfa5b361",
+      "points": 1678626
+    },
+    "inputScope": "Different frozen fused cloud from the primary PC; compare arms within each platform only.",
+    "sourceScope": "Exact f9-relevant Poisson subtree plus the same two-file patch. Frozen unrelated CLI/Ceres/CUDA closure; not a full current-main Windows rebuild.",
+    "observations": {
+      "control": {
+        "wallSeconds": 80.4584827,
+        "CPUSeconds": 228.4375,
+        "userSeconds": 215.25,
+        "kernelSeconds": 13.1875,
+        "processCycles": 913450275272,
+        "peakWorkingSetBytes": 2565173248,
+        "peakCommitBytes": 3866046464,
+        "NVML": {
+          "samples": 81,
+          "peakWholeBoardVRAMBytes": 1715195904,
+          "smClockMHz": {
+            "mean": 1664.8024691358025,
+            "min": 1645,
+            "max": 1885
+          },
+          "temperatureC": {
+            "mean": 64.07407407407408,
+            "min": 64,
+            "max": 65
+          },
+          "powerMilliwatts": {
+            "mean": 43340.87654320987,
+            "min": 41030,
+            "max": 57792
+          }
+        },
+        "windowsPMU": {
+          "instructions_user": null,
+          "instructions_kernel": null,
+          "cycles_user": null,
+          "cycles_kernel": null,
+          "cache_misses": null,
+          "branch_misses": null,
+          "status": "Unavailable; no WindowsPMU collection. processCycles=QueryProcessCycleTime,not Linuxcycles:u or PMU user/kernel split."
+        },
+        "mesh": {
+          "vertices": 4609047,
+          "faces": 9183164,
+          "bytes": 234502777,
+          "sha256": "a67c6f0d6104eb93b64cdc165b47508647fbf3accf816e59c2aade8d9bc5c597",
+          "finiteVertexFields": true,
+          "triangleIndicesValid": true,
+          "completePayload": true
+        }
+      },
+      "candidate": {
+        "wallSeconds": 79.836906,
+        "CPUSeconds": 225.9375,
+        "userSeconds": 213.734375,
+        "kernelSeconds": 12.203125,
+        "processCycles": 904702421037,
+        "peakWorkingSetBytes": 2564726784,
+        "peakCommitBytes": 3847458816,
+        "NVML": {
+          "samples": 80,
+          "peakWholeBoardVRAMBytes": 1715195904,
+          "smClockMHz": {
+            "mean": 1739.95,
+            "min": 1645,
+            "max": 1885
+          },
+          "temperatureC": {
+            "mean": 64.4375,
+            "min": 64,
+            "max": 65
+          },
+          "powerMilliwatts": {
+            "mean": 45713.2,
+            "min": 41126,
+            "max": 55841
+          }
+        },
+        "windowsPMU": {
+          "instructions_user": null,
+          "instructions_kernel": null,
+          "cycles_user": null,
+          "cycles_kernel": null,
+          "cache_misses": null,
+          "branch_misses": null,
+          "status": "Unavailable; no WindowsPMU collection. processCycles=QueryProcessCycleTime,not Linuxcycles:u or PMU user/kernel split."
+        },
+        "mesh": {
+          "vertices": 4609051,
+          "faces": 9183172,
+          "bytes": 234502981,
+          "sha256": "7bd8466b796eea5117e54a024dc047bd4a932622a39f2959b2f2e1a62861320f",
+          "finiteVertexFields": true,
+          "triangleIndicesValid": true,
+          "completePayload": true
+        }
+      }
+    },
+    "percentChangeCandidateVsControl": {
+      "wallSeconds": -0.7725434026858768,
+      "CPUSeconds": -1.094391244870041,
+      "userSeconds": -0.7041231126596936,
+      "kernelSeconds": -7.464454976303314,
+      "processCycles": -0.9576716403523089,
+      "peakWorkingSetBytes": -0.017404828322920007,
+      "peakCommitBytes": -0.48079215221764615
+    },
+    "serialTinyWholeFileExact": true,
+    "quality": {
+      "method": "Complete all-vertex closest-triangle/barycentric RGB, both directions; no alignment or subsampling.",
+      "cross": {
+        "vertexCount": [
+          4609047,
+          4609051
+        ],
+        "faceCount": [
+          9183164,
+          9183172
+        ],
+        "candidateToBaseline": {
+          "surfaceDistance": {
+            "count": 4609051,
+            "p50": 0.0,
+            "p99": 0.0,
+            "p999": 1.1920928955078125e-07,
+            "max": 5.4219131769197e-05,
+            "rms": 5.134154845740137e-08,
+            "mean": 1.1888044275121378e-09,
+            "bboxDiagonal": 13.336481360160887,
+            "maxRelative": 4.065475015858525e-06,
+            "above1eMinus6Diagonal": 3,
+            "above1eMinus5Diagonal": 0
+          },
+          "colourAbsolute0to255": {
+            "count": 13827153,
+            "p50": 0.0,
+            "p99": 1.0,
+            "p999": 11.0,
+            "max": 137.0,
+            "rms": 0.7710663676261902,
+            "mean": 0.05250365287065506
+          }
+        },
+        "baselineToCandidate": {
+          "surfaceDistance": {
+            "count": 4609047,
+            "p50": 0.0,
+            "p99": 0.0,
+            "p999": 1.1920928955078125e-07,
+            "max": 0.00011355690711314947,
+            "rms": 6.927217381037731e-08,
+            "mean": 1.1918560490885382e-09,
+            "bboxDiagonal": 13.336481360160887,
+            "maxRelative": 8.514757682065216e-06,
+            "above1eMinus6Diagonal": 4,
+            "above1eMinus5Diagonal": 0
+          },
+          "colourAbsolute0to255": {
+            "count": 13827141,
+            "p50": 0.0,
+            "p99": 1.0,
+            "p999": 11.0,
+            "max": 137.0,
+            "rms": 0.7710794806480408,
+            "mean": 0.05249934643507004
+          }
+        }
+      },
+      "sharedUniqueExactXYZ": {
+        "sharedUniqueExactXYZ": 4600172,
+        "uniqueXYZCounts": [
+          4607564,
+          4607565
+        ],
+        "rgbNonzeroComponents": 140174,
+        "rgbMaxAbs": 137,
+        "rgbP99Abs": 1.0,
+        "valueMaxAbs": 0.00015544891357421875,
+        "method": "Descriptive RGB/value comparison only at shared bit-identical unique XYZ. Duplicate XYZ excluded. No global geometry or quality equivalence claim."
+      },
+      "limits": "One pair; no local own-repeat envelope, rendered-image or ground-truth equivalence claim."
+    },
+    "limits": "Small directional screen only. GPU clock means vary (1664.8/1739.95 MHz); no repeatable speed claim. QueryProcessCycleTime is not Linux cycles:u; unavailable Windows PMU fields remain null.",
+    "cliBytes": [
+      54392832,
+      54393344
+    ]
+  },
+  "conclusion": "Larger primary Fountain case improves wall/CPU in both orders; smaller Fountain case is slower. Facade N1 and Windows 3072 N1 are directionally faster. No universal speed, memory-saving or parallel output-equivalence claim."
+}

@@ -945,8 +945,8 @@ typename RegularTreeNode< Dim , NodeData , DepthAndOffsetType >::template ConstN
 	if( node!=neighbors.neighbors.data[ CenterIndex ] )
 	{
 		for( int d=node->depth()+1 ; d<=_depth && this->neighbors[d].neighbors.data[ CenterIndex ] ; d++ ) this->neighbors[d].neighbors.data[ CenterIndex ] = NULL;
-		neighbors.clear();
-		if( !node->parent ) neighbors.neighbors.data[ CenterIndex ] = node;
+		// Child windows are fully assigned by _NeighborsLoop, including nulls.
+		if( !node->parent ) neighbors.clear() , neighbors.neighbors.data[ CenterIndex ] = node;
 		else _NeighborsLoop( ParameterPack::UIntPack< LeftRadii ... >() , ParameterPack::UIntPack< RightRadii ... >() , ParameterPack::UIntPack< LeftRadii ... >() , ParameterPack::UIntPack< RightRadii ... >() , getNeighbors( node->parent ).neighbors() , neighbors.neighbors() , (int)( node - node->parent->children ) );
 	}
 	return neighbors;

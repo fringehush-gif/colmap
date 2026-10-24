@@ -1121,6 +1121,107 @@ TEST(PoissonMeshing, ParallelForPreservesCallableStateSemantics) {
   EXPECT_EQ(last_call, 3);
 }
 
+template <unsigned int Dim, unsigned int LeftRadius, unsigned int RightRadius>
+void CheckCachedNeighborWindows() {
+  using Node = PoissonRecon::RegularTreeNode<Dim, int, int>;
+  using Left = ParameterPack::IsotropicUIntPack<Dim, LeftRadius>;
+  using Right = ParameterPack::IsotropicUIntPack<Dim, RightRadius>;
+  using Key = typename Node::template ConstNeighborKey<Left, Right>;
+  constexpr int kChildren = 1 << Dim;
+  constexpr int kWidth = LeftRadius + RightRadius + 1;
+  Node root;
+  auto initialize = [](Node&) {};
+  auto grow = [&](Node& node) {
+    return node.template initChildren<false>(nullptr, initialize);
+  };
+  ASSERT_TRUE(grow(root));
+  ASSERT_TRUE(grow(root.children[0]));
+  ASSERT_TRUE(grow(root.children[kChildren - 1]));
+  ASSERT_TRUE(grow(root.children[0].children[0]));
+  ASSERT_TRUE(grow(root.children[kChildren - 1].children[kChildren - 1]));
+  std::vector<const Node*> nodes;
+  auto collect = [&](auto&& self, const Node* node) -> void {
+    nodes.push_back(node);
+    if (node->children != nullptr) {
+      for (int child = 0; child < kChildren; ++child) {
+        self(self, &node->children[child]);
+      }
+    }
+  };
+  collect(collect, &root);
+  const std::vector<const Node*> queries = {
+      &root,
+      &root.children[0],
+      &root.children[kChildren - 1],
+      &root.children[0].children[0],
+      &root.children[kChildren - 1].children[0],
+      &root.children[0].children[0].children[kChildren - 1],
+      &root.children[kChildren - 1].children[kChildren - 1].children[0],
+      &root.children[0].children[kChildren - 1],
+      &root.children[kChildren - 1],
+      &root,
+      &root.children[0].children[0],
+      &root.children[0].children[0].children[0],
+  };
+  Key key;
+  key.set(3);
+  for (const Node* query : queries) {
+    int depth;
+    int offset[Dim];
+    query->depthAndOffset(depth, offset);
+    const auto& window = key.getNeighbors(query).neighbors;
+    int indices[Dim] = {};
+    for (unsigned int slot = 0; slot < window.Size(); ++slot) {
+      const Node* expected = nullptr;
+      for (const Node* node : nodes) {
+        int node_depth;
+        int node_offset[Dim];
+        node->depthAndOffset(node_depth, node_offset);
+        bool matches = node_depth == depth;
+        for (unsigned int dim = 0; dim < Dim; ++dim) {
+          matches &= node_offset[dim] ==
+                     offset[dim] + indices[dim] - static_cast<int>(LeftRadius);
+        }
+        if (matches) {
+          expected = node;
+          break;
+        }
+      }
+      EXPECT_EQ(window(indices), expected)
+          << "dimension=" << Dim << " radii=" << LeftRadius << ","
+          << RightRadius << " depth=" << depth << " slot=" << slot;
+      for (unsigned int dim = 0; dim < Dim; ++dim) {
+        if (++indices[dim] < kWidth) {
+          break;
+        }
+        indices[dim] = 0;
+      }
+    }
+  }
+  root.cleanChildren(true);
+}
+
+template <unsigned int Dim>
+void CheckCachedNeighborRadii() {
+  CheckCachedNeighborWindows<Dim, 0, 0>();
+  CheckCachedNeighborWindows<Dim, 1, 1>();
+  CheckCachedNeighborWindows<Dim, 2, 2>();
+  CheckCachedNeighborWindows<Dim, 2, 0>();
+  CheckCachedNeighborWindows<Dim, 0, 2>();
+}
+
+TEST(PoissonMeshing, CachedNeighborWindowsMatchSparseTree1D) {
+  CheckCachedNeighborRadii<1>();
+}
+
+TEST(PoissonMeshing, CachedNeighborWindowsMatchSparseTree2D) {
+  CheckCachedNeighborRadii<2>();
+}
+
+TEST(PoissonMeshing, CachedNeighborWindowsMatchSparseTree3D) {
+  CheckCachedNeighborRadii<3>();
+}
+
 }  // namespace
 }  // namespace mvs
 }  // namespace colmap
