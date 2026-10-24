@@ -8,14 +8,14 @@ are permitted provided that the following conditions are met:
 Redistributions of source code must retain the above copyright notice, this list of
 conditions and the following disclaimer. Redistributions in binary form must reproduce
 the above copyright notice, this list of conditions and the following disclaimer
-in the documentation and/or other materials provided with the distribution. 
+in the documentation and/or other materials provided with the distribution.
 
 Neither the name of the Johns Hopkins University nor the names of its contributors
 may be used to endorse or promote products derived from this software without specific
-prior written permission. 
+prior written permission.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
-EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO THE IMPLIED WARRANTIES 
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO THE IMPLIED WARRANTIES
 OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
 SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
 INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
@@ -90,7 +90,22 @@ namespace PoissonRecon
 			for( unsigned int i=0 ; i<futures.size() ; i++ ) futures[i].get();
 		}
 
+		// Keep typed callbacks visible to the compiler in the OpenMP chunk loop.
+		template< typename Function >
+		static void ParallelFor( size_t begin , size_t end , Function iterationFunction , unsigned int numThreads=_NumThreads , ParallelType pType=ParallelizationType , ScheduleType schedule=Schedule , size_t chunkSize=ChunkSize )
+		{
+			_ParallelFor( begin , end , iterationFunction , numThreads , pType , schedule , chunkSize );
+		}
+
+		// Existing type-erased callbacks retain their reference and mutable state.
 		static void ParallelFor( size_t begin , size_t end , const std::function< void ( unsigned int , size_t ) > &iterationFunction , unsigned int numThreads=_NumThreads , ParallelType pType=ParallelizationType , ScheduleType schedule=Schedule , size_t chunkSize=ChunkSize )
+		{
+			_ParallelFor( begin , end , iterationFunction , numThreads , pType , schedule , chunkSize );
+		}
+
+	private:
+		template< typename Function >
+		static void _ParallelFor( size_t begin , size_t end , Function &iterationFunction , unsigned int numThreads , ParallelType pType , ScheduleType schedule , size_t chunkSize )
 		{
 			if( begin>=end ) return;
 			size_t range = end - begin;
@@ -112,27 +127,12 @@ namespace PoissonRecon
 				chunks = numThreads = (unsigned int)( ( range + chunkSize - 1 ) / chunkSize );
 			}
 
-			std::function< void (unsigned int , size_t ) > _ChunkFunction = [ &iterationFunction , begin , end , chunkSize ]( unsigned int thread , size_t chunk )
+			auto _ChunkFunction = [ &iterationFunction , begin , end , chunkSize ]( unsigned int thread , size_t chunk )
 				{
 					const size_t _begin = begin + chunkSize*chunk;
 					const size_t _end = std::min< size_t >( end , _begin+chunkSize );
 					for( size_t i=_begin ; i<_end ; i++ ) iterationFunction( thread , i );
 				};
-			std::function< void (unsigned int ) > _StaticThreadFunction = [ &_ChunkFunction , chunks , numThreads ]( unsigned int thread )
-				{
-					for( size_t chunk=thread ; chunk<chunks ; chunk+=numThreads ) _ChunkFunction( thread , chunk );
-				};
-
-			std::function< void (unsigned int ) > _DynamicThreadFunction = [ &_ChunkFunction , chunks , &index ]( unsigned int thread )
-				{
-					size_t chunk;
-					while( ( chunk=index.fetch_add(1) )<chunks ) _ChunkFunction( thread , chunk );
-				};
-
-			std::function< void (unsigned int ) > ThreadFunction;
-			if     ( schedule==ScheduleType::STATIC  ) ThreadFunction = _StaticThreadFunction;
-			else if( schedule==ScheduleType::DYNAMIC ) ThreadFunction = _DynamicThreadFunction;
-
 			if( false ){}
 #ifdef _OPENMP
 			else if( pType==ParallelType::OPEN_MP )
@@ -150,6 +150,21 @@ namespace PoissonRecon
 #endif // _OPENMP
 			else if( pType==ParallelType::ASYNC )
 			{
+				std::function< void (unsigned int ) > _StaticThreadFunction = [ &_ChunkFunction , chunks , numThreads ]( unsigned int thread )
+					{
+						for( size_t chunk=thread ; chunk<chunks ; chunk+=numThreads ) _ChunkFunction( thread , chunk );
+					};
+
+				std::function< void (unsigned int ) > _DynamicThreadFunction = [ &_ChunkFunction , chunks , &index ]( unsigned int thread )
+					{
+						size_t chunk;
+						while( ( chunk=index.fetch_add(1) )<chunks ) _ChunkFunction( thread , chunk );
+					};
+
+				std::function< void (unsigned int ) > ThreadFunction;
+				if     ( schedule==ScheduleType::STATIC  ) ThreadFunction = _StaticThreadFunction;
+				else if( schedule==ScheduleType::DYNAMIC ) ThreadFunction = _DynamicThreadFunction;
+
 				static std::vector< std::future< void > > futures;
 				futures.resize( numThreads-1 );
 				for( unsigned int t=1 ; t<numThreads ; t++ ) futures[t-1] = std::async( std::launch::async , ThreadFunction , t );
@@ -158,7 +173,6 @@ namespace PoissonRecon
 			}
 		}
 
-	private:
 		static unsigned int _NumThreads;
 
 		template< typename Function , typename ... Functions >

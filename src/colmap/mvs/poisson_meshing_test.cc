@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -1054,6 +1055,72 @@ TEST(PoissonMeshing, PolygonIndexChainIntPreservesSpliceOrder) {
 TEST(PoissonMeshing, PolygonIndexChainLongLongPreservesSpliceOrder) {
   CheckPolygonIndexChainSpliceOrder<long long>();
 }
+
+TEST(PoissonMeshing, ParallelForVisitsEachIndexOnceAcrossBackends) {
+  using Pool = PoissonRecon::ThreadPool;
+  std::vector<Pool::ParallelType> backends = {Pool::NONE, Pool::ASYNC};
+#ifdef _OPENMP
+  backends.push_back(Pool::OPEN_MP);
+#endif
+  for (const auto backend : backends) {
+    for (const auto schedule : {Pool::STATIC, Pool::DYNAMIC}) {
+      for (const size_t chunk : {size_t{1}, size_t{128}}) {
+        for (const size_t end : {size_t{7}, size_t{8}, size_t{300}}) {
+          std::vector<std::atomic<int>> visits(300);
+          for (auto& count : visits) {
+            count.store(0);
+          }
+          std::atomic<bool> invalid_thread{false};
+          Pool::ParallelFor(
+              7,
+              end,
+              [&](unsigned int thread, size_t index) {
+                if (thread >= 4 || (backend == Pool::NONE && thread != 0)) {
+                  invalid_thread.store(true);
+                }
+                visits.at(index).fetch_add(1);
+              },
+              4,
+              backend,
+              schedule,
+              chunk);
+          EXPECT_FALSE(invalid_thread.load());
+          for (size_t index = 0; index < visits.size(); ++index) {
+            EXPECT_EQ(visits[index].load(), index >= 7 && index < end ? 1 : 0);
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(PoissonMeshing, ParallelForPreservesCallableStateSemantics) {
+  using Pool = PoissonRecon::ThreadPool;
+  struct Callback {
+    int calls = 0;
+    void operator()(unsigned int, size_t) { ++calls; }
+  };
+  Callback raw;
+  Pool::ParallelFor(0, 3, raw, 1, Pool::NONE);
+  EXPECT_EQ(raw.calls, 0);
+
+  const std::function<void(unsigned int, size_t)> erased = Callback{};
+  Pool::ParallelFor(0, 3, erased, 1, Pool::NONE);
+  ASSERT_NE(erased.target<Callback>(), nullptr);
+  EXPECT_EQ(erased.target<Callback>()->calls, 3);
+
+  int last_call = 0;
+  Pool::ParallelFor(
+      0,
+      3,
+      [count = 0, &last_call](unsigned int, size_t) mutable {
+        last_call = ++count;
+      },
+      1,
+      Pool::NONE);
+  EXPECT_EQ(last_call, 3);
+}
+
 }  // namespace
 }  // namespace mvs
 }  // namespace colmap

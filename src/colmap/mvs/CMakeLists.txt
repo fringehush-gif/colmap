@@ -80,6 +80,10 @@ COLMAP_ADD_TEST(
     SRCS poisson_meshing_test.cc
     LINK_LIBS colmap_mvs
 )
+# The test directly includes Poisson's OpenMP-dependent ThreadPool header.
+if(TESTS_ENABLED AND OPENMP_FOUND)
+    target_link_libraries(colmap_mvs_poisson_meshing_test OpenMP::OpenMP_CXX)
+endif()
 COLMAP_ADD_TEST(
     NAME delaunay_meshing_test
     SRCS delaunay_meshing_test.cc

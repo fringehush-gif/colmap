@@ -1,0 +1,355 @@
+{
+  "schema": "colmap.poissonTypedCallbacksBenchmark/v1",
+  "comparisonBase": "18ca078cea6c67cd46e9a938cd1de3b94befa40f",
+  "measurement": "Complete Poisson mesher, including default trimming, on fixed complete fused clouds. Same inputs/toolchain/dependencies within each matched pair.",
+  "settings": {
+    "depth": 13,
+    "pointWeight": 1,
+    "color": true,
+    "trim": 10,
+    "otherOptions": "defaults"
+  },
+  "primary": {
+    "cpu": "AMD Ryzen 9 3900X",
+    "gpu": "NVIDIA RTX 3080 Ti",
+    "platform": "WSL2 Linux",
+    "compiler": "GCC 12.4",
+    "cuda": "13.2",
+    "counterScope": "Per-native-process perf user instructions/cycles and cache events; wait4 CPU/RSS; all recorded events ran 100%. Same-pass collection.",
+    "cases": {
+      "FountainP11-1536": {
+        "observationsPerArm": 2,
+        "workers": 12,
+        "observations": {
+          "control": [
+            {
+              "wallSeconds": 17.800623891002033,
+              "cpuSeconds": 112.849865,
+              "instructions": 347482421086.0,
+              "cacheMisses": 2218145798.0,
+              "peakRssMiB": 1395.24609375
+            },
+            {
+              "wallSeconds": 17.000265638984274,
+              "cpuSeconds": 109.247229,
+              "instructions": 347332449705.0,
+              "cacheMisses": 2234627795.0,
+              "peakRssMiB": 1404.953125
+            }
+          ],
+          "candidate": [
+            {
+              "wallSeconds": 17.556174467987148,
+              "cpuSeconds": 109.751626,
+              "instructions": 341383426000.0,
+              "cacheMisses": 2215706352.0,
+              "peakRssMiB": 1392.91015625
+            },
+            {
+              "wallSeconds": 16.99989111701143,
+              "cpuSeconds": 108.88895500000001,
+              "instructions": 341317484177.0,
+              "cacheMisses": 2204456510.0,
+              "peakRssMiB": 1392.85546875
+            }
+          ]
+        },
+        "means": {
+          "control": {
+            "wallSeconds": 17.400444764993154,
+            "cpuSeconds": 111.048547,
+            "instructions": 347407435395.5,
+            "cacheMisses": 2226386796.5,
+            "peakRssMiB": 1400.099609375
+          },
+          "candidate": {
+            "wallSeconds": 17.27803279249929,
+            "cpuSeconds": 109.3202905,
+            "instructions": 341350455088.5,
+            "cacheMisses": 2210081431.0,
+            "peakRssMiB": 1392.8828125
+          }
+        },
+        "percentChange": {
+          "wallSeconds": -0.7034991010122726,
+          "cpuSeconds": -1.5563071707727971,
+          "instructions": -1.7434803317046277,
+          "cacheMisses": -0.7323689453078375,
+          "peakRssMiB": -0.5154488171182026
+        }
+      },
+      "FountainP11-3072": {
+        "observationsPerArm": 2,
+        "workers": 12,
+        "observations": {
+          "control": [
+            {
+              "wallSeconds": 51.42139973700978,
+              "cpuSeconds": 332.08155,
+              "instructions": 1115544846957.0,
+              "cacheMisses": 7303801584.0,
+              "peakRssMiB": 2783.0546875
+            },
+            {
+              "wallSeconds": 50.794670937990304,
+              "cpuSeconds": 329.134814,
+              "instructions": 1114803838979.0,
+              "cacheMisses": 7342905200.0,
+              "peakRssMiB": 2787.00390625
+            }
+          ],
+          "candidate": [
+            {
+              "wallSeconds": 49.66591303399764,
+              "cpuSeconds": 326.31226399999997,
+              "instructions": 1098628968256.0,
+              "cacheMisses": 7278061727.0,
+              "peakRssMiB": 2786.3125
+            },
+            {
+              "wallSeconds": 48.564331169996876,
+              "cpuSeconds": 329.45703,
+              "instructions": 1098241335766.0,
+              "cacheMisses": 7327099053.0,
+              "peakRssMiB": 2787.20703125
+            }
+          ]
+        },
+        "means": {
+          "control": {
+            "wallSeconds": 51.10803533750004,
+            "cpuSeconds": 330.608182,
+            "instructions": 1115174342968.0,
+            "cacheMisses": 7323353392.0,
+            "peakRssMiB": 2785.029296875
+          },
+          "candidate": {
+            "wallSeconds": 49.11512210199726,
+            "cpuSeconds": 327.884647,
+            "instructions": 1098435152011.0,
+            "cacheMisses": 7302580390.0,
+            "peakRssMiB": 2786.759765625
+          }
+        },
+        "percentChange": {
+          "wallSeconds": -3.899412729020524,
+          "cpuSeconds": -0.8237954014096438,
+          "instructions": -1.5010380271527013,
+          "cacheMisses": -0.2836542344480053,
+          "peakRssMiB": 0.06213466953262081
+        }
+      },
+      "ETH3D-Facade-1536": {
+        "observationsPerArm": 2,
+        "workers": 12,
+        "observations": {
+          "control": [
+            {
+              "wallSeconds": 70.07459812198067,
+              "cpuSeconds": 440.759754,
+              "instructions": 1399086831970.0,
+              "cacheMisses": 9226192689.0,
+              "peakRssMiB": 3771.9921875
+            },
+            {
+              "wallSeconds": 70.51985080298618,
+              "cpuSeconds": 454.44750400000004,
+              "instructions": 1399126794848.0,
+              "cacheMisses": 9461537172.0,
+              "peakRssMiB": 3771.875
+            }
+          ],
+          "candidate": [
+            {
+              "wallSeconds": 72.27130268700421,
+              "cpuSeconds": 459.77561000000003,
+              "instructions": 1376416504642.0,
+              "cacheMisses": 9279016177.0,
+              "peakRssMiB": 3772.03125
+            },
+            {
+              "wallSeconds": 69.98060973899555,
+              "cpuSeconds": 429.081487,
+              "instructions": 1375840568259.0,
+              "cacheMisses": 9144295787.0,
+              "peakRssMiB": 3775.2890625
+            }
+          ]
+        },
+        "means": {
+          "control": {
+            "wallSeconds": 70.29722446248343,
+            "cpuSeconds": 447.603629,
+            "instructions": 1399106813409.0,
+            "cacheMisses": 9343864930.5,
+            "peakRssMiB": 3771.93359375
+          },
+          "candidate": {
+            "wallSeconds": 71.12595621299988,
+            "cpuSeconds": 444.42854850000003,
+            "instructions": 1376128536450.5,
+            "cacheMisses": 9211655982.0,
+            "peakRssMiB": 3773.66015625
+          }
+        },
+        "percentChange": {
+          "wallSeconds": 1.1788968296447155,
+          "cpuSeconds": -0.7093509288772948,
+          "instructions": -1.642353302712618,
+          "cacheMisses": -1.4149278642550445,
+          "peakRssMiB": 0.04577393681746145
+        }
+      }
+    }
+  },
+  "olderPc": {
+    "cpu": "Intel Core i7-4790K",
+    "gpu": "NVIDIA GTX 1080",
+    "platform": "Windows10",
+    "compiler": "MSVC19.39",
+    "cuda": "12.9",
+    "workers": 4,
+    "observationsPerArm": 1,
+    "inputScope": "Own retained native FountainP11-1536 fused cloud;434083points; same cloud in both arms. Fixed Windows dependency/CLI closure with relevant Poisson sources matching the comparison base, not a complete current-main Windows rebuild.",
+    "control": {
+      "wallSeconds": 28.0609914,
+      "CPUSeconds": 82.203125,
+      "processCycles": 328861092466,
+      "peakWorkingSetBytes": 1070383104,
+      "peakCommitBytes": 1470689280
+    },
+    "candidate": {
+      "wallSeconds": 28.2236454,
+      "CPUSeconds": 81.625,
+      "processCycles": 327931486010,
+      "peakWorkingSetBytes": 1070661632,
+      "peakCommitBytes": 1472274432
+    },
+    "instructions": null,
+    "cacheMisses": null,
+    "counterScope": "GetProcessTimes, QueryProcessCycleTime, peak working set/commit; no PMU. Single-pair screen with variable GPU boost clocks; no stable speed/regression inference.",
+    "quality": "Both complete meshes finite and index-valid. Tiny serial wholefile exact and27tests pass; no full Windows cross-surface/RGB or own-repeat comparison."
+  },
+  "quality": {
+    "method": "All-vertex bidirectional Open3D0.19 closest-triangle surface and interpolated RGB; no alignment/subsampling/postprocessing;12primary meshes finite/indexvalid.",
+    "cases": {
+      "FountainP11-1536": {
+        "vertexCounts": [
+          1266576,
+          1266578
+        ],
+        "faceCounts": [
+          2501848,
+          2501853
+        ],
+        "crossSurfaceP99": 0.0,
+        "crossSurfaceP999": 9.555351461101412e-07,
+        "crossSurfaceMax": 0.0017920716638481285,
+        "crossSurfaceMaxRelativeToDiagonal": 0.00014025125322281097,
+        "crossSurfaceRms": 1.5944473202984623e-06,
+        "crossVerticesAbove1eMinus5Diagonal": [
+          1,
+          0
+        ],
+        "crossRgbRms8bit": 0.9014241695404053,
+        "crossRgbMax8bit": 167.0,
+        "controlRepeatSurfaceMax": 0.0017920716638481285,
+        "controlRepeatRgbRms8bit": 0.9053698778152466,
+        "controlRepeatRgbMax8bit": 136.0,
+        "candidateRepeatSurfaceMax": 0.00034460914948017743,
+        "candidateRepeatRgbRms8bit": 0.9018386602401733,
+        "candidateRepeatRgbMax8bit": 136.0
+      },
+      "FountainP11-3072": {
+        "vertexCounts": [
+          4605348,
+          4605348
+        ],
+        "faceCounts": [
+          9178931,
+          9178930
+        ],
+        "crossSurfaceP99": 0.0,
+        "crossSurfaceP999": 3.5762786865234375e-07,
+        "crossSurfaceMax": 0.0017133111609036827,
+        "crossSurfaceMaxRelativeToDiagonal": 0.00012761595020728694,
+        "crossSurfaceRms": 8.021421322718074e-07,
+        "crossVerticesAbove1eMinus5Diagonal": [
+          1,
+          1
+        ],
+        "crossRgbRms8bit": 0.7616515755653381,
+        "crossRgbMax8bit": 117.0,
+        "controlRepeatSurfaceMax": 0.000508338495142784,
+        "controlRepeatRgbRms8bit": 0.7557771801948547,
+        "controlRepeatRgbMax8bit": 128.0,
+        "candidateRepeatSurfaceMax": 0.0017133111609036827,
+        "candidateRepeatRgbRms8bit": 0.7833980321884155,
+        "candidateRepeatRgbMax8bit": 173.0
+      },
+      "ETH3D-Facade-1536": {
+        "vertexCounts": [
+          5406565,
+          5406545
+        ],
+        "faceCounts": [
+          10722961,
+          10722928
+        ],
+        "crossSurfaceP99": 0.0,
+        "crossSurfaceP999": 3.162979879718208e-06,
+        "crossSurfaceMax": 0.010681076915003118,
+        "crossSurfaceMaxRelativeToDiagonal": 0.00013796905647530934,
+        "crossSurfaceRms": 4.745733960975388e-06,
+        "crossVerticesAbove1eMinus5Diagonal": [
+          4,
+          6
+        ],
+        "crossRgbRms8bit": 1.6941026449203491,
+        "crossRgbMax8bit": 171.0,
+        "controlRepeatSurfaceMax": 0.0018531660452608379,
+        "controlRepeatRgbRms8bit": 1.657912015914917,
+        "controlRepeatRgbMax8bit": 195.0,
+        "candidateRepeatSurfaceMax": 0.005590465706487723,
+        "candidateRepeatRgbRms8bit": 1.7150338888168335,
+        "candidateRepeatRgbMax8bit": 213.0
+      }
+    },
+    "limits": "Parallel outputs are not byte-identical. Rare Fa\u00e7ade geometric extremes and Fountain 1536 color extreme exceed the observed own-repeat maxima. These are relative mesh checks, not rendered-image or ground-truth quality scores."
+  },
+  "tests": {
+    "linuxFocused": 27,
+    "windowsFocused": 27,
+    "skipped": 0,
+    "OpenMPBackendCovered": true,
+    "serialTinyOrderedMeshExactBothPlatforms": true,
+    "fullCppSuiteRun": false,
+    "pythonTestsRun": false
+  },
+  "costs": {
+    "linuxCliBytes": [
+      73047025,
+      85421033
+    ],
+    "windowsCliBytes": [
+      52230144,
+      54392832
+    ],
+    "windowsTextBytes": [
+      20566528,
+      22258688
+    ],
+    "poissonCompileSecondsObserved": {
+      "linux": [
+        210.23,
+        379.378
+      ],
+      "windows": [
+        73.955,
+        120.026
+      ]
+    },
+    "compileLimit": "Historical/shared-build observations, not controlled compile benchmarks."
+  },
+  "conclusion": "Lower user-instruction counts in the primary panels. Repeatable wall improvement in this N2 panel only at Fountain 3072; Fountain 1536/Facade/older PC do not support a wall-gain claim. No memory-saving or universal speed claim."
+}
