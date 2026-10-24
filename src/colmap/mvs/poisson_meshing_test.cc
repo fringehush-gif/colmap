@@ -593,6 +593,169 @@ TEST(PoissonMeshing, GpuNormalInvalidNodeRemainsAnError) {
   EXPECT_EQ(touched, 77);
 }
 
+struct NormalSlabTestContext {
+  std::vector<PoissonNormalGpu::Record>* records = nullptr;
+  std::vector<float> values;
+  std::vector<std::uint32_t> touched;
+  std::size_t next_node = 0;
+  int ready_calls = 0;
+  int consume_calls = 0;
+  bool released = false;
+  bool throw_ready = false;
+  bool throw_consume = false;
+};
+
+void NormalSlabReady(void* opaque) {
+  auto& context = *static_cast<NormalSlabTestContext*>(opaque);
+  ++context.ready_calls;
+  if (context.throw_ready) throw std::runtime_error("ready callback");
+  if (context.records) {
+    std::memset(context.records->data(),
+                0xa5,
+                context.records->size() * sizeof(PoissonNormalGpu::Record));
+    std::vector<PoissonNormalGpu::Record>().swap(*context.records);
+  }
+  context.released = true;
+}
+
+void NormalSlabConsume(void* opaque,
+                       std::size_t begin,
+                       std::size_t count,
+                       const float* values,
+                       const std::uint32_t* touched) {
+  auto& context = *static_cast<NormalSlabTestContext*>(opaque);
+  ++context.consume_calls;
+  EXPECT_EQ(context.ready_calls, 1);
+  EXPECT_TRUE(context.released);
+  EXPECT_EQ(begin, context.next_node);
+  if (context.throw_consume) throw std::runtime_error("consume callback");
+  context.values.insert(context.values.end(), values, values + count * 3);
+  context.touched.insert(context.touched.end(), touched, touched + count);
+  context.next_node += count;
+}
+
+TEST(PoissonMeshing, GpuNormalSlabsMatchFullReadbackAfterCaptureRelease) {
+  PoissonNormalGpu::Stats stats;
+  if (!PoissonNormalGpu::Available(stats)) GTEST_SKIP() << stats.reason;
+  for (const std::size_t slab_nodes : {1, 2, 3, 5, 10, 11, 17}) {
+    SCOPED_TRACE(slab_nodes);
+    std::vector<PoissonNormalGpu::Record> records(3, MakeNormalRecord());
+    records[0].node[0] = 0;
+    records[0].coefficient[0] = 0.5f;
+    records[0].node[26] = 10;
+    records[0].coefficient[26] = 1;
+    records[0].value[0] = 1;
+    records[0].value[1] = 2;
+    records[0].value[2] = 3;
+    records[1].node[0] = 0;
+    records[1].coefficient[0] = 0.25f;
+    records[1].value[0] = 4;
+    records[1].value[1] = 8;
+    records[1].value[2] = 12;
+    records[2].node[12] = 3;
+    records[2].coefficient[12] = 1;
+    const std::uint32_t denormal_bits = 1;
+    std::memcpy(&records[2].value[0], &denormal_bits, sizeof(denormal_bits));
+    const PoissonNormalGpu::Record* blocks[] = {records.data(), nullptr};
+    const std::size_t counts[] = {records.size(), 0};
+    std::array<float, 33> full_values;
+    full_values.fill(-7);
+    std::array<std::uint32_t, 11> full_touched;
+    full_touched.fill(77);
+    ASSERT_TRUE(PoissonNormalGpu::Reduce(
+        blocks, counts, 2, 11, full_values.data(), full_touched.data(), stats));
+
+    NormalSlabTestContext context;
+    context.records = &records;
+    const PoissonNormalGpu::SlabCallbacks callbacks{
+        &context, NormalSlabReady, NormalSlabConsume};
+    ASSERT_TRUE(PoissonNormalGpu::ReduceSlabs(
+        blocks, counts, 2, 11, slab_nodes, callbacks, stats));
+    EXPECT_EQ(context.ready_calls, 1);
+    EXPECT_TRUE(context.released);
+    EXPECT_TRUE(records.empty());
+    EXPECT_EQ(context.next_node, 11);
+    EXPECT_EQ(context.consume_calls,
+              static_cast<int>((10 + slab_nodes) / slab_nodes));
+    ASSERT_EQ(context.values.size(), full_values.size());
+    ASSERT_EQ(context.touched.size(), full_touched.size());
+    EXPECT_EQ(
+        std::memcmp(
+            context.values.data(), full_values.data(), sizeof(full_values)),
+        0);
+    EXPECT_EQ(
+        context.touched,
+        (std::vector<std::uint32_t>(full_touched.begin(), full_touched.end())));
+    std::uint32_t result_bits = 0;
+    std::memcpy(&result_bits, &context.values[9], sizeof(result_bits));
+    EXPECT_EQ(result_bits, denormal_bits);
+  }
+}
+
+TEST(PoissonMeshing, GpuNormalSlabPrelaunchRefusalCallsNoCallbacks) {
+  const auto record = MakeNormalRecord();
+  const PoissonNormalGpu::Record* blocks[] = {&record};
+  NormalSlabTestContext context;
+  const PoissonNormalGpu::SlabCallbacks counting_callbacks{
+      &context, NormalSlabReady, NormalSlabConsume};
+  PoissonNormalGpu::Stats stats;
+  const std::size_t one[] = {1};
+  EXPECT_FALSE(PoissonNormalGpu::ReduceSlabs(
+      blocks, one, 1, 128000001, 1, counting_callbacks, stats));
+  EXPECT_STREQ(stats.reason, "shape");
+  EXPECT_FALSE(PoissonNormalGpu::ReduceSlabs(
+      blocks, one, 1, 11, 0, counting_callbacks, stats));
+  EXPECT_STREQ(stats.reason, "shape");
+  const std::size_t oversized_counts[] = {8000000};
+  EXPECT_FALSE(PoissonNormalGpu::ReduceSlabs(
+      blocks, oversized_counts, 1, 128000000, 1, counting_callbacks, stats));
+  EXPECT_STREQ(stats.reason, "workspace-budget");
+  EXPECT_EQ(context.ready_calls, 0);
+  EXPECT_EQ(context.consume_calls, 0);
+}
+
+TEST(PoissonMeshing, GpuNormalSlabValidationAndCallbackErrorsPropagate) {
+  PoissonNormalGpu::Stats stats;
+  if (!PoissonNormalGpu::Available(stats)) GTEST_SKIP() << stats.reason;
+  auto record = MakeNormalRecord();
+  record.node[0] = 1;
+  record.coefficient[0] = 1;
+  record.value[0] = 1;
+  const PoissonNormalGpu::Record* blocks[] = {&record};
+  const std::size_t counts[] = {1};
+  NormalSlabTestContext context;
+  const PoissonNormalGpu::SlabCallbacks callbacks{
+      &context, NormalSlabReady, NormalSlabConsume};
+  EXPECT_THROW(
+      PoissonNormalGpu::ReduceSlabs(blocks, counts, 1, 1, 1, callbacks, stats),
+      std::runtime_error);
+  EXPECT_EQ(context.ready_calls, 0);
+  EXPECT_EQ(context.consume_calls, 0);
+
+  record.node[0] = 0;
+  record.value[0] = std::numeric_limits<float>::quiet_NaN();
+  EXPECT_THROW(
+      PoissonNormalGpu::ReduceSlabs(blocks, counts, 1, 1, 1, callbacks, stats),
+      std::runtime_error);
+  EXPECT_EQ(context.ready_calls, 0);
+  EXPECT_EQ(context.consume_calls, 0);
+
+  record.value[0] = 1;
+  context.throw_ready = true;
+  EXPECT_THROW(
+      PoissonNormalGpu::ReduceSlabs(blocks, counts, 1, 1, 1, callbacks, stats),
+      std::runtime_error);
+  EXPECT_EQ(context.ready_calls, 1);
+  EXPECT_EQ(context.consume_calls, 0);
+  context = NormalSlabTestContext{};
+  context.throw_consume = true;
+  EXPECT_THROW(
+      PoissonNormalGpu::ReduceSlabs(blocks, counts, 1, 1, 1, callbacks, stats),
+      std::runtime_error);
+  EXPECT_EQ(context.ready_calls, 1);
+  EXPECT_EQ(context.consume_calls, 1);
+}
+
 #endif
 
 struct TrimReplayNode {

@@ -30,4 +30,23 @@ bool Reduce(const Record* const* blocks,
             std::uint32_t* touched,
             Stats& stats);
 
+// Exact bounded host readback. False is returned only before either callback.
+// ready is called after synchronous GPU completion and invalid-value checks;
+// the input capture blocks are dead at that point and may be released.
+// consume receives ascending consecutive node slabs, preserving raw float bits.
+// Callback/transfer errors after ready throw; they must never trigger replay.
+struct SlabCallbacks {
+  void* context;
+  void (*ready)(void*);
+  void (*consume)(
+      void*, std::size_t, std::size_t, const float*, const std::uint32_t*);
+};
+bool ReduceSlabs(const Record* const* blocks,
+                 const std::size_t* counts,
+                 std::size_t block_count,
+                 std::size_t node_count,
+                 std::size_t slab_nodes,
+                 const SlabCallbacks& callbacks,
+                 Stats& stats);
+
 }  // namespace PoissonNormalGpu

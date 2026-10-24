@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-24",
+  "incrementalBase": "719b98604e4d0620ba1648cf213dc185cdd50e3f",
+  "sourceBlobs": {
+    "src/thirdparty/PoissonRecon/FEMTree.inl": "ec60d413343c0708bcd1a0150e7bff380d473a8d",
+    "src/thirdparty/PoissonRecon/normal_gpu.h": "a6f47304274b77ebc08183400d08d2c2e51a1288",
+    "src/thirdparty/PoissonRecon/normal_gpu.cu": "02ceba7ea9d5c113c011dcbb2fa9383fd7ee6d8d",
+    "src/colmap/mvs/poisson_meshing_test.cc": "53629a7e9f3362d350ad927a6e684bc32aaa1a0e"
+  },
+  "scope": "Poisson meshing only; identical frozen fused inputs, default options except12workers. Not an end-to-end pipeline claim.",
+  "hardware": {
+    "cpu": "AMD Ryzen 9 3900X",
+    "gpu": "NVIDIA GeForce RTX 3080 Ti",
+    "platform": "Linux/WSL2",
+    "cudaArchitecture": "sm_86"
+  },
+  "options": {
+    "num_threads": 12,
+    "depth": 13,
+    "point_weight": 1,
+    "color": true,
+    "trim": 10
+  },
+  "inputIdentities": {
+    "Fountain P11 1536": {
+      "bytes": 11704815,
+      "xxh3_128": "ca6b80f40ef658d6c3544b78a18cb789"
+    },
+    "Fountain P11 3072": {
+      "bytes": 45267382,
+      "xxh3_128": "9f7557445a39d6d290f9582dd80ce5bb"
+    },
+    "ETH3D Facade1536": {
+      "bytes": 56222740,
+      "xxh3_128": "908a3f2e78d28205a722af6a53da4295"
+    }
+  },
+  "metricColumns": ["wall_s", "CPU_s", "peak_RSS_MiB", "sampled_mean_RSS_MiB", "instructions_G", "cache_misses_G", "user_cycles_G", "cache_references_G", "page_faults", "context_switches", "CPU_migrations"],
+  "cases": [
+    {
+      "scene": "Fountain P11",
+      "resolution": 1536,
+      "workers": 12,
+      "nPerArm": 2,
+      "order": "ABBA after warm AB",
+      "controlMean": [18.231640842495835, 113.7628545, 1396.017578125, 1169.9013786092837, 347.2630195035, 2.234516636, 430.3080585315, 10.48849587, 562325.0, 4642.5, 244.0],
+      "candidateMean": [17.401231578493025, 110.868099, 1393.98046875, 1187.8026450163397, 347.262931907, 2.21498432, 423.191469318, 10.363010246, 511312.5, 3992.0, 220.5],
+      "wallObservations_s": {
+        "control": [18.7581321040052, 17.705149580986472],
+        "candidate": [17.056094208994182, 17.74636894799187]
+      },
+      "sampledWholeDeviceGpuPeaks_MiB": {
+        "control": [2264.90234375, 1942.90234375],
+        "candidate": [2302.90234375, 2302.90234375]
+      },
+      "gpuPowerLimit_W": 379.999
+    },
+    {
+      "scene": "Fountain P11",
+      "resolution": 3072,
+      "workers": 12,
+      "nPerArm": 2,
+      "order": "ABBA after warm AB",
+      "controlMean": [51.38991681700281, 338.45336999999995, 2893.8359375, 2295.2899920194095, 1115.3671484095, 7.398233905, 1270.1014084445, 33.280076247, 1789603.0, 11424.5, 527.0],
+      "candidateMean": [51.39555045450106, 341.577677, 2779.591796875, 2270.9635339337055, 1115.593374883, 7.3923409085, 1282.7211812155, 32.7803317365, 1738406.5, 10937.0, 596.5],
+      "wallObservations_s": {
+        "control": [52.11511376799899, 50.664719866006635],
+        "candidate": [50.976440842001466, 51.81466006700066]
+      },
+      "sampledWholeDeviceGpuPeaks_MiB": {
+        "control": [1942.90234375, 3932.90234375],
+        "candidate": [3339.40234375, 3144.90234375]
+      },
+      "gpuPowerLimit_W": 379.999
+    },
+    {
+      "scene": "ETH3D Facade",
+      "resolution": 1536,
+      "workers": 12,
+      "nPerArm": 1,
+      "order": "AB; extra control run for quality only",
+      "controlMean": [70.88477771700127, 434.74526199999997, 4004.29296875, null, 1398.130507486, 9.186189138, 1640.808249805, 39.858727465, 2585977.0, 18254.0, 772.0],
+      "candidateMean": [68.42560613001115, 440.81225600000005, 3772.60546875, null, 1399.092492575, 9.310097333, 1666.760212284, 40.453506393, 2466020.0, 13435.0, 753.0],
+      "wallObservations_s": {
+        "control": [70.88477771700127],
+        "candidate": [68.42560613001115]
+      },
+      "sampledWholeDeviceGpuPeaks_MiB": {
+        "control": [2192.7265625],
+        "candidate": [1942.90234375]
+      },
+      "gpuPowerLimit_W": 379.999
+    }
+  ],
+  "validation": {
+    "gpuVisibleTests": {
+      "count": 25,
+      "failures": 0,
+      "skipped": 0
+    },
+    "maskedTests": {
+      "count": 25,
+      "failures": 0,
+      "skipped": 7
+    },
+    "serialHeaderAndPayloadExact": true,
+    "comparisonColumns": ["scene", "comparison", "vertices_A", "vertices_B", "faces_A", "faces_B", "max_bidirectional_surface_p99", "max_bidirectional_surface_p999", "max_bidirectional_surface_distance", "max_bidirectional_RGB_RMS_0to255", "max_bidirectional_RGB_mean_0to255"],
+    "comparisons": [
+      ["Fountain P11 1536", "control-repeat", 1266575, 1266578, 2501848, 2501853, 0.0, 9.541398640621973e-07, 0.0017920716638481285, 0.9149205684661865, 0.05503888055682182],
+      ["Fountain P11 1536", "candidate-repeat", 1266576, 1266577, 2501850, 2501851, 0.0, 9.610960183499514e-07, 0.0017920716638481285, 0.9107882976531982, 0.05440570041537285],
+      ["Fountain P11 1536", "control-candidate", 1266575, 1266576, 2501848, 2501850, 0.0, 9.541398640621973e-07, 1.9091731524149826e-05, 0.9206568002700806, 0.054518915712833405],
+      ["Fountain P11 3072", "control-repeat", 4605344, 4605346, 9178923, 9178927, 0.0, 2.682209014892578e-07, 6.271813601477578e-05, 0.7610594630241394, 0.04564445838332176],
+      ["Fountain P11 3072", "candidate-repeat", 4605348, 4605350, 9178930, 9178934, 0.0, 2.3321807383902549e-07, 0.000508338495142784, 0.7701368927955627, 0.04601854830980301],
+      ["Fountain P11 3072", "control-candidate", 4605344, 4605348, 9178923, 9178930, 0.0, 4.76837158203125e-07, 0.000508338495142784, 0.7569857835769653, 0.044960491359233856],
+      ["ETH3D Facade1536", "control-candidate", 5406560, 5406563, 10722955, 10722958, 0.0, 1.9110702922202824e-06, 0.010681076915003118, 1.6622079610824585, 0.08400450646877289],
+      ["ETH3D Facade1536", "control-repeat", 5406560, 5406560, 10722955, 10722955, 0.0, 1.9073486328125e-06, 0.010681076915003118, 1.6768734455108643, 0.08467268943786621],
+      ["ETH3D Facade1536", "second-control-candidate", 5406560, 5406563, 10722955, 10722958, 0.0, 1.9073487410281524e-06, 0.0017517503970745456, 1.6868252754211426, 0.0862923189997673]
+    ]
+  },
+  "counters": "Exact native PID attachment/inheritance with recorded launch gap; no complete lifetime claim. All events counted at100% running, no multiplexing. NVML whole-device.",
+  "limits": ["Fountain N2 means after excluded warm AB; one matched Facade pair plus control-only quality repeat.", "Process peak RSS is OS lifetime accounting; sampled mean RSS and whole-GPU telemetry are different quantities.", "Generic perf cache events do not identify individual cache levels. No VRAM-saving claim.", "Parallel meshes are not byte-identical; serial mesh and direct GPU readback fixture are bit-exact.", "No new Windows/GTX1080 measurement for this change."]
+}
