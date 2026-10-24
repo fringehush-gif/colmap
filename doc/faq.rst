@@ -879,11 +879,14 @@ Keep these options fixed when comparing GPU worker counts. For example::
         --PatchMatchStereo.num_threads 12 \
         --PatchMatchStereo.gpu_index 0,0 \
         --PatchMatchStereo.rotation_buffer_reuse 1 \
-        --PatchMatchStereo.checkpoint_hmm 1
+        --PatchMatchStereo.checkpoint_hmm 0
 
 Change only ``--PatchMatchStereo.gpu_index`` to ``0`` for the single-worker
 comparison. Concurrent workers need enough device memory for their combined
 problems; the faster configuration depends on the hardware and scene.
+Checkpointing is not required for this comparison. To evaluate worker counts
+with checkpointing enabled, use ``--PatchMatchStereo.checkpoint_hmm 1`` in
+both runs; keep rotation reuse fixed as well.
 
 
 .. _faq-dense-timeout:
