@@ -1073,6 +1073,17 @@ __global__ void SweepFromTopToBottom(
                                  [kCooperative && kGeomConsistencyTerm ? 3 : 1]
                                  [kBlockWidth];
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 610 && !defined(__HIPCC__)
+  // Checkpoint construction bounds both orientations by INT_MAX. Keep
+  // spatial indices signed and narrow; pitches and plane addresses stay wide.
+  const int checkpoint_rows =
+      kCheckpointHmm ? static_cast<int>(checkpoint_stripe.GetHeight()) : 1;
+  const int last_checkpoint =
+      kCheckpointHmm
+          ? (static_cast<int>(cost_map.GetHeight()) - 1) / checkpoint_rows
+          : 0;
+
+#endif
   // Probability for boundary pixels.
   constexpr float kUniformProb = 0.5f;
 
@@ -1104,13 +1115,25 @@ __global__ void SweepFromTopToBottom(
       // Source chains are independent; preserve each ordered row recurrence.
       // Compute backward message.
       float beta = kUniformProb;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 610 && !defined(__HIPCC__)
+      int checkpoint_idx = last_checkpoint;
+      int checkpoint_row = checkpoint_idx * checkpoint_rows;
+#endif
       for (int row = cost_map.GetHeight() - 1; row >= 0; --row) {
         const float cost = cost_map.Get(row, col, image_idx);
         beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
         if constexpr (kCheckpointHmm) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 610 && !defined(__HIPCC__)
+          if (row == checkpoint_row) {
+            checkpoint_beta.Set(checkpoint_idx, col, image_idx, beta);
+            checkpoint_row -= checkpoint_rows;
+            --checkpoint_idx;
+          }
+#else
           if (row % checkpoint_stripe.GetHeight() == 0)
             checkpoint_beta.Set(
                 row / checkpoint_stripe.GetHeight(), col, image_idx, beta);
+#endif
         } else {
           sel_prob_map.Set(row, col, image_idx, beta);
         }
@@ -1165,16 +1188,32 @@ __global__ void SweepFromTopToBottom(
     normal_map.GetSlice(0, col, prev_param_state.normal);
   }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 610 && !defined(__HIPCC__)
+  for (int row = 0, stripe_row = 0, checkpoint_idx = 0;
+       row < cost_map.GetHeight();
+       ++row, ++stripe_row) {
+#else
   for (int row = 0; row < cost_map.GetHeight(); ++row) {
+#endif
     if constexpr (!kCooperative) {
       // The scalar refresh has no end-of-row barrier before tile reuse.
       __syncthreads();
     }
     if constexpr (kCheckpointHmm) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 610 && !defined(__HIPCC__)
+      if (stripe_row == checkpoint_rows) {
+        stripe_row = 0;
+        ++checkpoint_idx;
+      }
+      if (stripe_row == 0 && col < cost_map.GetWidth()) {
+        const int count =
+            min(checkpoint_rows, static_cast<int>(cost_map.GetHeight()) - row);
+#else
       if (row % checkpoint_stripe.GetHeight() == 0 &&
           col < cost_map.GetWidth()) {
         const int count = min(static_cast<int>(checkpoint_stripe.GetHeight()),
                               static_cast<int>(cost_map.GetHeight()) - row);
+#endif
         const int end = row + count;
         const int first_source = kCooperative ? threadIdx.y : 0;
         const int source_step = kCooperative ? blockDim.y : 1;
@@ -1183,8 +1222,12 @@ __global__ void SweepFromTopToBottom(
           float beta =
               end == cost_map.GetHeight()
                   ? kUniformProb
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 610 && !defined(__HIPCC__)
+                  : checkpoint_beta.Get(checkpoint_idx + 1, col, image_idx);
+#else
                   : checkpoint_beta.Get(
                         end / checkpoint_stripe.GetHeight(), col, image_idx);
+#endif
           for (int beta_row = end - 1; beta_row >= row; --beta_row) {
             const float cost = cost_map.Get(beta_row, col, image_idx);
             beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
@@ -1268,10 +1311,15 @@ __global__ void SweepFromTopToBottom(
         const float alpha = likelihood_computer.ComputeForwardMessage(
             cost, forward_message[image_idx * source_stride]);
         const float beta =
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 610 && !defined(__HIPCC__)
+            kCheckpointHmm ? checkpoint_stripe.Get(stripe_row, col, image_idx)
+                           : sel_prob_map.Get(row, col, image_idx);
+#else
             kCheckpointHmm
                 ? checkpoint_stripe.Get(
                       row % checkpoint_stripe.GetHeight(), col, image_idx)
                 : sel_prob_map.Get(row, col, image_idx);
+#endif
         const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
         const float sel_prob = likelihood_computer.ComputeSelProb(
             alpha, beta, prev_prob, options.prev_sel_prob_weight);
@@ -1606,10 +1654,15 @@ __global__ void SweepFromTopToBottom(
           const float alpha = likelihood_computer.ComputeForwardMessage(
               cost, source_forward_message[image_idx * source_stride]);
           const float beta =
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 610 && !defined(__HIPCC__)
+              kCheckpointHmm ? checkpoint_stripe.Get(stripe_row, col, image_idx)
+                             : sel_prob_map.Get(row, col, image_idx);
+#else
               kCheckpointHmm
                   ? checkpoint_stripe.Get(
                         row % checkpoint_stripe.GetHeight(), col, image_idx)
                   : sel_prob_map.Get(row, col, image_idx);
+#endif
           const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
           const float prob = likelihood_computer.ComputeSelProb(
               alpha, beta, prev_prob, options.prev_sel_prob_weight);
@@ -1639,10 +1692,15 @@ __global__ void SweepFromTopToBottom(
         const float alpha = likelihood_computer.ComputeForwardMessage(
             cost, forward_message[image_idx * source_stride]);
         const float beta =
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 610 && !defined(__HIPCC__)
+            kCheckpointHmm ? checkpoint_stripe.Get(stripe_row, col, image_idx)
+                           : sel_prob_map.Get(row, col, image_idx);
+#else
             kCheckpointHmm
                 ? checkpoint_stripe.Get(
                       row % checkpoint_stripe.GetHeight(), col, image_idx)
                 : sel_prob_map.Get(row, col, image_idx);
+#endif
         const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
         const float prob = likelihood_computer.ComputeSelProb(
             alpha, beta, prev_prob, options.prev_sel_prob_weight);
