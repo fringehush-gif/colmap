@@ -524,7 +524,7 @@ TEST_F(CudaTest, SampleWindowBoundariesPreserveOutputs) {
 
 TEST_P(PatchMatchCudaTest, CheckpointHmmPreservesAlgorithmOutputs) {
   const auto [geometry, filter] = GetParam();
-  for (const int num_sources : {9, 17}) {
+  for (const int num_sources : {1, 9, 17}) {
     for (const bool reuse : {false, true}) {
       SCOPED_TRACE(::testing::Message()
                    << "sources=" << num_sources << ", reuse=" << reuse);
