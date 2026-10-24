@@ -602,6 +602,15 @@ RegularTreeNode< Dim , NodeData , DepthAndOffsetType >::NeighborKey< ParameterPa
 }
 template< unsigned int Dim , class NodeData , class DepthAndOffsetType >
 template< unsigned int ... LeftRadii , unsigned int ... RightRadii >
+typename RegularTreeNode< Dim , NodeData , DepthAndOffsetType >::template NeighborKey< ParameterPack::UIntPack< LeftRadii ... > , ParameterPack::UIntPack< RightRadii ... > >& RegularTreeNode< Dim , NodeData , DepthAndOffsetType >::NeighborKey< ParameterPack::UIntPack< LeftRadii ... > , ParameterPack::UIntPack< RightRadii ... > >::operator = ( const NeighborKey& key )
+{
+	if( this==&key ) return *this;
+	set( key._depth );
+	for( int d=0 ; d<=_depth ; d++ ) memcpy( &neighbors[d] , &key.neighbors[d] , sizeof( Neighbors< ParameterPack::UIntPack< ( LeftRadii + RightRadii + 1 ) ... > > ) );
+	return *this;
+}
+template< unsigned int Dim , class NodeData , class DepthAndOffsetType >
+template< unsigned int ... LeftRadii , unsigned int ... RightRadii >
 RegularTreeNode< Dim , NodeData , DepthAndOffsetType >::NeighborKey< ParameterPack::UIntPack< LeftRadii ... > , ParameterPack::UIntPack< RightRadii ... > >::~NeighborKey( void )
 {
 	if( neighbors ) delete[] neighbors;
@@ -862,8 +871,10 @@ template< unsigned int Dim , class NodeData , class DepthAndOffsetType >
 template< unsigned int ... LeftRadii , unsigned int ... RightRadii >
 typename RegularTreeNode< Dim , NodeData , DepthAndOffsetType >::template ConstNeighborKey< ParameterPack::UIntPack< LeftRadii ... > , ParameterPack::UIntPack< RightRadii ... > >& RegularTreeNode< Dim , NodeData , DepthAndOffsetType >::ConstNeighborKey< ParameterPack::UIntPack< LeftRadii ... > , ParameterPack::UIntPack< RightRadii ... > >::operator = ( const ConstNeighborKey& key )
 {
+	if( this==&key ) return *this;
 	set( key._depth );
 	for( int d=0 ; d<=_depth ; d++ ) memcpy( &neighbors[d] , &key.neighbors[d] , sizeof( ConstNeighbors< ParameterPack::UIntPack< ( LeftRadii + RightRadii + 1 ) ... > > ) );
+	return *this;
 }
 template< unsigned int Dim , class NodeData , class DepthAndOffsetType >
 template< unsigned int ... LeftRadii , unsigned int ... RightRadii >

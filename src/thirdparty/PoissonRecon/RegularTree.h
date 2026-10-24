@@ -256,6 +256,7 @@ namespace PoissonRecon
 
 			NeighborKey( void );
 			NeighborKey( const NeighborKey& key );
+			NeighborKey& operator = ( const NeighborKey& key );
 			~NeighborKey( void );
 
 			int depth( void ) const { return _depth; }
