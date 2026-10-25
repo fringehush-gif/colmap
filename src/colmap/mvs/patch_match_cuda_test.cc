@@ -16,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <limits>
@@ -353,6 +354,38 @@ void ExpectNonempty(const Result& result,
     EXPECT_EQ(consistent_pixels, 0);
   }
 }
+
+class ScopedPatchMatchBackend {
+ public:
+  explicit ScopedPatchMatchBackend(const char* value) {
+    const char* current = std::getenv("COLMAP_PATCH_MATCH_BACKEND");
+    if (current) {
+      previous_ = current;
+      had_previous_ = true;
+    }
+    Set(value);
+  }
+
+  ~ScopedPatchMatchBackend() {
+    Set(had_previous_ ? previous_.c_str() : nullptr);
+  }
+
+ private:
+  static void Set(const char* value) {
+#ifdef _WIN32
+    _putenv_s("COLMAP_PATCH_MATCH_BACKEND", value ? value : "");
+#else
+    if (value) {
+      setenv("COLMAP_PATCH_MATCH_BACKEND", value, 1);
+    } else {
+      unsetenv("COLMAP_PATCH_MATCH_BACKEND");
+    }
+#endif
+  }
+
+  std::string previous_;
+  bool had_previous_ = false;
+};
 
 class CudaTest : public ::testing::Test {
  protected:
@@ -898,6 +931,70 @@ TEST_P(PatchMatchCudaTest, SeparateCalibrationsMatchSerialOnSameDevice) {
       ExpectEquivalent(expected_b, actual_b);
     }
   }
+}
+
+TEST_F(CudaTest, ExperimentalAcmhUsesOnlyPerViewCudaPath) {
+  ScopedPatchMatchBackend backend("experimental-acmh-weighted");
+  EXPECT_FALSE(CanPairPatchMatchViews(47, 35, 47, 35, false));
+  EXPECT_FALSE(CanBatchPatchMatchViews({{47, 35}, {47, 35}, {47, 35}}, false));
+  Inputs inputs = MakeInputs(0);
+  PatchMatchOptions options = MakeOptions(false, false, false);
+  options.window_radius = 5;
+  options.window_step = 1;
+  EXPECT_ANY_THROW(RunPatchMatch(&inputs, options));
+  options.window_step = 2;
+  options.window_radius = 4;
+  EXPECT_ANY_THROW(RunPatchMatch(&inputs, options));
+  {
+    ScopedPatchMatchBackend unknown("unknown-backend");
+    options.window_radius = 5;
+    EXPECT_ANY_THROW(RunPatchMatch(&inputs, options));
+  }
+}
+
+TEST_F(CudaTest, ExperimentalAcmhOddPartialTilesKeepFacingNormals) {
+  Inputs inputs = MakeInputs(0);
+  PatchMatchOptions options = MakeOptions(false, false, false);
+  options.window_radius = 5;
+  options.window_step = 2;
+  options.num_samples = 15;
+  options.num_iterations = 2;
+  Result native;
+  {
+    ScopedPatchMatchBackend backend("default");
+    options.window_step = 1;
+    native = RunPatchMatch(&inputs, options);
+  }
+  options.window_step = 2;
+  ScopedPatchMatchBackend backend("experimental-acmh-weighted");
+  const Result photo = RunPatchMatch(&inputs, options);
+  ExpectNonempty(photo, inputs, false);
+  const float fx = 48.0f;
+  const float fy = 57.0f;
+  const float cx = 47.0f * 0.5f + 0.7f;
+  const float cy = 35.0f * 0.5f - 1.1f;
+  for (const Result* result : {static_cast<const Result*>(&native), &photo}) {
+    size_t checked = 0;
+    for (size_t row = 0; row < result->depths.GetHeight(); ++row) {
+      for (size_t col = 0; col < result->depths.GetWidth(); ++col) {
+        if (result->depths.Get(row, col) <= 0.0f) continue;
+        const float nx = result->normals.Get(row, col, 0);
+        const float ny = result->normals.Get(row, col, 1);
+        const float nz = result->normals.Get(row, col, 2);
+        EXPECT_TRUE(std::isfinite(nx) && std::isfinite(ny) &&
+                    std::isfinite(nz));
+        EXPECT_LT(
+            nx * ((col + 0.5f - cx) / fx) + ny * ((row + 0.5f - cy) / fy) + nz,
+            0.0f);
+        ++checked;
+      }
+    }
+    EXPECT_GT(checked, 0);
+  }
+  options.geom_consistency = true;
+  options.filter = true;
+  const Result geo = RunPatchMatch(&inputs, options);
+  ExpectNonempty(geo, inputs, true);
 }
 
 INSTANTIATE_TEST_SUITE_P(PhotoAndGeometry,

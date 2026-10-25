@@ -21,6 +21,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <sstream>
@@ -1017,6 +1018,10 @@ struct SweepOptions {
   float filter_geom_consistency_max_cost = 1.0f;
 };
 
+#ifndef COLMAP_HIP_ENABLED
+#include "experimental_acmh_backend.cuh"
+#endif
+
 constexpr int kCooperativeSampleBatchSize = 4;
 constexpr int kCooperativeSampleWindowSize = 16;
 
@@ -1993,6 +1998,21 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   // Wait for all initializations to finish.
   CUDA_SYNC_AND_CHECK();
 
+  const char* backend = std::getenv("COLMAP_PATCH_MATCH_BACKEND");
+  const bool experimental =
+      backend && std::strcmp(backend, "experimental-acmh-weighted") == 0;
+  THROW_CHECK(!backend || backend[0] == '\0' ||
+              std::strcmp(backend, "default") == 0 || experimental)
+      << "Unknown COLMAP_PATCH_MATCH_BACKEND";
+  if (experimental) {
+    THROW_CHECK_EQ(kWindowSize, 11) << "Experimental ACMH requires radius 5";
+    THROW_CHECK_EQ(kWindowStep, 2) << "Experimental ACMH requires step 2";
+#ifdef COLMAP_HIP_ENABLED
+    THROW_CHECK(false) << "Experimental ACMH requires CUDA";
+#endif
+    LOG(INFO) << "Experimental weighted ACMH backend, step 2";
+  }
+
   CudaTimer total_timer;
   CudaTimer init_timer;
 
@@ -2017,6 +2037,21 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   CUDA_SYNC_AND_CHECK();
 
   init_timer.Print("Initialization");
+
+#ifndef COLMAP_HIP_ENABLED
+  std::unique_ptr<GpuMat<float>> donor_scores;
+  std::unique_ptr<GpuMat<float>> alternate_donor_scores;
+  if (experimental) {
+    const size_t width = cost_map_->GetWidth();
+    const size_t height = cost_map_->GetHeight();
+    donor_scores = std::make_unique<GpuMat<float>>(width, height);
+    alternate_donor_scores = std::make_unique<GpuMat<float>>(height, width);
+    const dim3 grid((width + 31) / 32, height);
+    experimental_acmh::InitialDonorMean<<<grid, 32>>>(cost_map_->View(),
+                                                      donor_scores->View());
+    CUDA_SYNC_AND_CHECK();
+  }
+#endif
 
   const float total_num_steps = options_.num_iterations * 4;
 
@@ -2088,7 +2123,46 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
                                                    cost_map_->GetHeight())
                          : no_checkpoint;
 
-#define CALL_SWEEP_FUNC                                           \
+#ifndef COLMAP_HIP_ENABLED
+#define EXPERIMENTAL_SWEEP_FUNC                                              \
+  if constexpr (kWindowSize == 11 && kWindowStep == 2) {                     \
+    experimental_acmh::Launch<kWindowSize,                                   \
+                              kWindowStep,                                   \
+                              kGeomConsistencyTerm,                          \
+                              kFilterPhotoConsistency,                       \
+                              kFilterGeomConsistency,                        \
+                              kCheckpointHmm>(                               \
+        MakeRefCamera(ref_K_host_[rotation_in_half_pi_],                     \
+                      ref_inv_K_host_[rotation_in_half_pi_]),                \
+        cost_map_->View(),                                                   \
+        depth_map_->View(),                                                  \
+        normal_map_->View(),                                                 \
+        PackedConsistencyMaskView{consistency_mask_->View()},                \
+        kCheckpointHmm ? prev_sel_prob_map_->View() : sel_prob_map_->View(), \
+        prev_sel_prob_map_->View(),                                          \
+        checkpoints,                                                         \
+        beta_stripe,                                                         \
+        ref_image_texture_->GetObj(),                                        \
+        ref_image_->sum_image->View(),                                       \
+        ref_image_->squared_sum_image->View(),                               \
+        src_images_texture_->GetObj(),                                       \
+        src_depth_maps_texture_ ? src_depth_maps_texture_->GetObj() : 0,     \
+        poses_texture_[rotation_in_half_pi_]->GetObj(),                      \
+        sweep_options,                                                       \
+        static_cast<unsigned int>(iter * 4 + sweep),                         \
+        donor_scores->View());                                               \
+  }
+#define CALL_SWEEP_FUNC     \
+  if (experimental) {       \
+    EXPERIMENTAL_SWEEP_FUNC \
+  } else {                  \
+    NATIVE_SWEEP_FUNC       \
+  }
+#else
+#define CALL_SWEEP_FUNC NATIVE_SWEEP_FUNC
+#endif
+
+#define NATIVE_SWEEP_FUNC                                         \
   SweepFromTopToBottom<kWindowSize,                               \
                        kWindowStep,                               \
                        kGeomConsistencyTerm,                      \
@@ -2169,10 +2243,24 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
       }
 
 #undef CALL_SWEEP_FUNC
+#undef NATIVE_SWEEP_FUNC
+#ifndef COLMAP_HIP_ENABLED
+#undef EXPERIMENTAL_SWEEP_FUNC
+#endif
 
       CUDA_SYNC_AND_CHECK();
 
       Rotate();
+#ifndef COLMAP_HIP_ENABLED
+      if (experimental) {
+        THROW_CHECK_EQ(alternate_donor_scores->GetWidth(),
+                       cost_map_->GetWidth());
+        THROW_CHECK_EQ(alternate_donor_scores->GetHeight(),
+                       cost_map_->GetHeight());
+        donor_scores->Rotate(alternate_donor_scores.get());
+        donor_scores.swap(alternate_donor_scores);
+      }
+#endif
 
       // Rotate selected image map.
       if (last_sweep && options_.filter) {
@@ -2333,11 +2421,17 @@ bool PairFitsResidentWaves(size_t first_grid,
 }
 }  // namespace
 
+static bool NativePatchMatchBackendRequested() {
+  const char* backend = std::getenv("COLMAP_PATCH_MATCH_BACKEND");
+  return !backend || backend[0] == '\0' || std::strcmp(backend, "default") == 0;
+}
+
 bool CanPairPatchMatchViews(size_t first_width,
                             size_t first_height,
                             size_t second_width,
                             size_t second_height,
                             bool geometric) {
+  if (!NativePatchMatchBackendRequested()) return false;
   if (!first_width || !first_height || !second_width || !second_height) {
     return false;
   }
@@ -2349,6 +2443,7 @@ bool CanPairPatchMatchViews(size_t first_width,
 
 bool CanBatchPatchMatchViews(
     const std::vector<std::pair<size_t, size_t>>& view_shapes, bool geometric) {
+  if (!NativePatchMatchBackendRequested()) return false;
   const size_t count = view_shapes.size();
   if (count < 3 || count > 5) return false;
   const size_t width = view_shapes.front().first;
@@ -2452,6 +2547,8 @@ bool CanBatchPatchMatchViews(
 // admission; the controller admits larger groups separately.
 void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
                         const std::vector<cudaStream_t>& streams) {
+  THROW_CHECK(NativePatchMatchBackendRequested())
+      << "Experimental backend uses per-view PatchMatchCuda::Run";
   THROW_CHECK_GE(views.size(), 2);
   THROW_CHECK_LE(views.size(), 5);
   THROW_CHECK_EQ(streams.size(), views.size());
