@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <OpenImageIO/imagebufalgo.h>
@@ -462,6 +463,53 @@ TEST(Bitmap, RescaleFilters) {
   box.Rescale(1, 1, Bitmap::RescaleFilter::kBox);
 
   EXPECT_NE(bilinear.GetPixel(0, 0)->r, box.GetPixel(0, 0)->r);
+}
+
+TEST(Bitmap, RescaleSameGridPreservesPixelsAndStorage) {
+  for (const bool as_rgb : {false, true}) {
+    for (const auto filter :
+         {Bitmap::RescaleFilter::kBilinear, Bitmap::RescaleFilter::kBox}) {
+      Bitmap bitmap(7, 5, as_rgb);
+      auto& pixels = bitmap.RowMajorData();
+      for (size_t idx = 0; idx < pixels.size(); ++idx) {
+        pixels[idx] = static_cast<uint8_t>((idx * 37 + 11) % 256);
+      }
+      const auto expected = pixels;
+      const auto* original_storage = pixels.data();
+
+      bitmap.Rescale(7, 5, filter);
+
+      EXPECT_EQ(bitmap.Width(), 7);
+      EXPECT_EQ(bitmap.Height(), 5);
+      EXPECT_EQ(bitmap.Channels(), as_rgb ? 3 : 1);
+      EXPECT_EQ(bitmap.RowMajorData().data(), original_storage);
+      EXPECT_EQ(bitmap.RowMajorData(), expected);
+    }
+  }
+}
+
+TEST(Bitmap, RescaleOnlyOneAxisChanges) {
+  for (const bool as_rgb : {false, true}) {
+    for (const auto filter :
+         {Bitmap::RescaleFilter::kBilinear, Bitmap::RescaleFilter::kBox}) {
+      for (const auto dimensions : {std::pair{9, 5}, std::pair{7, 3}}) {
+        Bitmap bitmap(7, 5, as_rgb);
+        auto& pixels = bitmap.RowMajorData();
+        for (size_t idx = 0; idx < pixels.size(); ++idx) {
+          pixels[idx] = static_cast<uint8_t>((idx * 37 + 11) % 256);
+        }
+
+        bitmap.Rescale(dimensions.first, dimensions.second, filter);
+
+        EXPECT_EQ(bitmap.Width(), dimensions.first);
+        EXPECT_EQ(bitmap.Height(), dimensions.second);
+        EXPECT_EQ(bitmap.Channels(), as_rgb ? 3 : 1);
+        EXPECT_EQ(bitmap.NumBytes(),
+                  static_cast<size_t>(dimensions.first * dimensions.second) *
+                      bitmap.Channels());
+      }
+    }
+  }
 }
 
 TEST(Bitmap, Thumbnail) {
