@@ -68,8 +68,7 @@ bool DefaultReferencePairSettings(const PatchMatchOptions& o) {
          o.filter_min_num_consistent == d.filter_min_num_consistent &&
          o.allow_missing_files == d.allow_missing_files &&
          o.write_consistency_graph == d.write_consistency_graph &&
-         !o.rotation_buffer_reuse && !o.checkpoint_hmm &&
-         o.geom_consistency == o.filter;
+         !o.checkpoint_hmm && o.geom_consistency == o.filter;
 }
 }  // namespace
 #endif
@@ -721,7 +720,12 @@ void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
   CUDA_SYNC_AND_CHECK();
   size_t free_after_second = 0, total_after_second = 0;
   CUDA_SAFE_CALL(cudaMemGetInfo(&free_after_second, &total_after_second));
-  if (free_after_second < owned_peak + kExternalMargin) {
+  // A banked rotation has allocated both orientations and masks in each
+  // constructor. The native path can still allocate rotation outputs.
+  const size_t remaining_needed = options.rotation_buffer_reuse
+                                      ? kExternalMargin
+                                      : owned_peak + kExternalMargin;
+  if (free_after_second < remaining_needed) {
     second_cuda.reset();
     finish_first_native();
     return;

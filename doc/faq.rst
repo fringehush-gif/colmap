@@ -869,7 +869,10 @@ increase host memory use and CPU work, even when elapsed time decreases.
 The CUDA options ``--PatchMatchStereo.rotation_buffer_reuse 1`` and
 ``--PatchMatchStereo.checkpoint_hmm 1`` can change this tradeoff without changing
 the reconstruction settings. Rotation reuse retains additional GPU buffers to
-avoid repeated allocation. HMM checkpointing reduces retained message storage
+avoid repeated allocation. With one CUDA worker, eligible references can also
+be paired while rotation reuse is enabled. Pairing requires enough device
+occupancy and available memory; other references run individually.
+HMM checkpointing reduces retained message storage
 but adds recurrence replay and source-plane copies. Both default to false;
 measure elapsed time and peak memory on the intended workload and hardware.
 Keep these options fixed when comparing GPU worker counts. For example::

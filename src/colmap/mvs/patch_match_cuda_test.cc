@@ -383,7 +383,7 @@ TEST_P(SourceUploadTest, DirectUploadPreservesAlgorithmOutputs) {
   ExpectEquivalent(padded, direct);
 }
 
-TEST_F(CudaTest, PairedDefaultSweepsPreserveIndependentOutputs) {
+void ExpectPairedDefaultSweepOutputs(const bool reuse) {
   const auto make_problem = [](Inputs& inputs) {
     PatchMatch::Problem problem;
     problem.ref_image_idx = 0;
@@ -409,12 +409,13 @@ TEST_F(CudaTest, PairedDefaultSweepsPreserveIndependentOutputs) {
     }
   };
   for (const bool geometry : {false, true}) {
-    SCOPED_TRACE(geometry);
+    SCOPED_TRACE(::testing::Message()
+                 << "geometry=" << geometry << " reuse=" << reuse);
     // Odd, differently calibrated references and nine sources exercise both
     // orientations and a final consistency-mask byte tail.
     Inputs first_inputs = MakeInputs(0, 9);
     Inputs second_inputs = MakeInputs(1, 9);
-    auto options = MakeOptions(geometry, geometry, false);
+    auto options = MakeOptions(geometry, geometry, reuse);
     const PatchMatchOptions defaults;
     options.window_radius = defaults.window_radius;
     options.window_step = defaults.window_step;
@@ -430,6 +431,11 @@ TEST_F(CudaTest, PairedDefaultSweepsPreserveIndependentOutputs) {
     };
     const auto expected_first = serial(first_problem);
     const auto expected_second = serial(second_problem);
+    if (reuse && geometry) {
+      const auto& first_mask = std::get<3>(expected_first);
+      const auto& second_mask = std::get<3>(expected_second);
+      EXPECT_FALSE(first_mask.empty() && second_mask.empty());
+    }
     PatchMatchCuda first(options, first_problem);
     PatchMatchCuda second(options, second_problem);
     Streams streams;
@@ -453,6 +459,14 @@ TEST_F(CudaTest, PairedDefaultSweepsPreserveIndependentOutputs) {
     compare(expected_first, first);
     compare(expected_second, second);
   }
+}
+
+TEST_F(CudaTest, PairedDefaultSweepsPreserveIndependentOutputs) {
+  ExpectPairedDefaultSweepOutputs(false);
+}
+
+TEST_F(CudaTest, PairedBankedRotationPreservesIndependentOutputs) {
+  ExpectPairedDefaultSweepOutputs(true);
 }
 
 TEST_F(CudaTest, ExplicitAndDefaultStreamHelpers) {

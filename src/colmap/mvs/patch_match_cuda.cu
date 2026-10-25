@@ -2245,6 +2245,23 @@ size_t PatchMatchCuda::PairPeakBytes() const {
     add(&textures, texture_bytes(pose, sizeof(float)));
   }
   add(&resident, multiply(textures, 2));
+  if (options_.rotation_buffer_reuse) {
+    // Both orientation banks and both texture arrays already exist. Charge
+    // their actual pitches rather than estimating from the current layout.
+    add(&resident, mat_bytes(alternate_depth_map_));
+    add(&resident, mat_bytes(alternate_normal_map_));
+    add(&resident, mat_bytes(alternate_ref_image_->image));
+    add(&resident, mat_bytes(alternate_ref_image_->sum_image));
+    add(&resident, mat_bytes(alternate_ref_image_->squared_sum_image));
+    add(&resident,
+        multiply(texture_bytes(alternate_ref_image_texture_, sizeof(uint8_t)),
+                 2));
+    if (options_.filter) {
+      add(&resident, mat_bytes(consistency_mask_));
+      add(&resident, mat_bytes(alternate_consistency_mask_));
+    }
+    return resident;
+  }
   // Native Rotate temporarily owns old and new reference/depth/normal arrays.
   // Double that transient bound to cover opposite-orientation pitch changes.
   size_t transient = 0;
@@ -2331,7 +2348,8 @@ void RunPatchMatchPair(PatchMatchCuda& first,
     THROW_CHECK_EQ(p.options_.window_step, 1);
     THROW_CHECK_EQ(p.options_.num_iterations, 5);
     THROW_CHECK(!p.options_.checkpoint_hmm);
-    THROW_CHECK(!p.options_.rotation_buffer_reuse);
+    THROW_CHECK_EQ(p.options_.rotation_buffer_reuse,
+                   first.options_.rotation_buffer_reuse);
     THROW_CHECK_EQ(p.rotation_in_half_pi_, 0);
     THROW_CHECK(p.hmm_checkpoint_ == nullptr);
     THROW_CHECK(p.sel_prob_map_ != nullptr);
@@ -2382,10 +2400,12 @@ void RunPatchMatchPair(PatchMatchCuda& first,
 
   const auto prepare_last_mask = [](PatchMatchCuda& p, bool last) {
     if (!last || !p.options_.filter) return;
-    p.consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
-        p.cost_map_->GetWidth(),
-        p.cost_map_->GetHeight(),
-        PackedConsistencyMaskDepth(p.cost_map_->GetDepth()));
+    if (!p.options_.rotation_buffer_reuse) {
+      p.consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
+          p.cost_map_->GetWidth(),
+          p.cost_map_->GetHeight(),
+          PackedConsistencyMaskDepth(p.cost_map_->GetDepth()));
+    }
     p.consistency_mask_->FillWithScalar(0);
   };
   const auto launch = [](PatchMatchCuda& p,
@@ -2463,12 +2483,17 @@ void RunPatchMatchPair(PatchMatchCuda& first,
   };
   const auto rotate_last_mask = [](PatchMatchCuda& p, bool last) {
     if (!last || !p.options_.filter) return;
-    std::unique_ptr<GpuMat<uint8_t>> rotated(new GpuMat<uint8_t>(
-        p.cost_map_->GetWidth(),
-        p.cost_map_->GetHeight(),
-        PackedConsistencyMaskDepth(p.cost_map_->GetDepth())));
-    p.consistency_mask_->Rotate(rotated.get());
-    p.consistency_mask_.swap(rotated);
+    if (p.options_.rotation_buffer_reuse) {
+      // Rotate() swapped the produced mask into the alternate owner.
+      p.alternate_consistency_mask_->Rotate(p.consistency_mask_.get());
+    } else {
+      std::unique_ptr<GpuMat<uint8_t>> rotated(new GpuMat<uint8_t>(
+          p.cost_map_->GetWidth(),
+          p.cost_map_->GetHeight(),
+          PackedConsistencyMaskDepth(p.cost_map_->GetDepth())));
+      p.consistency_mask_->Rotate(rotated.get());
+      p.consistency_mask_.swap(rotated);
+    }
     p.consistency_mask_valid_ = true;
   };
 
