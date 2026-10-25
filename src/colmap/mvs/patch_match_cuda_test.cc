@@ -19,6 +19,7 @@
 #include <cstring>
 #include <future>
 #include <limits>
+#include <memory>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -475,6 +476,126 @@ TEST_F(CudaTest, PairedBankedRotationPreservesIndependentOutputs) {
 
 TEST_F(CudaTest, PairedTallInitialCostStripeTailsPreserveOutputs) {
   ExpectPairedDefaultSweepOutputs(false, true);
+}
+
+void ExpectReferenceBatchOutputs(const size_t count,
+                                 const bool geometry,
+                                 const bool reuse) {
+  const auto make_problem = [](Inputs& images) {
+    PatchMatch::Problem problem;
+    problem.ref_image_idx = 0;
+    for (size_t i = 1; i < images.images.size(); ++i)
+      problem.src_image_idxs.push_back(static_cast<int>(i));
+    problem.images = &images.images;
+    problem.depth_maps = &images.depths;
+    problem.normal_maps = &images.normals;
+    return problem;
+  };
+  auto options = MakeOptions(geometry, geometry, reuse);
+  const PatchMatchOptions defaults;
+  options.window_radius = defaults.window_radius;
+  options.window_step = defaults.window_step;
+  options.num_samples = defaults.num_samples;
+  options.num_iterations = defaults.num_iterations;
+  options.sigma_spatial = options.window_radius;
+  std::vector<std::unique_ptr<Inputs> > inputs;
+  std::vector<PatchMatch::Problem> problems;
+  for (size_t i = 0; i < count; ++i) {
+    inputs.push_back(std::make_unique<Inputs>(
+        MakeInputs(static_cast<int>(i % 2), 9, i % 2 ? 153 : 149)));
+    problems.push_back(make_problem(*inputs.back()));
+  }
+  const auto construct = [&]() {
+    std::vector<std::unique_ptr<PatchMatchCuda> > owners;
+    for (const auto& problem : problems)
+      owners.push_back(std::make_unique<PatchMatchCuda>(options, problem));
+    return owners;
+  };
+  const auto read = [](const PatchMatchCuda& cuda) {
+    return std::make_tuple(cuda.GetDepthMap(),
+                           cuda.GetNormalMap(),
+                           cuda.GetSelProbMap(),
+                           cuda.GetConsistentImageIdxs());
+  };
+  struct Streams {
+    std::vector<cudaStream_t> values;
+    explicit Streams(size_t count) : values(count, nullptr) {
+      for (auto& stream : values)
+        CUDA_SAFE_CALL(
+            cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    }
+    ~Streams() {
+      for (auto stream : values)
+        if (stream) (void)cudaStreamDestroy(stream);
+    }
+  } streams(count);
+  auto incumbent = construct();
+  for (size_t i = 0; i < count; i += 2) {
+    if (i + 1 < count) {
+      RunPatchMatchPair(*incumbent[i],
+                        *incumbent[i + 1],
+                        streams.values[i],
+                        streams.values[i + 1]);
+    } else {
+      incumbent[i]->Run();
+    }
+  }
+  using Snapshot =
+      std::tuple<DepthMap, NormalMap, Mat<float>, std::vector<int> >;
+  std::vector<Snapshot> expected;
+  for (const auto& owner : incumbent) expected.push_back(read(*owner));
+  incumbent.clear();
+  auto batch = construct();
+  std::vector<PatchMatchCuda*> views;
+  for (auto& owner : batch) views.push_back(owner.get());
+  RunPatchMatchBatch(views, streams.values);
+  for (size_t i = 0; i < count; ++i) {
+    SCOPED_TRACE(::testing::Message()
+                 << "count=" << count << " view=" << i
+                 << " geometry=" << geometry << " reuse=" << reuse);
+    const auto actual = read(*batch[i]);
+    ExpectExactlyEqual(std::get<0>(expected[i]), std::get<0>(actual));
+    ExpectExactlyEqual(std::get<1>(expected[i]), std::get<1>(actual));
+    ExpectExactlyEqual(std::get<2>(expected[i]), std::get<2>(actual));
+    EXPECT_EQ(std::get<3>(expected[i]), std::get<3>(actual));
+  }
+}
+
+TEST_F(CudaTest, ThreeViewPhotoBatchPreservesOddTallOutputs) {
+  ExpectReferenceBatchOutputs(3, false, false);
+}
+
+TEST_F(CudaTest, FiveViewPhotoBatchPreservesOddTallOutputs) {
+  ExpectReferenceBatchOutputs(5, false, false);
+}
+
+TEST_F(CudaTest, FiveViewGeometricBankedBatchPreservesFinalMask) {
+  ExpectReferenceBatchOutputs(5, true, true);
+}
+
+TEST_F(CudaTest, BatchAdmissionCanBeatIneligiblePairs) {
+  // Search grid widths against the queried device rather than baking in an
+  // sm86/SM-count cutoff. This exercises the large-grid path where the
+  // incumbent schedules singletons but the five-view aggregate saves waves.
+  bool found = false;
+  for (size_t width = 64; width <= 65536; width += 64) {
+    const std::vector<std::pair<size_t, size_t> > shapes(5, {width, 3});
+    if (!CanPairPatchMatchViews(width, 3, width, 3, false) &&
+        CanBatchPatchMatchViews(shapes, false)) {
+      found = true;
+      break;
+    }
+  }
+  if (!found) GTEST_SKIP() << "No beneficial five-grid case on this device";
+  EXPECT_TRUE(found);
+}
+
+TEST_F(CudaTest, BatchAdmissionRejectsUnsupportedGroupSizes) {
+  EXPECT_FALSE(CanBatchPatchMatchViews({{47, 149}, {39, 153}}, false));
+  EXPECT_FALSE(CanBatchPatchMatchViews(
+      std::vector<std::pair<size_t, size_t> >(6, {47, 149}), false));
+  EXPECT_FALSE(
+      CanBatchPatchMatchViews({{47, 149}, {0, 153}, {47, 149}}, false));
 }
 
 TEST_F(CudaTest, ExplicitAndDefaultStreamHelpers) {
