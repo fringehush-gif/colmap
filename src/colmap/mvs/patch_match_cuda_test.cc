@@ -596,6 +596,44 @@ TEST_F(CudaTest, SampleWindowBoundariesPreserveOutputs) {
   }
 }
 
+TEST_F(CudaTest, DuplicatedSourcesPreservePhotoGeometryAcrossCacheBoundary) {
+  // The same source bitmap, calibration, and pose occupy every source layer.
+  // Sampling can choose different IDs as the CDF length changes, but each
+  // selected source contributes the same photo cost. Compare geometry only:
+  // selection maps necessarily have different source dimensions.
+  const Inputs seed = MakeInputs(0, 1);
+  const auto duplicate_source = [&seed](const int num_sources) {
+    Inputs inputs;
+    inputs.images.push_back(seed.images[0]);
+    inputs.depths.push_back(seed.depths[0]);
+    inputs.normals.push_back(seed.normals[0]);
+    for (int i = 0; i < num_sources; ++i) {
+      inputs.images.push_back(seed.images[1]);
+      inputs.depths.push_back(seed.depths[1]);
+      inputs.normals.push_back(seed.normals[1]);
+    }
+    return inputs;
+  };
+
+  PatchMatchOptions options = MakeOptions(false, false, false);
+  options.window_radius = 5;
+  options.window_step = 1;
+  options.num_samples = 15;
+  options.num_iterations = 5;
+  options.sigma_spatial = options.window_radius;
+
+  Inputs nine_sources = duplicate_source(9);
+  Inputs thirty_three_sources = duplicate_source(33);
+  const Result nine = RunPatchMatch(&nine_sources, options);
+  const Result thirty_three = RunPatchMatch(&thirty_three_sources, options);
+  ExpectNonempty(nine, nine_sources, false);
+  ExpectNonempty(thirty_three, thirty_three_sources, false);
+  EXPECT_EQ(nine.selection.GetDepth(), 9);
+  EXPECT_EQ(thirty_three.selection.GetDepth(), 33);
+  ExpectExactlyEqual(nine.depths, thirty_three.depths);
+  ExpectExactlyEqual(nine.normals, thirty_three.normals);
+}
+
 TEST_P(PatchMatchCudaTest, CheckpointHmmPreservesAlgorithmOutputs) {
   const auto [geometry, filter] = GetParam();
   for (const int num_sources : {1, 9, 17}) {
