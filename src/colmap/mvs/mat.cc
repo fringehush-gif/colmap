@@ -463,8 +463,30 @@ void Mat<float>::Write(const std::filesystem::path& path) const {
   THROW_CHECK_FILE_OPEN(file, path);
   SetFullPrecTextStream(file);
   file << width_ << "&" << height_ << "&" << depth_ << "&";
-  WriteBinaryLittleEndian<float>(&file, {data_.data(), data_.size()});
+  THROW_CHECK(file) << path;
+  if (IsLittleEndian()) {
+    // Match the native bulk reader without a per-float ostream call. Chunk by
+    // bytes so neither size_t multiplication nor streamsize conversion wraps.
+    THROW_CHECK_LE(data_.size(),
+                   std::numeric_limits<size_t>::max() / sizeof(float));
+    const size_t num_bytes = data_.size() * sizeof(float);
+    const size_t max_chunk_bytes = static_cast<size_t>(
+        std::min<std::uintmax_t>(std::numeric_limits<size_t>::max(),
+                                 std::numeric_limits<std::streamsize>::max()));
+    const char* payload = reinterpret_cast<const char*>(data_.data());
+    for (size_t offset = 0; offset < num_bytes;) {
+      const size_t chunk_bytes = std::min(num_bytes - offset, max_chunk_bytes);
+      file.write(payload + offset, static_cast<std::streamsize>(chunk_bytes));
+      THROW_CHECK(file) << path;
+      offset += chunk_bytes;
+    }
+  } else {
+    // Keep the canonical little-endian payload on big-endian hosts.
+    WriteBinaryLittleEndian<float>(&file, {data_.data(), data_.size()});
+    THROW_CHECK(file) << path;
+  }
   file.close();
+  THROW_CHECK(file) << path;
 }
 
 }  // namespace mvs

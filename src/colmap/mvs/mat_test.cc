@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <utility>
@@ -121,6 +122,64 @@ TEST(Mat, Fill) {
   mat.Set(1, 0, 0, 10);
   mat.Set(1, 0, 1, 10);
   mat.Set(1, 0, 2, 10);
+}
+
+TEST_F(MatFileTest, WritePreservesCanonicalHeaderAndPlanarFloatBits) {
+  const std::vector<uint32_t> bits = {0x00000000,
+                                      0x80000000,
+                                      0x3f800000,
+                                      0xbf800000,
+                                      0x00000001,
+                                      0x80000001,
+                                      0x00800000,
+                                      0x80800000,
+                                      0x7f7fffff,
+                                      0xff7fffff,
+                                      0x7f800000,
+                                      0xff800000,
+                                      0x7fc12345,
+                                      0xffc54321,
+                                      0x3eaaaaab,
+                                      0x41200000,
+                                      0x12345678,
+                                      0x87654321};
+  Mat<float> mat(3, 2, 3);
+  static_assert(sizeof(float) == sizeof(uint32_t));
+  std::memcpy(mat.GetPtr(), bits.data(), bits.size() * sizeof(uint32_t));
+  mat.Write(path_);
+  std::ifstream file(path_, std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(file)),
+                          std::istreambuf_iterator<char>());
+  EXPECT_EQ(bytes, "3&2&3&" + LittleEndianFloats(bits));
+  Mat<float> readback;
+  readback.Read(path_);
+  for (size_t i = 0; i < bits.size(); ++i) {
+    EXPECT_EQ(FloatBits(readback.GetPtr()[i]), bits[i]);
+  }
+}
+
+TEST_F(MatFileTest, WriteEmptyPreservesLegacyHeader) {
+  Mat<float>().Write(path_);
+  std::ifstream file(path_, std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(file)),
+                          std::istreambuf_iterator<char>());
+  EXPECT_EQ(bytes, "0&0&0&");
+}
+
+TEST_F(MatFileTest, WriteReportsBufferedOrCloseFailure) {
+#if defined(__linux__)
+  if (!std::filesystem::exists("/dev/full")) {
+    GTEST_SKIP() << "Linux failure sink unavailable";
+  }
+  // This tiny payload can fit in the stream buffer: close must be checked too.
+  Mat<float> mat(1, 1, 1);
+  EXPECT_THROW(mat.Write("/dev/full"), std::exception);
+  // Force a payload larger than the stream buffer to exercise write failure.
+  Mat<float> larger(8192, 1, 1);
+  EXPECT_THROW(larger.Write("/dev/full"), std::exception);
+#else
+  GTEST_SKIP() << "Requires Linux /dev/full";
+#endif
 }
 
 TEST_F(MatFileTest, ReadPreservesFloatBits) {
