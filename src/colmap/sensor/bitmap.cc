@@ -695,6 +695,19 @@ void Bitmap::SetImageData(int width, int height, std::vector<uint8_t>&& data) {
 void Bitmap::Rescale(const int new_width,
                      const int new_height,
                      RescaleFilter filter) {
+  // A valid image already on the requested grid needs no OIIO filtering or
+  // replacement allocation. Preserve SetImageData's metadata-axis repair;
+  // leave malformed and empty inputs and unknown filters on the old path.
+  if (new_width == width_ && new_height == height_ && width_ > 0 &&
+      height_ > 0 && channels_ > 0 && meta_data_ != nullptr &&
+      (filter == RescaleFilter::kBilinear || filter == RescaleFilter::kBox) &&
+      data_.size() == static_cast<size_t>(width_) * height_ * channels_) {
+    auto* meta_data = OIIOMetaData::Upcast(meta_data_.get());
+    meta_data->image_spec.width = width_;
+    meta_data->image_spec.height = height_;
+    return;
+  }
+
   const OIIO::ImageBuf buf(
       OIIO::ImageSpec(width_, height_, channels_, OIIO::TypeDesc::UINT8),
       data_.data());
