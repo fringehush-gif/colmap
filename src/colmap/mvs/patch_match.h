@@ -109,10 +109,29 @@ class PatchMatchController : public BaseController {
   void Run();
 
  private:
+  struct PreparedProblem {
+    bool valid = false;
+    PatchMatchOptions options;
+    PatchMatch::Problem problem;
+    std::vector<Image> images;
+    std::vector<DepthMap> depth_maps;
+    std::vector<NormalMap> normal_maps;
+    std::filesystem::path depth_path, normal_path, consistency_path;
+    PreparedProblem() = default;
+    PreparedProblem(const PreparedProblem&) = delete;
+    PreparedProblem& operator=(const PreparedProblem&) = delete;
+  };
+
   void ReadWorkspace();
   void ReadProblems();
   void ReadGpuIndices();
+  bool PrepareProblem(const PatchMatchOptions& options,
+                      size_t problem_idx,
+                      PreparedProblem* prepared);
   void ProcessProblem(const PatchMatchOptions& options, size_t problem_idx);
+  void ProcessProblemPair(const PatchMatchOptions& options,
+                          size_t first_problem_idx,
+                          size_t second_problem_idx);
 
   const PatchMatchOptions options_;
   const std::filesystem::path workspace_path_;

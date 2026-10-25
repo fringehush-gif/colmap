@@ -10,6 +10,8 @@
 #include <gtest/gtest.h>
 
 #ifndef COLMAP_HIP_ENABLED
+#include "colmap/mvs/patch_match_cuda.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -379,6 +381,78 @@ TEST_P(SourceUploadTest, DirectUploadPreservesAlgorithmOutputs) {
   ExpectNonempty(padded, inputs, true);
   ExpectNonempty(direct, inputs, true);
   ExpectEquivalent(padded, direct);
+}
+
+TEST_F(CudaTest, PairedDefaultSweepsPreserveIndependentOutputs) {
+  const auto make_problem = [](Inputs& inputs) {
+    PatchMatch::Problem problem;
+    problem.ref_image_idx = 0;
+    for (size_t i = 1; i < inputs.images.size(); ++i) {
+      problem.src_image_idxs.push_back(static_cast<int>(i));
+    }
+    problem.images = &inputs.images;
+    problem.depth_maps = &inputs.depths;
+    problem.normal_maps = &inputs.normals;
+    return problem;
+  };
+  const auto read = [](const PatchMatchCuda& cuda) {
+    return std::make_tuple(cuda.GetDepthMap(),
+                           cuda.GetNormalMap(),
+                           cuda.GetSelProbMap(),
+                           cuda.GetConsistentImageIdxs());
+  };
+  struct Streams {
+    cudaStream_t first = nullptr, second = nullptr;
+    ~Streams() {
+      if (second) (void)cudaStreamDestroy(second);
+      if (first) (void)cudaStreamDestroy(first);
+    }
+  };
+  for (const bool geometry : {false, true}) {
+    SCOPED_TRACE(geometry);
+    // Odd, differently calibrated references and nine sources exercise both
+    // orientations and a final consistency-mask byte tail.
+    Inputs first_inputs = MakeInputs(0, 9);
+    Inputs second_inputs = MakeInputs(1, 9);
+    auto options = MakeOptions(geometry, geometry, false);
+    const PatchMatchOptions defaults;
+    options.window_radius = defaults.window_radius;
+    options.window_step = defaults.window_step;
+    options.num_samples = defaults.num_samples;
+    options.num_iterations = defaults.num_iterations;
+    options.sigma_spatial = options.window_radius;
+    auto first_problem = make_problem(first_inputs);
+    auto second_problem = make_problem(second_inputs);
+    const auto serial = [&](const PatchMatch::Problem& problem) {
+      PatchMatchCuda cuda(options, problem);
+      cuda.Run();
+      return read(cuda);
+    };
+    const auto expected_first = serial(first_problem);
+    const auto expected_second = serial(second_problem);
+    PatchMatchCuda first(options, first_problem);
+    PatchMatchCuda second(options, second_problem);
+    Streams streams;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&streams.first, cudaStreamNonBlocking),
+              cudaSuccess);
+    ASSERT_EQ(cudaStreamCreateWithFlags(&streams.second, cudaStreamNonBlocking),
+              cudaSuccess);
+    RunPatchMatchPair(first, second, streams.first, streams.second);
+    const auto compare = [&](const auto& expected, const PatchMatchCuda& cuda) {
+      const auto actual = read(cuda);
+      ExpectExactlyEqual(std::get<0>(expected), std::get<0>(actual));
+      ExpectExactlyEqual(std::get<1>(expected), std::get<1>(actual));
+      ExpectExactlyEqual(std::get<2>(expected), std::get<2>(actual));
+      EXPECT_EQ(std::get<3>(expected), std::get<3>(actual));
+      const auto& depths = std::get<0>(actual).GetData();
+      EXPECT_GT(std::count_if(depths.begin(),
+                              depths.end(),
+                              [](float depth) { return depth > 0.0f; }),
+                0);
+    };
+    compare(expected_first, first);
+    compare(expected_second, second);
+  }
 }
 
 TEST_F(CudaTest, ExplicitAndDefaultStreamHelpers) {

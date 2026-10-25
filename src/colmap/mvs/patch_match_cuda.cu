@@ -17,11 +17,14 @@
 #include "colmap/util/logging.h"
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <sstream>
+#include <vector>
 
 // The number of threads per Cuda thread block. Warning: Do not change this
 // value, since the templated window sizes rely on this value.
@@ -2166,6 +2169,320 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
   total_timer.Print("Total");
 }
+
+#ifndef COLMAP_HIP_ENABLED
+
+size_t PatchMatchCuda::PairPeakBytes() const {
+  // Query only allocations owned by this instance. cudaMemGetInfo deltas can
+  // include unrelated clients and are not an ownership measurement.
+  const auto multiply = [](size_t a, size_t b) {
+    THROW_CHECK(a == 0 || b <= std::numeric_limits<size_t>::max() / a);
+    return a * b;
+  };
+  const auto add = [](size_t* total, size_t bytes) {
+    THROW_CHECK_LE(bytes, std::numeric_limits<size_t>::max() - *total);
+    *total += bytes;
+  };
+  const auto mat_bytes = [&](const auto& mat) {
+    return multiply(multiply(mat->GetPitch(), mat->GetHeight()),
+                    mat->GetDepth());
+  };
+  const auto texture_bytes = [&](const auto& texture, size_t element_bytes) {
+    return multiply(
+        multiply(multiply(texture->GetWidth(), texture->GetHeight()),
+                 texture->GetDepth()),
+        element_bytes);
+  };
+  size_t resident = 0;
+  size_t ref_mats = 0;
+  add(&ref_mats, mat_bytes(ref_image_->image));
+  add(&ref_mats, mat_bytes(ref_image_->sum_image));
+  add(&ref_mats, mat_bytes(ref_image_->squared_sum_image));
+  const size_t ref_tex = texture_bytes(ref_image_texture_, sizeof(uint8_t));
+  size_t depth_normal = 0;
+  add(&depth_normal, mat_bytes(depth_map_));
+  add(&depth_normal, mat_bytes(normal_map_));
+  add(&resident, ref_mats);
+  add(&resident, depth_normal);
+  add(&resident, mat_bytes(rand_state_map_));
+  add(&resident, sel_prob_map_->GetCapacityBytes());
+  add(&resident, prev_sel_prob_map_->GetCapacityBytes());
+  add(&resident, cost_map_->GetCapacityBytes());
+  add(&resident, mat_bytes(global_workspace_));
+  // CUDA array alignment and metadata are implementation-dependent. Charge
+  // twice their logical content, plus the separate fixed margin at admission.
+  size_t textures = 0;
+  add(&textures, ref_tex);
+  add(&textures, texture_bytes(src_images_texture_, sizeof(uint8_t)));
+  if (src_depth_maps_texture_ != nullptr) {
+    add(&textures, texture_bytes(src_depth_maps_texture_, sizeof(float)));
+  }
+  for (const auto& pose : poses_texture_) {
+    add(&textures, texture_bytes(pose, sizeof(float)));
+  }
+  add(&resident, multiply(textures, 2));
+  // Native Rotate temporarily owns old and new reference/depth/normal arrays.
+  // Double that transient bound to cover opposite-orientation pitch changes.
+  size_t transient = 0;
+  add(&transient, multiply(ref_mats, 2));
+  add(&transient, multiply(depth_normal, 2));
+  add(&transient, multiply(ref_tex, 4));
+  if (options_.filter) {
+    const size_t mask_planes = (problem_.src_image_idxs.size() - 1) / 8 + 1;
+    add(&transient,
+        multiply(multiply(multiply(ref_width_, ref_height_), mask_planes), 2));
+  }
+  add(&resident, transient);
+  return resident;
+}
+
+namespace {
+size_t PairGridCount(size_t width, size_t height) {
+  return (std::max(width, height) - 1) / 8 + 1;
+}
+
+size_t PairResidentBlocksPerSm(bool geometric,
+                               bool final_filter,
+                               size_t* sm_count) {
+  int device = 0;
+  CUDA_SAFE_CALL(cudaGetDevice(&device));
+  cudaDeviceProp properties{};
+  CUDA_SAFE_CALL(cudaGetDeviceProperties(&properties, device));
+  int per_sm = 0;
+  if (geometric && final_filter) {
+    CUDA_SAFE_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &per_sm,
+        SweepFromTopToBottom<11, 1, true, true, true, true, 8, false>,
+        128,
+        0));
+  } else if (geometric) {
+    CUDA_SAFE_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &per_sm,
+        SweepFromTopToBottom<11, 1, true, false, false, true, 8, false>,
+        128,
+        0));
+  } else {
+    CUDA_SAFE_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &per_sm,
+        SweepFromTopToBottom<11, 1, false, false, false, true, 8, false>,
+        128,
+        0));
+  }
+  *sm_count = properties.multiProcessorCount;
+  return static_cast<size_t>(per_sm);
+}
+bool PairFitsResidentWaves(size_t first_grid,
+                           size_t second_grid,
+                           bool geometric,
+                           bool final_filter) {
+  size_t sm_count = 0;
+  const size_t per_sm =
+      PairResidentBlocksPerSm(geometric, final_filter, &sm_count);
+  return sm_count > 0 &&
+         (first_grid - 1) / sm_count + (second_grid - 1) / sm_count + 2 <=
+             per_sm;
+}
+}  // namespace
+
+bool CanPairPatchMatchViews(size_t first_width,
+                            size_t first_height,
+                            size_t second_width,
+                            size_t second_height,
+                            bool geometric) {
+  if (!first_width || !first_height || !second_width || !second_height) {
+    return false;
+  }
+  return PairFitsResidentWaves(PairGridCount(first_width, first_height),
+                               PairGridCount(second_width, second_height),
+                               geometric,
+                               false);
+}
+
+void RunPatchMatchPair(PatchMatchCuda& first,
+                       PatchMatchCuda& second,
+                       cudaStream_t first_stream,
+                       cudaStream_t second_stream) {
+  const auto validate = [&first](PatchMatchCuda& p) {
+    THROW_CHECK_EQ(p.options_.window_radius, 5);
+    THROW_CHECK_EQ(p.options_.window_step, 1);
+    THROW_CHECK_EQ(p.options_.num_iterations, 5);
+    THROW_CHECK(!p.options_.checkpoint_hmm);
+    THROW_CHECK(!p.options_.rotation_buffer_reuse);
+    THROW_CHECK_EQ(p.rotation_in_half_pi_, 0);
+    THROW_CHECK(p.hmm_checkpoint_ == nullptr);
+    THROW_CHECK(p.sel_prob_map_ != nullptr);
+    THROW_CHECK(p.options_.geom_consistency == p.options_.filter);
+    THROW_CHECK((p.src_depth_maps_texture_ != nullptr) ==
+                p.options_.geom_consistency);
+    THROW_CHECK_EQ(p.options_.gpu_index, first.options_.gpu_index);
+    THROW_CHECK_EQ(p.options_.geom_consistency,
+                   first.options_.geom_consistency);
+  };
+  validate(first);
+  validate(second);
+  THROW_CHECK(first_stream != nullptr && second_stream != nullptr);
+  THROW_CHECK(first_stream != second_stream);
+  THROW_CHECK(CanPairPatchMatchViews(first.ref_width_,
+                                     first.ref_height_,
+                                     second.ref_width_,
+                                     second.ref_height_,
+                                     first.options_.geom_consistency));
+  const size_t first_grid = PairGridCount(first.ref_width_, first.ref_height_);
+  const size_t second_grid =
+      PairGridCount(second.ref_width_, second.ref_height_);
+  const bool final_together =
+      !first.options_.geom_consistency ||
+      PairFitsResidentWaves(first_grid, second_grid, true, true);
+  first.consistency_mask_valid_ = false;
+  second.consistency_mask_valid_ = false;
+
+  // Constructors/texture uploads and native initial-cost kernels finish before
+  // any paired Sweep. They remain on the caller's per-thread default stream.
+  CUDA_SYNC_AND_CHECK();
+  for (PatchMatchCuda* p : {&first, &second}) {
+    p->ComputeCudaConfig();
+    ComputeInitialCost<11, 1><<<p->sweep_grid_size_, p->sweep_block_size_>>>(
+        MakeRefCamera(p->ref_K_host_[0], p->ref_inv_K_host_[0]),
+        p->cost_map_->View(),
+        p->depth_map_->View(),
+        p->normal_map_->View(),
+        p->ref_image_texture_->GetObj(),
+        p->ref_image_->sum_image->View(),
+        p->ref_image_->squared_sum_image->View(),
+        p->src_images_texture_->GetObj(),
+        p->poses_texture_[0]->GetObj(),
+        p->options_.sigma_spatial,
+        p->options_.sigma_color);
+  }
+  CUDA_SYNC_AND_CHECK();
+
+  const auto prepare_last_mask = [](PatchMatchCuda& p, bool last) {
+    if (!last || !p.options_.filter) return;
+    p.consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
+        p.cost_map_->GetWidth(),
+        p.cost_map_->GetHeight(),
+        PackedConsistencyMaskDepth(p.cost_map_->GetDepth()));
+    p.consistency_mask_->FillWithScalar(0);
+  };
+  const auto launch = [](PatchMatchCuda& p,
+                         cudaStream_t stream,
+                         int iter,
+                         int sweep,
+                         bool last) {
+    THROW_CHECK_GE(p.rotation_in_half_pi_, 0);
+    THROW_CHECK_LT(p.rotation_in_half_pi_, 4);
+    THROW_CHECK_EQ(
+        p.cost_map_->GetWidth(),
+        p.rotation_in_half_pi_ % 2 == 0 ? p.ref_width_ : p.ref_height_);
+    THROW_CHECK_EQ(
+        p.cost_map_->GetHeight(),
+        p.rotation_in_half_pi_ % 2 == 0 ? p.ref_height_ : p.ref_width_);
+    SweepOptions o;
+    o.depth_min = p.options_.depth_min;
+    o.depth_max = p.options_.depth_max;
+    o.sigma_spatial = p.options_.sigma_spatial;
+    o.sigma_color = p.options_.sigma_color;
+    o.num_samples = p.options_.num_samples;
+    o.ncc_sigma = p.options_.ncc_sigma;
+    o.min_triangulation_angle = DEG2RAD(p.options_.min_triangulation_angle);
+    o.incident_angle_sigma = p.options_.incident_angle_sigma;
+    o.geom_consistency_regularizer = p.options_.geom_consistency_regularizer;
+    o.geom_consistency_max_cost = p.options_.geom_consistency_max_cost;
+    o.filter_min_ncc = p.options_.filter_min_ncc;
+    o.filter_min_triangulation_angle =
+        DEG2RAD(p.options_.filter_min_triangulation_angle);
+    o.filter_min_num_consistent = p.options_.filter_min_num_consistent;
+    o.filter_geom_consistency_max_cost =
+        p.options_.filter_geom_consistency_max_cost;
+    o.perturbation = 1.0f / std::pow(2.0f, iter + sweep / 4.0f);
+    o.prev_sel_prob_weight = static_cast<float>(iter * 4 + sweep) /
+                             static_cast<float>(p.options_.num_iterations * 4);
+    const dim3 block(8, 4 * kCooperativeSampleBatchSize, 1);
+    const dim3 grid((p.cost_map_->GetWidth() - 1) / 8 + 1, 1, 1);
+    const GpuMatView<float> no_checkpoint{nullptr, 0, 0, 0, 0};
+#define PAIR_LAUNCH(GEOM, PHOTO_FILTER, GEO_FILTER)                           \
+  SweepFromTopToBottom<11, 1, GEOM, PHOTO_FILTER, GEO_FILTER, true, 8, false> \
+      <<<grid, block, 0, stream>>>(                                           \
+          MakeRefCamera(p.ref_K_host_[p.rotation_in_half_pi_],                \
+                        p.ref_inv_K_host_[p.rotation_in_half_pi_]),           \
+          p.global_workspace_->View(),                                        \
+          p.rand_state_map_->View(),                                          \
+          (PatchMatchRngPerimeter{p.ref_width_, p.ref_height_}),              \
+          static_cast<unsigned int>(p.rotation_in_half_pi_),                  \
+          p.cost_map_->View(),                                                \
+          p.depth_map_->View(),                                               \
+          p.normal_map_->View(),                                              \
+          (PackedConsistencyMaskView{p.consistency_mask_->View()}),           \
+          p.sel_prob_map_->View(),                                            \
+          p.prev_sel_prob_map_->View(),                                       \
+          no_checkpoint,                                                      \
+          no_checkpoint,                                                      \
+          p.ref_image_texture_->GetObj(),                                     \
+          p.ref_image_->sum_image->View(),                                    \
+          p.ref_image_->squared_sum_image->View(),                            \
+          p.src_images_texture_->GetObj(),                                    \
+          p.src_depth_maps_texture_ == nullptr                                \
+              ? 0                                                             \
+              : p.src_depth_maps_texture_->GetObj(),                          \
+          p.poses_texture_[p.rotation_in_half_pi_]->GetObj(),                 \
+          o)
+    if (p.options_.geom_consistency) {
+      if (last) {
+        PAIR_LAUNCH(true, true, true);
+      } else {
+        PAIR_LAUNCH(true, false, false);
+      }
+    } else {
+      PAIR_LAUNCH(false, false, false);
+    }
+#undef PAIR_LAUNCH
+  };
+  const auto rotate_last_mask = [](PatchMatchCuda& p, bool last) {
+    if (!last || !p.options_.filter) return;
+    std::unique_ptr<GpuMat<uint8_t>> rotated(new GpuMat<uint8_t>(
+        p.cost_map_->GetWidth(),
+        p.cost_map_->GetHeight(),
+        PackedConsistencyMaskDepth(p.cost_map_->GetDepth())));
+    p.consistency_mask_->Rotate(rotated.get());
+    p.consistency_mask_.swap(rotated);
+    p.consistency_mask_valid_ = true;
+  };
+
+  for (int iter = 0; iter < first.options_.num_iterations; ++iter) {
+    for (int sweep = 0; sweep < 4; ++sweep) {
+      const bool last = iter == first.options_.num_iterations - 1 && sweep == 3;
+      // Allocation/fill for both masks precede both launches. No allocator or
+      // rotation work executes while either Sweep is in flight.
+      prepare_last_mask(first, last);
+      prepare_last_mask(second, last);
+      // The final mask fills run on this host thread's PTDS. The Sweep
+      // streams are nonblocking, so publish both zeroed masks explicitly.
+      if (last && first.options_.filter) CUDA_SYNC_AND_CHECK();
+      launch(first, first_stream, iter, sweep, last);
+      if (last && !final_together) {
+        CUDA_CHECK();
+        CUDA_SAFE_CALL(cudaStreamSynchronize(first_stream));
+        launch(second, second_stream, iter, sweep, last);
+        CUDA_CHECK();
+        CUDA_SAFE_CALL(cudaStreamSynchronize(second_stream));
+      } else {
+        launch(second, second_stream, iter, sweep, last);
+        CUDA_CHECK();
+        CUDA_SAFE_CALL(cudaStreamSynchronize(first_stream));
+        CUDA_SAFE_CALL(cudaStreamSynchronize(second_stream));
+      }
+      first.Rotate();
+      second.Rotate();
+      rotate_last_mask(first, last);
+      rotate_last_mask(second, last);
+      CUDA_SYNC_AND_CHECK();
+    }
+  }
+  THROW_CHECK_EQ(first.rotation_in_half_pi_, 0);
+  THROW_CHECK_EQ(second.rotation_in_half_pi_, 0);
+  CUDA_SYNC_AND_CHECK();
+}
+#endif
 
 void PatchMatchCuda::ComputeCudaConfig() {
   sweep_block_size_.x = THREADS_PER_BLOCK;
