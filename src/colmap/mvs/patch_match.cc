@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <set>
 #include <tuple>
@@ -225,6 +226,28 @@ void PatchMatchController::Run() {
     };
     const auto run_phase = [&](const PatchMatchOptions& phase) {
       for (size_t index = 0; index < problems_.size();) {
+        // Batch only adjacent matching default-path references. A rejected
+        // group falls through to the unchanged pair/single scheduler below.
+        size_t batch_end = index;
+        const auto first_shape = shape(index);
+        while (batch_end < problems_.size() && batch_end < index + 5 &&
+               shape(batch_end) == first_shape)
+          ++batch_end;
+        std::vector<std::pair<size_t, size_t>> batch_shapes;
+        for (size_t next = index; next < batch_end; ++next)
+          batch_shapes.emplace_back(std::get<0>(shape(next)),
+                                    std::get<1>(shape(next)));
+        if (CanBatchPatchMatchViews(batch_shapes, phase.geom_consistency)) {
+          std::vector<size_t> indices;
+          for (size_t next = index; next < batch_end; ++next)
+            indices.push_back(next);
+          thread_pool_->AddTask(&PatchMatchController::ProcessProblemBatch,
+                                this,
+                                phase,
+                                std::move(indices));
+          index = batch_end;
+          continue;
+        }
         if (index + 1 < problems_.size()) {
           const auto first_shape = shape(index);
           const auto second_shape = shape(index + 1);
@@ -737,6 +760,211 @@ void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
   RunPatchMatchPair(*first_cuda, *second_cuda, streams.first, streams.second);
   write_cuda(first, *first_cuda);
   write_cuda(second, *second_cuda);
+#endif
+}
+
+void PatchMatchController::ProcessProblemBatch(
+    const PatchMatchOptions& options, std::vector<size_t> problem_indices) {
+#ifdef COLMAP_HIP_ENABLED
+  for (const size_t index : problem_indices) ProcessProblem(options, index);
+#else
+  THROW_CHECK_GE(problem_indices.size(), 3);
+  THROW_CHECK_LE(problem_indices.size(), 5);
+  // PreparedProblem::problem points into its own vectors: heap owners keep
+  // those addresses stable while CUDA owners and readback remain alive.
+  std::vector<std::unique_ptr<PreparedProblem>> input;
+  input.reserve(problem_indices.size());
+  for (const size_t index : problem_indices) {
+    auto prepared = std::make_unique<PreparedProblem>();
+    if (PrepareProblem(options, index, prepared.get())) {
+      PatchMatch(prepared->options, prepared->problem).Check();
+      input.push_back(std::move(prepared));
+    }
+  }
+  if (input.empty()) return;
+  SetBestCudaDevice(gpu_indices_.at(thread_pool_->GetThreadIndex()));
+  const auto shape = [](const PreparedProblem& p) {
+    const auto& ref = p.problem.images->at(p.problem.ref_image_idx);
+    size_t source_width = 0, source_height = 0;
+    for (const int source : p.problem.src_image_idxs) {
+      const auto& image = p.problem.images->at(source);
+      source_width = std::max(source_width, image.GetWidth());
+      source_height = std::max(source_height, image.GetHeight());
+    }
+    return std::make_tuple(ref.GetWidth(),
+                           ref.GetHeight(),
+                           p.problem.src_image_idxs.size(),
+                           source_width,
+                           source_height);
+  };
+  const auto write_cuda = [](const PreparedProblem& p,
+                             const PatchMatchCuda& cuda) {
+    cuda.GetDepthMap().Write(p.depth_path);
+    cuda.GetNormalMap().Write(p.normal_path);
+    if (p.options.write_consistency_graph) {
+      const auto& ref = p.problem.images->at(p.problem.ref_image_idx);
+      ConsistencyGraph(
+          ref.GetWidth(), ref.GetHeight(), cuda.GetConsistentImageIdxs())
+          .Write(p.consistency_path);
+    }
+  };
+  const auto run_native = [](const PreparedProblem& p) {
+    PatchMatch solver(p.options, p.problem);
+    solver.Run();
+    solver.GetDepthMap().Write(p.depth_path);
+    solver.GetNormalMap().Write(p.normal_path);
+    if (p.options.write_consistency_graph)
+      solver.GetConsistencyGraph().Write(p.consistency_path);
+  };
+  std::vector<std::unique_ptr<PatchMatchCuda>> owners(input.size());
+  constexpr size_t kExternalMargin = size_t(256) << 20;
+  const auto pair_or_single_fallback = [&]() {
+    for (size_t i = 0; i < input.size();) {
+      if (i + 1 < input.size()) {
+        const auto& a =
+            input[i]->problem.images->at(input[i]->problem.ref_image_idx);
+        const auto& b = input[i + 1]->problem.images->at(
+            input[i + 1]->problem.ref_image_idx);
+        if (shape(*input[i]) == shape(*input[i + 1]) &&
+            CanPairPatchMatchViews(a.GetWidth(),
+                                   a.GetHeight(),
+                                   b.GetWidth(),
+                                   b.GetHeight(),
+                                   options.geom_consistency)) {
+          if (!owners[i])
+            owners[i] = std::make_unique<PatchMatchCuda>(input[i]->options,
+                                                         input[i]->problem);
+          CUDA_SYNC_AND_CHECK();
+          const size_t owned_peak = owners[i]->PairPeakBytes();
+          size_t free_bytes = 0, total_bytes = 0;
+          CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+          if (!owners[i + 1] &&
+              owned_peak <=
+                  std::numeric_limits<size_t>::max() - kExternalMargin &&
+              free_bytes >= owned_peak + kExternalMargin) {
+            owners[i + 1] = std::make_unique<PatchMatchCuda>(
+                input[i + 1]->options, input[i + 1]->problem);
+            CUDA_SYNC_AND_CHECK();
+          }
+          if (owners[i + 1]) {
+            CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+            const bool enough_for_rotation =
+                options.rotation_buffer_reuse
+                    ? free_bytes >= kExternalMargin
+                    : owned_peak <= std::numeric_limits<size_t>::max() -
+                                        kExternalMargin &&
+                          free_bytes >= owned_peak + kExternalMargin;
+            if (enough_for_rotation) {
+              PairStreams streams;
+              RunPatchMatchPair(
+                  *owners[i], *owners[i + 1], streams.first, streams.second);
+              write_cuda(*input[i], *owners[i]);
+              write_cuda(*input[i + 1], *owners[i + 1]);
+              owners[i].reset();
+              owners[i + 1].reset();
+              i += 2;
+              continue;
+            }
+            // Match the incumbent pair's low-memory fallback: the first
+            // constructed owner is retained, the second is released before
+            // running the first view singly.
+            owners[i + 1].reset();
+          }
+        }
+      }
+      if (owners[i]) {
+        owners[i]->Run();
+        write_cuda(*input[i], *owners[i]);
+        owners[i].reset();
+      } else {
+        run_native(*input[i]);
+      }
+      ++i;
+    }
+  };
+
+  if (input.size() < 3) {
+    pair_or_single_fallback();
+    return;
+  }
+  std::vector<std::pair<size_t, size_t>> shapes;
+  const auto first_shape = shape(*input.front());
+  for (const auto& p : input) {
+    const auto this_shape = shape(*p);
+    if (this_shape != first_shape) {
+      pair_or_single_fallback();
+      return;
+    }
+    shapes.emplace_back(std::get<0>(this_shape), std::get<1>(this_shape));
+  }
+  if (!CanBatchPatchMatchViews(shapes, options.geom_consistency)) {
+    pair_or_single_fallback();
+    return;
+  }
+  owners[0] =
+      std::make_unique<PatchMatchCuda>(input[0]->options, input[0]->problem);
+  CUDA_SYNC_AND_CHECK();
+  const size_t first_peak = owners[0]->PairPeakBytes();
+  bool memory_admitted = true;
+  for (size_t i = 1; i < input.size(); ++i) {
+    size_t free_bytes = 0, total_bytes = 0;
+    CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+    const size_t remaining = input.size() - i + 1;
+    if (first_peak > (std::numeric_limits<size_t>::max() - kExternalMargin) /
+                         remaining ||
+        free_bytes < remaining * first_peak + kExternalMargin) {
+      memory_admitted = false;
+      break;
+    }
+    owners[i] =
+        std::make_unique<PatchMatchCuda>(input[i]->options, input[i]->problem);
+    CUDA_SYNC_AND_CHECK();
+    if (owners[i]->PairPeakBytes() > first_peak) {
+      owners[i].reset();
+      memory_admitted = false;
+      break;
+    }
+  }
+  size_t free_bytes = 0, total_bytes = 0;
+  CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+  if (first_peak > std::numeric_limits<size_t>::max() - kExternalMargin ||
+      free_bytes < first_peak + kExternalMargin)
+    memory_admitted = false;
+  if (!memory_admitted) {
+    if (first_peak > std::numeric_limits<size_t>::max() - kExternalMargin ||
+        free_bytes < first_peak + kExternalMargin)
+      for (size_t i = 1; i < owners.size(); ++i) owners[i].reset();
+    pair_or_single_fallback();
+    return;
+  }
+  std::vector<PatchMatchCuda*> views;
+  for (auto& owner : owners) views.push_back(owner.get());
+  struct BatchStreams {
+    std::vector<cudaStream_t> values;
+    explicit BatchStreams(size_t count) : values(count, nullptr) {
+      try {
+        for (auto& stream : values)
+          CUDA_SAFE_CALL(
+              cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+      } catch (...) {
+        for (auto stream : values)
+          if (stream) (void)cudaStreamDestroy(stream);
+        throw;
+      }
+    }
+    ~BatchStreams() {
+      for (auto stream : values) {
+        if (stream) {
+          (void)cudaStreamSynchronize(stream);
+          (void)cudaStreamDestroy(stream);
+        }
+      }
+    }
+  } streams(input.size());
+  LOG(INFO) << "Running " << input.size() << " reference PatchMatch batch";
+  RunPatchMatchBatch(views, streams.values);
+  for (size_t i = 0; i < input.size(); ++i) write_cuda(*input[i], *owners[i]);
+  for (auto& owner : owners) owner.reset();
 #endif
 }
 

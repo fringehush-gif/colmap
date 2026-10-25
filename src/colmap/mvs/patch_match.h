@@ -132,6 +132,8 @@ class PatchMatchController : public BaseController {
   void ProcessProblemPair(const PatchMatchOptions& options,
                           size_t first_problem_idx,
                           size_t second_problem_idx);
+  void ProcessProblemBatch(const PatchMatchOptions& options,
+                           std::vector<size_t> problem_indices);
 
   const PatchMatchOptions options_;
   const std::filesystem::path workspace_path_;

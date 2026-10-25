@@ -16,6 +16,7 @@
 
 #include <iostream>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace colmap {
@@ -43,6 +44,8 @@ class PatchMatchCuda {
                                 PatchMatchCuda& second,
                                 cudaStream_t first_stream,
                                 cudaStream_t second_stream);
+  friend void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
+                                 const std::vector<cudaStream_t>& streams);
 #endif
   template <int kWindowSize, int kWindowStep, bool kCheckpointHmm>
   void RunWithWindowSizeAndStep();
@@ -156,6 +159,12 @@ void RunPatchMatchPair(PatchMatchCuda& first,
                        PatchMatchCuda& second,
                        cudaStream_t first_stream,
                        cudaStream_t second_stream);
+// Same native kernels and per-view state; controller admits groups of 3 to 5.
+void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
+                        const std::vector<cudaStream_t>& streams);
+// The resource query is device-specific and preserves the pair admission.
+bool CanBatchPatchMatchViews(
+    const std::vector<std::pair<size_t, size_t>>& view_shapes, bool geometric);
 #endif
 
 }  // namespace mvs

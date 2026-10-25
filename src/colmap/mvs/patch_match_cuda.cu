@@ -2347,10 +2347,116 @@ bool CanPairPatchMatchViews(size_t first_width,
                                false);
 }
 
-void RunPatchMatchPair(PatchMatchCuda& first,
-                       PatchMatchCuda& second,
-                       cudaStream_t first_stream,
-                       cudaStream_t second_stream) {
+bool CanBatchPatchMatchViews(
+    const std::vector<std::pair<size_t, size_t>>& view_shapes, bool geometric) {
+  const size_t count = view_shapes.size();
+  if (count < 3 || count > 5) return false;
+  const size_t width = view_shapes.front().first;
+  const size_t height = view_shapes.front().second;
+  if (!width || !height ||
+      width > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+      height > static_cast<size_t>(std::numeric_limits<int>::max()))
+    return false;
+  for (const auto& shape : view_shapes)
+    if (shape.first != width || shape.second != height) return false;
+  const auto multiply = [](size_t x, size_t y, size_t* result) {
+    if (y && x > std::numeric_limits<size_t>::max() / y) return false;
+    *result = x * y;
+    return true;
+  };
+  const auto add = [](size_t x, size_t y, size_t* result) {
+    if (x > std::numeric_limits<size_t>::max() - y) return false;
+    *result = x + y;
+    return true;
+  };
+  const auto waves = [](size_t grid, size_t capacity) {
+    return 1 + (grid - 1) / capacity;
+  };
+  const size_t grid_width = (width - 1) / 8 + 1;
+  const size_t grid_height = (height - 1) / 8 + 1;
+  const size_t max_grid = std::max(grid_width, grid_height);
+  // This is the incumbent's actual pair decision; otherwise each reference
+  // runs as a singleton on the one-GPU worker.
+  const bool incumbent_pair =
+      PairFitsResidentWaves(max_grid, max_grid, geometric, false);
+  size_t sm_count = 0;
+  const size_t resident = PairResidentBlocksPerSm(geometric, false, &sm_count);
+  size_t capacity = 0, batch_grid_width = 0, batch_grid_height = 0;
+  if (!sm_count || !resident || !multiply(sm_count, resident, &capacity) ||
+      !multiply(count, grid_width, &batch_grid_width) ||
+      !multiply(count, grid_height, &batch_grid_height))
+    return false;
+  const size_t pair_count = count / 2;
+  const size_t single_count = count % 2;
+  const auto incumbent_regular_waves = [&](size_t grid, size_t* result) {
+    const size_t single_waves = waves(grid, capacity);
+    size_t per_pair = 1;
+    if (!incumbent_pair && !multiply(2, single_waves, &per_pair)) return false;
+    size_t pairs = 0, singles = 0;
+    return multiply(pair_count, per_pair, &pairs) &&
+           multiply(single_count, single_waves, &singles) &&
+           add(pairs, singles, result);
+  };
+  size_t incumbent_width = 0, incumbent_height = 0;
+  if (!incumbent_regular_waves(grid_width, &incumbent_width) ||
+      !incumbent_regular_waves(grid_height, &incumbent_height))
+    return false;
+  const size_t batch_width = waves(batch_grid_width, capacity);
+  const size_t batch_height = waves(batch_grid_height, capacity);
+  // In each five-iteration Run, ten sweeps walk height rows with width-grid
+  // columns; ten walk width rows with height-grid columns. GEO's final sweep
+  // has its own kernel/resource limit and is checked separately below.
+  const size_t height_sweeps = geometric ? 9 : 10;
+  size_t incumbent_first = 0, incumbent_second = 0;
+  size_t batch_first = 0, batch_second = 0;
+  size_t incumbent_cost = 0, batch_cost = 0;
+  if (!multiply(incumbent_width, height, &incumbent_first) ||
+      !multiply(incumbent_first, 10, &incumbent_first) ||
+      !multiply(incumbent_height, width, &incumbent_second) ||
+      !multiply(incumbent_second, height_sweeps, &incumbent_second) ||
+      !multiply(batch_width, height, &batch_first) ||
+      !multiply(batch_first, 10, &batch_first) ||
+      !multiply(batch_height, width, &batch_second) ||
+      !multiply(batch_second, height_sweeps, &batch_second) ||
+      !add(incumbent_first, incumbent_second, &incumbent_cost) ||
+      !add(batch_first, batch_second, &batch_cost) ||
+      batch_cost >= incumbent_cost)
+    return false;
+  if (geometric) {
+    size_t final_sm_count = 0;
+    const size_t final_resident =
+        PairResidentBlocksPerSm(true, true, &final_sm_count);
+    size_t final_capacity = 0;
+    if (!final_sm_count || !final_resident ||
+        !multiply(final_sm_count, final_resident, &final_capacity))
+      return false;
+    const bool final_pair_together =
+        incumbent_pair && PairFitsResidentWaves(max_grid, max_grid, true, true);
+    const size_t final_single_waves = waves(grid_height, final_capacity);
+    size_t final_per_pair = 1;
+    if (!final_pair_together &&
+        !multiply(2, final_single_waves, &final_per_pair))
+      return false;
+    size_t final_pairs = 0, final_single = 0, incumbent_final = 0;
+    if (!multiply(pair_count, final_per_pair, &final_pairs) ||
+        !multiply(single_count, final_single_waves, &final_single) ||
+        !add(final_pairs, final_single, &incumbent_final))
+      return false;
+    if (waves(batch_grid_height, final_capacity) > incumbent_final)
+      return false;
+  }
+  return true;
+}
+
+// Common host schedule. The two-view wrapper retains its original one-wave
+// admission; the controller admits larger groups separately.
+void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
+                        const std::vector<cudaStream_t>& streams) {
+  THROW_CHECK_GE(views.size(), 2);
+  THROW_CHECK_LE(views.size(), 5);
+  THROW_CHECK_EQ(streams.size(), views.size());
+  THROW_CHECK(views.front() != nullptr);
+  PatchMatchCuda& first = *views.front();
   const auto validate = [&first](PatchMatchCuda& p) {
     THROW_CHECK_EQ(p.options_.window_radius, 5);
     THROW_CHECK_EQ(p.options_.window_step, 1);
@@ -2368,28 +2474,36 @@ void RunPatchMatchPair(PatchMatchCuda& first,
     THROW_CHECK_EQ(p.options_.geom_consistency,
                    first.options_.geom_consistency);
   };
-  validate(first);
-  validate(second);
-  THROW_CHECK(first_stream != nullptr && second_stream != nullptr);
-  THROW_CHECK(first_stream != second_stream);
-  THROW_CHECK(CanPairPatchMatchViews(first.ref_width_,
-                                     first.ref_height_,
-                                     second.ref_width_,
-                                     second.ref_height_,
-                                     first.options_.geom_consistency));
-  const size_t first_grid = PairGridCount(first.ref_width_, first.ref_height_);
-  const size_t second_grid =
-      PairGridCount(second.ref_width_, second.ref_height_);
+  for (size_t i = 0; i < views.size(); ++i) {
+    THROW_CHECK(views[i] != nullptr);
+    THROW_CHECK(streams[i] != nullptr);
+    for (size_t j = 0; j < i; ++j) {
+      THROW_CHECK(views[i] != views[j]);
+      THROW_CHECK(streams[i] != streams[j]);
+    }
+    validate(*views[i]);
+  }
+  const bool is_pair = views.size() == 2;
+  if (is_pair) {
+    THROW_CHECK(CanPairPatchMatchViews(first.ref_width_,
+                                       first.ref_height_,
+                                       views[1]->ref_width_,
+                                       views[1]->ref_height_,
+                                       first.options_.geom_consistency));
+  }
   const bool final_together =
-      !first.options_.geom_consistency ||
-      PairFitsResidentWaves(first_grid, second_grid, true, true);
-  first.consistency_mask_valid_ = false;
-  second.consistency_mask_valid_ = false;
+      !is_pair || !first.options_.geom_consistency ||
+      PairFitsResidentWaves(
+          PairGridCount(first.ref_width_, first.ref_height_),
+          PairGridCount(views[1]->ref_width_, views[1]->ref_height_),
+          true,
+          true);
+  for (PatchMatchCuda* p : views) p->consistency_mask_valid_ = false;
 
   // Constructors/texture uploads and native initial-cost kernels finish before
   // any paired Sweep. They remain on the caller's per-thread default stream.
   CUDA_SYNC_AND_CHECK();
-  for (PatchMatchCuda* p : {&first, &second}) {
+  for (PatchMatchCuda* p : views) {
     p->ComputeCudaConfig();
     dim3 initial_cost_grid = p->sweep_grid_size_;
     initial_cost_grid.y =
@@ -2512,37 +2626,38 @@ void RunPatchMatchPair(PatchMatchCuda& first,
   for (int iter = 0; iter < first.options_.num_iterations; ++iter) {
     for (int sweep = 0; sweep < 4; ++sweep) {
       const bool last = iter == first.options_.num_iterations - 1 && sweep == 3;
-      // Allocation/fill for both masks precede both launches. No allocator or
-      // rotation work executes while either Sweep is in flight.
-      prepare_last_mask(first, last);
-      prepare_last_mask(second, last);
-      // The final mask fills run on this host thread's PTDS. The Sweep
-      // streams are nonblocking, so publish both zeroed masks explicitly.
+      for (PatchMatchCuda* p : views) prepare_last_mask(*p, last);
       if (last && first.options_.filter) CUDA_SYNC_AND_CHECK();
-      launch(first, first_stream, iter, sweep, last);
       if (last && !final_together) {
-        CUDA_CHECK();
-        CUDA_SAFE_CALL(cudaStreamSynchronize(first_stream));
-        launch(second, second_stream, iter, sweep, last);
-        CUDA_CHECK();
-        CUDA_SAFE_CALL(cudaStreamSynchronize(second_stream));
+        // Retain the incumbent pair's low-residency final-filter sequence.
+        for (size_t i = 0; i < views.size(); ++i) {
+          launch(*views[i], streams[i], iter, sweep, last);
+          CUDA_CHECK();
+          CUDA_SAFE_CALL(cudaStreamSynchronize(streams[i]));
+        }
       } else {
-        launch(second, second_stream, iter, sweep, last);
+        for (size_t i = 0; i < views.size(); ++i)
+          launch(*views[i], streams[i], iter, sweep, last);
         CUDA_CHECK();
-        CUDA_SAFE_CALL(cudaStreamSynchronize(first_stream));
-        CUDA_SAFE_CALL(cudaStreamSynchronize(second_stream));
+        for (cudaStream_t stream : streams)
+          CUDA_SAFE_CALL(cudaStreamSynchronize(stream));
       }
-      first.Rotate();
-      second.Rotate();
-      rotate_last_mask(first, last);
-      rotate_last_mask(second, last);
+      for (PatchMatchCuda* p : views) p->Rotate();
+      for (PatchMatchCuda* p : views) rotate_last_mask(*p, last);
       CUDA_SYNC_AND_CHECK();
     }
   }
-  THROW_CHECK_EQ(first.rotation_in_half_pi_, 0);
-  THROW_CHECK_EQ(second.rotation_in_half_pi_, 0);
+  for (PatchMatchCuda* p : views) THROW_CHECK_EQ(p->rotation_in_half_pi_, 0);
   CUDA_SYNC_AND_CHECK();
 }
+
+void RunPatchMatchPair(PatchMatchCuda& first,
+                       PatchMatchCuda& second,
+                       cudaStream_t first_stream,
+                       cudaStream_t second_stream) {
+  RunPatchMatchBatch({&first, &second}, {first_stream, second_stream});
+}
+
 #endif
 
 void PatchMatchCuda::ComputeCudaConfig() {
