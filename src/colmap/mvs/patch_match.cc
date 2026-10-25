@@ -14,13 +14,65 @@
 #include "colmap/util/threading.h"
 
 #include <algorithm>
+#include <limits>
 #include <numeric>
 #include <set>
+#include <tuple>
+#include <utility>
 
 #define PrintOption(option) LOG(INFO) << #option ": " << option << std::endl
 
 namespace colmap {
 namespace mvs {
+
+#ifndef COLMAP_HIP_ENABLED
+namespace {
+struct PairStreams {
+  cudaStream_t first = nullptr, second = nullptr;
+  PairStreams() {
+    CUDA_SAFE_CALL(cudaStreamCreateWithFlags(&first, cudaStreamNonBlocking));
+    const cudaError_t second_status =
+        cudaStreamCreateWithFlags(&second, cudaStreamNonBlocking);
+    if (second_status != cudaSuccess) {
+      (void)cudaStreamDestroy(first);
+      first = nullptr;
+      CUDA_SAFE_CALL(second_status);
+    }
+  }
+  ~PairStreams() {
+    if (second) (void)cudaStreamDestroy(second);
+    if (first) (void)cudaStreamDestroy(first);
+  }
+};
+
+bool DefaultReferencePairSettings(const PatchMatchOptions& o) {
+  const PatchMatchOptions d;
+  return o.depth_min == d.depth_min && o.depth_max == d.depth_max &&
+         o.sigma_spatial == d.sigma_spatial && o.sigma_color == d.sigma_color &&
+         o.ncc_sigma == d.ncc_sigma &&
+         o.min_triangulation_angle == d.min_triangulation_angle &&
+         o.incident_angle_sigma == d.incident_angle_sigma &&
+         o.geom_consistency_regularizer == d.geom_consistency_regularizer &&
+         o.geom_consistency_max_cost == d.geom_consistency_max_cost &&
+         o.filter_min_ncc == d.filter_min_ncc &&
+         o.filter_min_triangulation_angle == d.filter_min_triangulation_angle &&
+         o.filter_geom_consistency_max_cost ==
+             d.filter_geom_consistency_max_cost &&
+         o.cache_size == d.cache_size &&
+         o.direct_source_upload == d.direct_source_upload &&
+         o.reference_only_normal_materialization ==
+             d.reference_only_normal_materialization &&
+         o.window_radius == d.window_radius && o.window_step == d.window_step &&
+         o.num_samples == d.num_samples &&
+         o.num_iterations == d.num_iterations &&
+         o.filter_min_num_consistent == d.filter_min_num_consistent &&
+         o.allow_missing_files == d.allow_missing_files &&
+         o.write_consistency_graph == d.write_consistency_graph &&
+         !o.rotation_buffer_reuse && !o.checkpoint_hmm &&
+         o.geom_consistency == o.filter;
+}
+}  // namespace
+#endif
 
 PatchMatch::PatchMatch(const PatchMatchOptions& options, const Problem& problem)
     : options_(options), problem_(problem) {}
@@ -152,6 +204,63 @@ void PatchMatchController::Run() {
   thread_pool_ = std::make_unique<ThreadPool>(gpu_indices_.size());
   io_thread_pool_ = std::make_unique<ThreadPool>(
       GetEffectiveNumThreads(options_.num_threads));
+
+#ifndef COLMAP_HIP_ENABLED
+  if (gpu_indices_.size() == 1 && DefaultReferencePairSettings(options_)) {
+    SetBestCudaDevice(gpu_indices_.front());
+    const auto& model = workspace_->GetModel();
+    const auto shape = [&](size_t index) {
+      const auto& problem = problems_.at(index);
+      const auto& ref = model.images.at(problem.ref_image_idx);
+      size_t source_width = 0, source_height = 0;
+      for (const int source : problem.src_image_idxs) {
+        const auto& image = model.images.at(source);
+        source_width = std::max(source_width, image.GetWidth());
+        source_height = std::max(source_height, image.GetHeight());
+      }
+      return std::make_tuple(ref.GetWidth(),
+                             ref.GetHeight(),
+                             problem.src_image_idxs.size(),
+                             source_width,
+                             source_height);
+    };
+    const auto run_phase = [&](const PatchMatchOptions& phase) {
+      for (size_t index = 0; index < problems_.size();) {
+        if (index + 1 < problems_.size()) {
+          const auto first_shape = shape(index);
+          const auto second_shape = shape(index + 1);
+          if (first_shape == second_shape &&
+              CanPairPatchMatchViews(std::get<0>(first_shape),
+                                     std::get<1>(first_shape),
+                                     std::get<0>(second_shape),
+                                     std::get<1>(second_shape),
+                                     phase.geom_consistency)) {
+            thread_pool_->AddTask(&PatchMatchController::ProcessProblemPair,
+                                  this,
+                                  phase,
+                                  index,
+                                  index + 1);
+            index += 2;
+            continue;
+          }
+        }
+        thread_pool_->AddTask(
+            &PatchMatchController::ProcessProblem, this, phase, index);
+        ++index;
+      }
+      thread_pool_->Wait();
+    };
+    if (options_.geom_consistency) {
+      auto photo_options = options_;
+      photo_options.geom_consistency = false;
+      photo_options.filter = false;
+      run_phase(photo_options);
+    }
+    run_phase(options_);
+    run_timer.PrintMinutes();
+    return;
+  }
+#endif
 
   // If geometric consistency is enabled, then photometric output must be
   // computed first for all images without filtering.
@@ -357,15 +466,18 @@ void PatchMatchController::ReadGpuIndices() {
   }
 }
 
-void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
-                                          const size_t problem_idx) {
+bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
+                                          const size_t problem_idx,
+                                          PreparedProblem* prepared) {
   if (CheckIfStopped()) {
-    return;
+    return false;
   }
 
   const auto& model = workspace_->GetModel();
 
-  auto& problem = problems_.at(problem_idx);
+  auto& shared_problem = problems_.at(problem_idx);
+  auto& problem = prepared->problem;
+  problem = shared_problem;
   const int gpu_index = gpu_indices_.at(thread_pool_->GetThreadIndex());
   THROW_CHECK_GE(gpu_index, -1);
 
@@ -385,7 +497,7 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
   if (ExistsFile(depth_map_path) && ExistsFile(normal_map_path) &&
       (!options.write_consistency_graph ||
        ExistsFile(consistency_graph_path))) {
-    return;
+    return false;
   }
 
   LOG_HEADING1(StringPrintf("Processing view %d / %d for %s",
@@ -412,9 +524,10 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
     patch_match_options.sigma_spatial = patch_match_options.window_radius;
   }
 
-  std::vector<Image> images = model.images;
-  std::vector<DepthMap> depth_maps;
-  std::vector<NormalMap> normal_maps;
+  auto& images = prepared->images;
+  auto& depth_maps = prepared->depth_maps;
+  auto& normal_maps = prepared->normal_maps;
+  images = model.images;
   if (options.geom_consistency) {
     depth_maps.resize(model.images.size());
     normal_maps.resize(model.images.size());
@@ -489,25 +602,138 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
       }
     });
 
+    shared_problem.src_image_idxs = src_image_idxs;
     problem.src_image_idxs = src_image_idxs;
   }
 
   problem.Print();
   patch_match_options.Print();
 
-  PatchMatch patch_match(patch_match_options, problem);
+  prepared->options = patch_match_options;
+  prepared->depth_path = depth_map_path;
+  prepared->normal_path = normal_map_path;
+  prepared->consistency_path = consistency_graph_path;
+  prepared->valid = true;
+  return true;
+}
+
+void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
+                                          const size_t problem_idx) {
+  PreparedProblem prepared;
+  if (!PrepareProblem(options, problem_idx, &prepared)) return;
+  PatchMatch patch_match(prepared.options, prepared.problem);
   patch_match.Run();
 
   LOG(INFO) << std::endl
-            << StringPrintf("Writing %s output for %s",
-                            output_type.c_str(),
-                            image_name.c_str());
+            << StringPrintf(
+                   "Writing %s output for %s",
+                   options.geom_consistency ? "geometric" : "photometric",
+                   workspace_->GetModel()
+                       .GetImageName(prepared.problem.ref_image_idx)
+                       .c_str());
 
-  patch_match.GetDepthMap().Write(depth_map_path);
-  patch_match.GetNormalMap().Write(normal_map_path);
+  patch_match.GetDepthMap().Write(prepared.depth_path);
+  patch_match.GetNormalMap().Write(prepared.normal_path);
   if (options.write_consistency_graph) {
-    patch_match.GetConsistencyGraph().Write(consistency_graph_path);
+    patch_match.GetConsistencyGraph().Write(prepared.consistency_path);
   }
+}
+
+void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
+                                              const size_t first_problem_idx,
+                                              const size_t second_problem_idx) {
+#ifdef COLMAP_HIP_ENABLED
+  ProcessProblem(options, first_problem_idx);
+  ProcessProblem(options, second_problem_idx);
+#else
+  const auto write_cuda = [](const PreparedProblem& input,
+                             const PatchMatchCuda& cuda) {
+    cuda.GetDepthMap().Write(input.depth_path);
+    cuda.GetNormalMap().Write(input.normal_path);
+    if (input.options.write_consistency_graph) {
+      const auto& ref = input.problem.images->at(input.problem.ref_image_idx);
+      ConsistencyGraph(
+          ref.GetWidth(), ref.GetHeight(), cuda.GetConsistentImageIdxs())
+          .Write(input.consistency_path);
+    }
+  };
+  const auto run_native = [](const PreparedProblem& input) {
+    PatchMatch solver(input.options, input.problem);
+    solver.Run();
+    solver.GetDepthMap().Write(input.depth_path);
+    solver.GetNormalMap().Write(input.normal_path);
+    if (input.options.write_consistency_graph) {
+      solver.GetConsistencyGraph().Write(input.consistency_path);
+    }
+  };
+
+  PreparedProblem first, second;
+  PrepareProblem(options, first_problem_idx, &first);
+  PrepareProblem(options, second_problem_idx, &second);
+  if (!first.valid || !second.valid) {
+    if (first.valid) run_native(first);
+    if (second.valid) run_native(second);
+    return;
+  }
+
+  PatchMatch(first.options, first.problem).Check();
+  PatchMatch(second.options, second.problem).Check();
+  // CUDA's current device is per host thread. The controller's metadata
+  // query selected a device on the caller, not on this pool worker.
+  SetBestCudaDevice(gpu_indices_.at(thread_pool_->GetThreadIndex()));
+  const auto& first_ref = first.problem.images->at(first.problem.ref_image_idx);
+  const auto& second_ref =
+      second.problem.images->at(second.problem.ref_image_idx);
+  if (first.problem.src_image_idxs.size() !=
+          second.problem.src_image_idxs.size() ||
+      !CanPairPatchMatchViews(first_ref.GetWidth(),
+                              first_ref.GetHeight(),
+                              second_ref.GetWidth(),
+                              second_ref.GetHeight(),
+                              options.geom_consistency)) {
+    run_native(first);
+    run_native(second);
+    return;
+  }
+
+  auto first_cuda =
+      std::make_unique<PatchMatchCuda>(first.options, first.problem);
+  CUDA_SYNC_AND_CHECK();
+  size_t free_after_first = 0, total_after_first = 0;
+  CUDA_SAFE_CALL(cudaMemGetInfo(&free_after_first, &total_after_first));
+  constexpr size_t kExternalMargin = size_t(256) << 20;
+  const size_t owned_peak = first_cuda->PairPeakBytes();
+  const bool enough_for_second_and_rotation =
+      owned_peak <= std::numeric_limits<size_t>::max() - kExternalMargin &&
+      free_after_first >= owned_peak + kExternalMargin;
+  const auto finish_first_native = [&]() {
+    first_cuda->Run();
+    write_cuda(first, *first_cuda);
+    first_cuda.reset();
+    run_native(second);
+  };
+  if (!enough_for_second_and_rotation) {
+    finish_first_native();
+    return;
+  }
+  auto second_cuda =
+      std::make_unique<PatchMatchCuda>(second.options, second.problem);
+  CUDA_SYNC_AND_CHECK();
+  size_t free_after_second = 0, total_after_second = 0;
+  CUDA_SAFE_CALL(cudaMemGetInfo(&free_after_second, &total_after_second));
+  if (free_after_second < owned_peak + kExternalMargin) {
+    second_cuda.reset();
+    finish_first_native();
+    return;
+  }
+
+  LOG(INFO) << "Running paired PatchMatch references " << first_problem_idx
+            << " and " << second_problem_idx;
+  PairStreams streams;
+  RunPatchMatchPair(*first_cuda, *second_cuda, streams.first, streams.second);
+  write_cuda(first, *first_cuda);
+  write_cuda(second, *second_cuda);
+#endif
 }
 
 }  // namespace mvs

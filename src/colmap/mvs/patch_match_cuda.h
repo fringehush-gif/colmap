@@ -32,8 +32,18 @@ class PatchMatchCuda {
   NormalMap GetNormalMap() const;
   Mat<float> GetSelProbMap() const;
   std::vector<int> GetConsistentImageIdxs() const;
+#ifndef COLMAP_HIP_ENABLED
+  // Conservative owner-local estimate for admitting a second live instance.
+  size_t PairPeakBytes() const;
+#endif
 
  private:
+#ifndef COLMAP_HIP_ENABLED
+  friend void RunPatchMatchPair(PatchMatchCuda& first,
+                                PatchMatchCuda& second,
+                                cudaStream_t first_stream,
+                                cudaStream_t second_stream);
+#endif
   template <int kWindowSize, int kWindowStep, bool kCheckpointHmm>
   void RunWithWindowSizeAndStep();
 
@@ -132,6 +142,21 @@ class PatchMatchCuda {
   cudaArray_t alternate_ref_image_array_ = nullptr;
 #endif
 };
+
+#ifndef COLMAP_HIP_ENABLED
+// Query the native default Sweep's device residency for both orientations.
+bool CanPairPatchMatchViews(size_t first_width,
+                            size_t first_height,
+                            size_t second_width,
+                            size_t second_height,
+                            bool geometric);
+
+// Both instances own prepared, independent real inputs on one CUDA device.
+void RunPatchMatchPair(PatchMatchCuda& first,
+                       PatchMatchCuda& second,
+                       cudaStream_t first_stream,
+                       cudaStream_t second_stream);
+#endif
 
 }  // namespace mvs
 }  // namespace colmap
