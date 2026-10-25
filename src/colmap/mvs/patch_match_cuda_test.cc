@@ -168,11 +168,14 @@ struct Inputs {
 // Two independent reference problems, each with differently calibrated source
 // views. All images are rendered from the same textured world plane. Sizes are
 // deliberately non-square, odd, and not CUDA block multiples.
-Inputs MakeInputs(const int variant, const int num_source_images = 2) {
+Inputs MakeInputs(const int variant,
+                  const int num_source_images = 2,
+                  const int ref_height = 0) {
   Inputs inputs;
   for (int i = 0; i <= num_source_images; ++i) {
     const int width = (variant == 0 ? 47 : 39) + 2 * i;
-    const int height = (variant == 0 ? 35 : 53) + 2 * i;
+    const int height =
+        (ref_height > 0 ? ref_height : (variant == 0 ? 35 : 53)) + 2 * i;
     const float fx = (variant == 0 ? 48.0f : 69.0f) + 3.0f * i;
     const float fy = (variant == 0 ? 57.0f : 44.0f) + 2.0f * i;
     const float cx = width * 0.5f + 0.7f + i * 0.2f;
@@ -383,7 +386,8 @@ TEST_P(SourceUploadTest, DirectUploadPreservesAlgorithmOutputs) {
   ExpectEquivalent(padded, direct);
 }
 
-void ExpectPairedDefaultSweepOutputs(const bool reuse) {
+void ExpectPairedDefaultSweepOutputs(const bool reuse,
+                                     const bool tall = false) {
   const auto make_problem = [](Inputs& inputs) {
     PatchMatch::Problem problem;
     problem.ref_image_idx = 0;
@@ -413,8 +417,8 @@ void ExpectPairedDefaultSweepOutputs(const bool reuse) {
                  << "geometry=" << geometry << " reuse=" << reuse);
     // Odd, differently calibrated references and nine sources exercise both
     // orientations and a final consistency-mask byte tail.
-    Inputs first_inputs = MakeInputs(0, 9);
-    Inputs second_inputs = MakeInputs(1, 9);
+    Inputs first_inputs = MakeInputs(0, 9, tall ? 149 : 0);
+    Inputs second_inputs = MakeInputs(1, 9, tall ? 153 : 0);
     auto options = MakeOptions(geometry, geometry, reuse);
     const PatchMatchOptions defaults;
     options.window_radius = defaults.window_radius;
@@ -467,6 +471,10 @@ TEST_F(CudaTest, PairedDefaultSweepsPreserveIndependentOutputs) {
 
 TEST_F(CudaTest, PairedBankedRotationPreservesIndependentOutputs) {
   ExpectPairedDefaultSweepOutputs(true);
+}
+
+TEST_F(CudaTest, PairedTallInitialCostStripeTailsPreserveOutputs) {
+  ExpectPairedDefaultSweepOutputs(false, true);
 }
 
 TEST_F(CudaTest, ExplicitAndDefaultStreamHelpers) {
@@ -544,6 +552,29 @@ TEST_F(CudaTest, WideWindowsPreserveOutputs) {
     ExpectNonempty(original, inputs, false);
     ExpectNonempty(reused, inputs, false);
     ExpectEquivalent(original, reused);
+  }
+}
+
+TEST_F(CudaTest, TallInitialCostStripeTailsPreserveOutputs) {
+  // The two odd reference heights leave 21- and 25-row final stripes. Odd
+  // widths also retain the existing pitched-storage and border-lane coverage.
+  for (const int variant : {0, 1}) {
+    Inputs inputs = MakeInputs(variant, 2, variant == 0 ? 149 : 153);
+    for (const int radius : {2, 5, 9, 17}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "variant=" << variant << " radius=" << radius);
+      PatchMatchOptions options = MakeOptions(false, false, false);
+      options.window_radius = radius;
+      options.sigma_spatial = radius;
+      options.num_iterations = 1;
+      options.num_samples = 1;
+      const Result original = RunPatchMatch(&inputs, options);
+      options.rotation_buffer_reuse = true;
+      const Result reused = RunPatchMatch(&inputs, options);
+      ExpectNonempty(original, inputs, false);
+      ExpectNonempty(reused, inputs, false);
+      ExpectEquivalent(original, reused);
+    }
   }
 }
 
