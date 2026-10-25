@@ -354,12 +354,9 @@ struct LocalRefImage {
 
   float* data = nullptr;
 
-  __device__ inline void Read(const int row) {
-    // For the first row, read the entire block into shared memory. For all
-    // consecutive rows, it is only necessary to shift the rows in shared memory
-    // up by one element and then read in a new row at the bottom of the shared
-    // memory. Note that this assumes that the calling loop starts with the
-    // first row and then consecutively reads in the next row.
+  __device__ inline void Read(const int row, const bool stripe_start = false) {
+    // For the first row of a stripe, read the entire block into shared memory.
+    // Consecutive rows shift the tile up and read one new row at the bottom.
 
     const int thread_id = threadIdx.x;
     const int thread_block_first_id = blockDim.x * blockIdx.x;
@@ -368,7 +365,7 @@ struct LocalRefImage {
     const int global_col_start =
         thread_block_first_id - kThreadBlockRadius * kBlockWidth + thread_id;
 
-    if (row == 0) {
+    if (row == 0 || stripe_start) {
       int global_row = row - kWindowRadius;
       for (int local_row = 0; local_row < kNumRows; ++local_row, ++global_row) {
         int local_col = local_col_start;
@@ -491,7 +488,10 @@ struct PhotoConsistencyCostComputer {
   float depth = 0.0f;
   const float* normal = nullptr;
 
-  __device__ inline void ReadRef(const int row) { local_ref_image.Read(row); }
+  __device__ inline void ReadRef(const int row,
+                                 const bool stripe_start = false) {
+    local_ref_image.Read(row, stripe_start);
+  }
 
   __device__ inline void ReadWeights(const int first_row = 0,
                                      const int row_stride = 1) {
@@ -520,8 +520,8 @@ struct PhotoConsistencyCostComputer {
     }
   }
 
-  __device__ inline void Read(const int row) {
-    ReadRef(row);
+  __device__ inline void Read(const int row, const bool stripe_start = false) {
+    ReadRef(row, stripe_start);
     __syncthreads();
     ReadWeights();
   }
@@ -935,6 +935,8 @@ __global__ void RotateNormalMap(GpuMatView<float> normal_map) {
   }
 }
 
+constexpr int kInitialCostStripeRows = 64;
+
 template <int kWindowSize, int kWindowStep>
 __global__ void ComputeInitialCost(
     const RefCamera camera,
@@ -970,12 +972,15 @@ __global__ void ComputeInitialCost(
   float normal[3] = {0};
   pcc_computer.normal = normal;
 
-  for (int row = 0; row < cost_map.GetHeight(); ++row) {
+  const int first_row = blockIdx.y * kInitialCostStripeRows;
+  const int last_row = min(first_row + kInitialCostStripeRows,
+                           static_cast<int>(cost_map.GetHeight()));
+  for (int row = first_row; row < last_row; ++row) {
     // Finish every column's previous-row reads before reusing the shared tile.
     __syncthreads();
     // Note that this must be executed even for pixels outside the borders,
     // since pixels are used in the local neighborhood of the current pixel.
-    pcc_computer.Read(row);
+    pcc_computer.Read(row, row == first_row);
 
     if (col < cost_map.GetWidth()) {
       pcc_computer.depth = depth_map.Get(row, col);
@@ -1992,8 +1997,11 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   CudaTimer init_timer;
 
   ComputeCudaConfig();
+  dim3 initial_cost_grid = sweep_grid_size_;
+  initial_cost_grid.y = (cost_map_->GetHeight() + kInitialCostStripeRows - 1) /
+                        kInitialCostStripeRows;
   ComputeInitialCost<kWindowSize, kWindowStep>
-      <<<sweep_grid_size_, sweep_block_size_>>>(
+      <<<initial_cost_grid, sweep_block_size_>>>(
           MakeRefCamera(ref_K_host_[rotation_in_half_pi_],
                         ref_inv_K_host_[rotation_in_half_pi_]),
           cost_map_->View(),
@@ -2383,7 +2391,11 @@ void RunPatchMatchPair(PatchMatchCuda& first,
   CUDA_SYNC_AND_CHECK();
   for (PatchMatchCuda* p : {&first, &second}) {
     p->ComputeCudaConfig();
-    ComputeInitialCost<11, 1><<<p->sweep_grid_size_, p->sweep_block_size_>>>(
+    dim3 initial_cost_grid = p->sweep_grid_size_;
+    initial_cost_grid.y =
+        (p->cost_map_->GetHeight() + kInitialCostStripeRows - 1) /
+        kInitialCostStripeRows;
+    ComputeInitialCost<11, 1><<<initial_cost_grid, p->sweep_block_size_>>>(
         MakeRefCamera(p->ref_K_host_[0], p->ref_inv_K_host_[0]),
         p->cost_map_->View(),
         p->depth_map_->View(),
