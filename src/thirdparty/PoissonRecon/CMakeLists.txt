@@ -27,3 +27,15 @@ if(CUDA_ENABLED AND NOT HIP_ENABLED)
     target_compile_options(colmap_poisson_recon PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>)
     target_link_libraries(colmap_poisson_recon PRIVATE CUDA::cudart)
 endif()
+
+# The bounded matrix is a private PoissonRecon type; keep its test isolated
+# from the MVS library and its CUDA dependencies.
+set(FOLDER_NAME "poisson_recon")
+COLMAP_ADD_TEST(
+    NAME sparse_matrix_test
+    SRCS sparse_matrix_test.cc
+)
+if(TESTS_ENABLED AND OPENMP_FOUND)
+    target_link_libraries(colmap_poisson_recon_sparse_matrix_test PRIVATE
+        OpenMP::OpenMP_CXX)
+endif()
