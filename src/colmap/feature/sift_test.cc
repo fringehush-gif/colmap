@@ -17,12 +17,91 @@
 #include "colmap/util/cuda.h"
 #endif
 
+#include "thirdparty/VLFeat/imopv.h"
+
+#include <algorithm>
 #include <functional>
 #include <set>
 #include <utility>
+#include <vector>
 
 namespace colmap {
 namespace {
+
+TEST(SiftCPUConvolution, MatchesScalarReferenceAcrossLayouts) {
+  struct Shape {
+    int width;
+    int height;
+    int padding;
+    int step;
+  };
+  // Exercise the four-vector path, its strict-width tail, and small fallbacks.
+  for (const Shape shape : {Shape{127, 31, 1, 1},
+                            Shape{128, 32, 0, 1},
+                            Shape{129, 35, 15, 2},
+                            Shape{144, 37, 0, 3}}) {
+    const int source_stride = shape.width + shape.padding;
+    std::vector<float> source(source_stride * shape.height);
+    for (size_t i = 0; i < source.size(); ++i) {
+      source[i] = (static_cast<int>(i % 127) - 63) * 0.0625f;
+    }
+    // Binary fractions keep the scalar oracle exact without a contraction
+    // assumption. Each output retains the production descending tap order.
+    const float filter[] = {0.0625f, -0.125f, 0.5f, 0.25f, -0.0625f};
+    const int output_height = (shape.height - 1) / shape.step + 1;
+    for (const bool transpose : {false, true}) {
+      for (const bool zero_padding : {false, true}) {
+        for (const int filter_begin : {-2, 0}) {
+          SCOPED_TRACE(::testing::Message()
+                       << shape.width << "x" << shape.height
+                       << " step=" << shape.step << " transpose=" << transpose
+                       << " zero=" << zero_padding
+                       << " begin=" << filter_begin);
+          const int filter_end = filter_begin + 4;
+          const int rows = transpose ? shape.width : output_height;
+          const int columns = transpose ? output_height : shape.width;
+          const int destination_stride = columns + 3;
+          std::vector<float> actual(rows * destination_stride + 7, 123.25f);
+          std::vector<float> expected = actual;
+          for (int x = 0; x < shape.width; ++x) {
+            for (int y = 0; y < shape.height; y += shape.step) {
+              float sum = 0;
+              for (int tap = filter_end; tap >= filter_begin; --tap) {
+                const int row = y - tap;
+                float value = 0;
+                if (!zero_padding || (row >= 0 && row < shape.height)) {
+                  value = source[std::clamp(row, 0, shape.height - 1) *
+                                     source_stride +
+                                 x];
+                }
+                sum += value * filter[tap - filter_begin];
+              }
+              const int index = transpose
+                                    ? x * destination_stride + y / shape.step
+                                    : (y / shape.step) * destination_stride + x;
+              expected[index] = sum;
+            }
+          }
+          const unsigned int flags =
+              (transpose ? VL_TRANSPOSE : 0) |
+              (zero_padding ? VL_PAD_BY_ZERO : VL_PAD_BY_CONTINUITY);
+          vl_imconvcol_vf(actual.data(),
+                          destination_stride,
+                          source.data(),
+                          shape.width,
+                          shape.height,
+                          source_stride,
+                          filter,
+                          filter_begin,
+                          filter_end,
+                          shape.step,
+                          flags);
+          EXPECT_EQ(actual, expected);
+        }
+      }
+    }
+  }
+}
 
 Bitmap CreateImageWithSquare(const int size) {
   Bitmap bitmap(size, size, false);

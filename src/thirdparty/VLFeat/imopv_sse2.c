@@ -24,6 +24,30 @@ the terms of the BSD license (see the COPYING file).
 #include "imopv.h"
 #include "imopv_sse2.h"
 
+#if defined(VL_ARCH_X64)
+/* Conservative half-open byte span, including row padding. */
+static vl_bool
+_vl_imconvcol_sse2_float_span (void const *buffer,
+                              vl_size rows, vl_size columns, vl_size stride,
+                              vl_uintptr *begin, vl_uintptr *end)
+{
+  vl_uintptr const maximum = (vl_uintptr)-1 ;
+  vl_uintptr count ;
+  if (rows == 0 || columns == 0) return VL_FALSE ;
+  if (stride != 0 && rows - 1 > maximum / stride) return VL_FALSE ;
+  count = (rows - 1) * stride ;
+  if (columns > maximum - count) return VL_FALSE ;
+  count += columns ;
+  if (count > maximum / sizeof(float)) return VL_FALSE ;
+  count *= sizeof(float) ;
+  *begin = (vl_uintptr)buffer ;
+  if (count > maximum - *begin) return VL_FALSE ;
+  *end = *begin + count ;
+  return VL_TRUE ;
+}
+#endif
+
+
 #define FLT VL_TYPE_FLOAT
 #define VL_IMOPV_SSE2_INSTANTIATING
 #include "imopv_sse2.c"
@@ -56,10 +80,102 @@ VL_XCAT3(_vl_imconvcol_v, SFX, _sse2)
   double totcol = 0 ;
   double simdcol = 0 ;
 
+#if (FLT == VL_TYPE_FLOAT) && defined(VL_ARCH_X64)
+  vl_bool separate_buffers = VL_FALSE ;
+  vl_uintptr src_begin, src_end, dst_begin, dst_end, filter_begin, filter_end ;
+  /* Unsigned subtraction avoids signed overflow for the filter support. */
+  if (src_width >= 128 && src_height >= 32 && use_simd &&
+      filt_end >= filt_begin && dheight > 0 &&
+      dst_stride >= (transp ? (vl_size)dheight : src_width)) {
+    vl_uintptr filter_count = (vl_uintptr)filt_end - (vl_uintptr)filt_begin ;
+    if (filter_count < (vl_uintptr)-1 &&
+        _vl_imconvcol_sse2_float_span(src, src_height, src_width, src_stride,
+                                     &src_begin, &src_end) &&
+        _vl_imconvcol_sse2_float_span(dst,
+                                     transp ? src_width : (vl_size)dheight,
+                                     transp ? (vl_size)dheight : src_width,
+                                     dst_stride, &dst_begin, &dst_end) &&
+        _vl_imconvcol_sse2_float_span(filt, 1, filter_count + 1, 0,
+                                     &filter_begin, &filter_end)) {
+      separate_buffers = (dst_end <= src_begin || src_end <= dst_begin) &&
+                         (dst_end <= filter_begin || filter_end <= dst_begin) ;
+    }
+  }
+#endif
+
   /* let filt point to the last sample of the filter */
   filt += filt_end - filt_begin ;
 
   while (x < (signed)src_width) {
+#if (FLT == VL_TYPE_FLOAT) && defined(VL_ARCH_X64)
+    /* Advance adjacent SSE vectors together. Keep each pixel's tap order and
+       the original vector/scalar path for small images and the remainder. */
+    if (separate_buffers && src_width >= 128 && src_height >= 32 && use_simd &&
+        x + 4 * VSIZE < (signed)src_width && VALIGNED(src + x)) {
+      for (y = 0 ; y < (signed)src_height ; y += step) {
+        union {VTYPE v ; T x[VSIZE] ;} a0, a1, a2, a3 ;
+        VTYPE v0 = VSTZ(), v1 = VSTZ(), v2 = VSTZ(), v3 = VSTZ(), c ;
+        T const *filti = filt ;
+        vl_index stop = filt_end - y ;
+        T const *srci = src + x - stop * src_stride ;
+        int b, lane ;
+        a0.v = a1.v = a2.v = a3.v = VSTZ() ;
+
+        if (stop > 0) {
+          if (!zeropad) {
+            v0 = *(VTYPE*)(src + x) ;
+            v1 = *(VTYPE*)(src + x + VSIZE) ;
+            v2 = *(VTYPE*)(src + x + 2 * VSIZE) ;
+            v3 = *(VTYPE*)(src + x + 3 * VSIZE) ;
+          }
+          while (filti > filt - stop) {
+            c = VLD1(filti--) ;
+            a0.v = VADD(a0.v, VMUL(v0, c)) ;
+            a1.v = VADD(a1.v, VMUL(v1, c)) ;
+            a2.v = VADD(a2.v, VMUL(v2, c)) ;
+            a3.v = VADD(a3.v, VMUL(v3, c)) ;
+            srci += src_stride ;
+          }
+        }
+        stop = filt_end - VL_MAX(filt_begin, y - (signed)src_height + 1) + 1 ;
+        while (filti > filt - stop) {
+          v0 = *(VTYPE*)srci ;
+          v1 = *(VTYPE*)(srci + VSIZE) ;
+          v2 = *(VTYPE*)(srci + 2 * VSIZE) ;
+          v3 = *(VTYPE*)(srci + 3 * VSIZE) ;
+          c = VLD1(filti--) ;
+          a0.v = VADD(a0.v, VMUL(v0, c)) ;
+          a1.v = VADD(a1.v, VMUL(v1, c)) ;
+          a2.v = VADD(a2.v, VMUL(v2, c)) ;
+          a3.v = VADD(a3.v, VMUL(v3, c)) ;
+          srci += src_stride ;
+        }
+        if (zeropad) v0 = v1 = v2 = v3 = VSTZ() ;
+        stop = filt_end - filt_begin + 1 ;
+        while (filti > filt - stop) {
+          c = VLD1(filti--) ;
+          a0.v = VADD(a0.v, VMUL(v0, c)) ;
+          a1.v = VADD(a1.v, VMUL(v1, c)) ;
+          a2.v = VADD(a2.v, VMUL(v2, c)) ;
+          a3.v = VADD(a3.v, VMUL(v3, c)) ;
+        }
+        for (b = 0 ; b < 4 ; ++b) {
+          T const *values = b == 0 ? a0.x : b == 1 ? a1.x : b == 2 ? a2.x : a3.x ;
+          for (lane = 0 ; lane < VSIZE ; ++lane) {
+            if (transp) dst[(b * VSIZE + lane) * dst_stride] = values[lane] ;
+            else dst[b * VSIZE + lane] = values[lane] ;
+          }
+        }
+        dst += transp ? 1 : dst_stride ;
+      }
+      if (transp) dst += 4 * VSIZE * dst_stride - dheight ;
+      else dst += 4 * VSIZE - dheight * dst_stride ;
+      x += 4 * VSIZE ;
+      simdcol += 4 * VSIZE ;
+      totcol += 4 * VSIZE ;
+      continue ;
+    }
+#endif
     /* Calculate dest[x,y] = sum_p image[x,p] filt[y - p]
      * where supp(filt) = [filt_begin, filt_end] = [fb,fe].
      *
