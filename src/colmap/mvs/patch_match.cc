@@ -70,7 +70,7 @@ bool DefaultReferencePairSettings(const PatchMatchOptions& o) {
          o.filter_min_num_consistent == d.filter_min_num_consistent &&
          o.allow_missing_files == d.allow_missing_files &&
          o.write_consistency_graph == d.write_consistency_graph &&
-         !o.checkpoint_hmm && o.geom_consistency == o.filter;
+         o.geom_consistency == o.filter;
 }
 }  // namespace
 #endif
@@ -238,7 +238,8 @@ void PatchMatchController::Run() {
         for (size_t next = index; next < batch_end; ++next)
           batch_shapes.emplace_back(std::get<0>(shape(next)),
                                     std::get<1>(shape(next)));
-        if (CanBatchPatchMatchViews(batch_shapes, phase.geom_consistency)) {
+        if (CanBatchPatchMatchViews(
+                batch_shapes, phase.geom_consistency, phase.checkpoint_hmm)) {
           std::vector<size_t> indices;
           for (size_t next = index; next < batch_end; ++next)
             indices.push_back(next);
@@ -257,7 +258,8 @@ void PatchMatchController::Run() {
                                      std::get<1>(first_shape),
                                      std::get<0>(second_shape),
                                      std::get<1>(second_shape),
-                                     phase.geom_consistency)) {
+                                     phase.geom_consistency,
+                                     phase.checkpoint_hmm)) {
             thread_pool_->AddTask(&PatchMatchController::ProcessProblemPair,
                                   this,
                                   phase,
@@ -713,7 +715,8 @@ void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
                               first_ref.GetHeight(),
                               second_ref.GetWidth(),
                               second_ref.GetHeight(),
-                              options.geom_consistency)) {
+                              options.geom_consistency,
+                              options.checkpoint_hmm)) {
     run_native(first);
     run_native(second);
     return;
@@ -831,7 +834,8 @@ void PatchMatchController::ProcessProblemBatch(
                                    a.GetHeight(),
                                    b.GetWidth(),
                                    b.GetHeight(),
-                                   options.geom_consistency)) {
+                                   options.geom_consistency,
+                                   options.checkpoint_hmm)) {
           if (!owners[i])
             owners[i] = std::make_unique<PatchMatchCuda>(input[i]->options,
                                                          input[i]->problem);
@@ -898,7 +902,8 @@ void PatchMatchController::ProcessProblemBatch(
     }
     shapes.emplace_back(std::get<0>(this_shape), std::get<1>(this_shape));
   }
-  if (!CanBatchPatchMatchViews(shapes, options.geom_consistency)) {
+  if (!CanBatchPatchMatchViews(
+          shapes, options.geom_consistency, options.checkpoint_hmm)) {
     pair_or_single_fallback();
     return;
   }

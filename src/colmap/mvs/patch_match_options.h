@@ -109,8 +109,13 @@ struct PatchMatchOptions {
   bool rotation_buffer_reuse = false;
 
   // Save GPU memory by checkpointing backward HMM messages and replaying
-  // each stripe. Adds recurrence work and rotation copies; defaults to false.
+  // each stripe. Adds recurrence work and rotation copies. CUDA enables this
+  // by default; set false to retain the full probability volumes.
+#if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
+  bool checkpoint_hmm = true;
+#else
   bool checkpoint_hmm = false;
+#endif
 
   void Print() const;
   bool Check() const;

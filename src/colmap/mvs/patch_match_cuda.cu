@@ -2389,7 +2389,8 @@ size_t PatchMatchCuda::PairPeakBytes() const {
   add(&resident, ref_mats);
   add(&resident, depth_normal);
   add(&resident, mat_bytes(rand_state_map_));
-  add(&resident, sel_prob_map_->GetCapacityBytes());
+  if (sel_prob_map_) add(&resident, sel_prob_map_->GetCapacityBytes());
+  if (hmm_checkpoint_) add(&resident, hmm_checkpoint_->GetCapacityBytes());
   add(&resident, prev_sel_prob_map_->GetCapacityBytes());
   add(&resident, cost_map_->GetCapacityBytes());
   add(&resident, mat_bytes(global_workspace_));
@@ -2457,6 +2458,7 @@ size_t PairGridCount(size_t width, size_t height) {
   return (std::max(width, height) - 1) / 8 + 1;
 }
 
+template <bool kCheckpointHmm>
 size_t PairResidentBlocksPerSm(bool geometric,
                                bool final_filter,
                                size_t* sm_count) {
@@ -2468,32 +2470,56 @@ size_t PairResidentBlocksPerSm(bool geometric,
   if (geometric && final_filter) {
     CUDA_SAFE_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
         &per_sm,
-        SweepFromTopToBottom<11, 1, true, true, true, true, 8, false>,
+        SweepFromTopToBottom<11, 1, true, true, true, true, 8, kCheckpointHmm>,
         128,
         0));
   } else if (geometric) {
     CUDA_SAFE_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
         &per_sm,
-        SweepFromTopToBottom<11, 1, true, false, false, true, 8, false>,
+        SweepFromTopToBottom<11,
+                             1,
+                             true,
+                             false,
+                             false,
+                             true,
+                             8,
+                             kCheckpointHmm>,
         128,
         0));
   } else {
     CUDA_SAFE_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
         &per_sm,
-        SweepFromTopToBottom<11, 1, false, false, false, true, 8, false>,
+        SweepFromTopToBottom<11,
+                             1,
+                             false,
+                             false,
+                             false,
+                             true,
+                             8,
+                             kCheckpointHmm>,
         128,
         0));
   }
   *sm_count = properties.multiProcessorCount;
   return static_cast<size_t>(per_sm);
 }
+size_t PairResidentBlocksPerSm(bool geometric,
+                               bool final_filter,
+                               bool checkpoint_hmm,
+                               size_t* sm_count) {
+  return checkpoint_hmm
+             ? PairResidentBlocksPerSm<true>(geometric, final_filter, sm_count)
+             : PairResidentBlocksPerSm<false>(
+                   geometric, final_filter, sm_count);
+}
 bool PairFitsResidentWaves(size_t first_grid,
                            size_t second_grid,
                            bool geometric,
-                           bool final_filter) {
+                           bool final_filter,
+                           bool checkpoint_hmm) {
   size_t sm_count = 0;
-  const size_t per_sm =
-      PairResidentBlocksPerSm(geometric, final_filter, &sm_count);
+  const size_t per_sm = PairResidentBlocksPerSm(
+      geometric, final_filter, checkpoint_hmm, &sm_count);
   return sm_count > 0 &&
          (first_grid - 1) / sm_count + (second_grid - 1) / sm_count + 2 <=
              per_sm;
@@ -2505,17 +2531,35 @@ bool CanPairPatchMatchViews(size_t first_width,
                             size_t second_width,
                             size_t second_height,
                             bool geometric) {
+  return CanPairPatchMatchViews(
+      first_width, first_height, second_width, second_height, geometric, false);
+}
+
+bool CanPairPatchMatchViews(size_t first_width,
+                            size_t first_height,
+                            size_t second_width,
+                            size_t second_height,
+                            bool geometric,
+                            bool checkpoint_hmm) {
   if (!first_width || !first_height || !second_width || !second_height) {
     return false;
   }
   return PairFitsResidentWaves(PairGridCount(first_width, first_height),
                                PairGridCount(second_width, second_height),
                                geometric,
-                               false);
+                               false,
+                               checkpoint_hmm);
 }
 
 bool CanBatchPatchMatchViews(
     const std::vector<std::pair<size_t, size_t>>& view_shapes, bool geometric) {
+  return CanBatchPatchMatchViews(view_shapes, geometric, false);
+}
+
+bool CanBatchPatchMatchViews(
+    const std::vector<std::pair<size_t, size_t>>& view_shapes,
+    bool geometric,
+    bool checkpoint_hmm) {
   const size_t count = view_shapes.size();
   if (count < 3 || count > 5) return false;
   const size_t width = view_shapes.front().first;
@@ -2544,10 +2588,11 @@ bool CanBatchPatchMatchViews(
   const size_t max_grid = std::max(grid_width, grid_height);
   // This is the incumbent's actual pair decision; otherwise each reference
   // runs as a singleton on the one-GPU worker.
-  const bool incumbent_pair =
-      PairFitsResidentWaves(max_grid, max_grid, geometric, false);
+  const bool incumbent_pair = PairFitsResidentWaves(
+      max_grid, max_grid, geometric, false, checkpoint_hmm);
   size_t sm_count = 0;
-  const size_t resident = PairResidentBlocksPerSm(geometric, false, &sm_count);
+  const size_t resident =
+      PairResidentBlocksPerSm(geometric, false, checkpoint_hmm, &sm_count);
   size_t capacity = 0, batch_grid_width = 0, batch_grid_height = 0;
   if (!sm_count || !resident || !multiply(sm_count, resident, &capacity) ||
       !multiply(count, grid_width, &batch_grid_width) ||
@@ -2592,13 +2637,14 @@ bool CanBatchPatchMatchViews(
   if (geometric) {
     size_t final_sm_count = 0;
     const size_t final_resident =
-        PairResidentBlocksPerSm(true, true, &final_sm_count);
+        PairResidentBlocksPerSm(true, true, checkpoint_hmm, &final_sm_count);
     size_t final_capacity = 0;
     if (!final_sm_count || !final_resident ||
         !multiply(final_sm_count, final_resident, &final_capacity))
       return false;
     const bool final_pair_together =
-        incumbent_pair && PairFitsResidentWaves(max_grid, max_grid, true, true);
+        incumbent_pair &&
+        PairFitsResidentWaves(max_grid, max_grid, true, true, checkpoint_hmm);
     const size_t final_single_waves = waves(grid_height, final_capacity);
     size_t final_per_pair = 1;
     if (!final_pair_together &&
@@ -2628,12 +2674,12 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     THROW_CHECK_EQ(p.options_.window_radius, 5);
     THROW_CHECK_EQ(p.options_.window_step, 1);
     THROW_CHECK_EQ(p.options_.num_iterations, 5);
-    THROW_CHECK(!p.options_.checkpoint_hmm);
+    THROW_CHECK_EQ(p.options_.checkpoint_hmm, first.options_.checkpoint_hmm);
     THROW_CHECK_EQ(p.options_.rotation_buffer_reuse,
                    first.options_.rotation_buffer_reuse);
     THROW_CHECK_EQ(p.rotation_in_half_pi_, 0);
-    THROW_CHECK(p.hmm_checkpoint_ == nullptr);
-    THROW_CHECK(p.sel_prob_map_ != nullptr);
+    THROW_CHECK_EQ(p.hmm_checkpoint_ != nullptr, p.options_.checkpoint_hmm);
+    THROW_CHECK_EQ(p.sel_prob_map_ == nullptr, p.options_.checkpoint_hmm);
     THROW_CHECK(p.options_.geom_consistency == p.options_.filter);
     THROW_CHECK((p.src_depth_maps_texture_ != nullptr) ==
                 p.options_.geom_consistency);
@@ -2650,6 +2696,8 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     }
     validate(*views[i]);
   }
+  VLOG(2) << "PatchMatch batch checkpoint_hmm: "
+          << first.options_.checkpoint_hmm << ", references: " << views.size();
   bool shared_geometry = first.CanShareGeometryRotation();
   for (PatchMatchCuda* p : views)
     shared_geometry = shared_geometry && p->CanShareGeometryRotation() &&
@@ -2680,7 +2728,8 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
                                        first.ref_height_,
                                        views[1]->ref_width_,
                                        views[1]->ref_height_,
-                                       first.options_.geom_consistency));
+                                       first.options_.geom_consistency,
+                                       first.options_.checkpoint_hmm));
   }
   const bool final_together =
       !is_pair || !first.options_.geom_consistency ||
@@ -2688,7 +2737,8 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
           PairGridCount(first.ref_width_, first.ref_height_),
           PairGridCount(views[1]->ref_width_, views[1]->ref_height_),
           true,
-          true);
+          true,
+          first.options_.checkpoint_hmm);
   for (PatchMatchCuda* p : views) p->consistency_mask_valid_ = false;
 
   // Constructors/texture uploads and native initial-cost kernels finish before
@@ -2762,41 +2812,69 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     const dim3 block(8, 4 * kCooperativeSampleBatchSize, 1);
     const dim3 grid((p.cost_map_->GetWidth() - 1) / 8 + 1, 1, 1);
     const GpuMatView<float> no_checkpoint{nullptr, 0, 0, 0, 0};
-#define PAIR_LAUNCH(GEOM, PHOTO_FILTER, GEO_FILTER)                           \
-  SweepFromTopToBottom<11, 1, GEOM, PHOTO_FILTER, GEO_FILTER, true, 8, false> \
-      <<<grid, block, 0, stream>>>(                                           \
-          MakeRefCamera(p.ref_K_host_[p.rotation_in_half_pi_],                \
-                        p.ref_inv_K_host_[p.rotation_in_half_pi_]),           \
-          p.global_workspace_->View(),                                        \
-          p.rand_state_map_->View(),                                          \
-          (PatchMatchRngPerimeter{p.ref_width_, p.ref_height_}),              \
-          static_cast<unsigned int>(p.rotation_in_half_pi_),                  \
-          p.cost_map_->View(),                                                \
-          p.GeometryView(*p.depth_map_),                                      \
-          p.GeometryView(*p.normal_map_),                                     \
-          (PackedConsistencyMaskView{p.consistency_mask_->View()}),           \
-          p.sel_prob_map_->View(),                                            \
-          p.prev_sel_prob_map_->View(),                                       \
-          no_checkpoint,                                                      \
-          no_checkpoint,                                                      \
-          p.ref_image_texture_->GetObj(),                                     \
-          p.ReferenceStatisticsView(false),                                   \
-          p.ReferenceStatisticsView(true),                                    \
-          p.src_images_texture_->GetObj(),                                    \
-          p.src_depth_maps_texture_ == nullptr                                \
-              ? 0                                                             \
-              : p.src_depth_maps_texture_->GetObj(),                          \
-          p.poses_texture_[p.rotation_in_half_pi_]->GetObj(),                 \
-          o,                                                                  \
-          p.ReferenceStatisticsTexture())
-    if (p.options_.geom_consistency) {
-      if (last) {
-        PAIR_LAUNCH(true, true, true);
+    const auto checkpoints =
+        p.options_.checkpoint_hmm
+            ? p.hmm_checkpoint_->Checkpoints(p.cost_map_->GetWidth(),
+                                             p.cost_map_->GetHeight())
+            : no_checkpoint;
+    const auto beta_stripe =
+        p.options_.checkpoint_hmm
+            ? p.hmm_checkpoint_->Stripe(p.cost_map_->GetWidth(),
+                                        p.cost_map_->GetHeight())
+            : no_checkpoint;
+#define PAIR_LAUNCH(GEOM, PHOTO_FILTER, GEO_FILTER, CHECKPOINT)              \
+  SweepFromTopToBottom<11,                                                   \
+                       1,                                                    \
+                       GEOM,                                                 \
+                       PHOTO_FILTER,                                         \
+                       GEO_FILTER,                                           \
+                       true,                                                 \
+                       8,                                                    \
+                       CHECKPOINT><<<grid, block, 0, stream>>>(              \
+      MakeRefCamera(p.ref_K_host_[p.rotation_in_half_pi_],                   \
+                    p.ref_inv_K_host_[p.rotation_in_half_pi_]),              \
+      p.global_workspace_->View(),                                           \
+      p.rand_state_map_->View(),                                             \
+      (PatchMatchRngPerimeter{p.ref_width_, p.ref_height_}),                 \
+      static_cast<unsigned int>(p.rotation_in_half_pi_),                     \
+      p.cost_map_->View(),                                                   \
+      p.GeometryView(*p.depth_map_),                                         \
+      p.GeometryView(*p.normal_map_),                                        \
+      (PackedConsistencyMaskView{p.consistency_mask_->View()}),              \
+      (CHECKPOINT ? p.prev_sel_prob_map_->View() : p.sel_prob_map_->View()), \
+      p.prev_sel_prob_map_->View(),                                          \
+      checkpoints,                                                           \
+      beta_stripe,                                                           \
+      p.ref_image_texture_->GetObj(),                                        \
+      p.ReferenceStatisticsView(false),                                      \
+      p.ReferenceStatisticsView(true),                                       \
+      p.src_images_texture_->GetObj(),                                       \
+      p.src_depth_maps_texture_ == nullptr                                   \
+          ? 0                                                                \
+          : p.src_depth_maps_texture_->GetObj(),                             \
+      p.poses_texture_[p.rotation_in_half_pi_]->GetObj(),                    \
+      o,                                                                     \
+      p.ReferenceStatisticsTexture())
+    if (p.options_.checkpoint_hmm) {
+      if (p.options_.geom_consistency) {
+        if (last) {
+          PAIR_LAUNCH(true, true, true, true);
+        } else {
+          PAIR_LAUNCH(true, false, false, true);
+        }
       } else {
-        PAIR_LAUNCH(true, false, false);
+        PAIR_LAUNCH(false, false, false, true);
       }
     } else {
-      PAIR_LAUNCH(false, false, false);
+      if (p.options_.geom_consistency) {
+        if (last) {
+          PAIR_LAUNCH(true, true, true, false);
+        } else {
+          PAIR_LAUNCH(true, false, false, false);
+        }
+      } else {
+        PAIR_LAUNCH(false, false, false, false);
+      }
     }
 #undef PAIR_LAUNCH
   };

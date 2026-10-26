@@ -175,6 +175,13 @@ void BindMVS(py::module& m) {
               "Retain rotated GPU buffers between sweeps. CUDA only; "
               "uses additional GPU memory.")
           .def_readwrite(
+              "checkpoint_hmm",
+              &PMOpts::checkpoint_hmm,
+              "Reduce GPU memory by replaying backward HMM messages from "
+              "checkpoints. CUDA only; adds recurrence work and rotation "
+              "copies. "
+              "Disable to retain full probability volumes.")
+          .def_readwrite(
               "allow_missing_files",
               &PMOpts::allow_missing_files,
               "Whether to tolerate missing images/maps in the problem setup")

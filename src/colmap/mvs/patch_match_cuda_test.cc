@@ -260,6 +260,8 @@ PatchMatchOptions MakeOptions(const bool geometry,
   options.geom_consistency = geometry;
   options.filter = filter;
   options.rotation_buffer_reuse = reuse;
+  // Keep full-storage controls explicit when the public CUDA default changes.
+  options.checkpoint_hmm = false;
   options.filter_min_ncc = -1.0;
   options.filter_min_triangulation_angle = 0.0;
   options.filter_min_num_consistent = 1;
@@ -566,7 +568,8 @@ TEST_F(CudaTest, PairedTallInitialCostStripeTailsPreserveOutputs) {
 
 void ExpectReferenceBatchOutputs(const size_t count,
                                  const bool geometry,
-                                 const bool reuse) {
+                                 const bool reuse,
+                                 const bool checkpoint = false) {
   const auto make_problem = [](Inputs& images) {
     PatchMatch::Problem problem;
     problem.ref_image_idx = 0;
@@ -588,7 +591,10 @@ void ExpectReferenceBatchOutputs(const size_t count,
   std::vector<PatchMatch::Problem> problems;
   for (size_t i = 0; i < count; ++i) {
     inputs.push_back(std::make_unique<Inputs>(
-        MakeInputs(static_cast<int>(i % 2), 9, i % 2 ? 153 : 149)));
+        MakeInputs(static_cast<int>(i % 2),
+                   9,
+                   checkpoint ? 129 : (i % 2 ? 153 : 149),
+                   checkpoint ? 257 : 0)));
     problems.push_back(make_problem(*inputs.back()));
   }
   const auto construct = [&]() {
@@ -630,20 +636,37 @@ void ExpectReferenceBatchOutputs(const size_t count,
       std::tuple<DepthMap, NormalMap, Mat<float>, std::vector<int> >;
   std::vector<Snapshot> expected;
   for (const auto& owner : incumbent) expected.push_back(read(*owner));
-  incumbent.clear();
+  if (!checkpoint) incumbent.clear();
+  options.checkpoint_hmm = checkpoint;
   auto batch = construct();
+  if (checkpoint) {
+    for (size_t i = 0; i < count; ++i)
+      EXPECT_LT(batch[i]->PairPeakBytes(), incumbent[i]->PairPeakBytes());
+  }
   std::vector<PatchMatchCuda*> views;
   for (auto& owner : batch) views.push_back(owner.get());
   RunPatchMatchBatch(views, streams.values);
   for (size_t i = 0; i < count; ++i) {
-    SCOPED_TRACE(::testing::Message()
-                 << "count=" << count << " view=" << i
-                 << " geometry=" << geometry << " reuse=" << reuse);
+    SCOPED_TRACE(::testing::Message() << "count=" << count << " view=" << i
+                                      << " geometry=" << geometry << " reuse="
+                                      << reuse << " checkpoint=" << checkpoint);
     const auto actual = read(*batch[i]);
     ExpectExactlyEqual(std::get<0>(expected[i]), std::get<0>(actual));
     ExpectExactlyEqual(std::get<1>(expected[i]), std::get<1>(actual));
     ExpectExactlyEqual(std::get<2>(expected[i]), std::get<2>(actual));
     EXPECT_EQ(std::get<3>(expected[i]), std::get<3>(actual));
+  }
+  if (checkpoint) {
+    for (size_t i = 0; i < count; ++i) {
+      incumbent[i]->Run();
+      batch[i]->Run();
+      const auto expected_next = read(*incumbent[i]);
+      const auto actual_next = read(*batch[i]);
+      ExpectExactlyEqual(std::get<0>(expected_next), std::get<0>(actual_next));
+      ExpectExactlyEqual(std::get<1>(expected_next), std::get<1>(actual_next));
+      ExpectExactlyEqual(std::get<2>(expected_next), std::get<2>(actual_next));
+      EXPECT_EQ(std::get<3>(expected_next), std::get<3>(actual_next));
+    }
   }
 }
 
@@ -657,6 +680,22 @@ TEST_F(CudaTest, FiveViewPhotoBatchPreservesOddTallOutputs) {
 
 TEST_F(CudaTest, FiveViewGeometricBankedBatchPreservesFinalMask) {
   ExpectReferenceBatchOutputs(5, true, true);
+}
+
+TEST_F(CudaTest, ThreeViewCheckpointPhotoBatchPreservesFullStorageOutputs) {
+  ExpectReferenceBatchOutputs(3, false, true, true);
+}
+
+TEST_F(CudaTest, FiveViewCheckpointPhotoBatchPreservesFullStorageOutputs) {
+  ExpectReferenceBatchOutputs(5, false, true, true);
+}
+
+TEST_F(CudaTest, ThreeViewCheckpointGeometricBatchPreservesFullStorageOutputs) {
+  ExpectReferenceBatchOutputs(3, true, true, true);
+}
+
+TEST_F(CudaTest, FiveViewCheckpointGeometricBatchPreservesFullStorageOutputs) {
+  ExpectReferenceBatchOutputs(5, true, true, true);
 }
 
 TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {
