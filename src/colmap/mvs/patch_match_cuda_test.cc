@@ -142,6 +142,16 @@ TEST(PatchMatchCuda, RngPerimeterLayoutPreservesRotatedRowZero) {
         layout.Coordinates(index, &original_row, &original_col);
         EXPECT_EQ(original_row * width + original_col, rotated[0][col]);
       }
+      for (std::size_t row = 0; row < current_height; ++row) {
+        for (std::size_t col = 0; col < current_width; ++col) {
+          std::size_t original_row = 0, original_col = 0;
+          layout.OriginalCoordinates(
+              rotation, row, col, &original_row, &original_col);
+          ASSERT_LT(original_row, height);
+          ASSERT_LT(original_col, width);
+          EXPECT_EQ(original_row * width + original_col, rotated[row][col]);
+        }
+      }
       std::vector<Row> next(current_width, Row(current_height));
       for (std::size_t row = 0; row < current_height; ++row) {
         for (std::size_t col = 0; col < current_width; ++col) {
@@ -369,6 +379,79 @@ class CudaTest : public ::testing::Test {
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
   }
 };
+
+TEST_F(CudaTest, NondefaultFilteredPhotoPreservesRotatedStatistics) {
+  Inputs inputs = MakeInputs(0, 4, 77, 95);
+  auto options = MakeOptions(false, true, false);
+  options.window_radius = 13;  // Full27/step2 uses the original float planes.
+  options.window_step = 2;
+  options.num_samples = PatchMatchOptions{}.num_samples;
+  const Result native_rotation = RunPatchMatch(&inputs, options);
+  options.rotation_buffer_reuse = true;
+  const Result retained_rotation = RunPatchMatch(&inputs, options);
+  ExpectNonempty(native_rotation, inputs, true);
+  ExpectNonempty(retained_rotation, inputs, true);
+  ExpectEquivalent(native_rotation, retained_rotation);
+}
+
+TEST_F(CudaTest, IntegerStatisticsArrayPreservesChannelBits) {
+  // Exercise the existing typed-array wrapper with special FP32 representations
+  // carried as integers. This is array/descriptor coverage; the compiled map
+  // oracle must additionally cover production packing and device fetches.
+  const std::array<uint2, 8> input = {{
+      make_uint2(0x00000000u, 0x80000000u),
+      make_uint2(0x00000001u, 0x80000001u),
+      make_uint2(0x007fffffu, 0x807fffffu),
+      make_uint2(0x00800000u, 0x80800000u),
+      make_uint2(0x3f800000u, 0xbf800000u),
+      make_uint2(0x7f7fffffu, 0xff7fffffu),
+      make_uint2(0x7f800000u, 0xff800000u),
+      make_uint2(0x7fc12345u, 0x7fa12345u),
+  }};
+  cudaTextureDesc descriptor = {};
+  descriptor.addressMode[0] = cudaAddressModeClamp;
+  descriptor.addressMode[1] = cudaAddressModeClamp;
+  descriptor.filterMode = cudaFilterModePoint;
+  descriptor.readMode = cudaReadModeElementType;
+  descriptor.normalizedCoords = 0;
+  auto texture = CudaArrayLayeredTexture<uint2>::FromHostArray(
+      descriptor, 4, 2, 1, input.data());
+  cudaTextureDesc actual = {};
+  CUDA_SAFE_CALL(cudaGetTextureObjectTextureDesc(&actual, texture->GetObj()));
+  EXPECT_EQ(actual.filterMode, cudaFilterModePoint);
+  EXPECT_EQ(actual.readMode, cudaReadModeElementType);
+  EXPECT_EQ(actual.normalizedCoords, 0);
+  cudaResourceDesc resource = {};
+  CUDA_SAFE_CALL(
+      cudaGetTextureObjectResourceDesc(&resource, texture->GetObj()));
+  ASSERT_EQ(resource.resType, cudaResourceTypeArray);
+  cudaChannelFormatDesc channels = {};
+  cudaExtent extent = {};
+  unsigned flags = 0;
+  CUDA_SAFE_CALL(
+      cudaArrayGetInfo(&channels, &extent, &flags, resource.res.array.array));
+  EXPECT_EQ(channels.x, 32);
+  EXPECT_EQ(channels.y, 32);
+  EXPECT_EQ(channels.z, 0);
+  EXPECT_EQ(channels.w, 0);
+  EXPECT_EQ(channels.f, cudaChannelFormatKindUnsigned);
+  EXPECT_NE(flags & cudaArrayLayered, 0);
+  EXPECT_EQ(extent.width, 4);
+  EXPECT_EQ(extent.height, 2);
+  EXPECT_EQ(extent.depth, 1);
+  std::array<uint2, 8> output = {};
+  cudaMemcpy3DParms copy = {};
+  copy.srcArray = resource.res.array.array;
+  copy.dstPtr = make_cudaPitchedPtr(
+      output.data(), 4 * sizeof(uint2), 4 * sizeof(uint2), 2);
+  copy.extent = make_cudaExtent(4, 2, 1);
+  copy.kind = cudaMemcpyDeviceToHost;
+  CUDA_SAFE_CALL(cudaMemcpy3D(&copy));
+  for (size_t i = 0; i < input.size(); ++i) {
+    EXPECT_EQ(input[i].x, output[i].x);
+    EXPECT_EQ(input[i].y, output[i].y);
+  }
+}
 
 // Parameter order: geometric consistency, filtering.
 class PatchMatchCudaTest

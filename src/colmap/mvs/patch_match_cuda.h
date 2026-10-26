@@ -70,6 +70,8 @@ class PatchMatchCuda {
   void BindRefImageTexture();
 
   void InitRefImage();
+  GpuMatView<float> ReferenceStatisticsView(bool squared) const;
+  cudaTextureObject_t ReferenceStatisticsTexture() const;
   void InitSourceImages();
   void InitTransforms();
   void InitWorkspaceMemory();
@@ -138,7 +140,13 @@ class PatchMatchCuda {
   float ref_inv_K_host_[4][4];
 
   // Data for reference image.
-  std::unique_ptr<GpuMatRefImage> ref_image_;
+  std::unique_ptr<GpuMat<uint8_t>> ref_image_;
+  // Original-image FP32 statistics stored as two unconverted integer channels.
+  std::unique_ptr<CudaArrayLayeredTexture<uint2>> ref_statistics_texture_;
+  size_t ref_statistics_init_peak_bytes_ = 0;
+  // Nondefault windows keep the original rotated FP32 planes.
+  std::unique_ptr<GpuMat<float>> ref_sum_image_;
+  std::unique_ptr<GpuMat<float>> ref_squared_sum_image_;
   std::unique_ptr<GpuMat<float>> depth_map_;
   std::unique_ptr<GpuMat<float>> normal_map_;
   std::unique_ptr<PatchMatchStateMap> sel_prob_map_;
@@ -160,7 +168,9 @@ class PatchMatchCuda {
   // Per-problem storage for the opposite reference-image orientation.
   std::unique_ptr<GpuMat<float>> alternate_depth_map_;
   std::unique_ptr<GpuMat<float>> alternate_normal_map_;
-  std::unique_ptr<GpuMatRefImage> alternate_ref_image_;
+  std::unique_ptr<GpuMat<uint8_t>> alternate_ref_image_;
+  std::unique_ptr<GpuMat<float>> alternate_ref_sum_image_;
+  std::unique_ptr<GpuMat<float>> alternate_ref_squared_sum_image_;
   std::unique_ptr<GpuMat<uint8_t>> alternate_consistency_mask_;
   std::unique_ptr<CudaArrayLayeredTexture<uint8_t>>
       alternate_ref_image_texture_;

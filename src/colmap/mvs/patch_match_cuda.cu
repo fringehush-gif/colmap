@@ -936,6 +936,21 @@ __global__ void RotateNormalMap(GpuMatView<float> normal_map) {
   }
 }
 
+// Store float representations in integer channels: texture reads perform no
+// floating-point normalization, filtering, or denormal conversion.
+__global__ void PackReferenceStatistics(const GpuMatView<float> sum,
+                                        const GpuMatView<float> squared_sum,
+                                        GpuMatView<uint2> packed) {
+  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  if (row < packed.height && col < packed.width) {
+    packed.Set(row,
+               col,
+               make_uint2(__float_as_uint(sum.Get(row, col)),
+                          __float_as_uint(squared_sum.Get(row, col))));
+  }
+}
+
 constexpr int kInitialCostStripeRows = 64;
 
 template <int kWindowSize, int kWindowStep>
@@ -950,7 +965,8 @@ __global__ void ComputeInitialCost(
     const cudaTextureObject_t src_images_texture,
     const cudaTextureObject_t poses_texture,
     const float sigma_spatial,
-    const float sigma_color) {
+    const float sigma_color,
+    const cudaTextureObject_t ref_statistics_texture) {
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
 
   typedef PhotoConsistencyCostComputer<kWindowSize, kWindowStep>
@@ -988,8 +1004,16 @@ __global__ void ComputeInitialCost(
       normal_map.GetSlice(row, col, normal);
 
       pcc_computer.row = row;
-      pcc_computer.local_ref_sum = ref_sum_image.Get(row, col);
-      pcc_computer.local_ref_squared_sum = ref_squared_sum_image.Get(row, col);
+      if constexpr (kWindowSize == 11 && kWindowStep == 1) {
+        const uint2 statistics = tex2DLayered<uint2>(
+            ref_statistics_texture, col + 0.5f, row + 0.5f, 0);
+        pcc_computer.local_ref_sum = __uint_as_float(statistics.x);
+        pcc_computer.local_ref_squared_sum = __uint_as_float(statistics.y);
+      } else {
+        pcc_computer.local_ref_sum = ref_sum_image.Get(row, col);
+        pcc_computer.local_ref_squared_sum =
+            ref_squared_sum_image.Get(row, col);
+      }
 
       for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
         pcc_computer.src_image_idx = image_idx;
@@ -1067,7 +1091,8 @@ __global__ void SweepFromTopToBottom(
     const cudaTextureObject_t src_images_texture,
     const cudaTextureObject_t src_depth_maps_texture,
     const cudaTextureObject_t poses_texture,
-    const SweepOptions options) {
+    const SweepOptions options,
+    const cudaTextureObject_t ref_statistics_texture) {
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
   const bool owner = !kCooperative || threadIdx.y == 0;
   constexpr int kSampleBatchSize =
@@ -1280,8 +1305,21 @@ __global__ void SweepFromTopToBottom(
     const float* normals[kNumCosts] = {nullptr};
     if (owner && col < cost_map.GetWidth()) {
       pcc_computer.row = row;
-      pcc_computer.local_ref_sum = ref_sum_image.Get(row, col);
-      pcc_computer.local_ref_squared_sum = ref_squared_sum_image.Get(row, col);
+      if constexpr (kWindowSize == 11 && kWindowStep == 1) {
+        size_t original_row, original_col;
+        rand_state_layout.OriginalCoordinates(
+            rand_state_rotation, row, col, &original_row, &original_col);
+        const uint2 statistics = tex2DLayered<uint2>(ref_statistics_texture,
+                                                     original_col + 0.5f,
+                                                     original_row + 0.5f,
+                                                     0);
+        pcc_computer.local_ref_sum = __uint_as_float(statistics.x);
+        pcc_computer.local_ref_squared_sum = __uint_as_float(statistics.y);
+      } else {
+        pcc_computer.local_ref_sum = ref_sum_image.Get(row, col);
+        pcc_computer.local_ref_squared_sum =
+            ref_squared_sum_image.Get(row, col);
+      }
 
       // Propagate the depth at which the current ray intersects with the plane
       // of the normal of the previous ray. This helps to better estimate
@@ -2120,12 +2158,13 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           GeometryView(*depth_map_),
           GeometryView(*normal_map_),
           ref_image_texture_->GetObj(),
-          ref_image_->sum_image->View(),
-          ref_image_->squared_sum_image->View(),
+          ReferenceStatisticsView(false),
+          ReferenceStatisticsView(true),
           src_images_texture_->GetObj(),
           poses_texture_[0]->GetObj(),
           options_.sigma_spatial,
-          options_.sigma_color);
+          options_.sigma_color,
+          ReferenceStatisticsTexture());
   CUDA_SYNC_AND_CHECK();
 
   init_timer.Print("Initialization");
@@ -2226,14 +2265,15 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           checkpoints,                                            \
           beta_stripe,                                            \
           ref_image_texture_->GetObj(),                           \
-          ref_image_->sum_image->View(),                          \
-          ref_image_->squared_sum_image->View(),                  \
+          ReferenceStatisticsView(false),                         \
+          ReferenceStatisticsView(true),                          \
           src_images_texture_->GetObj(),                          \
           src_depth_maps_texture_ == nullptr                      \
               ? 0                                                 \
               : src_depth_maps_texture_->GetObj(),                \
           poses_texture_[rotation_in_half_pi_]->GetObj(),         \
-          sweep_options);
+          sweep_options,                                          \
+          ReferenceStatisticsTexture());
 
       if (last_sweep) {
         if (options_.filter) {
@@ -2339,9 +2379,9 @@ size_t PatchMatchCuda::PairPeakBytes() const {
   };
   size_t resident = 0;
   size_t ref_mats = 0;
-  add(&ref_mats, mat_bytes(ref_image_->image));
-  add(&ref_mats, mat_bytes(ref_image_->sum_image));
-  add(&ref_mats, mat_bytes(ref_image_->squared_sum_image));
+  add(&ref_mats, mat_bytes(ref_image_));
+  if (ref_sum_image_) add(&ref_mats, mat_bytes(ref_sum_image_));
+  if (ref_squared_sum_image_) add(&ref_mats, mat_bytes(ref_squared_sum_image_));
   const size_t ref_tex = texture_bytes(ref_image_texture_, sizeof(uint8_t));
   size_t depth_normal = 0;
   add(&depth_normal, mat_bytes(depth_map_));
@@ -2357,6 +2397,8 @@ size_t PatchMatchCuda::PairPeakBytes() const {
   // twice their logical content, plus the separate fixed margin at admission.
   size_t textures = 0;
   add(&textures, ref_tex);
+  if (ref_statistics_texture_)
+    add(&textures, texture_bytes(ref_statistics_texture_, sizeof(uint2)));
   if (!src_images_texture_->IsSparse())
     add(&textures, texture_bytes(src_images_texture_, sizeof(uint8_t)));
   if (src_depth_maps_texture_ != nullptr &&
@@ -2381,9 +2423,11 @@ size_t PatchMatchCuda::PairPeakBytes() const {
     add(&geometry, alternate_geometry);
     geometry = std::max(geometry, geometry_peak_floor_);
     add(&resident, geometry - depth_normal);
-    add(&resident, mat_bytes(alternate_ref_image_->image));
-    add(&resident, mat_bytes(alternate_ref_image_->sum_image));
-    add(&resident, mat_bytes(alternate_ref_image_->squared_sum_image));
+    add(&resident, mat_bytes(alternate_ref_image_));
+    if (alternate_ref_sum_image_)
+      add(&resident, mat_bytes(alternate_ref_sum_image_));
+    if (alternate_ref_squared_sum_image_)
+      add(&resident, mat_bytes(alternate_ref_squared_sum_image_));
     add(&resident,
         multiply(texture_bytes(alternate_ref_image_texture_, sizeof(uint8_t)),
                  2));
@@ -2391,7 +2435,7 @@ size_t PatchMatchCuda::PairPeakBytes() const {
       add(&resident, mat_bytes(consistency_mask_));
       add(&resident, mat_bytes(alternate_consistency_mask_));
     }
-    return resident;
+    return std::max(resident, ref_statistics_init_peak_bytes_);
   }
   // Native Rotate temporarily owns old and new reference/depth/normal arrays.
   // Double that transient bound to cover opposite-orientation pitch changes.
@@ -2405,7 +2449,7 @@ size_t PatchMatchCuda::PairPeakBytes() const {
         multiply(multiply(multiply(ref_width_, ref_height_), mask_planes), 2));
   }
   add(&resident, transient);
-  return resident;
+  return std::max(resident, ref_statistics_init_peak_bytes_);
 }
 
 namespace {
@@ -2662,12 +2706,13 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
         p->GeometryView(*p->depth_map_),
         p->GeometryView(*p->normal_map_),
         p->ref_image_texture_->GetObj(),
-        p->ref_image_->sum_image->View(),
-        p->ref_image_->squared_sum_image->View(),
+        p->ReferenceStatisticsView(false),
+        p->ReferenceStatisticsView(true),
         p->src_images_texture_->GetObj(),
         p->poses_texture_[0]->GetObj(),
         p->options_.sigma_spatial,
-        p->options_.sigma_color);
+        p->options_.sigma_color,
+        p->ReferenceStatisticsTexture());
   }
   CUDA_SYNC_AND_CHECK();
 
@@ -2735,14 +2780,15 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
           no_checkpoint,                                                      \
           no_checkpoint,                                                      \
           p.ref_image_texture_->GetObj(),                                     \
-          p.ref_image_->sum_image->View(),                                    \
-          p.ref_image_->squared_sum_image->View(),                            \
+          p.ReferenceStatisticsView(false),                                   \
+          p.ReferenceStatisticsView(true),                                    \
           p.src_images_texture_->GetObj(),                                    \
           p.src_depth_maps_texture_ == nullptr                                \
               ? 0                                                             \
               : p.src_depth_maps_texture_->GetObj(),                          \
           p.poses_texture_[p.rotation_in_half_pi_]->GetObj(),                 \
-          o)
+          o,                                                                  \
+          p.ReferenceStatisticsTexture())
     if (p.options_.geom_consistency) {
       if (last) {
         PAIR_LAUNCH(true, true, true);
@@ -2801,6 +2847,7 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
         }
       }
       for (PatchMatchCuda* p : views) rotate_last_mask(*p, last);
+
       CUDA_SYNC_AND_CHECK();
     }
   }
@@ -2854,8 +2901,8 @@ void PatchMatchCuda::BindRefImageTexture() {
   texture_desc.filterMode = cudaFilterModePoint;
   texture_desc.readMode = cudaReadModeNormalizedFloat;
   texture_desc.normalizedCoords = false;
-  ref_image_texture_ = CudaArrayLayeredTexture<uint8_t>::FromGpuMat(
-      texture_desc, *ref_image_->image);
+  ref_image_texture_ =
+      CudaArrayLayeredTexture<uint8_t>::FromGpuMat(texture_desc, *ref_image_);
 }
 
 #ifndef COLMAP_HIP_ENABLED
@@ -2863,7 +2910,7 @@ void PatchMatchCuda::BindReusableRefImageTexture() {
   if (ref_image_texture_ == nullptr) {
     // Initial filtered image: retain the original one allocation/one D2D copy.
     ref_image_texture_ = CudaArrayLayeredTexture<uint8_t>::FromGpuMat(
-        RotationRefTextureDesc(), *ref_image_->image);
+        RotationRefTextureDesc(), *ref_image_);
     ref_image_array_ = BorrowRotationRefArray(*ref_image_texture_);
     return;
   }
@@ -2871,23 +2918,30 @@ void PatchMatchCuda::BindReusableRefImageTexture() {
   // owned by this instance for the complete problem. No texture/array
   // recreation.
   THROW_CHECK(ref_image_array_ != nullptr);
-  THROW_CHECK_EQ(ref_image_texture_->GetWidth(), ref_image_->image->GetWidth());
-  THROW_CHECK_EQ(ref_image_texture_->GetHeight(),
-                 ref_image_->image->GetHeight());
-  THROW_CHECK_EQ(ref_image_texture_->GetDepth(), ref_image_->image->GetDepth());
+  THROW_CHECK_EQ(ref_image_texture_->GetWidth(), ref_image_->GetWidth());
+  THROW_CHECK_EQ(ref_image_texture_->GetHeight(), ref_image_->GetHeight());
+  THROW_CHECK_EQ(ref_image_texture_->GetDepth(), ref_image_->GetDepth());
   cudaMemcpy3DParms params = {};
-  params.extent = make_cudaExtent(ref_image_->image->GetWidth(),
-                                  ref_image_->image->GetHeight(),
-                                  ref_image_->image->GetDepth());
+  params.extent = make_cudaExtent(
+      ref_image_->GetWidth(), ref_image_->GetHeight(), ref_image_->GetDepth());
   params.kind = cudaMemcpyDeviceToDevice;
-  params.srcPtr = make_cudaPitchedPtr((void*)ref_image_->image->GetPtr(),
-                                      ref_image_->image->GetPitch(),
-                                      ref_image_->image->GetWidth(),
-                                      ref_image_->image->GetHeight());
+  params.srcPtr = make_cudaPitchedPtr((void*)ref_image_->GetPtr(),
+                                      ref_image_->GetPitch(),
+                                      ref_image_->GetWidth(),
+                                      ref_image_->GetHeight());
   params.dstArray = ref_image_array_;
   CUDA_SAFE_CALL(cudaMemcpy3D(&params));
 }
 #endif
+
+GpuMatView<float> PatchMatchCuda::ReferenceStatisticsView(bool squared) const {
+  const auto& owner = squared ? ref_squared_sum_image_ : ref_sum_image_;
+  return owner ? owner->View() : GpuMatView<float>{nullptr, 0, 0, 0, 0};
+}
+
+cudaTextureObject_t PatchMatchCuda::ReferenceStatisticsTexture() const {
+  return ref_statistics_texture_ ? ref_statistics_texture_->GetObj() : 0;
+}
 
 void PatchMatchCuda::InitRefImage() {
   const Image& ref_image = problem_.images->at(problem_.ref_image_idx);
@@ -2895,13 +2949,59 @@ void PatchMatchCuda::InitRefImage() {
   ref_width_ = ref_image.GetWidth();
   ref_height_ = ref_image.GetHeight();
 
-  // Upload to device and filter.
-  ref_image_ = std::make_unique<GpuMatRefImage>(ref_width_, ref_height_);
-  ref_image_->Filter(ref_image.GetBitmap().RowMajorData().data(),
-                     options_.window_radius,
-                     options_.window_step,
-                     options_.sigma_spatial,
-                     options_.sigma_color);
+  ref_statistics_init_peak_bytes_ = 0;
+  // Keep filtering arithmetic unchanged. The default window releases its
+  // temporary float and packed upload planes before source/state allocation.
+  {
+    GpuMatRefImage filtered_ref_image(ref_width_, ref_height_);
+    filtered_ref_image.Filter(ref_image.GetBitmap().RowMajorData().data(),
+                              options_.window_radius,
+                              options_.window_step,
+                              options_.sigma_spatial,
+                              options_.sigma_color);
+    ref_image_ = std::move(filtered_ref_image.image);
+    if (options_.window_radius == 5 && options_.window_step == 1) {
+      static_assert(sizeof(uint2) == 2 * sizeof(float));
+      GpuMat<uint2> packed(ref_width_, ref_height_);
+      const dim3 block(32, 16);
+      const dim3 grid((ref_width_ - 1) / block.x + 1,
+                      (ref_height_ - 1) / block.y + 1);
+      PackReferenceStatistics<<<grid, block>>>(
+          filtered_ref_image.sum_image->View(),
+          filtered_ref_image.squared_sum_image->View(),
+          packed.View());
+      CUDA_SYNC_AND_CHECK();
+      cudaTextureDesc desc = {};
+      desc.addressMode[0] = cudaAddressModeClamp;
+      desc.addressMode[1] = cudaAddressModeClamp;
+      desc.filterMode = cudaFilterModePoint;
+      desc.readMode = cudaReadModeElementType;
+      desc.normalizedCoords = 0;
+      ref_statistics_texture_ =
+          CudaArrayLayeredTexture<uint2>::FromGpuMat(desc, packed);
+
+      // Bound initialization separately: all temporary planes overlap the new
+      // array, but disappear before the subsequent owner-local allocations.
+      const auto add = [this](size_t pitch, size_t height, size_t planes) {
+        const size_t maximum = std::numeric_limits<size_t>::max();
+        THROW_CHECK_LE(pitch, maximum / height);
+        const size_t plane = pitch * height;
+        THROW_CHECK_LE(plane, maximum / planes);
+        const size_t bytes = plane * planes;
+        THROW_CHECK_LE(bytes, maximum - ref_statistics_init_peak_bytes_);
+        ref_statistics_init_peak_bytes_ += bytes;
+      };
+      add(ref_image_->GetPitch(), ref_height_, 1);
+      add(filtered_ref_image.sum_image->GetPitch(), ref_height_, 1);
+      add(filtered_ref_image.squared_sum_image->GetPitch(), ref_height_, 1);
+      add(packed.GetPitch(), ref_height_, 1);
+      // Match PairPeak's existing two-times logical CUDA-array charge.
+      add(ref_width_ * sizeof(uint2), ref_height_, 2);
+    } else {
+      ref_sum_image_ = std::move(filtered_ref_image.sum_image);
+      ref_squared_sum_image_ = std::move(filtered_ref_image.squared_sum_image);
+    }
+  }
 
   BindRefImageTexture();
 }
@@ -3263,7 +3363,12 @@ void PatchMatchCuda::InitAlternateOrientationMemory(
   } else {
     EnsureGeometryRotationMemory();
   }
-  alternate_ref_image_ = std::make_unique<GpuMatRefImage>(width, height);
+  alternate_ref_image_ = std::make_unique<GpuMat<uint8_t>>(width, height);
+  if (ref_sum_image_) {
+    alternate_ref_sum_image_ = std::make_unique<GpuMat<float>>(width, height);
+    alternate_ref_squared_sum_image_ =
+        std::make_unique<GpuMat<float>>(width, height);
+  }
   if (options_.filter) {
     alternate_consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
         width, height, PackedConsistencyMaskDepth(sources));
@@ -3293,12 +3398,12 @@ void PatchMatchCuda::InitAlternateOrientationMemory(
   add(alternate_depth_map_);
   add(normal_map_);
   add(alternate_normal_map_);
-  add(ref_image_->image);
-  add(alternate_ref_image_->image);
-  add(ref_image_->sum_image);
-  add(alternate_ref_image_->sum_image);
-  add(ref_image_->squared_sum_image);
-  add(alternate_ref_image_->squared_sum_image);
+  add(ref_image_);
+  add(alternate_ref_image_);
+  add(ref_sum_image_);
+  add(ref_squared_sum_image_);
+  add(alternate_ref_sum_image_);
+  add(alternate_ref_squared_sum_image_);
   // These owners reserve both layouts; active view spans undercount them.
   const auto add_state = [&pitched_bytes](const auto& mat) {
     if (!mat) return;
@@ -3316,7 +3421,11 @@ void PatchMatchCuda::InitAlternateOrientationMemory(
   LOG(INFO) << "Rotation reuse retained pitched bytes: " << pitched_bytes
             << ", curandState bytes: " << sizeof(curandState)
             << ", reference array logical bytes: "
-            << size_t{2} * ref_width_ * ref_height_;
+            << size_t{2} * ref_width_ * ref_height_
+            << ", immutable statistics array logical bytes: "
+            << (ref_statistics_texture_
+                    ? sizeof(uint2) * ref_width_ * ref_height_
+                    : 0);
 }
 #endif
 
@@ -3388,12 +3497,20 @@ void PatchMatchCuda::Rotate(bool pack_geometry) {
 
   // Rotate reference image.
   {
-    std::unique_ptr<GpuMatRefImage> rotated_ref_image(
-        new GpuMatRefImage(width, height));
-    ref_image_->image->Rotate(rotated_ref_image->image.get());
-    ref_image_->sum_image->Rotate(rotated_ref_image->sum_image.get());
-    ref_image_->squared_sum_image->Rotate(
-        rotated_ref_image->squared_sum_image.get());
+    std::unique_ptr<GpuMat<uint8_t>> rotated_ref_image(
+        new GpuMat<uint8_t>(width, height));
+    std::unique_ptr<GpuMat<float>> rotated_sum, rotated_squared_sum;
+    if (ref_sum_image_) {
+      rotated_sum = std::make_unique<GpuMat<float>>(width, height);
+      rotated_squared_sum = std::make_unique<GpuMat<float>>(width, height);
+    }
+    ref_image_->Rotate(rotated_ref_image.get());
+    if (ref_sum_image_) {
+      ref_sum_image_->Rotate(rotated_sum.get());
+      ref_squared_sum_image_->Rotate(rotated_squared_sum.get());
+      ref_sum_image_.swap(rotated_sum);
+      ref_squared_sum_image_.swap(rotated_squared_sum);
+    }
     ref_image_.swap(rotated_ref_image);
     BindRefImageTexture();
   }
@@ -3442,10 +3559,13 @@ void PatchMatchCuda::RotateWithBufferReuse(bool pack_geometry) {
     normal_map_->Rotate(alternate_normal_map_.get());
     normal_map_.swap(alternate_normal_map_);
   }
-  ref_image_->image->Rotate(alternate_ref_image_->image.get());
-  ref_image_->sum_image->Rotate(alternate_ref_image_->sum_image.get());
-  ref_image_->squared_sum_image->Rotate(
-      alternate_ref_image_->squared_sum_image.get());
+  ref_image_->Rotate(alternate_ref_image_.get());
+  if (ref_sum_image_) {
+    ref_sum_image_->Rotate(alternate_ref_sum_image_.get());
+    ref_squared_sum_image_->Rotate(alternate_ref_squared_sum_image_.get());
+    ref_sum_image_.swap(alternate_ref_sum_image_);
+    ref_squared_sum_image_.swap(alternate_ref_squared_sum_image_);
+  }
   ref_image_.swap(alternate_ref_image_);
   ref_image_texture_.swap(alternate_ref_image_texture_);
   std::swap(ref_image_array_, alternate_ref_image_array_);
