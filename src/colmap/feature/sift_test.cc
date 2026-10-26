@@ -18,9 +18,11 @@
 #endif
 
 #include "thirdparty/VLFeat/imopv.h"
+#include "thirdparty/VLFeat/sift.h"
 
 #include <algorithm>
 #include <functional>
+#include <memory>
 #include <set>
 #include <utility>
 #include <vector>
@@ -99,6 +101,34 @@ TEST(SiftCPUConvolution, MatchesScalarReferenceAcrossLayouts) {
           EXPECT_EQ(actual, expected);
         }
       }
+    }
+  }
+}
+
+TEST(SiftCPUGradientStorage, RejectsSingletonAxisOctaves) {
+  for (const auto shape : {std::pair{1, 1}, std::pair{8, 1}, std::pair{1, 8}}) {
+    for (const int levels : {1, 3}) {
+      SCOPED_TRACE(::testing::Message() << shape.first << "x" << shape.second
+                                        << " levels=" << levels);
+      std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)> filter(
+          vl_sift_new(shape.first, shape.second, 1, levels, 0),
+          &vl_sift_delete);
+      ASSERT_NE(filter, nullptr);
+      std::vector<vl_sift_pix> pixels(shape.first * shape.second, 0.5f);
+      ASSERT_EQ(vl_sift_process_first_octave(filter.get(), pixels.data()), 0);
+      VlSiftKeypoint keypoint;
+      vl_sift_keypoint_init(filter.get(), &keypoint, 0, 0, 2.0);
+      double angles[4] = {123, 123, 123, 123};
+      EXPECT_EQ(
+          vl_sift_calc_keypoint_orientations(filter.get(), angles, &keypoint),
+          0);
+      for (const double angle : angles) {
+        EXPECT_EQ(angle, 123);
+      }
+      std::vector<vl_sift_pix> descriptor(128, 123.25f);
+      vl_sift_calc_keypoint_descriptor(
+          filter.get(), descriptor.data(), &keypoint, 0);
+      EXPECT_EQ(descriptor, std::vector<vl_sift_pix>(128, 123.25f));
     }
   }
 }

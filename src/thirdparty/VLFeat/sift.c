@@ -900,8 +900,9 @@ vl_sift_new (int width, int height,
                         * (f->s_max - f->s_min + 1)  ) ;
   f-> dog     = vl_malloc (sizeof(vl_sift_pix) * nel
                         * (f->s_max - f->s_min    )  ) ;
+  /* Only levels s_min + 1 through s_max - 2 contain gradients. */
   f-> grad    = vl_malloc (sizeof(vl_sift_pix) * nel * 2
-                        * (f->s_max - f->s_min    )  ) ;
+                        * (nlevels > 0 ? nlevels : f->s_max - f->s_min)) ;
 
   f-> sigman  = 0.5 ;
   f-> sigmak  = pow (2.0, 1.0 / nlevels) ;
@@ -1587,8 +1588,8 @@ vl_sift_calc_keypoint_orientations (VlSiftFilt *f,
   vl_sift_pix const * pt ;
   int xs, ys, iter, i ;
 
-  /* skip if the keypoint octave is not current */
-  if(k->o != f->o_cur)
+  /* Gradients require at least a 2x2 octave; also check the octave. */
+  if(w < 2 || h < 2 || k->o != f->o_cur)
     return 0 ;
 
   /* skip the keypoint if it is out of bounds */
@@ -1972,8 +1973,10 @@ vl_sift_calc_keypoint_descriptor (VlSiftFilt *f,
   vl_sift_pix const *pt ;
   vl_sift_pix       *dpt ;
 
-  /* check bounds */
-  if(k->o  != f->o_cur        ||
+  /* Enforce the gradient geometry requirement before checking bounds. */
+  if(w     <  2               ||
+     h     <  2               ||
+     k->o  != f->o_cur        ||
      xi    <  0               ||
      xi    >= w               ||
      yi    <  0               ||
