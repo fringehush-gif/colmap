@@ -22,10 +22,16 @@
 namespace colmap {
 namespace mvs {
 
+template <typename T>
+class PatchMatchSourceArray;
+class PatchMatchSparseSources;
+
 class PatchMatchCuda {
  public:
   PatchMatchCuda(const PatchMatchOptions& options,
-                 const PatchMatch::Problem& problem);
+                 const PatchMatch::Problem& problem,
+                 std::shared_ptr<const PatchMatchSparseSources> shared = {});
+  ~PatchMatchCuda();
 
   void Run();
 
@@ -36,6 +42,7 @@ class PatchMatchCuda {
 #ifndef COLMAP_HIP_ENABLED
   // Conservative owner-local estimate for admitting a second live instance.
   size_t PairPeakBytes() const;
+  void UseSparseSources(std::shared_ptr<const PatchMatchSparseSources> shared);
 #endif
 
  private:
@@ -88,8 +95,8 @@ class PatchMatchCuda {
 
   // Reference and source image input data.
   std::unique_ptr<CudaArrayLayeredTexture<uint8_t>> ref_image_texture_;
-  std::unique_ptr<CudaArrayLayeredTexture<uint8_t>> src_images_texture_;
-  std::unique_ptr<CudaArrayLayeredTexture<float>> src_depth_maps_texture_;
+  std::unique_ptr<PatchMatchSourceArray<uint8_t>> src_images_texture_;
+  std::unique_ptr<PatchMatchSourceArray<float>> src_depth_maps_texture_;
 
   // Relative poses from rotated versions of reference image to source images
   // corresponding to _rotationInHalfPi:

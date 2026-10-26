@@ -5,6 +5,7 @@
 #include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/patch_match_hmm_checkpoint.h"
 #include "colmap/mvs/patch_match_rng_perimeter.h"
+#include "colmap/mvs/patch_match_source_array.h"
 #include "colmap/util/cudacc.h"
 
 #include <gtest/gtest.h>
@@ -171,10 +172,12 @@ struct Inputs {
 // deliberately non-square, odd, and not CUDA block multiples.
 Inputs MakeInputs(const int variant,
                   const int num_source_images = 2,
-                  const int ref_height = 0) {
+                  const int ref_height = 0,
+                  const int ref_width = 0) {
   Inputs inputs;
   for (int i = 0; i <= num_source_images; ++i) {
-    const int width = (variant == 0 ? 47 : 39) + 2 * i;
+    const int width =
+        (ref_width > 0 ? ref_width : (variant == 0 ? 47 : 39)) + 2 * i;
     const int height =
         (ref_height > 0 ? ref_height : (variant == 0 ? 35 : 53)) + 2 * i;
     const float fx = (variant == 0 ? 48.0f : 69.0f) + 3.0f * i;
@@ -571,6 +574,107 @@ TEST_F(CudaTest, FiveViewPhotoBatchPreservesOddTallOutputs) {
 
 TEST_F(CudaTest, FiveViewGeometricBankedBatchPreservesFinalMask) {
   ExpectReferenceBatchOutputs(5, true, true);
+}
+
+TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
+  // One workspace identity; five references reuse differently ordered subsets.
+  // Varying source dimensions exercise the original zero-padded layer extent.
+  Inputs input = MakeInputs(0, 9, 257, 513);
+  for (const bool geometry : {false, true}) {
+    for (const bool reuse : {false, true}) {
+      auto options = MakeOptions(geometry, geometry, reuse);
+      const PatchMatchOptions defaults;
+      options.window_radius = defaults.window_radius;
+      options.window_step = defaults.window_step;
+      options.num_samples = defaults.num_samples;
+      options.num_iterations = defaults.num_iterations;
+      options.sigma_spatial = options.window_radius;
+      // Native PrepareProblem owns different vectors for each reference.
+      std::vector<std::vector<Image> > images(5, input.images);
+      std::vector<std::vector<DepthMap> > depths(5, input.depths);
+      std::vector<PatchMatch::Problem> problems(5);
+      std::vector<const PatchMatch::Problem*> pointers;
+      for (int ref = 0; ref < 5; ++ref) {
+        auto& problem = problems[ref];
+        problem.ref_image_idx = ref;
+        problem.images = &images[ref];
+        problem.depth_maps = &depths[ref];
+        problem.normal_maps = &input.normals;
+        for (int source = 0; source < 10; ++source)
+          if (source != ref) problem.src_image_idxs.push_back(source);
+        std::rotate(problem.src_image_idxs.begin(),
+                    problem.src_image_idxs.begin() + ref,
+                    problem.src_image_idxs.end());
+        pointers.push_back(&problem);
+      }
+      EXPECT_EQ(PatchMatchSparseSources::Budget({nullptr, nullptr, nullptr},
+                                                geometry),
+                0);
+      auto invalid = problems[0];
+      invalid.images = nullptr;
+      EXPECT_EQ(PatchMatchSparseSources::Budget(
+                    {&invalid, &problems[1], &problems[2]}, geometry),
+                0);
+      invalid = problems[0];
+      invalid.src_image_idxs.clear();
+      EXPECT_EQ(PatchMatchSparseSources::Budget(
+                    {&invalid, &problems[1], &problems[2]}, geometry),
+                0);
+      using Snapshot =
+          std::tuple<DepthMap, NormalMap, Mat<float>, std::vector<int> >;
+      const auto read = [](const PatchMatchCuda& owner) {
+        return Snapshot(owner.GetDepthMap(),
+                        owner.GetNormalMap(),
+                        owner.GetSelProbMap(),
+                        owner.GetConsistentImageIdxs());
+      };
+      std::vector<Snapshot> expected;
+      for (const auto& problem : problems) {
+        PatchMatchCuda independent(options, problem);
+        independent.Run();
+        expected.push_back(read(independent));
+        const auto& depth = std::get<0>(expected.back()).GetData();
+        EXPECT_TRUE(std::any_of(depth.begin(), depth.end(), [](float value) {
+          return value > 0.0f;
+        }));
+      }
+      ASSERT_GT(PatchMatchSparseSources::Budget(pointers, geometry), 0);
+      auto shared = PatchMatchSparseSources::Create(pointers, geometry);
+      ASSERT_TRUE(shared);
+      std::vector<std::unique_ptr<PatchMatchCuda> > owners;
+      owners.push_back(std::make_unique<PatchMatchCuda>(options, problems[0]));
+      owners[0]->UseSparseSources(shared);
+      for (size_t i = 1; i < problems.size(); ++i)
+        owners.push_back(
+            std::make_unique<PatchMatchCuda>(options, problems[i], shared));
+      shared.reset();  // Owners, not the caller, must retain the bank.
+      std::vector<PatchMatchCuda*> views;
+      std::vector<cudaStream_t> streams(owners.size(), nullptr);
+      struct StreamCleanup {
+        std::vector<cudaStream_t>& values;
+        ~StreamCleanup() {
+          for (auto stream : values) {
+            if (stream) {
+              (void)cudaStreamSynchronize(stream);
+              (void)cudaStreamDestroy(stream);
+            }
+          }
+        }
+      } cleanup{streams};
+      for (auto& stream : streams)
+        CUDA_SAFE_CALL(
+            cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+      for (auto& owner : owners) views.push_back(owner.get());
+      RunPatchMatchBatch(views, streams);
+      for (size_t i = 0; i < owners.size(); ++i) {
+        const auto actual = read(*owners[i]);
+        ExpectExactlyEqual(std::get<0>(expected[i]), std::get<0>(actual));
+        ExpectExactlyEqual(std::get<1>(expected[i]), std::get<1>(actual));
+        ExpectExactlyEqual(std::get<2>(expected[i]), std::get<2>(actual));
+        EXPECT_EQ(std::get<3>(expected[i]), std::get<3>(actual));
+      }
+    }
+  }
 }
 
 TEST_F(CudaTest, BatchAdmissionCanBeatIneligiblePairs) {
