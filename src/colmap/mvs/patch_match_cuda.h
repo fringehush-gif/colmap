@@ -188,6 +188,13 @@ bool CanPairPatchMatchViews(size_t first_width,
                             size_t second_width,
                             size_t second_height,
                             bool geometric);
+// Explicit checkpoint mode uses its own compiled kernel resource query.
+bool CanPairPatchMatchViews(size_t first_width,
+                            size_t first_height,
+                            size_t second_width,
+                            size_t second_height,
+                            bool geometric,
+                            bool checkpoint_hmm);
 
 // Both instances own prepared, independent real inputs on one CUDA device.
 void RunPatchMatchPair(PatchMatchCuda& first,
@@ -200,6 +207,10 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
 // The resource query is device-specific and preserves the pair admission.
 bool CanBatchPatchMatchViews(
     const std::vector<std::pair<size_t, size_t>>& view_shapes, bool geometric);
+bool CanBatchPatchMatchViews(
+    const std::vector<std::pair<size_t, size_t>>& view_shapes,
+    bool geometric,
+    bool checkpoint_hmm);
 #endif
 
 }  // namespace mvs
