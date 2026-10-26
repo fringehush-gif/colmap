@@ -62,6 +62,33 @@ struct PatchMatchRngPerimeter {
     *col = 0;
   }
 
+  // Map a valid pixel in the current orientation to its original-image pixel.
+  // This also permits immutable reference statistics to keep one orientation.
+  COLMAP_RNG_HD constexpr void OriginalCoordinates(unsigned rotation,
+                                                   size_t row,
+                                                   size_t col,
+                                                   size_t* original_row,
+                                                   size_t* original_col) const {
+    switch (rotation) {
+      case 0:
+        *original_row = row;
+        *original_col = col;
+        break;
+      case 1:
+        *original_row = col;
+        *original_col = width - 1 - row;
+        break;
+      case 2:
+        *original_row = height - 1 - row;
+        *original_col = width - 1 - col;
+        break;
+      default:
+        *original_row = height - 1 - col;
+        *original_col = row;
+        break;
+    }
+  }
+
   // col is in the CURRENT orientation, rotation is in [0,3] CCW quarter turns.
   // No state permutation or RNG call is needed at rotation boundaries.
   COLMAP_RNG_HD constexpr size_t SweepIndex(unsigned rotation,
