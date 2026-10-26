@@ -25,6 +25,7 @@
 #include <cstring>
 #include <limits>
 #include <sstream>
+#include <type_traits>
 #include <vector>
 
 // The number of threads per Cuda thread block. Warning: Do not change this
@@ -1045,6 +1046,13 @@ struct SweepOptions {
 constexpr int kCooperativeSampleBatchSize = 4;
 constexpr int kCooperativeSampleWindowSize = 16;
 
+#ifndef COLMAP_HIP_ENABLED
+// Keep the established shape on unmeasured architectures.
+constexpr int CooperativeSampleBatchSizeForDevice(int major, int minor) {
+  return major == 6 && minor == 1 ? 2 : kCooperativeSampleBatchSize;
+}
+#endif
+
 template <bool kCooperative,
           int kBlockWidth = THREADS_PER_BLOCK,
           int kSampleWindowSize = 1>
@@ -1070,7 +1078,8 @@ template <int kWindowSize,
           bool kFilterGeomConsistency = false,
           bool kCooperative = false,
           int kBlockWidth = THREADS_PER_BLOCK,
-          bool kCheckpointHmm = false>
+          bool kCheckpointHmm = false,
+          int kSourceJobGroups = kCooperativeSampleBatchSize>
 __global__ void SweepFromTopToBottom(
     const RefCamera camera,
     GpuMatView<float> global_workspace,
@@ -1095,8 +1104,11 @@ __global__ void SweepFromTopToBottom(
     const cudaTextureObject_t ref_statistics_texture) {
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
   const bool owner = !kCooperative || threadIdx.y == 0;
+  static_assert(kSourceJobGroups == kCooperativeSampleBatchSize ||
+                (kSourceJobGroups == 2 && kCooperative && kBlockWidth == 8 &&
+                 kWindowSize == 11 && kWindowStep == 1));
   constexpr int kSampleBatchSize =
-      kCooperative && kBlockWidth == 8 ? kCooperativeSampleBatchSize : 1;
+      kCooperative && kBlockWidth == 8 ? kSourceJobGroups : 1;
   constexpr int kSampleWindowSize =
       kCooperative && kBlockWidth == 8 ? kCooperativeSampleWindowSize : 1;
   __shared__ CooperativeNccJob<kCooperative, kBlockWidth, kSampleWindowSize>
@@ -1923,6 +1935,14 @@ PatchMatchCuda::PatchMatchCuda(
       << "PatchMatchStereo.rotation_buffer_reuse requires CUDA";
 #endif
   SetBestCudaDevice(std::stoi(options_.gpu_index));
+#ifndef COLMAP_HIP_ENABLED
+  int device = 0;
+  CUDA_SAFE_CALL(cudaGetDevice(&device));
+  cudaDeviceProp properties{};
+  CUDA_SAFE_CALL(cudaGetDeviceProperties(&properties, device));
+  cooperative_sample_batch_size_ =
+      CooperativeSampleBatchSizeForDevice(properties.major, properties.minor);
+#endif
   InitRefImage();
 #ifndef COLMAP_HIP_ENABLED
   if (shared)
@@ -2201,10 +2221,6 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   constexpr int kSweepBlockWidth = !kCooperative || kWindowSize / 2 > 16
                                        ? THREADS_PER_BLOCK
                                        : (kWindowSize / 2 <= 8 ? 8 : 16);
-  constexpr int kSampleBatchSize =
-      kCooperative && kSweepBlockWidth == 8 ? kCooperativeSampleBatchSize : 1;
-  const dim3 sweep_kernel_block_size(
-      kSweepBlockWidth, kCooperative ? 4 * kSampleBatchSize : 1, 1);
 
   for (int iter = 0; iter < options_.num_iterations; ++iter) {
     CudaTimer iter_timer;
@@ -2239,6 +2255,27 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
                                                    cost_map_->GetHeight())
                          : no_checkpoint;
 
+      const auto launch_sweep = [&](auto group_tag) {
+      // Keep compile-time launch constants local to the generic lambda.
+      // MSVC otherwise treats captured constexpr locals as object members.
+#ifdef COLMAP_HIP_ENABLED
+        constexpr bool kCooperative = false;
+#else
+        constexpr bool kCooperative = true;
+#endif
+        constexpr int kSweepBlockWidth = !kCooperative || kWindowSize / 2 > 16
+                                             ? THREADS_PER_BLOCK
+                                             : (kWindowSize / 2 <= 8 ? 8 : 16);
+        constexpr int kSourceJobGroups = decltype(group_tag)::value;
+        constexpr int kSampleBatchSize =
+            kCooperative && kSweepBlockWidth == 8 ? kSourceJobGroups : 1;
+        const dim3 sweep_kernel_block_size(
+            kSweepBlockWidth, kCooperative ? 4 * kSampleBatchSize : 1, 1);
+        if (iter == 0 && sweep == 0)
+          VLOG(1) << "Cooperative source-job groups: " << kSampleBatchSize
+                  << ", threads per block: "
+                  << sweep_kernel_block_size.x * sweep_kernel_block_size.y;
+
 #define CALL_SWEEP_FUNC                                           \
   SweepFromTopToBottom<kWindowSize,                               \
                        kWindowStep,                               \
@@ -2247,7 +2284,8 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
                        kFilterGeomConsistency,                    \
                        kCooperative,                              \
                        kSweepBlockWidth,                          \
-                       kCheckpointHmm>                            \
+                       kCheckpointHmm,                            \
+                       kSourceJobGroups>                          \
       <<<sweep_kernel_grid_size, sweep_kernel_block_size>>>(      \
           MakeRefCamera(ref_K_host_[rotation_in_half_pi_],        \
                         ref_inv_K_host_[rotation_in_half_pi_]),   \
@@ -2275,52 +2313,64 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           sweep_options,                                          \
           ReferenceStatisticsTexture());
 
-      if (last_sweep) {
-        if (options_.filter) {
-          if (!options_.rotation_buffer_reuse) {
-            consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
-                cost_map_->GetWidth(),
-                cost_map_->GetHeight(),
-                PackedConsistencyMaskDepth(cost_map_->GetDepth()));
-          }
-          consistency_mask_->FillWithScalar(0);
-        }
-        if (options_.geom_consistency) {
-          const bool kGeomConsistencyTerm = true;
+        if (last_sweep) {
           if (options_.filter) {
-            const bool kFilterPhotoConsistency = true;
-            const bool kFilterGeomConsistency = true;
-            CALL_SWEEP_FUNC
+            if (!options_.rotation_buffer_reuse) {
+              consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
+                  cost_map_->GetWidth(),
+                  cost_map_->GetHeight(),
+                  PackedConsistencyMaskDepth(cost_map_->GetDepth()));
+            }
+            consistency_mask_->FillWithScalar(0);
+          }
+          if (options_.geom_consistency) {
+            const bool kGeomConsistencyTerm = true;
+            if (options_.filter) {
+              const bool kFilterPhotoConsistency = true;
+              const bool kFilterGeomConsistency = true;
+              CALL_SWEEP_FUNC
+            } else {
+              const bool kFilterPhotoConsistency = false;
+              const bool kFilterGeomConsistency = false;
+              CALL_SWEEP_FUNC
+            }
           } else {
-            const bool kFilterPhotoConsistency = false;
-            const bool kFilterGeomConsistency = false;
-            CALL_SWEEP_FUNC
+            const bool kGeomConsistencyTerm = false;
+            if (options_.filter) {
+              const bool kFilterPhotoConsistency = true;
+              const bool kFilterGeomConsistency = false;
+              CALL_SWEEP_FUNC
+            } else {
+              const bool kFilterPhotoConsistency = false;
+              const bool kFilterGeomConsistency = false;
+              CALL_SWEEP_FUNC
+            }
           }
         } else {
-          const bool kGeomConsistencyTerm = false;
-          if (options_.filter) {
-            const bool kFilterPhotoConsistency = true;
-            const bool kFilterGeomConsistency = false;
+          const bool kFilterPhotoConsistency = false;
+          const bool kFilterGeomConsistency = false;
+          if (options_.geom_consistency) {
+            const bool kGeomConsistencyTerm = true;
             CALL_SWEEP_FUNC
           } else {
-            const bool kFilterPhotoConsistency = false;
-            const bool kFilterGeomConsistency = false;
+            const bool kGeomConsistencyTerm = false;
             CALL_SWEEP_FUNC
           }
         }
-      } else {
-        const bool kFilterPhotoConsistency = false;
-        const bool kFilterGeomConsistency = false;
-        if (options_.geom_consistency) {
-          const bool kGeomConsistencyTerm = true;
-          CALL_SWEEP_FUNC
-        } else {
-          const bool kGeomConsistencyTerm = false;
-          CALL_SWEEP_FUNC
-        }
-      }
 
 #undef CALL_SWEEP_FUNC
+      };
+      if constexpr (kCooperative && kSweepBlockWidth == 8 &&
+                    kWindowSize == 11 && kWindowStep == 1) {
+        if (cooperative_sample_batch_size_ == 2)
+          launch_sweep(std::integral_constant<int, 2>{});
+        else
+          launch_sweep(
+              std::integral_constant<int, kCooperativeSampleBatchSize>{});
+      } else {
+        launch_sweep(
+            std::integral_constant<int, kCooperativeSampleBatchSize>{});
+      }
 
       CUDA_SYNC_AND_CHECK();
 
@@ -2466,42 +2516,60 @@ size_t PairResidentBlocksPerSm(bool geometric,
   CUDA_SAFE_CALL(cudaGetDevice(&device));
   cudaDeviceProp properties{};
   CUDA_SAFE_CALL(cudaGetDeviceProperties(&properties, device));
-  int per_sm = 0;
-  if (geometric && final_filter) {
-    CUDA_SAFE_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &per_sm,
-        SweepFromTopToBottom<11, 1, true, true, true, true, 8, kCheckpointHmm>,
-        128,
-        0));
-  } else if (geometric) {
-    CUDA_SAFE_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &per_sm,
-        SweepFromTopToBottom<11,
-                             1,
-                             true,
-                             false,
-                             false,
-                             true,
-                             8,
-                             kCheckpointHmm>,
-        128,
-        0));
-  } else {
-    CUDA_SAFE_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &per_sm,
-        SweepFromTopToBottom<11,
-                             1,
-                             false,
-                             false,
-                             false,
-                             true,
-                             8,
-                             kCheckpointHmm>,
-        128,
-        0));
-  }
+  const auto resident_blocks = [&](auto group_tag) {
+    constexpr int kSourceJobGroups = decltype(group_tag)::value;
+    int per_sm = 0;
+    if (geometric && final_filter) {
+      CUDA_SAFE_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+          &per_sm,
+          SweepFromTopToBottom<11,
+                               1,
+                               true,
+                               true,
+                               true,
+                               true,
+                               8,
+                               kCheckpointHmm,
+                               kSourceJobGroups>,
+          8 * 4 * kSourceJobGroups,
+          0));
+    } else if (geometric) {
+      CUDA_SAFE_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+          &per_sm,
+          SweepFromTopToBottom<11,
+                               1,
+                               true,
+                               false,
+                               false,
+                               true,
+                               8,
+                               kCheckpointHmm,
+                               kSourceJobGroups>,
+          8 * 4 * kSourceJobGroups,
+          0));
+    } else {
+      CUDA_SAFE_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+          &per_sm,
+          SweepFromTopToBottom<11,
+                               1,
+                               false,
+                               false,
+                               false,
+                               true,
+                               8,
+                               kCheckpointHmm,
+                               kSourceJobGroups>,
+          8 * 4 * kSourceJobGroups,
+          0));
+    }
+    return static_cast<size_t>(per_sm);
+  };
   *sm_count = properties.multiProcessorCount;
-  return static_cast<size_t>(per_sm);
+  return CooperativeSampleBatchSizeForDevice(properties.major,
+                                             properties.minor) == 2
+             ? resident_blocks(std::integral_constant<int, 2>{})
+             : resident_blocks(
+                   std::integral_constant<int, kCooperativeSampleBatchSize>{});
 }
 size_t PairResidentBlocksPerSm(bool geometric,
                                bool final_filter,
@@ -2809,7 +2877,6 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     o.perturbation = 1.0f / std::pow(2.0f, iter + sweep / 4.0f);
     o.prev_sel_prob_weight = static_cast<float>(iter * 4 + sweep) /
                              static_cast<float>(p.options_.num_iterations * 4);
-    const dim3 block(8, 4 * kCooperativeSampleBatchSize, 1);
     const dim3 grid((p.cost_map_->GetWidth() - 1) / 8 + 1, 1, 1);
     const GpuMatView<float> no_checkpoint{nullptr, 0, 0, 0, 0};
     const auto checkpoints =
@@ -2822,6 +2889,13 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
             ? p.hmm_checkpoint_->Stripe(p.cost_map_->GetWidth(),
                                         p.cost_map_->GetHeight())
             : no_checkpoint;
+    const auto launch_group = [&](auto group_tag) {
+      constexpr int kSourceJobGroups = decltype(group_tag)::value;
+      const dim3 block(8, 4 * kSourceJobGroups, 1);
+      if (iter == 0 && sweep == 0)
+        VLOG(1) << "Cooperative source-job groups: " << kSourceJobGroups
+                << ", threads per block: " << block.x * block.y;
+
 #define PAIR_LAUNCH(GEOM, PHOTO_FILTER, GEO_FILTER, CHECKPOINT)              \
   SweepFromTopToBottom<11,                                                   \
                        1,                                                    \
@@ -2830,7 +2904,8 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
                        GEO_FILTER,                                           \
                        true,                                                 \
                        8,                                                    \
-                       CHECKPOINT><<<grid, block, 0, stream>>>(              \
+                       CHECKPOINT,                                           \
+                       kSourceJobGroups><<<grid, block, 0, stream>>>(        \
       MakeRefCamera(p.ref_K_host_[p.rotation_in_half_pi_],                   \
                     p.ref_inv_K_host_[p.rotation_in_half_pi_]),              \
       p.global_workspace_->View(),                                           \
@@ -2855,28 +2930,33 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
       p.poses_texture_[p.rotation_in_half_pi_]->GetObj(),                    \
       o,                                                                     \
       p.ReferenceStatisticsTexture())
-    if (p.options_.checkpoint_hmm) {
-      if (p.options_.geom_consistency) {
-        if (last) {
-          PAIR_LAUNCH(true, true, true, true);
+      if (p.options_.checkpoint_hmm) {
+        if (p.options_.geom_consistency) {
+          if (last) {
+            PAIR_LAUNCH(true, true, true, true);
+          } else {
+            PAIR_LAUNCH(true, false, false, true);
+          }
         } else {
-          PAIR_LAUNCH(true, false, false, true);
+          PAIR_LAUNCH(false, false, false, true);
         }
       } else {
-        PAIR_LAUNCH(false, false, false, true);
-      }
-    } else {
-      if (p.options_.geom_consistency) {
-        if (last) {
-          PAIR_LAUNCH(true, true, true, false);
+        if (p.options_.geom_consistency) {
+          if (last) {
+            PAIR_LAUNCH(true, true, true, false);
+          } else {
+            PAIR_LAUNCH(true, false, false, false);
+          }
         } else {
-          PAIR_LAUNCH(true, false, false, false);
+          PAIR_LAUNCH(false, false, false, false);
         }
-      } else {
-        PAIR_LAUNCH(false, false, false, false);
       }
-    }
 #undef PAIR_LAUNCH
+    };
+    if (p.cooperative_sample_batch_size_ == 2)
+      launch_group(std::integral_constant<int, 2>{});
+    else
+      launch_group(std::integral_constant<int, kCooperativeSampleBatchSize>{});
   };
   const auto rotate_last_mask = [](PatchMatchCuda& p, bool last) {
     if (!last || !p.options_.filter) return;
