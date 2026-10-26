@@ -113,6 +113,9 @@ class PatchMatchCuda {
   // calls to `rotate` mod 4.
   int rotation_in_half_pi_;
 
+  // Default-window source jobs per wave, chosen once for the bound device.
+  int cooperative_sample_batch_size_ = 4;
+
   // Reference and source image input data.
   std::unique_ptr<CudaArrayLayeredTexture<uint8_t>> ref_image_texture_;
   std::unique_ptr<PatchMatchSourceArray<uint8_t>> src_images_texture_;
