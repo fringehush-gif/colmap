@@ -128,6 +128,7 @@ if(CUDA_ENABLED)
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu
+            patch_match_source_array.h patch_match_source_array.cc
             patch_match_state_map.h
             patch_match_hmm_checkpoint.h
             patch_match_rng_perimeter.h
@@ -327,6 +328,7 @@ if(HIP_ENABLED)
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu
+            patch_match_source_array.h patch_match_source_array.cc
             patch_match_state_map.h
             patch_match_hmm_checkpoint.h
             patch_match_rng_perimeter.h

@@ -6,6 +6,7 @@
 #include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/mvs/patch_match_io.h"
+#include "colmap/mvs/patch_match_source_array.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/file.h"
@@ -905,31 +906,67 @@ void PatchMatchController::ProcessProblemBatch(
       std::make_unique<PatchMatchCuda>(input[0]->options, input[0]->problem);
   CUDA_SYNC_AND_CHECK();
   const size_t first_peak = owners[0]->PairPeakBytes();
-  bool memory_admitted = true;
-  for (size_t i = 1; i < input.size(); ++i) {
-    size_t free_bytes = 0, total_bytes = 0;
-    CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
-    const size_t remaining = input.size() - i + 1;
-    if (first_peak > (std::numeric_limits<size_t>::max() - kExternalMargin) /
-                         remaining ||
-        free_bytes < remaining * first_peak + kExternalMargin) {
-      memory_admitted = false;
-      break;
-    }
-    owners[i] =
-        std::make_unique<PatchMatchCuda>(input[i]->options, input[i]->problem);
-    CUDA_SYNC_AND_CHECK();
-    if (owners[i]->PairPeakBytes() > first_peak) {
-      owners[i].reset();
-      memory_admitted = false;
-      break;
-    }
-  }
+  std::vector<const PatchMatch::Problem*> source_problems;
+  for (const auto& prepared : input)
+    source_problems.push_back(&prepared->problem);
+  std::shared_ptr<const PatchMatchSparseSources> shared;
+  const size_t union_budget = PatchMatchSparseSources::Budget(
+      source_problems, options.geom_consistency);
   size_t free_bytes = 0, total_bytes = 0;
   CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
-  if (first_peak > std::numeric_limits<size_t>::max() - kExternalMargin ||
-      free_bytes < first_peak + kExternalMargin)
-    memory_admitted = false;
+  // The first independent owner stays intact during union construction.
+  // Reserve the full remaining independent peaks plus the incumbent extra
+  // transient peak. Rejecting sharing retains the exact old batch path.
+  const size_t maximum = std::numeric_limits<size_t>::max();
+  if (union_budget && union_budget <= maximum - kExternalMargin &&
+      first_peak <= (maximum - kExternalMargin - union_budget) / input.size() &&
+      free_bytes >=
+          union_budget + input.size() * first_peak + kExternalMargin) {
+    shared = PatchMatchSparseSources::Create(source_problems,
+                                             options.geom_consistency);
+    if (shared) owners[0]->UseSparseSources(shared);
+  }
+  const auto admit_remaining = [&]() {
+    bool memory_admitted = true;
+    for (size_t i = 1; i < input.size(); ++i) {
+      size_t free_bytes = 0, total_bytes = 0;
+      CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+      const size_t remaining = input.size() - i + 1;
+      if (first_peak > (std::numeric_limits<size_t>::max() - kExternalMargin) /
+                           remaining ||
+          free_bytes < remaining * first_peak + kExternalMargin) {
+        memory_admitted = false;
+        break;
+      }
+      owners[i] = std::make_unique<PatchMatchCuda>(
+          input[i]->options, input[i]->problem, shared);
+      CUDA_SYNC_AND_CHECK();
+      if (owners[i]->PairPeakBytes() > first_peak) {
+        owners[i].reset();
+        memory_admitted = false;
+        break;
+      }
+    }
+    size_t free_bytes = 0, total_bytes = 0;
+    CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+    if (first_peak > std::numeric_limits<size_t>::max() - kExternalMargin ||
+        free_bytes < first_peak + kExternalMargin)
+      memory_admitted = false;
+    return memory_admitted;
+  };
+  bool memory_admitted = admit_remaining();
+  if (!memory_admitted && shared) {
+    // Do not lower concurrency because the optional bank was rejected. Drop
+    // every shared owner/bank before reconstructing the incumbent first view.
+    for (auto& owner : owners) owner.reset();
+    shared.reset();
+    owners[0] =
+        std::make_unique<PatchMatchCuda>(input[0]->options, input[0]->problem);
+    CUDA_SYNC_AND_CHECK();
+    memory_admitted =
+        owners[0]->PairPeakBytes() <= first_peak && admit_remaining();
+  }
+  CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
   if (!memory_admitted) {
     if (first_peak > std::numeric_limits<size_t>::max() - kExternalMargin ||
         free_bytes < first_peak + kExternalMargin)
@@ -961,7 +998,8 @@ void PatchMatchController::ProcessProblemBatch(
       }
     }
   } streams(input.size());
-  LOG(INFO) << "Running " << input.size() << " reference PatchMatch batch";
+  LOG(INFO) << "Running " << input.size() << " reference PatchMatch batch"
+            << (shared ? " (sparse source aliases)" : "");
   RunPatchMatchBatch(views, streams.values);
   for (size_t i = 0; i < input.size(); ++i) write_cuda(*input[i], *owners[i]);
   for (auto& owner : owners) owner.reset();

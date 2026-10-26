@@ -12,6 +12,7 @@
 #include "colmap/mvs/packed_consistency_mask.h"
 #include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/mvs/patch_match_rng_perimeter.h"
+#include "colmap/mvs/patch_match_source_array.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/cudacc.h"
 #include "colmap/util/logging.h"
@@ -1868,8 +1869,10 @@ cudaArray_t BorrowRotationRefArray(
 }  // namespace
 #endif
 
-PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
-                               const PatchMatch::Problem& problem)
+PatchMatchCuda::PatchMatchCuda(
+    const PatchMatchOptions& options,
+    const PatchMatch::Problem& problem,
+    std::shared_ptr<const PatchMatchSparseSources> shared)
     : options_(options),
       problem_(problem),
       ref_width_(0),
@@ -1881,7 +1884,12 @@ PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
 #endif
   SetBestCudaDevice(std::stoi(options_.gpu_index));
   InitRefImage();
-  InitSourceImages();
+#ifndef COLMAP_HIP_ENABLED
+  if (shared)
+    UseSparseSources(std::move(shared));
+  else
+#endif
+    InitSourceImages();
   InitTransforms();
   InitWorkspaceMemory();
 #ifndef COLMAP_HIP_ENABLED
@@ -1890,6 +1898,25 @@ PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
   }
 #endif
 }
+
+PatchMatchCuda::~PatchMatchCuda() = default;
+#ifndef COLMAP_HIP_ENABLED
+void PatchMatchCuda::UseSparseSources(
+    std::shared_ptr<const PatchMatchSparseSources> shared) {
+  THROW_CHECK(shared && shared->Matches(problem_, options_.geom_consistency));
+  // Create both views before replacing either dense owner. Inputs and state
+  // remain untouched; no consuming kernel may have run before this attachment.
+  auto images = PatchMatchSourceArray<uint8_t>::FromSparse(
+      shared, problem_.ref_image_idx);
+  auto depths = options_.geom_consistency
+                    ? PatchMatchSourceArray<float>::FromSparse(
+                          shared, problem_.ref_image_idx)
+                    : nullptr;
+  THROW_CHECK(images && (!options_.geom_consistency || depths));
+  src_images_texture_ = std::move(images);
+  src_depth_maps_texture_ = std::move(depths);
+}
+#endif
 
 void PatchMatchCuda::Run() {
   // Only publish masks after a completed filtered sweep and final rotation.
@@ -2245,8 +2272,10 @@ size_t PatchMatchCuda::PairPeakBytes() const {
   // twice their logical content, plus the separate fixed margin at admission.
   size_t textures = 0;
   add(&textures, ref_tex);
-  add(&textures, texture_bytes(src_images_texture_, sizeof(uint8_t)));
-  if (src_depth_maps_texture_ != nullptr) {
+  if (!src_images_texture_->IsSparse())
+    add(&textures, texture_bytes(src_images_texture_, sizeof(uint8_t)));
+  if (src_depth_maps_texture_ != nullptr &&
+      !src_depth_maps_texture_->IsSparse()) {
     add(&textures, texture_bytes(src_depth_maps_texture_, sizeof(float)));
   }
   for (const auto& pose : poses_texture_) {
@@ -2795,7 +2824,7 @@ void PatchMatchCuda::InitSourceImages() {
                                 image.GetHeight(),
                                 image.GetWidth()});
       }
-      src_images_texture_ = CudaArrayLayeredTexture<uint8_t>::FromHostSlices(
+      src_images_texture_ = PatchMatchSourceArray<uint8_t>::FromHostSlices(
           texture_desc, max_width, max_height, image_slices);
     } else {
       // Copy source images to contiguous memory block.
@@ -2822,7 +2851,7 @@ void PatchMatchCuda::InitSourceImages() {
           dest += max_width;
         }
       }
-      src_images_texture_ = CudaArrayLayeredTexture<uint8_t>::FromHostArray(
+      src_images_texture_ = PatchMatchSourceArray<uint8_t>::FromHostArray(
           texture_desc,
           max_width,
           max_height,
@@ -2852,7 +2881,7 @@ void PatchMatchCuda::InitSourceImages() {
                                 depth_map.GetHeight(),
                                 depth_map.GetWidth() * sizeof(float)});
       }
-      src_depth_maps_texture_ = CudaArrayLayeredTexture<float>::FromHostSlices(
+      src_depth_maps_texture_ = PatchMatchSourceArray<float>::FromHostSlices(
           texture_desc, max_width, max_height, depth_slices);
     } else {
       const float kDefaultValue = 0.0f;
@@ -2872,7 +2901,7 @@ void PatchMatchCuda::InitSourceImages() {
           dest += max_width;
         }
       }
-      src_depth_maps_texture_ = CudaArrayLayeredTexture<float>::FromHostArray(
+      src_depth_maps_texture_ = PatchMatchSourceArray<float>::FromHostArray(
           texture_desc,
           max_width,
           max_height,
