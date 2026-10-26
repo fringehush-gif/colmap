@@ -1872,13 +1872,15 @@ cudaArray_t BorrowRotationRefArray(
 PatchMatchCuda::PatchMatchCuda(
     const PatchMatchOptions& options,
     const PatchMatch::Problem& problem,
-    std::shared_ptr<const PatchMatchSparseSources> shared)
+    std::shared_ptr<const PatchMatchSparseSources> shared,
+    const PatchMatchCuda* geometry_donor)
     : options_(options),
       problem_(problem),
       ref_width_(0),
       ref_height_(0),
       rotation_in_half_pi_(0) {
 #ifdef COLMAP_HIP_ENABLED
+  (void)geometry_donor;
   THROW_CHECK(!options_.rotation_buffer_reuse)
       << "PatchMatchStereo.rotation_buffer_reuse requires CUDA";
 #endif
@@ -1894,7 +1896,7 @@ PatchMatchCuda::PatchMatchCuda(
   InitWorkspaceMemory();
 #ifndef COLMAP_HIP_ENABLED
   if (options_.rotation_buffer_reuse) {
-    InitAlternateOrientationMemory();
+    InitAlternateOrientationMemory(geometry_donor);
   }
 #endif
 }
@@ -1919,6 +1921,9 @@ void PatchMatchCuda::UseSparseSources(
 #endif
 
 void PatchMatchCuda::Run() {
+#ifndef COLMAP_HIP_ENABLED
+  if (options_.rotation_buffer_reuse) EnsureGeometryRotationMemory();
+#endif
   // Only publish masks after a completed filtered sweep and final rotation.
   consistency_mask_valid_ = false;
 #define CASE_WINDOW_RADIUS(window_radius, window_step)                       \
@@ -1974,13 +1979,93 @@ void PatchMatchCuda::Run() {
 #undef CASE_WINDOW_STEP
 }
 
+GpuMatView<float> PatchMatchCuda::GeometryView(
+    const GpuMat<float>& owner) const {
+  if (!dense_geometry_) return owner.View();
+  const size_t width = rotation_in_half_pi_ % 2 ? ref_height_ : ref_width_;
+  const size_t height = rotation_in_half_pi_ % 2 ? ref_width_ : ref_height_;
+  return {const_cast<float*>(owner.GetPtr()),
+          width * sizeof(float),
+          width,
+          height,
+          owner.GetDepth()};
+}
+
+Mat<float> PatchMatchCuda::GeometryCopyToMat(const GpuMat<float>& owner) const {
+  if (!dense_geometry_) return owner.CopyToMat();
+  const auto view = GeometryView(owner);
+  Mat<float> result(view.width, view.height, view.depth);
+  CUDA_SAFE_CALL(cudaMemcpy2D(result.GetPtr(),
+                              view.pitch,
+                              view.GetPtr(),
+                              view.pitch,
+                              view.pitch,
+                              view.height * view.depth,
+                              cudaMemcpyDeviceToHost));
+  return result;
+}
+
+#ifndef COLMAP_HIP_ENABLED
+size_t PatchMatchCuda::GeometryBytes(const GpuMat<float>& depth,
+                                     const GpuMat<float>& normal) {
+  const auto bytes = [](const auto& owner) {
+    const size_t maximum = std::numeric_limits<size_t>::max();
+    THROW_CHECK_LE(owner.GetPitch(), maximum / owner.GetHeight());
+    const size_t plane = owner.GetPitch() * owner.GetHeight();
+    THROW_CHECK_LE(plane, maximum / owner.GetDepth());
+    return plane * owner.GetDepth();
+  };
+  const size_t depth_bytes = bytes(depth), normal_bytes = bytes(normal);
+  THROW_CHECK_LE(normal_bytes,
+                 std::numeric_limits<size_t>::max() - depth_bytes);
+  return depth_bytes + normal_bytes;
+}
+
+bool PatchMatchCuda::CanShareGeometryRotation() const {
+  if (!options_.rotation_buffer_reuse || rotation_in_half_pi_ != 0 ||
+      ref_height_ == 0 || ref_width_ == 0 ||
+      ref_width_ >
+          std::numeric_limits<size_t>::max() / sizeof(float) / ref_height_)
+    return false;
+  const size_t plane_bytes = ref_width_ * ref_height_ * sizeof(float);
+  const auto fits = [plane_bytes](const auto& owner, size_t planes) {
+    return owner && owner->GetDepth() == planes && owner->GetHeight() != 0 &&
+           owner->GetPitch() >= plane_bytes / owner->GetHeight() +
+                                    (plane_bytes % owner->GetHeight() != 0);
+  };
+  return fits(depth_map_, 1) && fits(normal_map_, 3) &&
+         ((geometry_alternate_bound_ && !alternate_depth_map_ &&
+           !alternate_normal_map_) ||
+          (fits(alternate_depth_map_, 1) && fits(alternate_normal_map_, 3)));
+}
+
+void PatchMatchCuda::EnsureGeometryRotationMemory() {
+  const size_t next = (rotation_in_half_pi_ + 1) % 4;
+  const size_t width = next % 2 ? ref_height_ : ref_width_;
+  const size_t height = next % 2 ? ref_width_ : ref_height_;
+  if (!alternate_depth_map_)
+    alternate_depth_map_ = std::make_unique<GpuMat<float>>(width, height);
+  if (!alternate_normal_map_)
+    alternate_normal_map_ = std::make_unique<GpuMat<float>>(width, height, 3);
+  geometry_alternate_bound_ =
+      std::max(geometry_alternate_bound_,
+               GeometryBytes(*alternate_depth_map_, *alternate_normal_map_));
+  const size_t active = GeometryBytes(*depth_map_, *normal_map_);
+  THROW_CHECK_LE(geometry_alternate_bound_,
+                 std::numeric_limits<size_t>::max() - active);
+  geometry_peak_floor_ =
+      std::max(geometry_peak_floor_, active + geometry_alternate_bound_);
+}
+
+#endif
+
 DepthMap PatchMatchCuda::GetDepthMap() const {
   return DepthMap(
-      depth_map_->CopyToMat(), options_.depth_min, options_.depth_max);
+      GeometryCopyToMat(*depth_map_), options_.depth_min, options_.depth_max);
 }
 
 NormalMap PatchMatchCuda::GetNormalMap() const {
-  return NormalMap(normal_map_->CopyToMat());
+  return NormalMap(GeometryCopyToMat(*normal_map_));
 }
 
 Mat<float> PatchMatchCuda::GetSelProbMap() const {
@@ -2032,8 +2117,8 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           MakeRefCamera(ref_K_host_[rotation_in_half_pi_],
                         ref_inv_K_host_[rotation_in_half_pi_]),
           cost_map_->View(),
-          depth_map_->View(),
-          normal_map_->View(),
+          GeometryView(*depth_map_),
+          GeometryView(*normal_map_),
           ref_image_texture_->GetObj(),
           ref_image_->sum_image->View(),
           ref_image_->squared_sum_image->View(),
@@ -2132,8 +2217,8 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           (PatchMatchRngPerimeter{ref_width_, ref_height_}),      \
           static_cast<unsigned int>(rotation_in_half_pi_),        \
           cost_map_->View(),                                      \
-          depth_map_->View(),                                     \
-          normal_map_->View(),                                    \
+          GeometryView(*depth_map_),                              \
+          GeometryView(*normal_map_),                             \
           (PackedConsistencyMaskView{consistency_mask_->View()}), \
           (kCheckpointHmm ? prev_sel_prob_map_->View()            \
                           : sel_prob_map_->View()),               \
@@ -2283,10 +2368,19 @@ size_t PatchMatchCuda::PairPeakBytes() const {
   }
   add(&resident, multiply(textures, 2));
   if (options_.rotation_buffer_reuse) {
-    // Both orientation banks and both texture arrays already exist. Charge
-    // their actual pitches rather than estimating from the current layout.
-    add(&resident, mat_bytes(alternate_depth_map_));
-    add(&resident, mat_bytes(alternate_normal_map_));
+    // Retain the parent's original geometry floor, including the donor's
+    // observed opposite-orientation padding for deferred alternate owners.
+    size_t alternate_geometry = 0;
+    if (alternate_depth_map_)
+      add(&alternate_geometry, mat_bytes(alternate_depth_map_));
+    if (alternate_normal_map_)
+      add(&alternate_geometry, mat_bytes(alternate_normal_map_));
+    alternate_geometry =
+        std::max(alternate_geometry, geometry_alternate_bound_);
+    size_t geometry = depth_normal;
+    add(&geometry, alternate_geometry);
+    geometry = std::max(geometry, geometry_peak_floor_);
+    add(&resident, geometry - depth_normal);
     add(&resident, mat_bytes(alternate_ref_image_->image));
     add(&resident, mat_bytes(alternate_ref_image_->sum_image));
     add(&resident, mat_bytes(alternate_ref_image_->squared_sum_image));
@@ -2512,6 +2606,30 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     }
     validate(*views[i]);
   }
+  bool shared_geometry = first.CanShareGeometryRotation();
+  for (PatchMatchCuda* p : views)
+    shared_geometry = shared_geometry && p->CanShareGeometryRotation() &&
+                      p->ref_width_ == first.ref_width_ &&
+                      p->ref_height_ == first.ref_height_;
+  std::unique_ptr<GpuMat<float>> geometry_depth, geometry_normal;
+  if (shared_geometry) {
+    geometry_depth = std::move(first.alternate_depth_map_);
+    geometry_normal = std::move(first.alternate_normal_map_);
+    if (!geometry_depth) {
+      first.EnsureGeometryRotationMemory();
+      geometry_depth = std::move(first.alternate_depth_map_);
+      geometry_normal = std::move(first.alternate_normal_map_);
+    }
+    VLOG(2) << "PatchMatch shared geometry rotation bank: " << views.size()
+            << " references, " << first.ref_width_ << "x" << first.ref_height_;
+    for (PatchMatchCuda* p : views) {
+      p->alternate_depth_map_.reset();
+      p->alternate_normal_map_.reset();
+    }
+  } else {
+    for (PatchMatchCuda* p : views)
+      if (p->options_.rotation_buffer_reuse) p->EnsureGeometryRotationMemory();
+  }
   const bool is_pair = views.size() == 2;
   if (is_pair) {
     THROW_CHECK(CanPairPatchMatchViews(first.ref_width_,
@@ -2541,8 +2659,8 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     ComputeInitialCost<11, 1><<<initial_cost_grid, p->sweep_block_size_>>>(
         MakeRefCamera(p->ref_K_host_[0], p->ref_inv_K_host_[0]),
         p->cost_map_->View(),
-        p->depth_map_->View(),
-        p->normal_map_->View(),
+        p->GeometryView(*p->depth_map_),
+        p->GeometryView(*p->normal_map_),
         p->ref_image_texture_->GetObj(),
         p->ref_image_->sum_image->View(),
         p->ref_image_->squared_sum_image->View(),
@@ -2609,8 +2727,8 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
           (PatchMatchRngPerimeter{p.ref_width_, p.ref_height_}),              \
           static_cast<unsigned int>(p.rotation_in_half_pi_),                  \
           p.cost_map_->View(),                                                \
-          p.depth_map_->View(),                                               \
-          p.normal_map_->View(),                                              \
+          p.GeometryView(*p.depth_map_),                                      \
+          p.GeometryView(*p.normal_map_),                                     \
           (PackedConsistencyMaskView{p.consistency_mask_->View()}),           \
           p.sel_prob_map_->View(),                                            \
           p.prev_sel_prob_map_->View(),                                       \
@@ -2671,10 +2789,24 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
         for (cudaStream_t stream : streams)
           CUDA_SAFE_CALL(cudaStreamSynchronize(stream));
       }
-      for (PatchMatchCuda* p : views) p->Rotate();
+      for (PatchMatchCuda* p : views) {
+        if (shared_geometry) {
+          p->alternate_depth_map_ = std::move(geometry_depth);
+          p->alternate_normal_map_ = std::move(geometry_normal);
+        }
+        p->Rotate(shared_geometry);
+        if (shared_geometry) {
+          geometry_depth = std::move(p->alternate_depth_map_);
+          geometry_normal = std::move(p->alternate_normal_map_);
+        }
+      }
       for (PatchMatchCuda* p : views) rotate_last_mask(*p, last);
       CUDA_SYNC_AND_CHECK();
     }
+  }
+  if (shared_geometry) {
+    first.alternate_depth_map_ = std::move(geometry_depth);
+    first.alternate_normal_map_ = std::move(geometry_normal);
   }
   for (PatchMatchCuda* p : views) THROW_CHECK_EQ(p->rotation_in_half_pi_, 0);
   CUDA_SYNC_AND_CHECK();
@@ -2693,16 +2825,16 @@ void PatchMatchCuda::ComputeCudaConfig() {
   sweep_block_size_.x = THREADS_PER_BLOCK;
   sweep_block_size_.y = 1;
   sweep_block_size_.z = 1;
-  sweep_grid_size_.x = (depth_map_->GetWidth() - 1) / THREADS_PER_BLOCK + 1;
+  const auto depth = GeometryView(*depth_map_);
+  sweep_grid_size_.x = (depth.GetWidth() - 1) / THREADS_PER_BLOCK + 1;
   sweep_grid_size_.y = 1;
   sweep_grid_size_.z = 1;
 
   elem_wise_block_size_.x = THREADS_PER_BLOCK;
   elem_wise_block_size_.y = THREADS_PER_BLOCK;
   elem_wise_block_size_.z = 1;
-  elem_wise_grid_size_.x = (depth_map_->GetWidth() - 1) / THREADS_PER_BLOCK + 1;
-  elem_wise_grid_size_.y =
-      (depth_map_->GetHeight() - 1) / THREADS_PER_BLOCK + 1;
+  elem_wise_grid_size_.x = (depth.GetWidth() - 1) / THREADS_PER_BLOCK + 1;
+  elem_wise_grid_size_.y = (depth.GetHeight() - 1) / THREADS_PER_BLOCK + 1;
   elem_wise_grid_size_.z = 1;
 }
 
@@ -3112,11 +3244,25 @@ void PatchMatchCuda::InitWorkspaceMemory() {
 }
 
 #ifndef COLMAP_HIP_ENABLED
-void PatchMatchCuda::InitAlternateOrientationMemory() {
+void PatchMatchCuda::InitAlternateOrientationMemory(
+    const PatchMatchCuda* geometry_donor) {
   const size_t width = ref_height_, height = ref_width_;
   const size_t sources = problem_.src_image_idxs.size();
-  alternate_depth_map_ = std::make_unique<GpuMat<float>>(width, height);
-  alternate_normal_map_ = std::make_unique<GpuMat<float>>(width, height, 3);
+  const size_t active_geometry = GeometryBytes(*depth_map_, *normal_map_);
+  const bool defer_geometry = geometry_donor &&
+                              geometry_donor->CanShareGeometryRotation() &&
+                              geometry_donor->ref_width_ == ref_width_ &&
+                              geometry_donor->ref_height_ == ref_height_;
+  if (defer_geometry) {
+    geometry_alternate_bound_ = geometry_donor->geometry_alternate_bound_;
+    THROW_CHECK_LE(geometry_alternate_bound_,
+                   std::numeric_limits<size_t>::max() - active_geometry);
+    geometry_peak_floor_ =
+        std::max(geometry_donor->geometry_peak_floor_,
+                 active_geometry + geometry_alternate_bound_);
+  } else {
+    EnsureGeometryRotationMemory();
+  }
   alternate_ref_image_ = std::make_unique<GpuMatRefImage>(width, height);
   if (options_.filter) {
     alternate_consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
@@ -3196,10 +3342,13 @@ void PatchMatchCuda::RotateStateMaps(size_t width, size_t height) {
   sel_prob_map_->Reorient(width, height);
 }
 
-void PatchMatchCuda::Rotate() {
+void PatchMatchCuda::Rotate(bool pack_geometry) {
+#ifdef COLMAP_HIP_ENABLED
+  (void)pack_geometry;
+#endif
 #ifndef COLMAP_HIP_ENABLED
   if (options_.rotation_buffer_reuse) {
-    RotateWithBufferReuse();
+    RotateWithBufferReuse(pack_geometry);
     return;
   }
 #endif
@@ -3256,22 +3405,43 @@ void PatchMatchCuda::Rotate() {
 }
 
 #ifndef COLMAP_HIP_ENABLED
-void PatchMatchCuda::RotateWithBufferReuse() {
+void PatchMatchCuda::RotateWithBufferReuse(bool pack_geometry) {
+  const auto old_depth = GeometryView(*depth_map_);
+  const auto old_normal = GeometryView(*normal_map_);
+  dense_geometry_ = dense_geometry_ || pack_geometry;
   rotation_in_half_pi_ = (rotation_in_half_pi_ + 1) % 4;
   const size_t width = rotation_in_half_pi_ % 2 == 0 ? ref_width_ : ref_height_;
   const size_t height =
       rotation_in_half_pi_ % 2 == 0 ? ref_height_ : ref_width_;
-  THROW_CHECK_EQ(alternate_depth_map_->GetWidth(), width);
-  THROW_CHECK_EQ(alternate_depth_map_->GetHeight(), height);
-
-  // Preserve producer/kernel/wait order for the remaining rotated fields.
-  // RNG state has one canonical perimeter owner and needs no rotation bank.
-  depth_map_->Rotate(alternate_depth_map_.get());
-  depth_map_.swap(alternate_depth_map_);
-  RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
-      normal_map_->View());
-  normal_map_->Rotate(alternate_normal_map_.get());
-  normal_map_.swap(alternate_normal_map_);
+  if (dense_geometry_) {
+    const auto rotate = [this](const auto input, auto& output) {
+      const auto target = GeometryView(*output);
+      for (size_t slice = 0; slice < input.depth; ++slice)
+        CudaRotate(reinterpret_cast<float*>(reinterpret_cast<char*>(input.ptr) +
+                                            slice * input.pitch * input.height),
+                   target.ptr + slice * target.width * target.height,
+                   input.width,
+                   input.height,
+                   input.pitch,
+                   target.pitch);
+      CUDA_SYNC_AND_CHECK();
+    };
+    rotate(old_depth, alternate_depth_map_);
+    depth_map_.swap(alternate_depth_map_);
+    RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
+        old_normal);
+    rotate(old_normal, alternate_normal_map_);
+    normal_map_.swap(alternate_normal_map_);
+  } else {
+    THROW_CHECK_EQ(alternate_depth_map_->GetWidth(), width);
+    THROW_CHECK_EQ(alternate_depth_map_->GetHeight(), height);
+    depth_map_->Rotate(alternate_depth_map_.get());
+    depth_map_.swap(alternate_depth_map_);
+    RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
+        old_normal);
+    normal_map_->Rotate(alternate_normal_map_.get());
+    normal_map_.swap(alternate_normal_map_);
+  }
   ref_image_->image->Rotate(alternate_ref_image_->image.get());
   ref_image_->sum_image->Rotate(alternate_ref_image_->sum_image.get());
   ref_image_->squared_sum_image->Rotate(

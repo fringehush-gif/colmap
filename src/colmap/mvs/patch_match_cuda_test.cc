@@ -576,6 +576,86 @@ TEST_F(CudaTest, FiveViewGeometricBankedBatchPreservesFinalMask) {
   ExpectReferenceBatchOutputs(5, true, true);
 }
 
+TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {
+  for (const auto& [width, height] :
+       std::array<std::pair<int, int>, 2>{{{128, 256}, {257, 129}}}) {
+    for (const bool geometry : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << width << "x" << height << " geometry=" << geometry);
+      std::vector<Inputs> inputs;
+      for (int i = 0; i < 3; ++i)
+        inputs.push_back(MakeInputs(i, 2, height, width));
+      auto options = MakeOptions(geometry, geometry, true);
+      const PatchMatchOptions defaults;
+      options.window_radius = defaults.window_radius;
+      options.window_step = defaults.window_step;
+      options.num_samples = defaults.num_samples;
+      options.num_iterations = defaults.num_iterations;
+      options.sigma_spatial = options.window_radius;
+      std::vector<PatchMatch::Problem> problems(3);
+      std::vector<std::unique_ptr<PatchMatchCuda> > control, candidate;
+      for (size_t i = 0; i < problems.size(); ++i) {
+        auto& problem = problems[i];
+        problem.ref_image_idx = 0;
+        problem.src_image_idxs = {1, 2};
+        problem.images = &inputs[i].images;
+        problem.depth_maps = &inputs[i].depths;
+        problem.normal_maps = &inputs[i].normals;
+        control.push_back(std::make_unique<PatchMatchCuda>(options, problem));
+        ASSERT_TRUE(control.back()->CanShareGeometryRotation());
+        candidate.push_back(std::make_unique<PatchMatchCuda>(
+            options,
+            problem,
+            std::shared_ptr<const PatchMatchSparseSources>{},
+            i > 0 ? control[0].get() : nullptr));
+        ASSERT_TRUE(candidate.back()->CanShareGeometryRotation());
+        EXPECT_EQ(candidate.back()->PairPeakBytes(),
+                  control.back()->PairPeakBytes());
+      }
+      std::vector<PatchMatchCuda*> views;
+      std::vector<cudaStream_t> streams(3, nullptr);
+      struct Cleanup {
+        std::vector<cudaStream_t>& streams;
+        ~Cleanup() {
+          for (auto stream : streams)
+            if (stream) (void)cudaStreamDestroy(stream);
+        }
+      } cleanup{streams};
+      for (size_t i = 0; i < 3; ++i) {
+        views.push_back(candidate[i].get());
+        CUDA_SAFE_CALL(
+            cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
+      }
+      const auto compare = [](const PatchMatchCuda& expected,
+                              const PatchMatchCuda& actual) {
+        ExpectExactlyEqual(expected.GetDepthMap(), actual.GetDepthMap());
+        ExpectExactlyEqual(expected.GetNormalMap(), actual.GetNormalMap());
+        ExpectExactlyEqual(expected.GetSelProbMap(), actual.GetSelProbMap());
+        EXPECT_EQ(expected.GetConsistentImageIdxs(),
+                  actual.GetConsistentImageIdxs());
+        EXPECT_GE(actual.PairPeakBytes(), expected.PairPeakBytes());
+      };
+      for (int repeat = 0; repeat < 2; ++repeat) {
+        for (auto& owner : control) owner->Run();
+        RunPatchMatchBatch(views, streams);
+        for (size_t i = 0; i < 3; ++i) compare(*control[i], *candidate[i]);
+      }
+      // Non-first owners have no private alternate pair when leaving the batch.
+      // Standalone Run must provision it and preserve logical views/readback.
+      for (size_t i = 0; i < 3; ++i) {
+        control[i]->Run();
+        candidate[i]->Run();
+        compare(*control[i], *candidate[i]);
+      }
+      control[0]->Run();
+      control[1]->Run();
+      RunPatchMatchPair(*candidate[0], *candidate[1], streams[0], streams[1]);
+      compare(*control[0], *candidate[0]);
+      compare(*control[1], *candidate[1]);
+    }
+  }
+}
+
 TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
   // One workspace identity; five references reuse differently ordered subsets.
   // Varying source dimensions exercise the original zero-padded layer extent.
