@@ -906,6 +906,7 @@ void PatchMatchController::ProcessProblemBatch(
       std::make_unique<PatchMatchCuda>(input[0]->options, input[0]->problem);
   CUDA_SYNC_AND_CHECK();
   const size_t first_peak = owners[0]->PairPeakBytes();
+  bool shared_geometry = owners[0]->CanShareGeometryRotation();
   std::vector<const PatchMatch::Problem*> source_problems;
   for (const auto& prepared : input)
     source_problems.push_back(&prepared->problem);
@@ -939,9 +940,13 @@ void PatchMatchController::ProcessProblemBatch(
         break;
       }
       owners[i] = std::make_unique<PatchMatchCuda>(
-          input[i]->options, input[i]->problem, shared);
+          input[i]->options,
+          input[i]->problem,
+          shared,
+          shared_geometry ? owners[0].get() : nullptr);
       CUDA_SYNC_AND_CHECK();
-      if (owners[i]->PairPeakBytes() > first_peak) {
+      if (owners[i]->PairPeakBytes() > first_peak ||
+          (shared_geometry && !owners[i]->CanShareGeometryRotation())) {
         owners[i].reset();
         memory_admitted = false;
         break;
@@ -955,9 +960,21 @@ void PatchMatchController::ProcessProblemBatch(
     return memory_admitted;
   };
   bool memory_admitted = admit_remaining();
+  if (!memory_admitted && shared_geometry) {
+    // Reject geometry sharing independently: keep any qualified source bank
+    // while restoring the parent's private alternate geometry owners.
+    for (auto& owner : owners) owner.reset();
+    shared_geometry = false;
+    owners[0] = std::make_unique<PatchMatchCuda>(
+        input[0]->options, input[0]->problem, shared);
+    CUDA_SYNC_AND_CHECK();
+    memory_admitted =
+        owners[0]->PairPeakBytes() <= first_peak && admit_remaining();
+  }
   if (!memory_admitted && shared) {
-    // Do not lower concurrency because the optional bank was rejected. Drop
-    // every shared owner/bank before reconstructing the incumbent first view.
+    // Do not lower concurrency because the optional source bank was rejected.
+    // Restore the incumbent independent-source closure only after its parent
+    // source-sharing admission has also failed.
     for (auto& owner : owners) owner.reset();
     shared.reset();
     owners[0] =

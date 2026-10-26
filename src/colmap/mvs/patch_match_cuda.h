@@ -28,9 +28,12 @@ class PatchMatchSparseSources;
 
 class PatchMatchCuda {
  public:
+  // Deferral is internal to same-shape batches after a full first owner has
+  // qualified both capacities and the controller retained the parent budget.
   PatchMatchCuda(const PatchMatchOptions& options,
                  const PatchMatch::Problem& problem,
-                 std::shared_ptr<const PatchMatchSparseSources> shared = {});
+                 std::shared_ptr<const PatchMatchSparseSources> shared = {},
+                 const PatchMatchCuda* geometry_donor = nullptr);
   ~PatchMatchCuda();
 
   void Run();
@@ -42,6 +45,8 @@ class PatchMatchCuda {
 #ifndef COLMAP_HIP_ENABLED
   // Conservative owner-local estimate for admitting a second live instance.
   size_t PairPeakBytes() const;
+  // Requires same-shape, serial rotations on the current CUDA device.
+  bool CanShareGeometryRotation() const;
   void UseSparseSources(std::shared_ptr<const PatchMatchSparseSources> shared);
 #endif
 
@@ -57,6 +62,9 @@ class PatchMatchCuda {
   template <int kWindowSize, int kWindowStep, bool kCheckpointHmm>
   void RunWithWindowSizeAndStep();
 
+  GpuMatView<float> GeometryView(const GpuMat<float>& owner) const;
+  Mat<float> GeometryCopyToMat(const GpuMat<float>& owner) const;
+
   void ComputeCudaConfig();
 
   void BindRefImageTexture();
@@ -67,13 +75,23 @@ class PatchMatchCuda {
   void InitWorkspaceMemory();
   void RotateStateMaps(size_t width, size_t height);
 #ifndef COLMAP_HIP_ENABLED
-  void InitAlternateOrientationMemory();
+  void InitAlternateOrientationMemory(const PatchMatchCuda* geometry_donor);
+  void EnsureGeometryRotationMemory();
+  static size_t GeometryBytes(const GpuMat<float>& depth,
+                              const GpuMat<float>& normal);
   void BindReusableRefImageTexture();
-  void RotateWithBufferReuse();
+  void RotateWithBufferReuse(bool pack_geometry);
 #endif
 
   // Rotate reference image by 90 degrees in counter-clockwise direction.
-  void Rotate();
+  void Rotate(bool pack_geometry = false);
+
+  // Packed logical planes can use padded physical owners of sufficient
+  // capacity. GpuMat dimensions remain allocation metadata after a shared
+  // rotation.
+  bool dense_geometry_ = false;
+  size_t geometry_alternate_bound_ = 0;
+  size_t geometry_peak_floor_ = 0;
 
   const PatchMatchOptions options_;
   const PatchMatch::Problem problem_;
