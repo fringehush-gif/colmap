@@ -2,12 +2,16 @@
 
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 
+#include "colmap/estimators/ceres_loss_function.h"
 #include "colmap/geometry/rigid3_matchers.h"
 #include "colmap/scene/reconstruction_matchers.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/models.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/testing.h"
+
+#include <algorithm>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -151,6 +155,68 @@ TEST(DefaultBundleAdjuster, NominalMultiCameraRig) {
                                  /*max_proj_center_error=*/0.1,
                                  /*max_scale_error=*/std::nullopt,
                                  /*num_obs_tolerance=*/0.0));
+}
+
+TEST(DefaultBundleAdjuster, PreservesWeightedAndRobustLosses) {
+  Reconstruction original;
+  SyntheticDatasetOptions dataset_options;
+  dataset_options.num_rigs = 1;
+  dataset_options.num_cameras_per_rig = 1;
+  dataset_options.num_frames_per_rig = 3;
+  dataset_options.num_points3D = 20;
+  SynthesizeDataset(dataset_options, &original);
+  SyntheticNoiseOptions noise_options;
+  noise_options.point2D_stddev = 1.0;
+  SynthesizeNoise(noise_options, &original);
+
+  for (const auto type : {CeresLossFunctionType::TRIVIAL,
+                          CeresLossFunctionType::HUBER,
+                          CeresLossFunctionType::CAUCHY}) {
+    for (const double weight : {1.0, 2.0}) {
+      SCOPED_TRACE(static_cast<int>(type));
+      SCOPED_TRACE(weight);
+      Reconstruction reconstruction = original;
+      BundleAdjustmentConfig config;
+      for (const image_t image_id : reconstruction.RegImageIds()) {
+        config.AddImage(image_id);
+      }
+      config.FixGauge(BundleAdjustmentGauge::TWO_CAMS_FROM_WORLD);
+      BundleAdjustmentOptions options;
+      options.ceres->loss_function_type = type;
+      options.ceres->loss_function_weight = weight;
+      options.ceres->loss_function_scale = 1.0;
+      auto adjuster =
+          CreateDefaultCeresBundleAdjuster(options, config, reconstruction);
+      ceres::Problem& problem = GetCeresProblem(*adjuster);
+      std::vector<ceres::ResidualBlockId> blocks;
+      problem.GetResidualBlocks(&blocks);
+      ASSERT_FALSE(blocks.empty());
+      const auto expected_loss = CreateCeresLossFunction(type, 1.0, weight);
+      double expected_cost = 0.0;
+      for (const auto block : blocks) {
+        const auto* loss = problem.GetLossFunctionForResidualBlock(block);
+        if (type == CeresLossFunctionType::TRIVIAL && weight == 1.0) {
+          EXPECT_EQ(loss, nullptr);
+        } else {
+          ASSERT_NE(loss, nullptr);
+        }
+        double cost;
+        ASSERT_TRUE(problem.EvaluateResidualBlock(
+            block, false, &cost, nullptr, nullptr));
+        double rho[3];
+        expected_loss->Evaluate(2.0 * cost, rho);
+        expected_cost += 0.5 * rho[0];
+      }
+      double actual_cost;
+      ASSERT_TRUE(problem.Evaluate(ceres::Problem::EvaluateOptions(),
+                                   &actual_cost,
+                                   nullptr,
+                                   nullptr,
+                                   nullptr));
+      EXPECT_NEAR(
+          actual_cost, expected_cost, 1e-12 * std::max(1.0, expected_cost));
+    }
+  }
 }
 
 TEST(DefaultBundleAdjuster, Cancellation) {

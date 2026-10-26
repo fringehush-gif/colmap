@@ -589,6 +589,13 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
             CreateCeresLossFunction(options_.ceres->loss_function_type,
                                     options_.ceres->loss_function_scale,
                                     options_.ceres->loss_function_weight)) {
+    // A null loss is Ceres' native representation of an unweighted squared
+    // residual. Keep factory validation before selecting that path.
+    if (options_.ceres->loss_function_type == CeresLossFunctionType::TRIVIAL &&
+        options_.ceres->loss_function_weight == 1.0) {
+      loss_function_.reset();
+    }
+
     VLOG(2) << "Creating Ceres bundle adjuster";
 
     ceres::Problem::Options problem_options;
