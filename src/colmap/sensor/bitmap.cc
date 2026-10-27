@@ -12,17 +12,191 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 
 #include <OpenImageIO/color.h>
 #include <OpenImageIO/imagebufalgo.h>
+#include <OpenImageIO/imagebufalgo_util.h>
 #include <OpenImageIO/imageio.h>
 
 namespace colmap {
 namespace {
+
+// Match OIIO 2.5.18's ordered math only in qualified compiler/library builds.
+#if OIIO_VERSION == OIIO_MAKE_VERSION(2, 5, 18) && defined(__GNUC__) &&   \
+    (__GNUC__ >= 9) && defined(__x86_64__) && !defined(__clang__) &&      \
+    !defined(__FAST_MATH__) && !defined(__FMA__) && !defined(__FMA4__) && \
+    (__FLT_EVAL_METHOD__ == 0) && (__GCC_IEC_559 >= 2) &&                 \
+    !defined(__AVX512F__)
+#define COLMAP_BITMAP_GRAY_TRIANGLE_ENABLED
+namespace gray_triangle_resize {
+namespace {
+constexpr uint64_t kMaxPixels = 64ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kMaxAxisEntries = 8ULL * 1024ULL * 1024ULL;
+struct Axis {
+  int taps = 0;
+  std::vector<int> origin;
+  std::vector<float> weight;
+};
+
+float Triangle(float x) { return std::max(0.0f, 1.0f - std::abs(x)); }
+
+bool MakeAxis(int source, int target, Axis* axis) {
+  const float ratio = static_cast<float>(target) / static_cast<float>(source);
+  const float width = 2.0f * std::max(1.0f, ratio);
+  const float radius_value = std::ceil((width * 0.5f) / ratio);
+  if (!std::isfinite(radius_value) || radius_value < 0.0f ||
+      static_cast<double>(radius_value) >
+          static_cast<double>((std::numeric_limits<int>::max() - 1) / 2))
+    return false;
+  const int radius = static_cast<int>(radius_value);
+  if (static_cast<uint64_t>(target) *
+          (2ULL * static_cast<uint64_t>(radius) + 1ULL) >
+      kMaxAxisEntries)
+    return false;
+  Axis a;
+  a.taps = 2 * radius + 1;
+  a.origin.resize(target);
+  a.weight.resize(static_cast<size_t>(target) * a.taps);
+  for (int dst = 0; dst < target; ++dst) {
+    const float sample = (static_cast<float>(dst) + 0.5f) *
+                         (1.0f / static_cast<float>(target)) *
+                         static_cast<float>(source);
+    const float center_value = std::floor(sample);
+    if (!std::isfinite(center_value) ||
+        static_cast<double>(center_value) <
+            static_cast<double>(std::numeric_limits<int>::min()) ||
+        static_cast<double>(center_value) >
+            static_cast<double>(std::numeric_limits<int>::max()))
+      return false;
+    const int center = static_cast<int>(center_value);
+    const int64_t first = static_cast<int64_t>(center) - radius;
+    const int64_t last = first + a.taps - 1;
+    if (first < std::numeric_limits<int>::min() ||
+        last > std::numeric_limits<int>::max())
+      return false;
+    const float fraction = sample - static_cast<float>(center);
+    a.origin[dst] = center - radius;
+    float sum = 0.0f;
+    for (int tap = 0; tap < a.taps; ++tap) {
+      const float offset =
+          ratio * (static_cast<float>(tap - radius) - (fraction - 0.5f));
+      const float scaled = offset * (2.0f / width);
+      const float w = Triangle(scaled);
+      a.weight[static_cast<size_t>(dst) * a.taps + tap] = w;
+      sum += w;
+    }
+    if (sum != 0.0f) {
+      for (int tap = 0; tap < a.taps; ++tap)
+        a.weight[static_cast<size_t>(dst) * a.taps + tap] /= sum;
+    }
+  }
+  axis->taps = a.taps;
+  axis->origin.swap(a.origin);
+  axis->weight.swap(a.weight);
+  return true;
+}
+
+uint8_t Quantize(float value) {
+  float scaled = value * 255.0f;
+  scaled += scaled < 0.0f ? -0.5f : 0.5f;
+  scaled = std::fmin(255.0f, std::fmax(0.0f, scaled));
+  // Finite clamped nonnegative conversion truncates, matching V37's rz.
+  return static_cast<uint8_t>(scaled);
+}
+
+bool Disjoint(const uint8_t* src,
+              size_t source_bytes,
+              const uint8_t* dst,
+              size_t target_bytes) {
+  const uintptr_t a = reinterpret_cast<uintptr_t>(src);
+  const uintptr_t b = reinterpret_cast<uintptr_t>(dst);
+  if (source_bytes > std::numeric_limits<uintptr_t>::max() - a ||
+      target_bytes > std::numeric_limits<uintptr_t>::max() - b)
+    return false;
+  return a + source_bytes <= b || b + target_bytes <= a;
+}
+}  // namespace
+
+// Packed rows only: source byte count must equal sw*sh; destination capacity
+// must be >=dw*dh. Caller owns live, disjoint input/output buffers throughout.
+// Refusal/axis allocation failure returns before writes; pool exceptions
+// propagate. Writes exactly dw*dh bytes on success; source and output suffix
+// are untouched.
+bool ResizeGrayTriangle(const uint8_t* src,
+                        size_t source_bytes,
+                        int sw,
+                        int sh,
+                        uint8_t* dst,
+                        size_t target_capacity,
+                        int dw,
+                        int dh) {
+  if (!src || !dst || sw < 1 || sh < 1 || dw < 1 || dh < 1 || dw > sw ||
+      dh > sh)
+    return false;
+  const uint64_t source_pixels =
+      static_cast<uint64_t>(sw) * static_cast<uint64_t>(sh);
+  const uint64_t target_pixels =
+      static_cast<uint64_t>(dw) * static_cast<uint64_t>(dh);
+  if (source_pixels > kMaxPixels || target_pixels > kMaxPixels ||
+      source_pixels > std::numeric_limits<size_t>::max() ||
+      target_pixels > std::numeric_limits<size_t>::max() ||
+      source_bytes != static_cast<size_t>(source_pixels) ||
+      target_capacity < static_cast<size_t>(target_pixels) ||
+      !Disjoint(src,
+                static_cast<size_t>(source_pixels),
+                dst,
+                static_cast<size_t>(target_pixels)))
+    return false;
+
+  Axis ax, ay;
+  try {
+    if (!MakeAxis(sw, dw, &ax) || !MakeAxis(sh, dh, &ay)) return false;
+  } catch (const std::bad_alloc&) {
+    return false;
+  } catch (const std::length_error&) {
+    return false;
+  }
+  // Axis validation/allocation precedes output. The OIIO pool joins before
+  // return.
+  OIIO::ImageBufAlgo::parallel_image(
+      OIIO::ROI(0, dw, 0, dh, 0, 1, 0, 1),
+      OIIO::paropt(0),
+      [&](OIIO::ROI region) {
+        for (int y = region.ybegin; y < region.yend; ++y) {
+          for (int x = region.xbegin; x < region.xend; ++x) {
+            const float* xw =
+                ax.weight.data() + static_cast<size_t>(x) * ax.taps;
+            const float* yw =
+                ay.weight.data() + static_cast<size_t>(y) * ay.taps;
+            float sum = 0.0f;
+            for (int j = 0; j < ay.taps; ++j) {
+              const float vy = yw[j];
+              if (vy == 0.0f) continue;
+              const int sy = std::max(0, std::min(sh - 1, ay.origin[y] + j));
+              for (int i = 0; i < ax.taps; ++i) {
+                const float w = vy * xw[i];
+                if (w == 0.0f) continue;
+                const int sx = std::max(0, std::min(sw - 1, ax.origin[x] + i));
+                sum += w * (static_cast<float>(
+                                src[static_cast<size_t>(sy) * sw + sx]) *
+                            (1.0f / 255.0f));
+              }
+            }
+            dst[static_cast<size_t>(y) * dw + x] = Quantize(sum);
+          }
+        }
+      });
+  return true;
+}
+}  // namespace gray_triangle_resize
+
+#endif
 
 struct BitmapReaderRegistry {
   struct Entry {
@@ -904,6 +1078,35 @@ void Bitmap::Rescale(const int new_width,
     meta_data->image_spec.height = height_;
     return;
   }
+
+#if defined(COLMAP_BITMAP_GRAY_TRIANGLE_ENABLED)
+  if (filter == RescaleFilter::kBilinear && channels_ == 1 && width_ > 0 &&
+      height_ > 0 && new_width > 0 && new_height > 0 && new_width <= width_ &&
+      new_height <= height_ && meta_data_ != nullptr &&
+      static_cast<uint64_t>(width_) * height_ <=
+          gray_triangle_resize::kMaxPixels &&
+      data_.size() == static_cast<size_t>(width_) * height_) {
+    const size_t bytes = static_cast<size_t>(new_width) * new_height;
+    std::vector<uint8_t> gray_data;
+    try {
+      gray_data.resize(bytes);
+    } catch (const std::bad_alloc&) {
+      // Retain the unmodified source for the ordinary OIIO path.
+    }
+    if (gray_data.size() == bytes &&
+        gray_triangle_resize::ResizeGrayTriangle(data_.data(),
+                                                 data_.size(),
+                                                 width_,
+                                                 height_,
+                                                 gray_data.data(),
+                                                 gray_data.size(),
+                                                 new_width,
+                                                 new_height)) {
+      SetImageData(new_width, new_height, std::move(gray_data));
+      return;
+    }
+  }
+#endif
 
   const OIIO::ImageBuf buf(
       OIIO::ImageSpec(width_, height_, channels_, OIIO::TypeDesc::UINT8),
