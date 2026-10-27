@@ -48,6 +48,155 @@ _vl_imconvcol_sse2_float_span (void const *buffer,
 #endif
 
 
+/* GCC >= 9's runtime AVX feature includes OSXSAVE and XCR0 XMM/YMM checks.
+   VLFeat's older vl_cpu_has_avx() checks only CPUID and is not sufficient.
+   Keep other compilers (including MSVC) on the accepted SSE2 implementation.
+   The target attribute isolates AVX from the baseline TU; reset the ISA so an
+   inherited -march cannot silently add AVX2/AVX512/FMA requirements to this leaf. */
+#if defined(VL_ARCH_X64) && defined(__GNUC__) && (__GNUC__ >= 9) && \
+    !defined(__clang__) && !defined(_MSC_VER) && !defined(__FAST_MATH__) && \
+    !defined(__FMA__) && !defined(__FMA4__) && !defined(__AVX512F__)
+#define VL_IMOPV_PRIVATE_AVX_FLOAT 1
+#include <immintrin.h>
+
+static void __attribute__((target("arch=x86-64,avx,no-avx2,no-avx512f,no-fma,no-fma4"), noinline))
+_vl_imconvcol_vf_avx_block32
+(float *dst, vl_size dst_stride,
+ float const *src, vl_size src_height, vl_size src_stride,
+ float const *filt, vl_index filt_begin, vl_index filt_end,
+ int step, unsigned int flags, vl_index x)
+{
+  vl_index y ;
+  vl_bool const transp = flags & VL_TRANSPOSE ;
+  vl_bool const zeropad = (flags & VL_PAD_MASK) == VL_PAD_BY_ZERO ;
+  /* filt already points at the last tap, as in the baseline SSE2 body. */
+  for (y = 0 ; y < (signed)src_height ; y += step) {
+    __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps() ;
+    __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps() ;
+    __m256 v0 = _mm256_setzero_ps(), v1 = _mm256_setzero_ps() ;
+    __m256 v2 = _mm256_setzero_ps(), v3 = _mm256_setzero_ps(), c ;
+    float const *filti = filt ;
+    vl_index stop = filt_end - y ;
+    float const *srci = src + x - stop * src_stride ;
+
+    if (stop > 0) {
+      if (!zeropad) {
+        v0 = _mm256_loadu_ps(src + x) ;
+        v1 = _mm256_loadu_ps(src + x + 8) ;
+        v2 = _mm256_loadu_ps(src + x + 16) ;
+        v3 = _mm256_loadu_ps(src + x + 24) ;
+      }
+      while (filti > filt - stop) {
+        c = _mm256_broadcast_ss(filti--) ;
+        a0 = _mm256_add_ps(a0, _mm256_mul_ps(v0, c)) ;
+        a1 = _mm256_add_ps(a1, _mm256_mul_ps(v1, c)) ;
+        a2 = _mm256_add_ps(a2, _mm256_mul_ps(v2, c)) ;
+        a3 = _mm256_add_ps(a3, _mm256_mul_ps(v3, c)) ;
+        srci += src_stride ;
+      }
+    }
+    stop = filt_end - VL_MAX(filt_begin, y - (signed)src_height + 1) + 1 ;
+    while (filti > filt - stop) {
+      v0 = _mm256_loadu_ps(srci) ;
+      v1 = _mm256_loadu_ps(srci + 8) ;
+      v2 = _mm256_loadu_ps(srci + 16) ;
+      v3 = _mm256_loadu_ps(srci + 24) ;
+      c = _mm256_broadcast_ss(filti--) ;
+      a0 = _mm256_add_ps(a0, _mm256_mul_ps(v0, c)) ;
+      a1 = _mm256_add_ps(a1, _mm256_mul_ps(v1, c)) ;
+      a2 = _mm256_add_ps(a2, _mm256_mul_ps(v2, c)) ;
+      a3 = _mm256_add_ps(a3, _mm256_mul_ps(v3, c)) ;
+      srci += src_stride ;
+    }
+    if (zeropad) v0 = v1 = v2 = v3 = _mm256_setzero_ps() ;
+    stop = filt_end - filt_begin + 1 ;
+    while (filti > filt - stop) {
+      c = _mm256_broadcast_ss(filti--) ;
+      a0 = _mm256_add_ps(a0, _mm256_mul_ps(v0, c)) ;
+      a1 = _mm256_add_ps(a1, _mm256_mul_ps(v1, c)) ;
+      a2 = _mm256_add_ps(a2, _mm256_mul_ps(v2, c)) ;
+      a3 = _mm256_add_ps(a3, _mm256_mul_ps(v3, c)) ;
+    }
+    if (transp) {
+      __m128 part ;
+      /* Keep the original ascending column stores, extracting each lane
+         directly from registers without the values[32] stack round-trip. */
+      part = _mm256_castps256_ps128(a0) ;
+      _mm_store_ss(dst + 0 * dst_stride, part) ;
+      _mm_store_ss(dst + 1 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
+      _mm_store_ss(dst + 2 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
+      _mm_store_ss(dst + 3 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
+      part = _mm256_extractf128_ps(a0, 1) ;
+      _mm_store_ss(dst + 4 * dst_stride, part) ;
+      _mm_store_ss(dst + 5 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
+      _mm_store_ss(dst + 6 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
+      _mm_store_ss(dst + 7 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
+      part = _mm256_castps256_ps128(a1) ;
+      _mm_store_ss(dst + 8 * dst_stride, part) ;
+      _mm_store_ss(dst + 9 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
+      _mm_store_ss(dst + 10 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
+      _mm_store_ss(dst + 11 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
+      part = _mm256_extractf128_ps(a1, 1) ;
+      _mm_store_ss(dst + 12 * dst_stride, part) ;
+      _mm_store_ss(dst + 13 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
+      _mm_store_ss(dst + 14 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
+      _mm_store_ss(dst + 15 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
+      part = _mm256_castps256_ps128(a2) ;
+      _mm_store_ss(dst + 16 * dst_stride, part) ;
+      _mm_store_ss(dst + 17 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
+      _mm_store_ss(dst + 18 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
+      _mm_store_ss(dst + 19 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
+      part = _mm256_extractf128_ps(a2, 1) ;
+      _mm_store_ss(dst + 20 * dst_stride, part) ;
+      _mm_store_ss(dst + 21 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
+      _mm_store_ss(dst + 22 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
+      _mm_store_ss(dst + 23 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
+      part = _mm256_castps256_ps128(a3) ;
+      _mm_store_ss(dst + 24 * dst_stride, part) ;
+      _mm_store_ss(dst + 25 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
+      _mm_store_ss(dst + 26 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
+      _mm_store_ss(dst + 27 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
+      part = _mm256_extractf128_ps(a3, 1) ;
+      _mm_store_ss(dst + 28 * dst_stride, part) ;
+      _mm_store_ss(dst + 29 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
+      _mm_store_ss(dst + 30 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
+      _mm_store_ss(dst + 31 * dst_stride,
+                   _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
+    } else {
+      _mm256_storeu_ps(dst, a0) ;
+      _mm256_storeu_ps(dst + 8, a1) ;
+      _mm256_storeu_ps(dst + 16, a2) ;
+      _mm256_storeu_ps(dst + 24, a3) ;
+    }
+    dst += transp ? 1 : dst_stride ;
+  }
+  _mm256_zeroupper() ;
+}
+#endif
+
 #define FLT VL_TYPE_FLOAT
 #define VL_IMOPV_SSE2_INSTANTIATING
 #include "imopv_sse2.c"
@@ -82,6 +231,9 @@ VL_XCAT3(_vl_imconvcol_v, SFX, _sse2)
 
 #if (FLT == VL_TYPE_FLOAT) && defined(VL_ARCH_X64)
   vl_bool separate_buffers = VL_FALSE ;
+#if defined(VL_IMOPV_PRIVATE_AVX_FLOAT)
+  vl_bool use_avx = VL_FALSE ;
+#endif
   vl_uintptr src_begin, src_end, dst_begin, dst_end, filter_begin, filter_end ;
   /* Unsigned subtraction avoids signed overflow for the filter support. */
   if (src_width >= 128 && src_height >= 32 && use_simd &&
@@ -103,10 +255,33 @@ VL_XCAT3(_vl_imconvcol_v, SFX, _sse2)
   }
 #endif
 
+#if (FLT == VL_TYPE_FLOAT) && defined(VL_ARCH_X64) && defined(VL_IMOPV_PRIVATE_AVX_FLOAT)
+  /* Do not cache this in a mutable function-static: calls can be concurrent.
+     GCC's initialized runtime feature table includes OS YMM-state support. */
+  use_avx = separate_buffers && (__builtin_cpu_supports("avx") != 0) ;
+#endif
+
   /* let filt point to the last sample of the filter */
   filt += filt_end - filt_begin ;
 
   while (x < (signed)src_width) {
+#if (FLT == VL_TYPE_FLOAT) && defined(VL_ARCH_X64) && defined(VL_IMOPV_PRIVATE_AVX_FLOAT)
+    /* Reuse ALL accepted disjointness, shape, stride and 16-byte starting
+       alignment guards. Unaligned AVX loads do not require a new 32-byte ABI.
+       Strict width inequality conservatively retains the baseline tail. */
+    if (use_avx && src_width >= 128 && src_height >= 32 && use_simd &&
+        x + 32 < (signed)src_width && VALIGNED(src + x)) {
+      _vl_imconvcol_vf_avx_block32(dst, dst_stride, src, src_height, src_stride,
+                                  filt, filt_begin, filt_end, step, flags, x) ;
+      /* The leaf's destination traversal is local. Advance only the column
+         origin here, equivalent to the baseline's post-row compensation. */
+      dst += transp ? 32 * dst_stride : 32 ;
+      x += 32 ;
+      simdcol += 32 ;
+      totcol += 32 ;
+      continue ;
+    }
+#endif
 #if (FLT == VL_TYPE_FLOAT) && defined(VL_ARCH_X64)
     /* Advance adjacent SSE vectors together. Keep each pixel's tap order and
        the original vector/scalar path for small images and the remainder. */
