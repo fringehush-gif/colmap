@@ -136,6 +136,56 @@ TEST(SiftCPUGradientStorage, RejectsSingletonAxisOctaves) {
   }
 }
 
+TEST(SiftCPUDescriptorSupport, KeepsHalfBinBoundaryAndIgnoresCorners) {
+  constexpr int kWidth = 96;
+  constexpr int kHeight = 96;
+  std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)> filter(
+      vl_sift_new(kWidth, kHeight, 1, 3, 0), &vl_sift_delete);
+  ASSERT_NE(filter, nullptr);
+  const std::vector<vl_sift_pix> pixels(kWidth * kHeight, 0.5f);
+  ASSERT_EQ(vl_sift_process_first_octave(filter.get(), pixels.data()), 0);
+  vl_sift_set_magnif(filter.get(), 3);
+  VlSiftKeypoint keypoint;
+  vl_sift_keypoint_init(filter.get(), &keypoint, 48.25, 48.25, 2);
+  ASSERT_EQ(keypoint.o, filter->o_cur);
+  ASSERT_GE(keypoint.is, filter->s_min + 1);
+  ASSERT_LE(keypoint.is, filter->s_max - 2);
+  std::vector<vl_sift_pix> initial(128);
+  vl_sift_calc_keypoint_descriptor(filter.get(), initial.data(), &keypoint, 0);
+  ASSERT_NE(filter->grad, nullptr);
+  auto* gradient =
+      filter->grad + (keypoint.is - filter->s_min - 1) * 2 * kWidth * kHeight;
+  std::fill(gradient, gradient + 2 * kWidth * kHeight, 0);
+  // With sigma=2 and magnification=3, this pixel reaches the outer spatial
+  // bin through its second neighbor. Rejecting its first bin loses data.
+  gradient[2 * (48 * kWidth + 34)] = 1;
+  for (const double angle : {0.0, 0.37, 1.57}) {
+    SCOPED_TRACE(angle);
+    for (const int dx : {-19, 19}) {
+      for (const int dy : {-19, 19}) {
+        gradient[2 * ((48 + dy) * kWidth + 48 + dx)] = 0;
+        gradient[2 * ((48 + dy) * kWidth + 48 + dx) + 1] = 0;
+      }
+    }
+    std::vector<vl_sift_pix> before(128);
+    vl_sift_calc_keypoint_descriptor(
+        filter.get(), before.data(), &keypoint, angle);
+    ASSERT_GT(*std::max_element(before.begin(), before.end()), 0);
+    // These corners lie inside the bounding square but outside the rotated
+    // descriptor support. Their gradients cannot change any histogram bin.
+    for (const int dx : {-19, 19}) {
+      for (const int dy : {-19, 19}) {
+        gradient[2 * ((48 + dy) * kWidth + 48 + dx)] = 1e6f;
+        gradient[2 * ((48 + dy) * kWidth + 48 + dx) + 1] = 0.37f;
+      }
+    }
+    std::vector<vl_sift_pix> after(128);
+    vl_sift_calc_keypoint_descriptor(
+        filter.get(), after.data(), &keypoint, angle);
+    EXPECT_EQ(after, before);
+  }
+}
+
 Bitmap CreateImageWithSquare(const int size) {
   Bitmap bitmap(size, size, false);
   bitmap.Fill(BitmapColor<uint8_t>(0, 0, 0));

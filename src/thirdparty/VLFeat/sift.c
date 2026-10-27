@@ -2012,11 +2012,6 @@ vl_sift_calc_keypoint_descriptor (VlSiftFilt *f,
     for(dxi =  VL_MAX (- W, 1 - xi    ) ;
         dxi <= VL_MIN (+ W, w - xi - 2) ; ++ dxi) {
 
-      /* retrieve */
-      vl_sift_pix mod   = *( pt + dxi*xo + dyi*yo + 0 ) ;
-      vl_sift_pix angle = *( pt + dxi*xo + dyi*yo + 1 ) ;
-      vl_sift_pix theta = vl_mod_2pi_f (angle - angle0) ;
-
       /* fractional displacement */
       vl_sift_pix dx = xi + dxi - x;
       vl_sift_pix dy = yi + dyi - y;
@@ -2025,6 +2020,21 @@ vl_sift_calc_keypoint_descriptor (VlSiftFilt *f,
          orientation and extension */
       vl_sift_pix nx = ( ct0 * dx + st0 * dy) / SBP ;
       vl_sift_pix ny = (-st0 * dx + ct0 * dy) / SBP ;
+      int         binx = (int)vl_floor_f (nx - 0.5) ;
+      int         biny = (int)vl_floor_f (ny - 0.5) ;
+
+      /* A neighbor b+d, d in {0,1}, can enter [-NBP/2,NBP/2) only
+         when -NBP/2-1 <= b < NBP/2. Reject only pixels for which
+         the original eight updates all fail their spatial bounds. */
+      if (binx < -(NBP/2) - 1 || binx >= (NBP/2) ||
+          biny < -(NBP/2) - 1 || biny >= (NBP/2)) {
+        continue ;
+      }
+
+      /* Retrieve gradient/orientation only for retained spatial samples. */
+      vl_sift_pix mod   = *( pt + dxi*xo + dyi*yo + 0 ) ;
+      vl_sift_pix angle = *( pt + dxi*xo + dyi*yo + 1 ) ;
+      vl_sift_pix theta = vl_mod_2pi_f (angle - angle0) ;
       vl_sift_pix nt = NBO * theta / (2 * VL_PI) ;
 
       /* Get the Gaussian weight of the sample. The Gaussian window
@@ -2037,8 +2047,6 @@ vl_sift_calc_keypoint_descriptor (VlSiftFilt *f,
 
       /* The sample will be distributed in 8 adjacent bins.
          We start from the ``lower-left'' bin. */
-      int         binx = (int)vl_floor_f (nx - 0.5) ;
-      int         biny = (int)vl_floor_f (ny - 0.5) ;
       int         bint = (int)vl_floor_f (nt) ;
       vl_sift_pix rbinx = nx - (binx + 0.5) ;
       vl_sift_pix rbiny = ny - (biny + 0.5) ;
