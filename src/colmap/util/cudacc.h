@@ -37,6 +37,10 @@ class CudaTimer {
   float elapsed_time_;
 };
 
+// Include the numeric code even when the runtime cannot describe an error.
+// Driver incompatibility additionally includes an actionable upgrade message.
+std::string FormatCudaError(cudaError_t error, const char* file, int line);
+
 void CudaSafeCall(const cudaError_t error,
                   const std::string& file,
                   const int line);
