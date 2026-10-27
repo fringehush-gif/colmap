@@ -21,6 +21,7 @@
 #include "thirdparty/VLFeat/sift.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <set>
@@ -36,17 +37,32 @@ TEST(SiftCPUConvolution, MatchesScalarReferenceAcrossLayouts) {
     int height;
     int padding;
     int step;
+    bool unaligned_start = false;
   };
-  // Exercise SSE2/AVX groups, 16-byte-only row alignment, vector tails, and
-  // small fallbacks.
+  // Exercise SSE2/AVX groups, vector tails, odd row strides, unaligned starts,
+  // 16-byte-only row alignment, and small fallbacks.
   for (const Shape shape : {Shape{127, 31, 1, 1},
                             Shape{128, 32, 0, 1},
+                            Shape{128, 32, 1, 1, true},
+                            Shape{129, 35, 15, 2, true},
                             Shape{129, 35, 15, 2},
                             Shape{144, 37, 0, 3},
                             Shape{132, 37, 0, 2},
                             Shape{257, 39, 15, 1}}) {
     const int source_stride = shape.width + shape.padding;
-    std::vector<float> source(source_stride * shape.height);
+    std::vector<float> source(source_stride * shape.height +
+                              (shape.unaligned_start ? 2 : 0));
+    int source_offset = shape.unaligned_start ? 1 : 0;
+    // Avoid assuming the vector allocation itself is 16-byte aligned.
+    if (shape.unaligned_start &&
+        reinterpret_cast<std::uintptr_t>(source.data() + source_offset) % 16 ==
+            0) {
+      ++source_offset;
+    }
+    const float* source_data = source.data() + source_offset;
+    if (shape.unaligned_start) {
+      ASSERT_NE(reinterpret_cast<std::uintptr_t>(source_data) % 16, 0);
+    }
     for (size_t i = 0; i < source.size(); ++i) {
       source[i] = (static_cast<int>(i % 127) - 63) * 0.0625f;
     }
@@ -59,8 +75,9 @@ TEST(SiftCPUConvolution, MatchesScalarReferenceAcrossLayouts) {
         for (const int filter_begin : {-2, 0}) {
           SCOPED_TRACE(::testing::Message()
                        << shape.width << "x" << shape.height
-                       << " step=" << shape.step << " transpose=" << transpose
-                       << " zero=" << zero_padding
+                       << " stride=" << source_stride
+                       << " offset=" << source_offset << " step=" << shape.step
+                       << " transpose=" << transpose << " zero=" << zero_padding
                        << " begin=" << filter_begin);
           const int filter_end = filter_begin + 4;
           const int rows = transpose ? shape.width : output_height;
@@ -75,9 +92,9 @@ TEST(SiftCPUConvolution, MatchesScalarReferenceAcrossLayouts) {
                 const int row = y - tap;
                 float value = 0;
                 if (!zero_padding || (row >= 0 && row < shape.height)) {
-                  value = source[std::clamp(row, 0, shape.height - 1) *
-                                     source_stride +
-                                 x];
+                  value = source_data[std::clamp(row, 0, shape.height - 1) *
+                                          source_stride +
+                                      x];
                 }
                 sum += value * filter[tap - filter_begin];
               }
@@ -92,7 +109,7 @@ TEST(SiftCPUConvolution, MatchesScalarReferenceAcrossLayouts) {
               (zero_padding ? VL_PAD_BY_ZERO : VL_PAD_BY_CONTINUITY);
           vl_imconvcol_vf(actual.data(),
                           destination_stride,
-                          source.data(),
+                          source_data,
                           shape.width,
                           shape.height,
                           source_stride,
