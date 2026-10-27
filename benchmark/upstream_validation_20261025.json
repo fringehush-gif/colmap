@@ -1,0 +1,1447 @@
+{
+  "schema": "october25-observations/v1",
+  "date": "2026-10-25",
+  "scope": {
+    "observationsPerArm": 1,
+    "gpuControllersPerArm": 1,
+    "mainHostSharedCustomCeres": true,
+    "customRotationReuse": true,
+    "nativeTiming": "sum of native process lifetimes; excludes controller gaps and postrun analysis",
+    "workflowTiming": "separate inclusive arm envelope; includes staging and controller transitions",
+    "linuxCpuAccounting": "wait4 native child including native threads and any waited descendants",
+    "windowsCpuAccounting": "reported native CPU total and its kernel component",
+    "vram": "sampled whole-board usage includes other clients and may miss peaks",
+    "quality": "N1 and differing downstream geometry do not establish equivalent reconstruction quality or isolate fusion and meshing",
+    "windowsTerminalEvidence": "aggregate completed report; individual exit codes not present in this packet"
+  },
+  "cases": [
+    {
+      "case": "fountain-1536-3080ti",
+      "platform": "Linux/WSL2",
+      "gpu": "RTX 3080 Ti",
+      "cpuWorkers": 12,
+      "arms": {
+        "pristine": {
+          "nativeStageSecondsSum": 349.8537830680143,
+          "inclusiveWorkflowSeconds": 360.31130818399834,
+          "stages": [
+            {
+              "stage": "features",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 2.791866175015457,
+                  "cpuUserSeconds": 5.394278,
+                  "cpuSystemSeconds": 0.660361,
+                  "peakRssBytes": 572928000,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 2.791866175015457,
+              "nativeCpuSecondsSum": 6.054639,
+              "peakRssBytes": 572928000,
+              "wholeBoardSampledVramPeakMiB": 1883.5703125
+            },
+            {
+              "stage": "matching",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 1.1029784550191835,
+                  "cpuUserSeconds": 3.689963,
+                  "cpuSystemSeconds": 0.39147899999999997,
+                  "peakRssBytes": 556179456,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 1.1029784550191835,
+              "nativeCpuSecondsSum": 4.081442,
+              "peakRssBytes": 556179456,
+              "wholeBoardSampledVramPeakMiB": 1883.5703125
+            },
+            {
+              "stage": "mapping",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 7.826220043003559,
+                  "cpuUserSeconds": 16.796915,
+                  "cpuSystemSeconds": 1.322182,
+                  "peakRssBytes": 476033024,
+                  "wholeBoardSampledVramPeakMiB": 1886.0703125,
+                  "vramSampleCount": 3,
+                  "vramAvailableSampleCount": 3,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 7.826220043003559,
+              "nativeCpuSecondsSum": 18.119097,
+              "peakRssBytes": 476033024,
+              "wholeBoardSampledVramPeakMiB": 1886.0703125
+            },
+            {
+              "stage": "undistortion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 1.351445727981627,
+                  "cpuUserSeconds": 10.740454,
+                  "cpuSystemSeconds": 0.563184,
+                  "peakRssBytes": 713129984,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 1.351445727981627,
+              "nativeCpuSecondsSum": 11.303638,
+              "peakRssBytes": 713129984,
+              "wholeBoardSampledVramPeakMiB": 1883.5703125
+            },
+            {
+              "stage": "patchmatch",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 289.4023159920471,
+                  "cpuUserSeconds": 287.100202,
+                  "cpuSystemSeconds": 3.818566,
+                  "peakRssBytes": 1185267712,
+                  "wholeBoardSampledVramPeakMiB": 2522.89453125,
+                  "vramSampleCount": 97,
+                  "vramAvailableSampleCount": 97,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 289.4023159920471,
+              "nativeCpuSecondsSum": 290.918768,
+              "peakRssBytes": 1185267712,
+              "wholeBoardSampledVramPeakMiB": 2522.89453125
+            },
+            {
+              "stage": "fusion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 2.8808204049710184,
+                  "cpuUserSeconds": 13.339579,
+                  "cpuSystemSeconds": 6.533505,
+                  "peakRssBytes": 871272448,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 2.8808204049710184,
+              "nativeCpuSecondsSum": 19.873084,
+              "peakRssBytes": 871272448,
+              "wholeBoardSampledVramPeakMiB": 1883.5703125
+            },
+            {
+              "stage": "meshing",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 44.498136269976385,
+                  "cpuUserSeconds": 204.144331,
+                  "cpuSystemSeconds": 37.872191,
+                  "peakRssBytes": 1763926016,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 15,
+                  "vramAvailableSampleCount": 15,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 44.498136269976385,
+              "nativeCpuSecondsSum": 242.016522,
+              "peakRssBytes": 1763926016,
+              "wholeBoardSampledVramPeakMiB": 1883.5703125
+            }
+          ],
+          "sourceRevision": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6"
+        },
+        "custom": {
+          "nativeStageSecondsSum": 49.35704714193707,
+          "inclusiveWorkflowSeconds": 59.67711595701985,
+          "stages": [
+            {
+              "stage": "features",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 2.7420677559566684,
+                  "cpuUserSeconds": 5.448414,
+                  "cpuSystemSeconds": 0.608046,
+                  "peakRssBytes": 583086080,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 2.7420677559566684,
+              "nativeCpuSecondsSum": 6.0564599999999995,
+              "peakRssBytes": 583086080,
+              "wholeBoardSampledVramPeakMiB": 1883.5703125
+            },
+            {
+              "stage": "matching",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 0.9759702669689432,
+                  "cpuUserSeconds": 3.663465,
+                  "cpuSystemSeconds": 0.32581699999999997,
+                  "peakRssBytes": 563597312,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 0.9759702669689432,
+              "nativeCpuSecondsSum": 3.9892819999999998,
+              "peakRssBytes": 563597312,
+              "wholeBoardSampledVramPeakMiB": 1883.5703125
+            },
+            {
+              "stage": "mapping",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 7.48604610102484,
+                  "cpuUserSeconds": 17.28615,
+                  "cpuSystemSeconds": 1.372747,
+                  "peakRssBytes": 474886144,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 3,
+                  "vramAvailableSampleCount": 3,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 7.48604610102484,
+              "nativeCpuSecondsSum": 18.658897,
+              "peakRssBytes": 474886144,
+              "wholeBoardSampledVramPeakMiB": 1883.5703125
+            },
+            {
+              "stage": "undistortion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 1.3482380239875056,
+                  "cpuUserSeconds": 10.839199,
+                  "cpuSystemSeconds": 0.7154189999999999,
+                  "peakRssBytes": 713211904,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 1.3482380239875056,
+              "nativeCpuSecondsSum": 11.554618000000001,
+              "peakRssBytes": 713211904,
+              "wholeBoardSampledVramPeakMiB": 1883.5703125
+            },
+            {
+              "stage": "patchmatch",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 19.800245421996806,
+                  "cpuUserSeconds": 20.340609,
+                  "cpuSystemSeconds": 2.194655,
+                  "peakRssBytes": 1450651648,
+                  "wholeBoardSampledVramPeakMiB": 3856.89453125,
+                  "vramSampleCount": 7,
+                  "vramAvailableSampleCount": 7,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 19.800245421996806,
+              "nativeCpuSecondsSum": 22.535264,
+              "peakRssBytes": 1450651648,
+              "wholeBoardSampledVramPeakMiB": 3856.89453125
+            },
+            {
+              "stage": "fusion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 1.0025063279899769,
+                  "cpuUserSeconds": 6.819571,
+                  "cpuSystemSeconds": 0.7045009999999999,
+                  "peakRssBytes": 662552576,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 1.0025063279899769,
+              "nativeCpuSecondsSum": 7.524071999999999,
+              "peakRssBytes": 662552576,
+              "wholeBoardSampledVramPeakMiB": 1883.5703125
+            },
+            {
+              "stage": "meshing",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 16.001973244012333,
+                  "cpuUserSeconds": 96.30681,
+                  "cpuSystemSeconds": 4.903581,
+                  "peakRssBytes": 1407283200,
+                  "wholeBoardSampledVramPeakMiB": 2134.89453125,
+                  "vramSampleCount": 6,
+                  "vramAvailableSampleCount": 6,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 16.001973244012333,
+              "nativeCpuSecondsSum": 101.210391,
+              "peakRssBytes": 1407283200,
+              "wholeBoardSampledVramPeakMiB": 2134.89453125
+            }
+          ],
+          "sourceRevision": "d4d5f2fdf74eb79ced79755afcbe638eb4942791"
+        }
+      },
+      "cpu": "Ryzen 3900X"
+    },
+    {
+      "case": "fountain-1536-3060",
+      "platform": "Linux/WSL2",
+      "gpu": "RTX 3060",
+      "cpuWorkers": 12,
+      "arms": {
+        "custom": {
+          "nativeStageSecondsSum": 74.53313568409067,
+          "inclusiveWorkflowSeconds": 85.12514660297893,
+          "stages": [
+            {
+              "stage": "features",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 2.915010994009208,
+                  "cpuUserSeconds": 5.642576,
+                  "cpuSystemSeconds": 0.62024,
+                  "peakRssBytes": 601821184,
+                  "wholeBoardSampledVramPeakMiB": 184.40625,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 2.915010994009208,
+              "nativeCpuSecondsSum": 6.262816,
+              "peakRssBytes": 601821184,
+              "wholeBoardSampledVramPeakMiB": 184.40625
+            },
+            {
+              "stage": "matching",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 1.3984604310244322,
+                  "cpuUserSeconds": 3.232383,
+                  "cpuSystemSeconds": 0.391561,
+                  "peakRssBytes": 558845952,
+                  "wholeBoardSampledVramPeakMiB": 184.40625,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 1.3984604310244322,
+              "nativeCpuSecondsSum": 3.623944,
+              "peakRssBytes": 558845952,
+              "wholeBoardSampledVramPeakMiB": 184.40625
+            },
+            {
+              "stage": "mapping",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 7.504171546024736,
+                  "cpuUserSeconds": 16.132265,
+                  "cpuSystemSeconds": 1.325392,
+                  "peakRssBytes": 470687744,
+                  "wholeBoardSampledVramPeakMiB": 184.40625,
+                  "vramSampleCount": 3,
+                  "vramAvailableSampleCount": 3,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 7.504171546024736,
+              "nativeCpuSecondsSum": 17.457657,
+              "peakRssBytes": 470687744,
+              "wholeBoardSampledVramPeakMiB": 184.40625
+            },
+            {
+              "stage": "undistortion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 1.451670609996654,
+                  "cpuUserSeconds": 11.176204,
+                  "cpuSystemSeconds": 0.7866059999999999,
+                  "peakRssBytes": 717791232,
+                  "wholeBoardSampledVramPeakMiB": 184.40625,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 1.451670609996654,
+              "nativeCpuSecondsSum": 11.962810000000001,
+              "peakRssBytes": 717791232,
+              "wholeBoardSampledVramPeakMiB": 184.40625
+            },
+            {
+              "stage": "patchmatch",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 42.062042513047345,
+                  "cpuUserSeconds": 42.461872,
+                  "cpuSystemSeconds": 2.33162,
+                  "peakRssBytes": 1456209920,
+                  "wholeBoardSampledVramPeakMiB": 2011.0703125,
+                  "vramSampleCount": 15,
+                  "vramAvailableSampleCount": 15,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 42.062042513047345,
+              "nativeCpuSecondsSum": 44.793492,
+              "peakRssBytes": 1456209920,
+              "wholeBoardSampledVramPeakMiB": 2011.0703125
+            },
+            {
+              "stage": "fusion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 1.002586947986856,
+                  "cpuUserSeconds": 6.499679,
+                  "cpuSystemSeconds": 0.7649009999999999,
+                  "peakRssBytes": 661229568,
+                  "wholeBoardSampledVramPeakMiB": 184.40625,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 1.002586947986856,
+              "nativeCpuSecondsSum": 7.2645800000000005,
+              "peakRssBytes": 661229568,
+              "wholeBoardSampledVramPeakMiB": 184.40625
+            },
+            {
+              "stage": "meshing",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 18.199192642001435,
+                  "cpuUserSeconds": 108.453131,
+                  "cpuSystemSeconds": 5.404588,
+                  "peakRssBytes": 1519939584,
+                  "wholeBoardSampledVramPeakMiB": 289.0703125,
+                  "vramSampleCount": 7,
+                  "vramAvailableSampleCount": 7,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 18.199192642001435,
+              "nativeCpuSecondsSum": 113.857719,
+              "peakRssBytes": 1519939584,
+              "wholeBoardSampledVramPeakMiB": 289.0703125
+            }
+          ],
+          "sourceRevision": "d4d5f2fdf74eb79ced79755afcbe638eb4942791"
+        },
+        "pristine": {
+          "nativeStageSecondsSum": 388.8657743988442,
+          "inclusiveWorkflowSeconds": 399.12456918298267,
+          "stages": [
+            {
+              "stage": "features",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 2.6343467970145866,
+                  "cpuUserSeconds": 5.325288,
+                  "cpuSystemSeconds": 0.62015,
+                  "peakRssBytes": 572940288,
+                  "wholeBoardSampledVramPeakMiB": 184.40625,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 2.6343467970145866,
+              "nativeCpuSecondsSum": 5.945437999999999,
+              "peakRssBytes": 572940288,
+              "wholeBoardSampledVramPeakMiB": 184.40625
+            },
+            {
+              "stage": "matching",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 1.258564424002543,
+                  "cpuUserSeconds": 3.428084,
+                  "cpuSystemSeconds": 0.28868,
+                  "peakRssBytes": 563011584,
+                  "wholeBoardSampledVramPeakMiB": 184.40625,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 1.258564424002543,
+              "nativeCpuSecondsSum": 3.716764,
+              "peakRssBytes": 563011584,
+              "wholeBoardSampledVramPeakMiB": 184.40625
+            },
+            {
+              "stage": "mapping",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 7.191712450992782,
+                  "cpuUserSeconds": 15.495221,
+                  "cpuSystemSeconds": 1.256478,
+                  "peakRssBytes": 481689600,
+                  "wholeBoardSampledVramPeakMiB": 184.40625,
+                  "vramSampleCount": 3,
+                  "vramAvailableSampleCount": 3,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 7.191712450992782,
+              "nativeCpuSecondsSum": 16.751699000000002,
+              "peakRssBytes": 481689600,
+              "wholeBoardSampledVramPeakMiB": 184.40625
+            },
+            {
+              "stage": "undistortion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 1.3505003489553928,
+                  "cpuUserSeconds": 10.521417,
+                  "cpuSystemSeconds": 0.690256,
+                  "peakRssBytes": 716283904,
+                  "wholeBoardSampledVramPeakMiB": 184.40625,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 1.3505003489553928,
+              "nativeCpuSecondsSum": 11.211673,
+              "peakRssBytes": 716283904,
+              "wholeBoardSampledVramPeakMiB": 184.40625
+            },
+            {
+              "stage": "patchmatch",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 329.9119275729754,
+                  "cpuUserSeconds": 327.514027,
+                  "cpuSystemSeconds": 3.725934,
+                  "peakRssBytes": 1183825920,
+                  "wholeBoardSampledVramPeakMiB": 677.0703125,
+                  "vramSampleCount": 110,
+                  "vramAvailableSampleCount": 110,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 329.9119275729754,
+              "nativeCpuSecondsSum": 331.239961,
+              "peakRssBytes": 1183825920,
+              "wholeBoardSampledVramPeakMiB": 677.0703125
+            },
+            {
+              "stage": "fusion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 3.126377149950713,
+                  "cpuUserSeconds": 14.411593,
+                  "cpuSystemSeconds": 7.329301,
+                  "peakRssBytes": 872636416,
+                  "wholeBoardSampledVramPeakMiB": 184.40625,
+                  "vramSampleCount": 2,
+                  "vramAvailableSampleCount": 2,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 3.126377149950713,
+              "nativeCpuSecondsSum": 21.740894,
+              "peakRssBytes": 872636416,
+              "wholeBoardSampledVramPeakMiB": 184.40625
+            },
+            {
+              "stage": "meshing",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 43.392345654952805,
+                  "cpuUserSeconds": 202.201573,
+                  "cpuSystemSeconds": 37.727451,
+                  "peakRssBytes": 1743859712,
+                  "wholeBoardSampledVramPeakMiB": 184.40625,
+                  "vramSampleCount": 15,
+                  "vramAvailableSampleCount": 15,
+                  "vramSampleIntervalSeconds": 3.0
+                }
+              ],
+              "nativeWallSecondsSum": 43.392345654952805,
+              "nativeCpuSecondsSum": 239.929024,
+              "peakRssBytes": 1743859712,
+              "wholeBoardSampledVramPeakMiB": 184.40625
+            }
+          ],
+          "sourceRevision": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6"
+        }
+      },
+      "cpu": "Ryzen 3900X"
+    },
+    {
+      "case": "outdoor-death-1500-3080ti",
+      "platform": "Linux/WSL2",
+      "gpu": "RTX 3080 Ti",
+      "cpuWorkers": 12,
+      "arms": {
+        "custom": {
+          "nativeStageSecondsSum": 245.44335722888354,
+          "inclusiveWorkflowSeconds": 255.89272268104833,
+          "stages": [
+            {
+              "stage": "features",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 18.142505967989564,
+                  "cpuUserSeconds": 42.873993,
+                  "cpuSystemSeconds": 3.038607,
+                  "peakRssBytes": 644378624,
+                  "wholeBoardSampledVramPeakMiB": 3356.92578125,
+                  "vramSampleCount": 5,
+                  "vramAvailableSampleCount": 5,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 18.142505967989564,
+              "nativeCpuSecondsSum": 45.9126,
+              "peakRssBytes": 644378624,
+              "wholeBoardSampledVramPeakMiB": 3356.92578125
+            },
+            {
+              "stage": "matching",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 34.486535449977964,
+                  "cpuUserSeconds": 402.300897,
+                  "cpuSystemSeconds": 0.732169,
+                  "peakRssBytes": 591843328,
+                  "wholeBoardSampledVramPeakMiB": 2746.92578125,
+                  "vramSampleCount": 9,
+                  "vramAvailableSampleCount": 9,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 34.486535449977964,
+              "nativeCpuSecondsSum": 403.033066,
+              "peakRssBytes": 591843328,
+              "wholeBoardSampledVramPeakMiB": 2746.92578125
+            },
+            {
+              "stage": "mapping",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 24.481686499959324,
+                  "cpuUserSeconds": 25.285529,
+                  "cpuSystemSeconds": 2.71479,
+                  "peakRssBytes": 471601152,
+                  "wholeBoardSampledVramPeakMiB": 1923.6015625,
+                  "vramSampleCount": 7,
+                  "vramAvailableSampleCount": 7,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 24.481686499959324,
+              "nativeCpuSecondsSum": 28.000319,
+              "peakRssBytes": 471601152,
+              "wholeBoardSampledVramPeakMiB": 1923.6015625
+            },
+            {
+              "stage": "undistortion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 13.431466937006917,
+                  "cpuUserSeconds": 134.765724,
+                  "cpuSystemSeconds": 4.980211,
+                  "peakRssBytes": 1466175488,
+                  "wholeBoardSampledVramPeakMiB": 1923.6015625,
+                  "vramSampleCount": 4,
+                  "vramAvailableSampleCount": 4,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 13.431466937006917,
+              "nativeCpuSecondsSum": 139.745935,
+              "peakRssBytes": 1466175488,
+              "wholeBoardSampledVramPeakMiB": 1923.6015625
+            },
+            {
+              "stage": "patchmatch",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 137.58738670597086,
+                  "cpuUserSeconds": 141.375943,
+                  "cpuSystemSeconds": 9.882379,
+                  "peakRssBytes": 2930774016,
+                  "wholeBoardSampledVramPeakMiB": 5149.42578125,
+                  "vramSampleCount": 35,
+                  "vramAvailableSampleCount": 35,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 137.58738670597086,
+              "nativeCpuSecondsSum": 151.25832200000002,
+              "peakRssBytes": 2930774016,
+              "wholeBoardSampledVramPeakMiB": 5149.42578125
+            },
+            {
+              "stage": "fusion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 4.20723438198911,
+                  "cpuUserSeconds": 38.82562,
+                  "cpuSystemSeconds": 2.824699,
+                  "peakRssBytes": 1789911040,
+                  "wholeBoardSampledVramPeakMiB": 1923.6015625,
+                  "vramSampleCount": 2,
+                  "vramAvailableSampleCount": 2,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 4.20723438198911,
+              "nativeCpuSecondsSum": 41.650319,
+              "peakRssBytes": 1789911040,
+              "wholeBoardSampledVramPeakMiB": 1923.6015625
+            },
+            {
+              "stage": "meshing",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 13.106541285989806,
+                  "cpuUserSeconds": 77.910526,
+                  "cpuSystemSeconds": 15.169686,
+                  "peakRssBytes": 949256192,
+                  "wholeBoardSampledVramPeakMiB": 1923.6015625,
+                  "vramSampleCount": 4,
+                  "vramAvailableSampleCount": 4,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 13.106541285989806,
+              "nativeCpuSecondsSum": 93.080212,
+              "peakRssBytes": 949256192,
+              "wholeBoardSampledVramPeakMiB": 1923.6015625
+            }
+          ],
+          "sourceRevision": "d4d5f2fdf74eb79ced79755afcbe638eb4942791"
+        },
+        "pristine": {
+          "nativeStageSecondsSum": 1838.5497985529946,
+          "inclusiveWorkflowSeconds": 1849.1608643759973,
+          "stages": [
+            {
+              "stage": "features",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 19.25234734098194,
+                  "cpuUserSeconds": 45.220029,
+                  "cpuSystemSeconds": 3.179502,
+                  "peakRssBytes": 646467584,
+                  "wholeBoardSampledVramPeakMiB": 3356.92578125,
+                  "vramSampleCount": 5,
+                  "vramAvailableSampleCount": 5,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 19.25234734098194,
+              "nativeCpuSecondsSum": 48.399530999999996,
+              "peakRssBytes": 646467584,
+              "wholeBoardSampledVramPeakMiB": 3356.92578125
+            },
+            {
+              "stage": "matching",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 35.36634759500157,
+                  "cpuUserSeconds": 412.255508,
+                  "cpuSystemSeconds": 0.680296,
+                  "peakRssBytes": 591794176,
+                  "wholeBoardSampledVramPeakMiB": 2746.92578125,
+                  "vramSampleCount": 9,
+                  "vramAvailableSampleCount": 9,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 35.36634759500157,
+              "nativeCpuSecondsSum": 412.935804,
+              "peakRssBytes": 591794176,
+              "wholeBoardSampledVramPeakMiB": 2746.92578125
+            },
+            {
+              "stage": "mapping",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 25.55814267898677,
+                  "cpuUserSeconds": 26.575154,
+                  "cpuSystemSeconds": 2.769081,
+                  "peakRssBytes": 473829376,
+                  "wholeBoardSampledVramPeakMiB": 1923.6015625,
+                  "vramSampleCount": 7,
+                  "vramAvailableSampleCount": 7,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 25.55814267898677,
+              "nativeCpuSecondsSum": 29.344235,
+              "peakRssBytes": 473829376,
+              "wholeBoardSampledVramPeakMiB": 1923.6015625
+            },
+            {
+              "stage": "undistortion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 14.138280383951496,
+                  "cpuUserSeconds": 140.69177,
+                  "cpuSystemSeconds": 5.266194,
+                  "peakRssBytes": 1467179008,
+                  "wholeBoardSampledVramPeakMiB": 1923.6015625,
+                  "vramSampleCount": 4,
+                  "vramAvailableSampleCount": 4,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 14.138280383951496,
+              "nativeCpuSecondsSum": 145.957964,
+              "peakRssBytes": 1467179008,
+              "wholeBoardSampledVramPeakMiB": 1923.6015625
+            },
+            {
+              "stage": "patchmatch",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 1698.7035784360487,
+                  "cpuUserSeconds": 1681.837878,
+                  "cpuSystemSeconds": 20.998075,
+                  "peakRssBytes": 2635952128,
+                  "wholeBoardSampledVramPeakMiB": 2912.05078125,
+                  "vramSampleCount": 425,
+                  "vramAvailableSampleCount": 425,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 1698.7035784360487,
+              "nativeCpuSecondsSum": 1702.835953,
+              "peakRssBytes": 2635952128,
+              "wholeBoardSampledVramPeakMiB": 2912.05078125
+            },
+            {
+              "stage": "fusion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 15.191230798023753,
+                  "cpuUserSeconds": 79.27635,
+                  "cpuSystemSeconds": 51.939116,
+                  "peakRssBytes": 2070016000,
+                  "wholeBoardSampledVramPeakMiB": 1928.7265625,
+                  "vramSampleCount": 4,
+                  "vramAvailableSampleCount": 4,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 15.191230798023753,
+              "nativeCpuSecondsSum": 131.215466,
+              "peakRssBytes": 2070016000,
+              "wholeBoardSampledVramPeakMiB": 1928.7265625
+            },
+            {
+              "stage": "meshing",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 30.339871320000384,
+                  "cpuUserSeconds": 132.259367,
+                  "cpuSystemSeconds": 26.067677,
+                  "peakRssBytes": 1228345344,
+                  "wholeBoardSampledVramPeakMiB": 1928.7265625,
+                  "vramSampleCount": 8,
+                  "vramAvailableSampleCount": 8,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 30.339871320000384,
+              "nativeCpuSecondsSum": 158.327044,
+              "peakRssBytes": 1228345344,
+              "wholeBoardSampledVramPeakMiB": 1928.7265625
+            }
+          ],
+          "sourceRevision": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6"
+        }
+      },
+      "cpu": "Ryzen 3900X"
+    },
+    {
+      "case": "facade-1500-3080ti",
+      "platform": "Linux/WSL2",
+      "gpu": "RTX 3080 Ti",
+      "cpuWorkers": 12,
+      "customMappingRecovered": true,
+      "arms": {
+        "pristine": {
+          "nativeStageSecondsSum": 2475.7906701659667,
+          "inclusiveWorkflowSeconds": 2492.783533159003,
+          "stages": [
+            {
+              "stage": "features",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 6.189445501018781,
+                  "cpuUserSeconds": 15.862026,
+                  "cpuSystemSeconds": 1.936735,
+                  "peakRssBytes": 743669760,
+                  "wholeBoardSampledVramPeakMiB": 3313.80078125,
+                  "vramSampleCount": 2,
+                  "vramAvailableSampleCount": 2,
+                  "vramSampleIntervalSeconds": 4.0
+                },
+                {
+                  "wallSeconds": 20.702233980002347,
+                  "cpuUserSeconds": 51.153303,
+                  "cpuSystemSeconds": 4.928896,
+                  "peakRssBytes": 768753664,
+                  "wholeBoardSampledVramPeakMiB": 3313.80078125,
+                  "vramSampleCount": 6,
+                  "vramAvailableSampleCount": 6,
+                  "vramSampleIntervalSeconds": 4.0
+                },
+                {
+                  "wallSeconds": 3.943149305006955,
+                  "cpuUserSeconds": 8.289909,
+                  "cpuSystemSeconds": 1.162511,
+                  "peakRssBytes": 708599808,
+                  "wholeBoardSampledVramPeakMiB": 1878.4765625,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 4.0
+                },
+                {
+                  "wallSeconds": 1.7387524700025097,
+                  "cpuUserSeconds": 1.05407,
+                  "cpuSystemSeconds": 0.44487299999999996,
+                  "peakRssBytes": 585355264,
+                  "wholeBoardSampledVramPeakMiB": 1878.4765625,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 4.0
+                },
+                {
+                  "wallSeconds": 2.1037980080000125,
+                  "cpuUserSeconds": 2.046678,
+                  "cpuSystemSeconds": 0.584197,
+                  "peakRssBytes": 614862848,
+                  "wholeBoardSampledVramPeakMiB": 1878.4765625,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 34.677379264030606,
+              "nativeCpuSecondsSum": 87.463198,
+              "peakRssBytes": 768753664,
+              "wholeBoardSampledVramPeakMiB": 3313.80078125
+            },
+            {
+              "stage": "matching",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 26.058237245015334,
+                  "cpuUserSeconds": 301.402682,
+                  "cpuSystemSeconds": 1.334715,
+                  "peakRssBytes": 676581376,
+                  "wholeBoardSampledVramPeakMiB": 3307.80078125,
+                  "vramSampleCount": 7,
+                  "vramAvailableSampleCount": 7,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 26.058237245015334,
+              "nativeCpuSecondsSum": 302.73739700000004,
+              "peakRssBytes": 676581376,
+              "wholeBoardSampledVramPeakMiB": 3307.80078125
+            },
+            {
+              "stage": "mapping",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 84.45015064999461,
+                  "cpuUserSeconds": 198.571553,
+                  "cpuSystemSeconds": 14.540093,
+                  "peakRssBytes": 779911168,
+                  "wholeBoardSampledVramPeakMiB": 1878.4765625,
+                  "vramSampleCount": 22,
+                  "vramAvailableSampleCount": 22,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 84.45015064999461,
+              "nativeCpuSecondsSum": 213.111646,
+              "peakRssBytes": 779911168,
+              "wholeBoardSampledVramPeakMiB": 1878.4765625
+            },
+            {
+              "stage": "undistortion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 22.17948152095778,
+                  "cpuUserSeconds": 225.929946,
+                  "cpuSystemSeconds": 12.322724000000001,
+                  "peakRssBytes": 2253430784,
+                  "wholeBoardSampledVramPeakMiB": 1880.9765625,
+                  "vramSampleCount": 6,
+                  "vramAvailableSampleCount": 6,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 22.17948152095778,
+              "nativeCpuSecondsSum": 238.25267,
+              "peakRssBytes": 2253430784,
+              "wholeBoardSampledVramPeakMiB": 1880.9765625
+            },
+            {
+              "stage": "patchmatch",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 2122.1201891959645,
+                  "cpuUserSeconds": 2095.78783,
+                  "cpuSystemSeconds": 34.453515,
+                  "peakRssBytes": 3244580864,
+                  "wholeBoardSampledVramPeakMiB": 2893.39453125,
+                  "vramSampleCount": 531,
+                  "vramAvailableSampleCount": 531,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 2122.1201891959645,
+              "nativeCpuSecondsSum": 2130.2413450000004,
+              "peakRssBytes": 3244580864,
+              "wholeBoardSampledVramPeakMiB": 2893.39453125
+            },
+            {
+              "stage": "fusion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 24.91209144401364,
+                  "cpuUserSeconds": 173.122914,
+                  "cpuSystemSeconds": 38.599246,
+                  "peakRssBytes": 3413008384,
+                  "wholeBoardSampledVramPeakMiB": 1935.8203125,
+                  "vramSampleCount": 7,
+                  "vramAvailableSampleCount": 7,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 24.91209144401364,
+              "nativeCpuSecondsSum": 211.72216,
+              "peakRssBytes": 3413008384,
+              "wholeBoardSampledVramPeakMiB": 1935.8203125
+            },
+            {
+              "stage": "meshing",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 161.39314084599027,
+                  "cpuUserSeconds": 663.36451,
+                  "cpuSystemSeconds": 131.360448,
+                  "peakRssBytes": 5778599936,
+                  "wholeBoardSampledVramPeakMiB": 2029.5625,
+                  "vramSampleCount": 41,
+                  "vramAvailableSampleCount": 41,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 161.39314084599027,
+              "nativeCpuSecondsSum": 794.724958,
+              "peakRssBytes": 5778599936,
+              "wholeBoardSampledVramPeakMiB": 2029.5625
+            }
+          ],
+          "sourceRevision": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6"
+        },
+        "custom": {
+          "nativeStageSecondsSum": 449.3232519039302,
+          "inclusiveWorkflowSeconds": null,
+          "stages": [
+            {
+              "stage": "features",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 6.053626020962838,
+                  "cpuUserSeconds": 14.99626,
+                  "cpuSystemSeconds": 1.892443,
+                  "peakRssBytes": 715853824,
+                  "wholeBoardSampledVramPeakMiB": 3318.89453125,
+                  "vramSampleCount": 2,
+                  "vramAvailableSampleCount": 2,
+                  "vramSampleIntervalSeconds": 4.0
+                },
+                {
+                  "wallSeconds": 16.85102193901548,
+                  "cpuUserSeconds": 51.846231,
+                  "cpuSystemSeconds": 4.890096,
+                  "peakRssBytes": 783581184,
+                  "wholeBoardSampledVramPeakMiB": 3318.89453125,
+                  "vramSampleCount": 5,
+                  "vramAvailableSampleCount": 5,
+                  "vramSampleIntervalSeconds": 4.0
+                },
+                {
+                  "wallSeconds": 3.8912076739943586,
+                  "cpuUserSeconds": 8.287434,
+                  "cpuSystemSeconds": 1.200497,
+                  "peakRssBytes": 706248704,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 4.0
+                },
+                {
+                  "wallSeconds": 1.8618164669605903,
+                  "cpuUserSeconds": 1.151282,
+                  "cpuSystemSeconds": 0.443723,
+                  "peakRssBytes": 584642560,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 4.0
+                },
+                {
+                  "wallSeconds": 2.0526870869798586,
+                  "cpuUserSeconds": 2.001359,
+                  "cpuSystemSeconds": 0.608111,
+                  "peakRssBytes": 612450304,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 1,
+                  "vramAvailableSampleCount": 1,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 30.710359187913127,
+              "nativeCpuSecondsSum": 87.317436,
+              "peakRssBytes": 783581184,
+              "wholeBoardSampledVramPeakMiB": 3318.89453125
+            },
+            {
+              "stage": "matching",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 25.695528790005483,
+                  "cpuUserSeconds": 299.857182,
+                  "cpuSystemSeconds": 1.348568,
+                  "peakRssBytes": 673714176,
+                  "wholeBoardSampledVramPeakMiB": 3312.89453125,
+                  "vramSampleCount": 7,
+                  "vramAvailableSampleCount": 7,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 25.695528790005483,
+              "nativeCpuSecondsSum": 301.20575,
+              "peakRssBytes": 673714176,
+              "wholeBoardSampledVramPeakMiB": 3312.89453125
+            },
+            {
+              "stage": "mapping",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 85.9588307350059,
+                  "cpuUserSeconds": 200.926778,
+                  "cpuSystemSeconds": 15.062295,
+                  "peakRssBytes": 786829312,
+                  "wholeBoardSampledVramPeakMiB": 1883.5703125,
+                  "vramSampleCount": 22,
+                  "vramAvailableSampleCount": 22,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 85.9588307350059,
+              "nativeCpuSecondsSum": 215.98907300000002,
+              "peakRssBytes": 786829312,
+              "wholeBoardSampledVramPeakMiB": 1883.5703125
+            },
+            {
+              "stage": "undistortion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 21.282675352995284,
+                  "cpuUserSeconds": 218.691231,
+                  "cpuSystemSeconds": 11.158532,
+                  "peakRssBytes": 2250153984,
+                  "wholeBoardSampledVramPeakMiB": 1878.4765625,
+                  "vramSampleCount": 6,
+                  "vramAvailableSampleCount": 6,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 21.282675352995284,
+              "nativeCpuSecondsSum": 229.849763,
+              "peakRssBytes": 2250153984,
+              "wholeBoardSampledVramPeakMiB": 1878.4765625
+            },
+            {
+              "stage": "patchmatch",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 200.5974139290047,
+                  "cpuUserSeconds": 207.284999,
+                  "cpuSystemSeconds": 12.630966,
+                  "peakRssBytes": 3412172800,
+                  "wholeBoardSampledVramPeakMiB": 5101.80078125,
+                  "vramSampleCount": 51,
+                  "vramAvailableSampleCount": 51,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 200.5974139290047,
+              "nativeCpuSecondsSum": 219.915965,
+              "peakRssBytes": 3412172800,
+              "wholeBoardSampledVramPeakMiB": 5101.80078125
+            },
+            {
+              "stage": "fusion",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 10.75315085297916,
+                  "cpuUserSeconds": 104.894755,
+                  "cpuSystemSeconds": 4.59177,
+                  "peakRssBytes": 2485559296,
+                  "wholeBoardSampledVramPeakMiB": 1878.4765625,
+                  "vramSampleCount": 3,
+                  "vramAvailableSampleCount": 3,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 10.75315085297916,
+              "nativeCpuSecondsSum": 109.486525,
+              "peakRssBytes": 2485559296,
+              "wholeBoardSampledVramPeakMiB": 1878.4765625
+            },
+            {
+              "stage": "meshing",
+              "nativeCalls": [
+                {
+                  "wallSeconds": 74.32529305602657,
+                  "cpuUserSeconds": 414.211446,
+                  "cpuSystemSeconds": 20.802732,
+                  "peakRssBytes": 3863482368,
+                  "wholeBoardSampledVramPeakMiB": 2129.80078125,
+                  "vramSampleCount": 19,
+                  "vramAvailableSampleCount": 19,
+                  "vramSampleIntervalSeconds": 4.0
+                }
+              ],
+              "nativeWallSecondsSum": 74.32529305602657,
+              "nativeCpuSecondsSum": 435.014178,
+              "peakRssBytes": 3863482368,
+              "wholeBoardSampledVramPeakMiB": 2129.80078125
+            }
+          ],
+          "sourceRevision": "d4d5f2fdf74eb79ced79755afcbe638eb4942791"
+        }
+      },
+      "cpu": "Ryzen 3900X"
+    },
+    {
+      "case": "fountain-1536-gtx1080",
+      "platform": "Windows 10",
+      "gpu": "GTX 1080",
+      "cpuWorkers": 8,
+      "arms": {
+        "pristine": {
+          "nativeStageSecondsSum": 318.6912596,
+          "inclusiveWorkflowSeconds": 324.625,
+          "stages": [
+            {
+              "stage": "features",
+              "wallSeconds": 1.985858,
+              "cpuSeconds": 5.0625,
+              "kernelCpuSeconds": 0.296875,
+              "peakWorkingSetBytes": 199778304,
+              "peakCommitBytes": 1600077824,
+              "wholeBoardSampledVramPeakBytes": 1835708416,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            },
+            {
+              "stage": "matching",
+              "wallSeconds": 1.1735358,
+              "cpuSeconds": 5.09375,
+              "kernelCpuSeconds": 0.1875,
+              "peakWorkingSetBytes": 178520064,
+              "peakCommitBytes": 1231429632,
+              "wholeBoardSampledVramPeakBytes": 1489678336,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            },
+            {
+              "stage": "mapper",
+              "wallSeconds": 11.8898735,
+              "cpuSeconds": 38.78125,
+              "kernelCpuSeconds": 0.84375,
+              "peakWorkingSetBytes": 123424768,
+              "peakCommitBytes": 117223424,
+              "wholeBoardSampledVramPeakBytes": 459001856,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            },
+            {
+              "stage": "undistort",
+              "wallSeconds": 2.5930987,
+              "cpuSeconds": 13.609375,
+              "kernelCpuSeconds": 0.4375,
+              "peakWorkingSetBytes": 241098752,
+              "peakCommitBytes": 235536384,
+              "wholeBoardSampledVramPeakBytes": 459001856,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            },
+            {
+              "stage": "patchmatch",
+              "wallSeconds": 258.2230318,
+              "cpuSeconds": 262.203125,
+              "kernelCpuSeconds": 3.328125,
+              "peakWorkingSetBytes": 826204160,
+              "peakCommitBytes": 1619775488,
+              "wholeBoardSampledVramPeakBytes": 1036693504,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            },
+            {
+              "stage": "fusion",
+              "wallSeconds": 5.4993886,
+              "cpuSeconds": 35.53125,
+              "kernelCpuSeconds": 0.875,
+              "peakWorkingSetBytes": 597028864,
+              "peakCommitBytes": 595267584,
+              "wholeBoardSampledVramPeakBytes": 459001856,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            },
+            {
+              "stage": "poisson",
+              "wallSeconds": 37.3264732,
+              "cpuSeconds": 179.296875,
+              "kernelCpuSeconds": 21.515625,
+              "peakWorkingSetBytes": 1126735872,
+              "peakCommitBytes": 1211559936,
+              "wholeBoardSampledVramPeakBytes": 459001856,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            }
+          ],
+          "sourceRevision": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6"
+        },
+        "custom": {
+          "nativeStageSecondsSum": 110.9148574,
+          "inclusiveWorkflowSeconds": 117.40599999998813,
+          "stages": [
+            {
+              "stage": "features",
+              "wallSeconds": 1.9856927,
+              "cpuSeconds": 5.234375,
+              "kernelCpuSeconds": 0.40625,
+              "peakWorkingSetBytes": 200114176,
+              "peakCommitBytes": 1606848512,
+              "wholeBoardSampledVramPeakBytes": 1835708416,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            },
+            {
+              "stage": "matching",
+              "wallSeconds": 1.1732746,
+              "cpuSeconds": 5.34375,
+              "kernelCpuSeconds": 0.265625,
+              "peakWorkingSetBytes": 176627712,
+              "peakCommitBytes": 1229082624,
+              "wholeBoardSampledVramPeakBytes": 917155840,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            },
+            {
+              "stage": "mapper",
+              "wallSeconds": 10.9366781,
+              "cpuSeconds": 35.796875,
+              "kernelCpuSeconds": 0.859375,
+              "peakWorkingSetBytes": 119996416,
+              "peakCommitBytes": 113508352,
+              "wholeBoardSampledVramPeakBytes": 459001856,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            },
+            {
+              "stage": "undistort",
+              "wallSeconds": 2.6399693,
+              "cpuSeconds": 13.5625,
+              "kernelCpuSeconds": 0.1875,
+              "peakWorkingSetBytes": 241201152,
+              "peakCommitBytes": 235474944,
+              "wholeBoardSampledVramPeakBytes": 459001856,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            },
+            {
+              "stage": "patchmatch",
+              "wallSeconds": 67.6067651,
+              "cpuSeconds": 70.265625,
+              "kernelCpuSeconds": 1.1875,
+              "peakWorkingSetBytes": 1080057856,
+              "peakCommitBytes": 2993168384,
+              "wholeBoardSampledVramPeakBytes": 2378870784,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            },
+            {
+              "stage": "fusion",
+              "wallSeconds": 2.2023769,
+              "cpuSeconds": 15.1875,
+              "kernelCpuSeconds": 0.453125,
+              "peakWorkingSetBytes": 391798784,
+              "peakCommitBytes": 386756608,
+              "wholeBoardSampledVramPeakBytes": 459001856,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            },
+            {
+              "stage": "poisson",
+              "wallSeconds": 24.3701007,
+              "cpuSeconds": 129.078125,
+              "kernelCpuSeconds": 19.625,
+              "peakWorkingSetBytes": 1013563392,
+              "peakCommitBytes": 1420193792,
+              "wholeBoardSampledVramPeakBytes": 573222912,
+              "vramSampleCount": null,
+              "vramSampleIntervalSeconds": 1,
+              "exitCode": null
+            }
+          ],
+          "sourceRevision": "d4d5f2fdf74eb79ced79755afcbe638eb4942791"
+        }
+      },
+      "cpu": "i7-4790K"
+    }
+  ]
+}
