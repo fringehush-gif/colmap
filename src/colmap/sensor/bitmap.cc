@@ -559,6 +559,135 @@ std::optional<bool> Bitmap::ReadIfUnmanaged(const std::filesystem::path& path,
   return ReadFromFile(path, as_rgb, linearize_colorspace);
 }
 
+std::optional<bool> Bitmap::ReadBilinearSamplesIfUnmanaged(
+    const std::filesystem::path& path,
+    const std::vector<std::array<double, 2>>& coordinates,
+    std::vector<std::optional<BitmapColor<uint8_t>>>* samples) {
+  THROW_CHECK_NOTNULL(samples);
+  if (ScopedBitmapReader::Find(path)) {
+    return std::nullopt;
+  }
+  for (const auto& xy : coordinates) {
+    if (!(xy[0] >= std::numeric_limits<int>::min() &&
+          xy[0] < std::numeric_limits<int>::max() &&
+          xy[1] >= std::numeric_limits<int>::min() &&
+          xy[1] < std::numeric_limits<int>::max())) {
+      return std::nullopt;
+    }
+  }
+
+  // Provider choice is fixed above. An unsupported format must not perform
+  // another managed-provider lookup when taking the ordinary file fallback.
+  const auto read_full_image = [&]() -> bool {
+    Bitmap bitmap;
+    if (!bitmap.ReadFromFile(
+            path, /*as_rgb=*/true, /*linearize_colorspace=*/false)) {
+      return false;
+    }
+    std::vector<std::optional<BitmapColor<uint8_t>>> result;
+    result.reserve(coordinates.size());
+    for (const auto& xy : coordinates) {
+      const auto color = bitmap.InterpolateBilinear(xy[0], xy[1]);
+      result.emplace_back(
+          color ? std::optional<BitmapColor<uint8_t>>(color->Cast<uint8_t>())
+                : std::nullopt);
+    }
+    *samples = std::move(result);
+    return true;
+  };
+  if (!ExistsFile(path)) {
+    return false;
+  }
+  OIIO::ImageSpec config;
+  config["oiio:reorient"] = 0;
+  config["oiio:UnassociatedAlpha"] = 1;
+  auto input = OIIO::ImageInput::open(PathToUtf8(path), &config);
+  if (!input) {
+    const std::string error = OIIO::geterror();
+    VLOG(3) << "Failed to read bitmap: " << error;
+    return false;
+  }
+  const auto& spec = input->spec();
+  constexpr int kBatchRows = 65;
+  const std::string format = input->format_name();
+  if ((format != "jpeg" && format != "png") ||
+      spec.format != OIIO::TypeDesc::UINT8 || !spec.channelformats.empty() ||
+      spec.nchannels != 3 || spec.width <= 0 || spec.height <= 0 ||
+      spec.width > std::numeric_limits<int>::max() / (3 * kBatchRows) ||
+      spec.depth != 1 || spec.x != 0 || spec.y != 0 || spec.z != 0 ||
+      spec.tile_width != 0 || spec.tile_height != 0 || spec.deep) {
+    input->close();
+    input.reset();
+    return read_full_image();
+  }
+  struct Request {
+    int row;
+    size_t index;
+  };
+  std::vector<Request> requests;
+  requests.reserve(coordinates.size());
+  std::vector<std::optional<BitmapColor<uint8_t>>> result(coordinates.size());
+  for (size_t index = 0; index < coordinates.size(); ++index) {
+    const int x = static_cast<int>(std::floor(coordinates[index][0]));
+    const int y = static_cast<int>(std::floor(coordinates[index][1]));
+    // Check global bounds: spare rows in the final batch are not image data.
+    if (x >= 0 && x < spec.width - 1 && y >= 0 && y < spec.height - 1) {
+      requests.push_back({y, index});
+    }
+  }
+  std::sort(requests.begin(),
+            requests.end(),
+            [](const Request& a, const Request& b) { return a.row < b.row; });
+  Bitmap rows(spec.width, std::min(kBatchRows, spec.height), /*as_rgb=*/true);
+  auto& data = rows.RowMajorData();
+  const size_t pitch = static_cast<size_t>(spec.width) * 3;
+  size_t next_request = 0;
+  int begin = 0;
+  bool carry = false;
+  while (begin < spec.height) {
+    const int end = begin + std::min(kBatchRows, spec.height - begin);
+    const int read_begin = begin + (carry ? 1 : 0);
+    if (read_begin < end &&
+        !input->read_scanlines(0,
+                               0,
+                               read_begin,
+                               end,
+                               0,
+                               0,
+                               3,
+                               OIIO::TypeDesc::UINT8,
+                               data.data() + (carry ? pitch : 0))) {
+      const std::string error = input->geterror();
+      input->close();
+      VLOG(3) << "Failed to read bitmap: " << error;
+      return false;
+    }
+    while (next_request < requests.size() &&
+           requests[next_request].row < end - 1) {
+      const size_t index = requests[next_request++].index;
+      const auto& xy = coordinates[index];
+      // Subtracting the integer batch start preserves the original fractional
+      // y for these nonnegative bounded coordinates. Reuse unchanged pixel
+      // math.
+      const auto color = rows.InterpolateBilinear(xy[0], xy[1] - begin);
+      result[index] = color->Cast<uint8_t>();
+    }
+    // Consume the tail even when no requested samples remain, preserving read
+    // errors that the full-image reader can encounter after the last sample.
+    if (end == spec.height) {
+      break;
+    }
+    std::copy_n(data.data() + static_cast<size_t>(end - begin - 1) * pitch,
+                pitch,
+                data.data());
+    begin = end - 1;
+    carry = true;
+  }
+  input->close();
+  *samples = std::move(result);
+  return true;
+}
+
 bool Bitmap::ReadFromFile(const std::filesystem::path& path,
                           const bool as_rgb,
                           const bool linearize_colorspace) {

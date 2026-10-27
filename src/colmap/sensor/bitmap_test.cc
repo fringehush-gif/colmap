@@ -10,6 +10,7 @@
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1580,6 +1581,384 @@ TEST(BitmapReader, RegistrationAfterPrecheckDefersToCallerThread) {
   ASSERT_TRUE(outcome.has_value());
   ASSERT_TRUE(*outcome);
   EXPECT_EQ(target.GetPixel(0, 0), BitmapColor<uint8_t>(7, 8, 9));
+}
+
+TEST(BitmapReader, BilinearFileSamplesMatchNativeFormatsAcrossBatchBoundaries) {
+  for (const std::string extension : {"jpg", "png"}) {
+    for (const int width : {1, 17}) {
+      for (const int height : {1, 2, 64, 65, 66, 129, 130, 193}) {
+        const auto path = CreateTestDir() / ("samples." + extension);
+        Bitmap source(width, height, true);
+        std::mt19937 random(17);
+        for (auto& value : source.RowMajorData()) {
+          value = static_cast<uint8_t>(random());
+        }
+        ASSERT_TRUE(source.Write(path));
+        auto input = OIIO::ImageInput::open(path.string());
+        ASSERT_TRUE(input);
+        ASSERT_STREQ(input->format_name(), extension == "jpg" ? "jpeg" : "png");
+        const auto& spec = input->spec();
+        ASSERT_EQ(spec.format, OIIO::TypeDesc::UINT8);
+        ASSERT_TRUE(spec.channelformats.empty());
+        ASSERT_EQ(spec.nchannels, 3);
+        ASSERT_EQ(spec.depth, 1);
+        ASSERT_EQ(spec.x, 0);
+        ASSERT_EQ(spec.y, 0);
+        ASSERT_EQ(spec.z, 0);
+        ASSERT_EQ(spec.tile_width, 0);
+        ASSERT_EQ(spec.tile_height, 0);
+        ASSERT_FALSE(spec.deep);
+        input->close();
+        Bitmap reference;
+        ASSERT_TRUE(reference.Read(path));
+        std::vector<std::array<double, 2>> coordinates;
+        for (int y = 0; y + 1 < height; ++y) {
+          for (int x = 0; x + 1 < width; ++x) {
+            for (const double fraction : {0.0, 0.125, 0.75, 0.999999}) {
+              coordinates.push_back({x + fraction, y + fraction});
+            }
+          }
+        }
+        coordinates.push_back({-0.1, 0});
+        coordinates.push_back({0, -0.1});
+        coordinates.push_back({static_cast<double>(width - 1), 0});
+        coordinates.push_back({0, static_cast<double>(height - 1)});
+        std::reverse(coordinates.begin(), coordinates.end());
+        std::vector<std::optional<BitmapColor<uint8_t>>> samples;
+        const auto read =
+            Bitmap::ReadBilinearSamplesIfUnmanaged(path, coordinates, &samples);
+        ASSERT_TRUE(read.has_value());
+        ASSERT_TRUE(*read);
+        ASSERT_EQ(samples.size(), coordinates.size());
+        for (size_t index = 0; index < coordinates.size(); ++index) {
+          const auto& xy = coordinates[index];
+          const auto color = reference.InterpolateBilinear(xy[0], xy[1]);
+          ASSERT_EQ(samples[index].has_value(), color.has_value());
+          if (color) {
+            EXPECT_EQ(*samples[index], color->Cast<uint8_t>());
+          }
+        }
+        const auto empty =
+            Bitmap::ReadBilinearSamplesIfUnmanaged(path, {}, &samples);
+        ASSERT_TRUE(empty.has_value());
+        ASSERT_TRUE(*empty);
+        EXPECT_TRUE(samples.empty());
+      }
+    }
+  }
+}
+
+TEST(BitmapReader, BilinearFileSamplesMatchPngAndFallbackGreyJpeg) {
+  for (const std::string extension : {"png", "jpg"}) {
+    const auto path = CreateTestDir() / ("fallback." + extension);
+    Bitmap source(17, 66, /*as_rgb=*/extension == "png");
+    std::mt19937 random(31);
+    for (auto& value : source.RowMajorData()) {
+      value = static_cast<uint8_t>(random());
+    }
+    ASSERT_TRUE(source.Write(path));
+    Bitmap reference;
+    ASSERT_TRUE(reference.Read(path));
+    const std::vector<std::array<double, 2>> coordinates = {
+        {0.25, 0.75}, {15.999, 64.75}, {0, 65}, {-0.5, 0}};
+    std::vector<std::optional<BitmapColor<uint8_t>>> samples;
+    const auto read =
+        Bitmap::ReadBilinearSamplesIfUnmanaged(path, coordinates, &samples);
+    ASSERT_TRUE(read.has_value());
+    ASSERT_TRUE(*read);
+    ASSERT_EQ(samples.size(), coordinates.size());
+    for (size_t index = 0; index < coordinates.size(); ++index) {
+      const auto color = reference.InterpolateBilinear(coordinates[index][0],
+                                                       coordinates[index][1]);
+      ASSERT_EQ(samples[index].has_value(), color.has_value());
+      if (color) {
+        EXPECT_EQ(*samples[index], color->Cast<uint8_t>());
+      }
+    }
+  }
+}
+
+TEST(BitmapReader, BilinearFileSamplesDeferManagedAndUnsafeInputs) {
+  const auto path = std::filesystem::absolute(CreateTestDir() / "managed.jpg");
+  Bitmap source(2, 2, true);
+  source.Fill(BitmapColor<uint8_t>(7, 8, 9));
+  ASSERT_TRUE(source.Write(path));
+  const std::vector<std::optional<BitmapColor<uint8_t>>> sentinel = {
+      BitmapColor<uint8_t>(1, 2, 3)};
+  auto samples = sentinel;
+  int calls = 0;
+  auto reader = ScopedBitmapReader::Create(
+      {path}, [&](const std::filesystem::path&, bool, bool, Bitmap*) {
+        ++calls;
+        return false;
+      });
+  auto future = std::async(std::launch::async, [&]() {
+    return Bitmap::ReadBilinearSamplesIfUnmanaged(path, {{0, 0}}, &samples);
+  });
+  EXPECT_FALSE(future.get().has_value());
+  EXPECT_EQ(calls, 0);
+  EXPECT_EQ(samples, sentinel);
+  reader->Close();
+  for (const double bad :
+       {std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::infinity(),
+        static_cast<double>(std::numeric_limits<int>::max())}) {
+    EXPECT_FALSE(
+        Bitmap::ReadBilinearSamplesIfUnmanaged(path, {{0, bad}}, &samples)
+            .has_value());
+    EXPECT_EQ(samples, sentinel);
+  }
+  const auto missing = Bitmap::ReadBilinearSamplesIfUnmanaged(
+      path.parent_path() / "missing.jpg", {{0, 0}}, &samples);
+  ASSERT_TRUE(missing.has_value());
+  EXPECT_FALSE(*missing);
+  EXPECT_EQ(samples, sentinel);
+}
+
+TEST(BitmapReader, BilinearFileSamplesMatchCorruptJpegTailBehavior) {
+  const auto path = CreateTestDir() / "corrupt-tail.jpg";
+  Bitmap source(128, 512, true);
+  std::mt19937 random(41);
+  for (auto& value : source.RowMajorData()) {
+    value = static_cast<uint8_t>(random());
+  }
+  ASSERT_TRUE(source.Write(path));
+  const auto bytes = std::filesystem::file_size(path);
+  ASSERT_GT(bytes, 1024);
+  {
+    std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(file.is_open());
+    file.seekp(static_cast<std::streamoff>(bytes - 64));
+    const std::array<char, 2> marker = {static_cast<char>(0xff),
+                                        static_cast<char>(0xd8)};
+    file.write(marker.data(), marker.size());
+  }
+  Bitmap reference;
+  const bool ordinary = reference.Read(path);
+  const std::vector<std::optional<BitmapColor<uint8_t>>> sentinel = {
+      BitmapColor<uint8_t>(1, 2, 3)};
+  const std::vector<std::vector<std::array<double, 2>>> patterns = {
+      {}, {{0.25, 0.75}}, {{0.25, 510.75}}};
+  for (const auto& coordinates : patterns) {
+    auto samples = sentinel;
+    const auto read =
+        Bitmap::ReadBilinearSamplesIfUnmanaged(path, coordinates, &samples);
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(*read, ordinary);
+    if (!ordinary) {
+      EXPECT_EQ(samples, sentinel);
+    } else {
+      ASSERT_EQ(samples.size(), coordinates.size());
+      for (size_t index = 0; index < coordinates.size(); ++index) {
+        const auto color = reference.InterpolateBilinear(coordinates[index][0],
+                                                         coordinates[index][1]);
+        ASSERT_TRUE(color.has_value());
+        EXPECT_EQ(samples[index], color->Cast<uint8_t>());
+      }
+    }
+  }
+}
+
+TEST(BitmapReader, BilinearFileSamplesRejectTruncatedPngWithoutPublishing) {
+  const auto path = CreateTestDir() / "truncated.png";
+  Bitmap source(128, 512, true);
+  std::mt19937 random(43);
+  for (auto& value : source.RowMajorData()) {
+    value = static_cast<uint8_t>(random());
+  }
+  ASSERT_TRUE(source.Write(path));
+  const auto bytes = std::filesystem::file_size(path);
+  ASSERT_GT(bytes, 1024);
+  std::filesystem::resize_file(path, bytes / 2);
+  Bitmap reference;
+  ASSERT_FALSE(reference.Read(path));
+  const std::vector<std::optional<BitmapColor<uint8_t>>> sentinel = {
+      BitmapColor<uint8_t>(1, 2, 3)};
+  for (const bool empty : {false, true}) {
+    auto samples = sentinel;
+    const std::vector<std::array<double, 2>> coordinates =
+        empty ? std::vector<std::array<double, 2>>{}
+              : std::vector<std::array<double, 2>>{{0.25, 0.75}};
+    const auto read =
+        Bitmap::ReadBilinearSamplesIfUnmanaged(path, coordinates, &samples);
+    ASSERT_TRUE(read.has_value());
+    EXPECT_FALSE(*read);
+    EXPECT_EQ(samples, sentinel);
+  }
+}
+
+void ExpectBilinearFileSamplesMatchOrdinaryRead(
+    const std::filesystem::path& path,
+    const std::vector<std::array<double, 2>>& coordinates) {
+  Bitmap reference;
+  const bool ordinary = reference.Read(path);
+  const std::vector<std::optional<BitmapColor<uint8_t>>> sentinel = {
+      BitmapColor<uint8_t>(1, 2, 3)};
+  auto samples = sentinel;
+  const auto read =
+      Bitmap::ReadBilinearSamplesIfUnmanaged(path, coordinates, &samples);
+  ASSERT_TRUE(read.has_value());
+  ASSERT_EQ(*read, ordinary);
+  if (!ordinary) {
+    EXPECT_EQ(samples, sentinel);
+    return;
+  }
+  ASSERT_EQ(samples.size(), coordinates.size());
+  for (size_t index = 0; index < coordinates.size(); ++index) {
+    const auto color = reference.InterpolateBilinear(coordinates[index][0],
+                                                     coordinates[index][1]);
+    ASSERT_EQ(samples[index].has_value(), color.has_value());
+    if (color) {
+      EXPECT_EQ(*samples[index], color->Cast<uint8_t>());
+    }
+  }
+}
+
+TEST(BitmapReader, BilinearFileSamplesPreservePngCorruptionOutcomes) {
+  const auto path = CreateTestDir() / "damaged.png";
+  Bitmap source(128, 192, true);
+  std::mt19937 random(47);
+  for (auto& value : source.RowMajorData()) {
+    value = static_cast<uint8_t>(random());
+  }
+  ASSERT_TRUE(source.Write(path));
+  std::ifstream input(path, std::ios::binary);
+  const std::vector<uint8_t> original((std::istreambuf_iterator<char>(input)),
+                                      std::istreambuf_iterator<char>());
+  input.close();
+  const auto read_u32 = [&](const size_t offset) {
+    return (static_cast<uint32_t>(original[offset]) << 24) |
+           (static_cast<uint32_t>(original[offset + 1]) << 16) |
+           (static_cast<uint32_t>(original[offset + 2]) << 8) |
+           original[offset + 3];
+  };
+  size_t idat = 0, idat_size = 0, iend = 0;
+  for (size_t offset = 8; offset + 12 <= original.size();) {
+    const size_t length = read_u32(offset);
+    ASSERT_LE(length, original.size() - offset - 12);
+    const std::string type(
+        reinterpret_cast<const char*>(original.data() + offset + 4), 4);
+    if (type == "IDAT" && length > 0) {
+      idat = offset;
+      idat_size = length;
+    } else if (type == "IEND") {
+      iend = offset;
+    }
+    offset += length + 12;
+  }
+  ASSERT_GT(idat_size, 0);
+  ASSERT_GT(iend, idat);
+  std::vector<std::vector<uint8_t>> cases;
+  auto damaged = original;
+  damaged[idat + 8 + idat_size - 1] ^= 0x40;
+  cases.push_back(damaged);
+  damaged = original;
+  damaged[idat + 8 + idat_size] ^= 1;
+  cases.push_back(damaged);
+  cases.emplace_back(original.begin(), original.begin() + iend);
+  damaged = original;
+  damaged[iend + 8] ^= 1;
+  cases.push_back(damaged);
+  for (const auto& bytes : cases) {
+    {
+      std::ofstream output(path, std::ios::binary | std::ios::trunc);
+      output.write(reinterpret_cast<const char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+      ASSERT_TRUE(output.good());
+    }
+    // Preserve the baseline decision, including tolerated missing IEND data.
+    ExpectBilinearFileSamplesMatchOrdinaryRead(path, {});
+    ExpectBilinearFileSamplesMatchOrdinaryRead(path, {{0.25, 0.75}});
+    ExpectBilinearFileSamplesMatchOrdinaryRead(path, {{126.5, 190.75}});
+  }
+}
+
+TEST(BitmapReader, BilinearFileSamplesPreserveAlphaAndHighBitFallback) {
+  for (const int channels : {3, 4}) {
+    for (const bool high_bit : {false, true}) {
+      if (channels == 3 && !high_bit) {
+        continue;
+      }
+      const auto path = CreateTestDir() / "fallback.png";
+      const auto type =
+          high_bit ? OIIO::TypeDesc::UINT16 : OIIO::TypeDesc::UINT8;
+      OIIO::ImageSpec spec(17, 66, channels, type);
+      spec["oiio:UnassociatedAlpha"] = 1;
+      std::mt19937 random(53);
+      std::vector<uint8_t> bytes(17 * 66 * channels);
+      std::vector<uint16_t> words(bytes.size());
+      for (size_t index = 0; index < bytes.size(); ++index) {
+        bytes[index] = static_cast<uint8_t>(random());
+        words[index] = static_cast<uint16_t>(random());
+      }
+      auto output = OIIO::ImageOutput::create(path.string());
+      ASSERT_TRUE(output);
+      ASSERT_TRUE(output->open(path.string(), spec));
+      const void* data = high_bit ? static_cast<const void*>(words.data())
+                                  : static_cast<const void*>(bytes.data());
+      ASSERT_TRUE(output->write_image(type, data));
+      ASSERT_TRUE(output->close());
+      ExpectBilinearFileSamplesMatchOrdinaryRead(
+          path, {{0.25, 0.75}, {15.75, 63.25}, {15.25, 64.75}, {0, 65}});
+    }
+  }
+}
+
+TEST(BitmapReader, BilinearFileSamplesMatchInterlacedPng) {
+  // Own synthetic RGB8 Adam7 fixture, encoded from PNG specification
+  // section 8.1. Pattern: R=27*x, G=63*(y%4), B=63*((x+y)%4). No runtime codec
+  // dependency.
+  const std::array<uint8_t, 175> encoded = {
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+      0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x82,
+      0x08, 0x02, 0x00, 0x00, 0x01, 0x6c, 0x83, 0x45, 0xca, 0x00, 0x00, 0x00,
+      0x76, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0xed, 0x8b, 0xc1, 0x09, 0x03,
+      0x31, 0x10, 0x03, 0xa7, 0x0f, 0xf7, 0xe1, 0xaf, 0x6a, 0x70, 0x1f, 0xae,
+      0x41, 0x5f, 0xf7, 0xe1, 0x3e, 0xd4, 0x87, 0xcb, 0x49, 0x48, 0x2a, 0x38,
+      0x08, 0x21, 0x5c, 0x76, 0x61, 0x91, 0xc4, 0x30, 0x00, 0x87, 0xd7, 0x7d,
+      0x35, 0xe6, 0x07, 0xfe, 0x1d, 0xe7, 0x67, 0x5b, 0xc7, 0x1b, 0xdf, 0x3e,
+      0xb0, 0xbb, 0x99, 0xf6, 0x36, 0xc7, 0xb5, 0xff, 0x6d, 0x37, 0x34, 0xc8,
+      0x42, 0x21, 0x34, 0x67, 0x58, 0xcb, 0x89, 0x55, 0xa4, 0x48, 0x91, 0x6b,
+      0x04, 0xa9, 0xc9, 0x5d, 0x19, 0x62, 0x4a, 0x4b, 0xde, 0x4a, 0xc4, 0x91,
+      0x20, 0x69, 0xa1, 0x47, 0x23, 0x9e, 0xc9, 0x0a, 0x3b, 0x4f, 0xe8, 0x93,
+      0xf2, 0xca, 0x2b, 0xaf, 0xbc, 0xf2, 0xca, 0xbb, 0xad, 0xf7, 0x00, 0x03,
+      0xc3, 0x48, 0xc2, 0x94, 0xef, 0x83, 0x7a, 0x00, 0x00, 0x00, 0x00, 0x49,
+      0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82};
+  ASSERT_EQ(encoded[28], 1);
+  const auto path = CreateTestDir() / "interlaced.png";
+  {
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(encoded.data()),
+                 static_cast<std::streamsize>(encoded.size()));
+    ASSERT_TRUE(output.good());
+  }
+  Bitmap reference;
+  ASSERT_TRUE(reference.Read(path));
+  ASSERT_EQ(reference.Width(), 9);
+  ASSERT_EQ(reference.Height(), 130);
+  std::vector<std::array<double, 2>> coordinates;
+  for (int y = 0; y < 130; ++y) {
+    for (int x = 0; x < 9; ++x) {
+      EXPECT_EQ(reference.GetPixel(x, y),
+                BitmapColor<uint8_t>(static_cast<uint8_t>(27 * x),
+                                     static_cast<uint8_t>(63 * (y % 4)),
+                                     static_cast<uint8_t>(63 * ((x + y) % 4))));
+      if (x < 8 && y < 129) {
+        coordinates.push_back({x + 0.25, y + 0.75});
+      }
+    }
+  }
+  ExpectBilinearFileSamplesMatchOrdinaryRead(path, coordinates);
+  ExpectBilinearFileSamplesMatchOrdinaryRead(path, {});
+  auto damaged = encoded;
+  damaged.back() ^= 1;
+  {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(damaged.data()),
+                 static_cast<std::streamsize>(damaged.size()));
+  }
+  ExpectBilinearFileSamplesMatchOrdinaryRead(path, {});
+  ExpectBilinearFileSamplesMatchOrdinaryRead(path, {{0.25, 0.75}});
 }
 
 TEST(BitmapReader, ManagedFailureNeverFallsBackToDisk) {

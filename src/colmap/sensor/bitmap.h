@@ -3,6 +3,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -113,6 +114,17 @@ class Bitmap {
   std::optional<bool> ReadIfUnmanaged(const std::filesystem::path& path,
                                       bool as_rgb = true,
                                       bool linearize_colorspace = false);
+
+  // Read RGB8 bilinear samples at the same pixel coordinates as
+  // InterpolateBilinear. Native RGB8 JPEG/PNG use a bounded application row
+  // buffer; decoder-private buffers are separate. Other
+  // formats use the ordinary file reader. Managed paths or unsafe coordinates
+  // return nullopt. Publish samples only after all image rows read
+  // successfully.
+  static std::optional<bool> ReadBilinearSamplesIfUnmanaged(
+      const std::filesystem::path& path,
+      const std::vector<std::array<double, 2>>& coordinates,
+      std::vector<std::optional<BitmapColor<uint8_t>>>* samples);
 
   // Write bitmap to file at given path. Defaults to converting to sRGB
   // colorspace for file storage.
