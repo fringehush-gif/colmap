@@ -22,9 +22,13 @@ inline cudaStream_t CudaDefaultStream() {
 #endif
 }
 
+// Describe a runtime error, including its numeric code and driver guidance.
+// Always returns a message, even if the runtime provides no description.
+std::string GetCudaErrorMessage(cudaError_t error);
+
 class CudaTimer {
  public:
-  // Pass nullptr for the legacy stream, or an explicitly managed stream.
+  // Pass an explicit stream to time work on that stream.
   explicit CudaTimer(cudaStream_t stream = CudaDefaultStream());
   ~CudaTimer();
 
