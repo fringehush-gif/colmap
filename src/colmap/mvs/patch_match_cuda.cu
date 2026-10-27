@@ -3265,7 +3265,7 @@ void PatchMatchCuda::InitSourceImages() {
       std::vector<CudaArrayLayeredTexture<float>::HostSlice> depth_slices;
       depth_slices.reserve(problem_.src_image_idxs.size());
       for (const auto image_idx : problem_.src_image_idxs) {
-        const DepthMap& depth_map = problem_.depth_maps->at(image_idx);
+        const DepthMap& depth_map = problem_.InputDepthMap(image_idx);
         depth_slices.push_back({depth_map.GetPtr(),
                                 depth_map.GetWidth(),
                                 depth_map.GetHeight(),
@@ -3281,7 +3281,7 @@ void PatchMatchCuda::InitSourceImages() {
           kDefaultValue);
       for (size_t i = 0; i < problem_.src_image_idxs.size(); ++i) {
         const DepthMap& depth_map =
-            problem_.depth_maps->at(problem_.src_image_idxs[i]);
+            problem_.InputDepthMap(problem_.src_image_idxs[i]);
         float* dest =
             src_depth_maps_host_data.data() + max_width * max_height * i;
         for (size_t r = 0; r < depth_map.GetHeight(); ++r) {

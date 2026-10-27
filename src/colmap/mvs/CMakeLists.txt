@@ -146,6 +146,11 @@ if(CUDA_ENABLED)
             SRCS patch_match_cuda_test.cc
             LINK_LIBS colmap_mvs_cuda
         )
+        COLMAP_ADD_TEST(
+            NAME patch_match_source_depth_lease_test
+            SRCS patch_match_source_depth_lease_test.cc
+            LINK_LIBS colmap_mvs_cuda
+        )
         if(TESTS_ENABLED)
             set_tests_properties(mvs/patch_match_cuda_test PROPERTIES TIMEOUT 120)
         endif()

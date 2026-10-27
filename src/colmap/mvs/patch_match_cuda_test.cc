@@ -879,6 +879,98 @@ TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
   }
 }
 
+TEST_F(CudaTest, ImmutableSourceDepthLeasesPreserveThreeViewGeoOutput) {
+  Inputs input = MakeInputs(0, 9, 257, 513);
+  auto options = MakeOptions(true, true, false);
+  // The production batch path admits the current native PatchMatch defaults.
+  // This fixture compares copied and leased source maps under that same path.
+  options.window_radius = 5;
+  options.num_samples = 15;
+  options.num_iterations = 5;
+  constexpr int kReferences = 3;
+  std::vector<std::shared_ptr<const DepthMap> > canonical;
+  for (const auto& depth : input.depths)
+    canonical.push_back(std::make_shared<DepthMap>(depth));
+  std::vector<std::vector<DepthMap> > old_depths(kReferences, input.depths);
+  std::vector<std::vector<DepthMap> > owned_depths(
+      kReferences, std::vector<DepthMap>(input.depths.size()));
+  std::vector<std::vector<std::shared_ptr<const DepthMap> > > leases(
+      kReferences,
+      std::vector<std::shared_ptr<const DepthMap> >(input.depths.size()));
+  std::vector<PatchMatch::Problem> old_problems(kReferences),
+      new_problems(kReferences);
+  std::vector<const PatchMatch::Problem*> new_pointers;
+  for (int ref = 0; ref < kReferences; ++ref) {
+    auto& old = old_problems[ref];
+    auto& candidate = new_problems[ref];
+    old.ref_image_idx = candidate.ref_image_idx = ref;
+    old.images = candidate.images = &input.images;
+    old.normal_maps = candidate.normal_maps = &input.normals;
+    old.depth_maps = &old_depths[ref];
+    candidate.depth_maps = &owned_depths[ref];
+    candidate.source_depth_leases = &leases[ref];
+    owned_depths[ref][ref] = input.depths[ref];
+    for (int id = 0; id < static_cast<int>(input.depths.size()); ++id) {
+      if (id == ref) continue;
+      old.src_image_idxs.push_back(id);
+      candidate.src_image_idxs.push_back(id);
+      leases[ref][id] = canonical[id];
+      ASSERT_EQ(candidate.InputDepthMap(id).GetPtr(), canonical[id]->GetPtr());
+    }
+    new_pointers.push_back(&candidate);
+  }
+
+  using Snapshot =
+      std::tuple<DepthMap, NormalMap, Mat<float>, std::vector<int> >;
+  const auto read = [](const PatchMatchCuda& owner) {
+    return Snapshot(owner.GetDepthMap(),
+                    owner.GetNormalMap(),
+                    owner.GetSelProbMap(),
+                    owner.GetConsistentImageIdxs());
+  };
+  std::vector<Snapshot> expected;
+  for (const auto& problem : old_problems) {
+    PatchMatchCuda owner(options, problem);
+    owner.Run();
+    expected.push_back(read(owner));
+  }
+
+  ASSERT_GT(PatchMatchSparseSources::Budget(new_pointers, true), 0);
+  auto shared = PatchMatchSparseSources::Create(new_pointers, true);
+  ASSERT_TRUE(shared);
+  std::vector<std::unique_ptr<PatchMatchCuda> > owners;
+  owners.push_back(std::make_unique<PatchMatchCuda>(options, new_problems[0]));
+  owners[0]->UseSparseSources(shared);
+  for (int ref = 1; ref < kReferences; ++ref)
+    owners.push_back(
+        std::make_unique<PatchMatchCuda>(options, new_problems[ref], shared));
+  shared.reset();
+  std::vector<PatchMatchCuda*> views;
+  std::vector<cudaStream_t> streams(kReferences, nullptr);
+  struct StreamCleanup {
+    std::vector<cudaStream_t>& values;
+    ~StreamCleanup() {
+      for (auto stream : values) {
+        if (stream) {
+          (void)cudaStreamSynchronize(stream);
+          (void)cudaStreamDestroy(stream);
+        }
+      }
+    }
+  } cleanup{streams};
+  for (auto& stream : streams)
+    CUDA_SAFE_CALL(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+  for (auto& owner : owners) views.push_back(owner.get());
+  RunPatchMatchBatch(views, streams);
+  for (int ref = 0; ref < kReferences; ++ref) {
+    const auto actual = read(*owners[ref]);
+    ExpectExactlyEqual(std::get<0>(expected[ref]), std::get<0>(actual));
+    ExpectExactlyEqual(std::get<1>(expected[ref]), std::get<1>(actual));
+    ExpectExactlyEqual(std::get<2>(expected[ref]), std::get<2>(actual));
+    EXPECT_EQ(std::get<3>(expected[ref]), std::get<3>(actual));
+  }
+}
+
 TEST_F(CudaTest, BatchAdmissionCanBeatIneligiblePairs) {
   // Search grid widths against the queried device rather than baking in an
   // sm86/SM-count cutoff. This exercises the large-grid path where the
