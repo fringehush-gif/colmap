@@ -21,6 +21,7 @@
 #include "thirdparty/VLFeat/sift.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -201,6 +202,45 @@ TEST(SiftCPUDescriptorSupport, KeepsHalfBinBoundaryAndIgnoresCorners) {
         filter.get(), after.data(), &keypoint, angle);
     EXPECT_EQ(after, before);
   }
+}
+
+TEST(SiftCPUDescriptorSupport, ExponentialTableEndpointIsFinite) {
+  constexpr int kWidth = 96;
+  constexpr int kHeight = 96;
+  std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)> filter(
+      vl_sift_new(kWidth, kHeight, 1, 3, 0), &vl_sift_delete);
+  ASSERT_NE(filter, nullptr);
+  const std::vector<vl_sift_pix> pixels(kWidth * kHeight, 0.5f);
+  ASSERT_EQ(vl_sift_process_first_octave(filter.get(), pixels.data()), 0);
+  vl_sift_set_magnif(filter.get(), 3);
+  VlSiftKeypoint keypoint;
+  vl_sift_keypoint_init(filter.get(), &keypoint, 48, 48, 2);
+  ASSERT_EQ(keypoint.o, filter->o_cur);
+  ASSERT_GE(keypoint.is, filter->s_min + 1);
+  ASSERT_LE(keypoint.is, filter->s_max - 2);
+  std::vector<vl_sift_pix> initial(128);
+  vl_sift_calc_keypoint_descriptor(filter.get(), initial.data(), &keypoint, 0);
+  ASSERT_NE(filter->grad, nullptr);
+  auto* gradient =
+      filter->grad + (keypoint.is - filter->s_min - 1) * 2 * kWidth * kHeight;
+  std::fill(gradient, gradient + 2 * kWidth * kHeight, 0);
+  gradient[2 * (48 * kWidth + 48)] = 1;
+  vl_sift_set_window_size(filter.get(), 0.5);
+  // SBP=6 and offset(-15,-15) give nx=ny=-2.5. Its bins(-3,-3)
+  // survive support rejection and fast_expn receives exactly25. The second
+  // spatial neighbor is valid but has zero weight in each dimension.
+  std::vector<vl_sift_pix> reference(128);
+  vl_sift_calc_keypoint_descriptor(
+      filter.get(), reference.data(), &keypoint, 0);
+  ASSERT_GT(*std::max_element(reference.begin(), reference.end()), 0);
+  gradient[2 * (33 * kWidth + 33)] = 1;
+  std::vector<vl_sift_pix> descriptor(128);
+  vl_sift_calc_keypoint_descriptor(
+      filter.get(), descriptor.data(), &keypoint, 0);
+  for (const vl_sift_pix value : descriptor) {
+    EXPECT_TRUE(std::isfinite(value));
+  }
+  EXPECT_EQ(descriptor, reference);
 }
 
 Bitmap CreateImageWithSquare(const int size) {
