@@ -1936,6 +1936,9 @@ TEST(BitmapReader, BilinearFileSamplesMatchInterlacedPng) {
   ASSERT_TRUE(reference.Read(path));
   ASSERT_EQ(reference.Width(), 9);
   ASSERT_EQ(reference.Height(), 130);
+  Bitmap gray;
+  ASSERT_TRUE(gray.Read(path, /*as_rgb=*/false));
+  EXPECT_EQ(gray.RowMajorData(), reference.CloneAsGrey().RowMajorData());
   std::vector<std::array<double, 2>> coordinates;
   for (int y = 0; y < 130; ++y) {
     for (int x = 0; x < 9; ++x) {
@@ -1959,6 +1962,180 @@ TEST(BitmapReader, BilinearFileSamplesMatchInterlacedPng) {
   }
   ExpectBilinearFileSamplesMatchOrdinaryRead(path, {});
   ExpectBilinearFileSamplesMatchOrdinaryRead(path, {{0.25, 0.75}});
+}
+
+TEST(Bitmap, GrayFileRowsMatchDecodedRgbOracleAndReusedBitmap) {
+  for (const std::string extension : {"jpg", "png"}) {
+    for (const int width : {1, 17}) {
+      for (const int height : {1, 63, 64, 65, 129}) {
+        const auto path = CreateTestDir() / ("gray-rows." + extension);
+        Bitmap source(width, height, true);
+        std::mt19937 random(61);
+        for (auto& value : source.RowMajorData()) {
+          value = static_cast<uint8_t>(random());
+        }
+        ASSERT_TRUE(source.Write(path));
+        // as_rgb=true retains the original full-image decoder path.
+        Bitmap rgb;
+        ASSERT_TRUE(rgb.Read(path, /*as_rgb=*/true));
+        const Bitmap expected = rgb.CloneAsGrey();
+        Bitmap fresh;
+        Bitmap reused(71, 131, /*as_rgb=*/true, /*linear_colorspace=*/true);
+        reused.Fill(BitmapColor<uint8_t>(255, 17, 31));
+        for (Bitmap* gray : {&fresh, &reused}) {
+          for (int repeat = 0; repeat < 2; ++repeat) {
+            ASSERT_TRUE(gray->Read(path, /*as_rgb=*/false));
+            EXPECT_EQ(gray->Width(), width);
+            EXPECT_EQ(gray->Height(), height);
+            EXPECT_EQ(gray->Channels(), 1);
+            EXPECT_EQ(gray->RowMajorData(), expected.RowMajorData());
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(Bitmap, GrayFileRowsPreserveExifMetadata) {
+  const auto path = CreateTestDir() / "gray-exif.jpg";
+  Bitmap source(17, 65, true);
+  source.Fill(BitmapColor<uint8_t>(17, 131, 241));
+  source.SetMetaData("Make", "gray-maker");
+  source.SetMetaData("Model", "gray-model");
+  const int focal = 50;
+  const float focal_mm = 50.f;
+  const float pixels_per_mm = 100.f;
+  const int resolution_unit = 4;
+  const int orientation = 6;
+  source.SetMetaData("Exif:FocalLengthIn35mmFilm", "int", &focal);
+  source.SetMetaData("Exif:FocalLength", "float", &focal_mm);
+  source.SetMetaData("Exif:FocalPlaneXResolution", "float", &pixels_per_mm);
+  source.SetMetaData("Exif:FocalPlaneResolutionUnit", "int", &resolution_unit);
+  source.SetMetaData("Orientation", "int", &orientation);
+  ASSERT_TRUE(source.Write(path));
+  Bitmap rgb;
+  ASSERT_TRUE(rgb.Read(path, true));
+  ASSERT_TRUE(rgb.ExifCameraModel().has_value());
+  ASSERT_TRUE(rgb.ExifFocalLength().has_value());
+  ASSERT_TRUE(rgb.ExifOrientation().has_value());
+  Bitmap gray;
+  ASSERT_TRUE(gray.Read(path, false));
+  EXPECT_EQ(gray.ExifCameraModel(), rgb.ExifCameraModel());
+  EXPECT_EQ(gray.ExifFocalLength(), rgb.ExifFocalLength());
+  EXPECT_EQ(gray.ExifOrientation(), rgb.ExifOrientation());
+  EXPECT_EQ(gray.ExifLatitude(), rgb.ExifLatitude());
+  EXPECT_EQ(gray.ExifLongitude(), rgb.ExifLongitude());
+  EXPECT_EQ(gray.ExifAltitude(), rgb.ExifAltitude());
+  EXPECT_EQ(gray.RowMajorData(), rgb.CloneAsGrey().RowMajorData());
+  // A metadata round-trip also exercises the stored ImageSpec channel count.
+  const auto rewritten = path.parent_path() / "gray-exif-rewritten.png";
+  ASSERT_TRUE(gray.Write(rewritten, /*delinearize_colorspace=*/false));
+  Bitmap reread;
+  ASSERT_TRUE(reread.Read(rewritten, false));
+  EXPECT_EQ(reread.RowMajorData(), gray.RowMajorData());
+}
+
+TEST(Bitmap, GrayFileRowsKeepUnsupportedAndLinearizedFallback) {
+  for (const int channels : {1, 3, 4}) {
+    for (const bool high_bit : {false, true}) {
+      const auto path = CreateTestDir() / "gray-fallback.png";
+      const auto type =
+          high_bit ? OIIO::TypeDesc::UINT16 : OIIO::TypeDesc::UINT8;
+      OIIO::ImageSpec spec(17, 65, channels, type);
+      spec["oiio:UnassociatedAlpha"] = 1;
+      std::vector<uint8_t> bytes(17 * 65 * channels);
+      std::vector<uint16_t> words(bytes.size());
+      std::mt19937 random(67);
+      for (size_t index = 0; index < bytes.size(); ++index) {
+        bytes[index] = static_cast<uint8_t>(random());
+        words[index] = static_cast<uint16_t>(random());
+      }
+      auto output = OIIO::ImageOutput::create(path.string());
+      ASSERT_TRUE(output);
+      ASSERT_TRUE(output->open(path.string(), spec));
+      const void* data = high_bit ? static_cast<const void*>(words.data())
+                                  : static_cast<const void*>(bytes.data());
+      ASSERT_TRUE(output->write_image(type, data));
+      ASSERT_TRUE(output->close());
+      for (const bool linearize : {false, true}) {
+        Bitmap rgb;
+        ASSERT_TRUE(rgb.Read(path, /*as_rgb=*/true, linearize));
+        Bitmap gray;
+        ASSERT_TRUE(gray.Read(path, /*as_rgb=*/false, linearize));
+        EXPECT_EQ(gray.RowMajorData(), rgb.CloneAsGrey().RowMajorData());
+        EXPECT_EQ(gray.Channels(), 1);
+      }
+    }
+  }
+}
+
+TEST(BitmapReader, GrayFileRowsManagedFailureDoesNotReadDisk) {
+  const auto path =
+      std::filesystem::absolute(CreateTestDir() / "gray-managed.png");
+  Bitmap disk(17, 65, true);
+  disk.Fill(BitmapColor<uint8_t>(7, 8, 9));
+  ASSERT_TRUE(disk.Write(path));
+  int calls = 0;
+  auto reader = ScopedBitmapReader::Create(
+      {path},
+      [&](const std::filesystem::path&, bool as_rgb, bool linearize, Bitmap*) {
+        ++calls;
+        EXPECT_FALSE(as_rgb);
+        EXPECT_FALSE(linearize);
+        return false;
+      });
+  Bitmap target;
+  EXPECT_FALSE(target.Read(path, /*as_rgb=*/false));
+  EXPECT_EQ(calls, 1);
+  reader->Close();
+  EXPECT_TRUE(target.Read(path, /*as_rgb=*/false));
+  EXPECT_EQ(calls, 1);
+}
+
+TEST(Bitmap, GrayFileRowsPreserveCorruptAndMissingReadFailure) {
+  for (const std::string extension : {"jpg", "png"}) {
+    const auto path = CreateTestDir() / ("gray-corrupt." + extension);
+    Bitmap source(128, 512, true);
+    std::mt19937 random(41);
+    for (auto& value : source.RowMajorData()) {
+      value = static_cast<uint8_t>(random());
+    }
+    ASSERT_TRUE(source.Write(path));
+    if (extension == "jpg") {
+      std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+      ASSERT_TRUE(file.is_open());
+      const auto size = std::filesystem::file_size(path);
+      ASSERT_GT(size, 128);
+      file.seekp(static_cast<std::streamoff>(size - 64));
+      const std::array<char, 2> marker = {static_cast<char>(0xff),
+                                          static_cast<char>(0xd8)};
+      file.write(marker.data(), marker.size());
+      ASSERT_TRUE(file.good());
+    } else {
+      const auto size = std::filesystem::file_size(path);
+      std::filesystem::resize_file(path, size / 2);
+    }
+    Bitmap rgb;
+    const bool ordinary = rgb.Read(path, /*as_rgb=*/true);
+    if (extension == "png") {
+      ASSERT_FALSE(ordinary);
+    }
+    Bitmap gray;
+    const bool sampled = gray.Read(path, /*as_rgb=*/false);
+    ASSERT_EQ(sampled, ordinary);
+    if (sampled) {
+      EXPECT_EQ(gray.RowMajorData(), rgb.CloneAsGrey().RowMajorData());
+    }
+    // Failed bitmap pixel/metadata contents have no claimed equivalence.
+    EXPECT_FALSE(gray.Read(path.parent_path() / "missing.png", false));
+    Bitmap recovery;
+    recovery = Bitmap(2, 2, false);
+    recovery.Fill(BitmapColor<uint8_t>(19));
+    const auto good = path.parent_path() / "recovery.png";
+    ASSERT_TRUE(recovery.Write(good));
+    ASSERT_TRUE(gray.Read(good, false));
+    EXPECT_EQ(gray.RowMajorData(), recovery.RowMajorData());
+  }
 }
 
 TEST(BitmapReader, ManagedFailureNeverFallsBackToDisk) {
