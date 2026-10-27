@@ -547,6 +547,21 @@ bool Bitmap::Read(const std::filesystem::path& path,
   if (auto reader = ScopedBitmapReader::Find(path)) {
     return reader->Read(path, as_rgb, linearize_colorspace, this);
   }
+  return ReadFromFile(path, as_rgb, linearize_colorspace);
+}
+
+std::optional<bool> Bitmap::ReadIfUnmanaged(const std::filesystem::path& path,
+                                            const bool as_rgb,
+                                            const bool linearize_colorspace) {
+  if (ScopedBitmapReader::Find(path)) {
+    return std::nullopt;
+  }
+  return ReadFromFile(path, as_rgb, linearize_colorspace);
+}
+
+bool Bitmap::ReadFromFile(const std::filesystem::path& path,
+                          const bool as_rgb,
+                          const bool linearize_colorspace) {
   if (!ExistsFile(path)) {
     VLOG(3) << "Failed to read bitmap, because file does not exist";
     return false;

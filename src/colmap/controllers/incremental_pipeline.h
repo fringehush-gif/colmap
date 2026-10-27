@@ -62,6 +62,10 @@ struct IncrementalPipelineOptions {
   // Whether to extract colors for reconstructed points.
   bool extract_colors = true;
 
+  // Overlap one file-backed image decode with refinement. The decoded image
+  // can remain resident during bundle adjustment. Managed readers stay serial.
+  bool overlap_color_decode = false;
+
   // The number of threads to use during reconstruction.
   int num_threads = -1;
 

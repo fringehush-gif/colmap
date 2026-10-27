@@ -8,9 +8,11 @@
 
 #include <array>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -1520,6 +1522,64 @@ TEST(BitmapReader, ExactRosterAndAdmittedLease) {
   admitted.reset();
   Bitmap missing;
   EXPECT_FALSE(missing.Read(path));
+}
+
+TEST(BitmapReader, UnmanagedReadMatchesNormalFileRead) {
+  const auto path =
+      std::filesystem::absolute(CreateTestDir() / "unmanaged.png");
+  Bitmap disk(2, 2, true);
+  disk.Fill(BitmapColor<uint8_t>(17, 31, 63));
+  ASSERT_TRUE(disk.Write(path));
+  Bitmap normal;
+  ASSERT_TRUE(normal.Read(path));
+  Bitmap unmanaged;
+  const auto outcome = unmanaged.ReadIfUnmanaged(path);
+  ASSERT_TRUE(outcome.has_value());
+  ASSERT_TRUE(*outcome);
+  EXPECT_EQ(unmanaged.Width(), normal.Width());
+  EXPECT_EQ(unmanaged.Height(), normal.Height());
+  EXPECT_EQ(unmanaged.RowMajorData(), normal.RowMajorData());
+}
+
+TEST(BitmapReader, MissingUnmanagedReadReportsFailure) {
+  const auto path = std::filesystem::absolute(CreateTestDir() / "missing.png");
+  Bitmap target;
+  const auto outcome = target.ReadIfUnmanaged(path);
+  ASSERT_TRUE(outcome.has_value());
+  EXPECT_FALSE(*outcome);
+}
+
+TEST(BitmapReader, RegistrationAfterPrecheckDefersToCallerThread) {
+  const auto path = std::filesystem::absolute(CreateTestDir() / "managed.png");
+  Bitmap disk(1, 1, true);
+  disk.Fill(BitmapColor<uint8_t>(7, 8, 9));
+  ASSERT_TRUE(disk.Write(path));
+  ASSERT_EQ(ScopedBitmapReader::Find(path), nullptr);
+
+  // A registration can appear after a caller's precheck but before worker
+  // admission. It must not redirect that worker into a managed callback.
+  int calls = 0;
+  std::thread::id callback_thread;
+  const auto caller_thread = std::this_thread::get_id();
+  auto reader = ScopedBitmapReader::Create(
+      {path}, [&](const std::filesystem::path&, bool, bool, Bitmap*) {
+        ++calls;
+        callback_thread = std::this_thread::get_id();
+        return false;
+      });
+  Bitmap target;
+  auto read = std::async(std::launch::async,
+                         [&]() { return target.ReadIfUnmanaged(path); });
+  EXPECT_FALSE(read.get().has_value());
+  EXPECT_EQ(calls, 0);
+  EXPECT_FALSE(target.Read(path));
+  EXPECT_EQ(calls, 1);
+  EXPECT_EQ(callback_thread, caller_thread);
+  reader->Close();
+  const auto outcome = target.ReadIfUnmanaged(path);
+  ASSERT_TRUE(outcome.has_value());
+  ASSERT_TRUE(*outcome);
+  EXPECT_EQ(target.GetPixel(0, 0), BitmapColor<uint8_t>(7, 8, 9));
 }
 
 TEST(BitmapReader, ManagedFailureNeverFallsBackToDisk) {

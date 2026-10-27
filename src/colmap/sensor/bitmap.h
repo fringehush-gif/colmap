@@ -107,6 +107,13 @@ class Bitmap {
             bool as_rgb = true,
             bool linearize_colorspace = false);
 
+  // Try a file read without invoking managed callbacks. A managed path returns
+  // nullopt without changing the bitmap. Otherwise the provider choice is fixed
+  // at admission, as for Read(), and the value reports file-read success.
+  std::optional<bool> ReadIfUnmanaged(const std::filesystem::path& path,
+                                      bool as_rgb = true,
+                                      bool linearize_colorspace = false);
+
   // Write bitmap to file at given path. Defaults to converting to sRGB
   // colorspace for file storage.
   bool Write(const std::filesystem::path& path,
@@ -163,6 +170,10 @@ class Bitmap {
   };
 
  private:
+  bool ReadFromFile(const std::filesystem::path& path,
+                    bool as_rgb,
+                    bool linearize_colorspace);
+
   // Replace the image dimensions and pixel data, updating the metadata
   // accordingly. The channel count is preserved.
   void SetImageData(int width, int height, std::vector<uint8_t>&& data);

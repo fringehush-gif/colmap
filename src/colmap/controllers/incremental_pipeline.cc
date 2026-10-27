@@ -6,9 +6,21 @@
 #include "colmap/estimators/bundle_adjustment_caspar.h"
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 #include "colmap/scene/database.h"
+#include "colmap/sensor/bitmap.h"
+#include "colmap/sensor/bitmap_reader.h"
 #include "colmap/util/file.h"
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/timer.h"
+
+#include <future>
+#include <limits>
+#include <memory>
+#include <new>
+#include <optional>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace colmap {
 namespace {
@@ -71,14 +83,108 @@ void IterativeGlobalRefinement(const IncrementalPipelineOptions& options,
   }
 }
 
+struct ColorSamples {
+  std::vector<Eigen::Vector2d> coordinates;
+  std::vector<std::optional<Eigen::Vector3ub>> colors;
+};
+
+// nullopt defers a managed path to the mapping thread; a null payload is a
+// completed file-read failure and must not be retried.
+using PrefetchedColorImage =
+    std::future<std::optional<std::unique_ptr<ColorSamples>>>;
+
+PrefetchedColorImage PrefetchColorImage(const std::filesystem::path& image_path,
+                                        const Image& image) {
+  try {
+    const auto path = image_path / image.Name();
+    if (ScopedBitmapReader::Find(path)) {
+      return {};
+    }
+    std::vector<Eigen::Vector2d> coordinates;
+    coordinates.reserve(image.NumPoints2D());
+    for (const Point2D& point2D : image.Points2D()) {
+      // Eager sampling also visits inactive observations. Defer nonfinite or
+      // extreme values that the ordinary eligibility loop might never sample;
+      // bilinear interpolation converts floor(x/y) to int and adds one.
+      const double x = point2D.xy(0) - 0.5;
+      const double y = point2D.xy(1) - 0.5;
+      if (!(x >= std::numeric_limits<int>::min() &&
+            x < std::numeric_limits<int>::max() &&
+            y >= std::numeric_limits<int>::min() &&
+            y < std::numeric_limits<int>::max())) {
+        return {};
+      }
+      coordinates.push_back(point2D.xy);
+    }
+    return std::async(
+        std::launch::async,
+        [path, coordinates = std::move(coordinates)]() mutable
+            -> std::optional<std::unique_ptr<ColorSamples>> {
+          try {
+            Bitmap bitmap;
+            // Resolve admission once on this thread. A new managed registration
+            // before this point defers to the original serial read; one after
+            // it cannot redirect an already admitted file read into a callback.
+            const auto read = bitmap.ReadIfUnmanaged(path, /*as_rgb=*/true);
+            if (!read.has_value()) {
+              return std::nullopt;
+            }
+            if (!*read) {
+              return std::unique_ptr<ColorSamples>();
+            }
+            auto samples = std::make_unique<ColorSamples>();
+            samples->coordinates = std::move(coordinates);
+            samples->colors.reserve(samples->coordinates.size());
+            for (const Eigen::Vector2d& xy : samples->coordinates) {
+              const auto color =
+                  bitmap.InterpolateBilinear(xy(0) - 0.5, xy(1) - 0.5);
+              if (color.has_value()) {
+                const auto rgb = color->Cast<uint8_t>();
+                samples->colors.emplace_back(
+                    Eigen::Vector3ub(rgb.r, rgb.g, rgb.b));
+              } else {
+                samples->colors.emplace_back(std::nullopt);
+              }
+            }
+            // Release the full raster before the future becomes ready. Only
+            // copied coordinates and sampled colors survive refinement.
+            return std::move(samples);
+          } catch (const std::bad_alloc&) {
+            // Earlier residency may refuse an allocation that succeeds after
+            // refinement. Defer that attempt to the original color barrier.
+            return std::nullopt;
+          }
+        });
+  } catch (const std::system_error&) {
+    return {};
+  } catch (const std::bad_alloc&) {
+    return {};
+  }
+}
+
 void ExtractColors(const std::filesystem::path& image_path,
                    const image_t image_id,
-                   Reconstruction& reconstruction) {
-  if (!reconstruction.ExtractColorsForImage(image_id, image_path)) {
-    LOG(WARNING) << "Could not read image "
-                 << reconstruction.Image(image_id).Name() << " at path "
-                 << image_path << ".";
+                   Reconstruction& reconstruction,
+                   PrefetchedColorImage* prefetched_image = nullptr) {
+  std::optional<std::unique_ptr<ColorSamples>> decoded;
+  if (prefetched_image != nullptr && prefetched_image->valid()) {
+    decoded = prefetched_image->get();
   }
+  if (decoded.has_value()) {
+    if (*decoded != nullptr) {
+      const auto& samples = **decoded;
+      if (reconstruction.ExtractColorsForImageFromSamples(
+              image_id, samples.coordinates, samples.colors) ||
+          reconstruction.ExtractColorsForImage(image_id, image_path)) {
+        return;
+      }
+    }
+  } else if (reconstruction.ExtractColorsForImage(image_id, image_path)) {
+    return;
+  }
+  LOG(WARNING) << "Could not read image "
+               << reconstruction.Image(image_id).Name() << " at path "
+               << image_path << ".";
 }
 
 void WriteSnapshot(const Reconstruction& reconstruction,
@@ -634,6 +740,20 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
 
     if (reg_next_success) {
       const Image& image = reconstruction->Image(next_image_id);
+      // A std::async future joins on every exit, including interruption and
+      // exceptions. Only copied coordinates/path are used off the mapping
+      // thread.
+      PrefetchedColorImage prefetched_color;
+      image_t prefetched_image_id = kInvalidImageId;
+      if (options_->extract_colors && options_->overlap_color_decode) {
+        const auto image_ids = image.FramePtr()->ImageIds();
+        auto first_image = image_ids.begin();
+        if (first_image != image_ids.end()) {
+          prefetched_image_id = first_image->id;
+          prefetched_color = PrefetchColorImage(
+              options_->image_path, reconstruction->Image(prefetched_image_id));
+        }
+      }
       for (const data_t& data_id : image.FramePtr()->ImageIds()) {
         mapper.TriangulateImage(options_->Triangulation(), data_id.id);
       }
@@ -664,7 +784,11 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
 
       if (options_->extract_colors) {
         for (const data_t& data_id : image.FramePtr()->ImageIds()) {
-          ExtractColors(options_->image_path, data_id.id, *reconstruction);
+          ExtractColors(
+              options_->image_path,
+              data_id.id,
+              *reconstruction,
+              data_id.id == prefetched_image_id ? &prefetched_color : nullptr);
         }
       }
 
