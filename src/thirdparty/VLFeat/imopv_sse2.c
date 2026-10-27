@@ -265,7 +265,13 @@ VL_XCAT3(_vl_imconvcol_v, SFX, _sse2)
 #endif
   vl_uintptr src_begin, src_end, dst_begin, dst_end, filter_begin, filter_end ;
   /* Unsigned subtraction avoids signed overflow for the filter support. */
-  if (src_width >= 128 && src_height >= 32 && use_simd &&
+  /* AVX uses unaligned loads: its conservative span/alias admission does not
+     require the legacy SSE row-stride alignment. Keep the old scan admission
+     when no AVX leaf was compiled. SSE dispatch below still requires use_simd. */
+  if (src_width >= 128 && src_height >= 32 &&
+#if (FLT != VL_TYPE_FLOAT) || !defined(VL_ARCH_X64) || !defined(VL_IMOPV_PRIVATE_AVX_FLOAT)
+      use_simd &&
+#endif
       filt_end >= filt_begin && dheight > 0 &&
       dst_stride >= (transp ? (vl_size)dheight : src_width)) {
     vl_uintptr filter_count = (vl_uintptr)filt_end - (vl_uintptr)filt_begin ;
@@ -299,11 +305,11 @@ VL_XCAT3(_vl_imconvcol_v, SFX, _sse2)
 
   while (x < (signed)src_width) {
 #if (FLT == VL_TYPE_FLOAT) && defined(VL_ARCH_X64) && defined(VL_IMOPV_PRIVATE_AVX_FLOAT)
-    /* Reuse ALL accepted disjointness, shape, stride and 16-byte starting
-       alignment guards. Unaligned AVX loads do not require a new 32-byte ABI.
-       Strict width inequality conservatively retains the baseline tail. */
-    if (use_avx && src_width >= 128 && src_height >= 32 && use_simd &&
-        x + 32 < (signed)src_width && VALIGNED(src + x)) {
+    /* The existing AVX leaf uses loadu/storeu and needs no SIMD row-stride
+       or starting alignment. Preserve all span/alias/shape and CPU/OS checks;
+       strict width inequality conservatively retains the baseline tail. */
+    if (use_avx && src_width >= 128 && src_height >= 32 &&
+        x + 32 < (signed)src_width) {
       _vl_imconvcol_vf_avx_block32(dst, dst_stride, src, src_height, src_stride,
                                   filt, filt_begin, filt_end, step, flags, x) ;
       /* The leaf's destination traversal is local. Advance only the column
