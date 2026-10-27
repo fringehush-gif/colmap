@@ -71,6 +71,10 @@ void BindIncrementalPipeline(py::module& m) {
       .def_readwrite("extract_colors",
                      &Opts::extract_colors,
                      "Whether to extract colors for reconstructed points.")
+      .def_readwrite("overlap_color_decode",
+                     &Opts::overlap_color_decode,
+                     "Overlap one file-backed color read with refinement. "
+                     "Disable to avoid the extra decoder worker and residency.")
       .def_readwrite("num_threads",
                      &Opts::num_threads,
                      "The number of threads to use during reconstruction.")
