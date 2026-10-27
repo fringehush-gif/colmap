@@ -111,8 +111,8 @@ SourcePlan Plan(const std::vector<const PatchMatch::Problem*>& problems,
           image.GetHeight() != image.GetBitmap().Height())
         return {};
       if (geometric && (size_t(id) >= p->depth_maps->size() ||
-                        p->depth_maps->at(id).GetWidth() != image.GetWidth() ||
-                        p->depth_maps->at(id).GetHeight() != image.GetHeight()))
+                        p->InputDepthMap(id).GetWidth() != image.GetWidth() ||
+                        p->InputDepthMap(id).GetHeight() != image.GetHeight()))
         return {};
       width = std::max(width, image.GetWidth());
       height = std::max(height, image.GetHeight());
@@ -319,7 +319,7 @@ struct PatchMatchSparseSources::Impl {
       if constexpr (sizeof(T) == 1)
         source = image.GetBitmap().RowMajorData().data();
       else
-        source = p->depth_maps->at(id).GetPtr();
+        source = p->InputDepthMap(id).GetPtr();
       for (size_t row = 0; row < image.GetHeight(); ++row)
         std::memcpy(pixels.data() + row * l.width,
                     source + row * image.GetWidth(),

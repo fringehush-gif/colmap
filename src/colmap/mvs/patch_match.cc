@@ -138,7 +138,7 @@ void PatchMatch::Check() const {
 
     if (options_.geom_consistency) {
       THROW_CHECK_LT(image_idx, problem_.depth_maps->size()) << image_idx;
-      const DepthMap& depth_map = problem_.depth_maps->at(image_idx);
+      const DepthMap& depth_map = problem_.InputDepthMap(image_idx);
       THROW_CHECK_EQ(image.GetWidth(), depth_map.GetWidth()) << image_idx;
       THROW_CHECK_EQ(image.GetHeight(), depth_map.GetHeight()) << image_idx;
     }
@@ -556,6 +556,8 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
   if (options.geom_consistency) {
     depth_maps.resize(model.images.size());
     normal_maps.resize(model.images.size());
+    prepared->source_depth_leases.resize(model.images.size());
+    problem.source_depth_leases = &prepared->source_depth_leases;
   }
 
   problem.images = &images;
@@ -614,7 +616,16 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
           images.at(image_idx).SetBitmap(
               *workspace_->GetBitmapLease(image_idx));
           if (options.geom_consistency) {
-            depth_maps.at(image_idx) = *workspace_->GetDepthMapLease(image_idx);
+            const auto depth_lease = workspace_->GetDepthMapLease(image_idx);
+            // Only source maps may alias the immutable workspace owner. The
+            // reference retains its independent mutable initialization copy.
+            if (image_idx != problem.ref_image_idx &&
+                depth_lease->GetWidth() == images.at(image_idx).GetWidth() &&
+                depth_lease->GetHeight() == images.at(image_idx).GetHeight()) {
+              prepared->source_depth_leases.at(image_idx) = depth_lease;
+            } else {
+              depth_maps.at(image_idx) = *depth_lease;
+            }
             if (!options.reference_only_normal_materialization ||
                 image_idx == problem.ref_image_idx ||
                 !workspace_->ValidateSourceNormalWithoutMaterialization(
