@@ -14,6 +14,7 @@
 #include "colmap/util/types.h"
 
 #include <filesystem>
+#include <optional>
 #include <vector>
 
 #include <Eigen/Core>
@@ -22,6 +23,7 @@ namespace colmap {
 
 struct PlyPoint;
 class DatabaseCache;
+class Bitmap;
 
 // Reconstruction class holds all information about a single reconstructed
 // model. It is used by the mapping and bundle adjustment classes and can be
@@ -245,6 +247,16 @@ class Reconstruction {
   // @return              True if image could be read at given path.
   bool ExtractColorsForImage(image_t image_id,
                              const std::filesystem::path& path);
+
+  // Apply already decoded pixels using the same first-nonblack color rule.
+  void ExtractColorsForImageFromBitmap(image_t image_id, const Bitmap& bitmap);
+
+  // Apply samples in observation order using current point associations/colors.
+  // Return false, without writing, if coordinates or sample counts changed.
+  bool ExtractColorsForImageFromSamples(
+      image_t image_id,
+      const std::vector<Eigen::Vector2d>& coordinates,
+      const std::vector<std::optional<Eigen::Vector3ub>>& colors);
 
   // Extract colors for all 3D points by computing the mean color of all images.
   //

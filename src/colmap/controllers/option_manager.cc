@@ -715,6 +715,8 @@ void OptionManager::AddMapperOptions() {
   AddDefaultOption("Mapper.structure_less_registration_only",
                    &mapper->structure_less_registration_only);
   AddDefaultOption("Mapper.extract_colors", &mapper->extract_colors);
+  AddDefaultOption("Mapper.overlap_color_decode",
+                   &mapper->overlap_color_decode);
   AddDefaultOption("Mapper.num_threads", &mapper->num_threads);
   AddDefaultOption("Mapper.random_seed", &mapper->random_seed);
   AddDefaultOption("Mapper.min_focal_length_ratio",
