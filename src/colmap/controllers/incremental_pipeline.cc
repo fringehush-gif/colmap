@@ -12,6 +12,7 @@
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/timer.h"
 
+#include <array>
 #include <future>
 #include <limits>
 #include <memory>
@@ -121,11 +122,17 @@ PrefetchedColorImage PrefetchColorImage(const std::filesystem::path& image_path,
         [path, coordinates = std::move(coordinates)]() mutable
             -> std::optional<std::unique_ptr<ColorSamples>> {
           try {
-            Bitmap bitmap;
+            std::vector<std::array<double, 2>> sample_coordinates;
+            sample_coordinates.reserve(coordinates.size());
+            for (const Eigen::Vector2d& xy : coordinates) {
+              sample_coordinates.push_back({xy(0) - 0.5, xy(1) - 0.5});
+            }
+            std::vector<std::optional<BitmapColor<uint8_t>>> colors;
             // Resolve admission once on this thread. A new managed registration
             // before this point defers to the original serial read; one after
             // it cannot redirect an already admitted file read into a callback.
-            const auto read = bitmap.ReadIfUnmanaged(path, /*as_rgb=*/true);
+            const auto read = Bitmap::ReadBilinearSamplesIfUnmanaged(
+                path, sample_coordinates, &colors);
             if (!read.has_value()) {
               return std::nullopt;
             }
@@ -135,13 +142,10 @@ PrefetchedColorImage PrefetchColorImage(const std::filesystem::path& image_path,
             auto samples = std::make_unique<ColorSamples>();
             samples->coordinates = std::move(coordinates);
             samples->colors.reserve(samples->coordinates.size());
-            for (const Eigen::Vector2d& xy : samples->coordinates) {
-              const auto color =
-                  bitmap.InterpolateBilinear(xy(0) - 0.5, xy(1) - 0.5);
+            for (const auto& color : colors) {
               if (color.has_value()) {
-                const auto rgb = color->Cast<uint8_t>();
                 samples->colors.emplace_back(
-                    Eigen::Vector3ub(rgb.r, rgb.g, rgb.b));
+                    Eigen::Vector3ub(color->r, color->g, color->b));
               } else {
                 samples->colors.emplace_back(std::nullopt);
               }
