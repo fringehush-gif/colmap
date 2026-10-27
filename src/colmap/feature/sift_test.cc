@@ -37,11 +37,14 @@ TEST(SiftCPUConvolution, MatchesScalarReferenceAcrossLayouts) {
     int padding;
     int step;
   };
-  // Exercise the four-vector path, its strict-width tail, and small fallbacks.
+  // Exercise SSE2/AVX groups, 16-byte-only row alignment, vector tails, and
+  // small fallbacks.
   for (const Shape shape : {Shape{127, 31, 1, 1},
                             Shape{128, 32, 0, 1},
                             Shape{129, 35, 15, 2},
-                            Shape{144, 37, 0, 3}}) {
+                            Shape{144, 37, 0, 3},
+                            Shape{132, 37, 0, 2},
+                            Shape{257, 39, 15, 1}}) {
     const int source_stride = shape.width + shape.padding;
     std::vector<float> source(source_stride * shape.height);
     for (size_t i = 0; i < source.size(); ++i) {
