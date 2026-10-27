@@ -455,6 +455,49 @@ TEST(Bitmap, RescaleGrey) {
   EXPECT_EQ(bitmap2.Channels(), 1);
 }
 
+TEST(Bitmap, RescaleGrayTriangleMatchesOIIO) {
+  for (const auto shape : {std::array{61, 43, 31, 22},
+                           std::array{8, 5, 4, 3},
+                           std::array{7, 5, 1, 1},
+                           std::array{65, 33, 65, 17},
+                           std::array{65, 33, 33, 33},
+                           std::array{257, 255, 13, 11}}) {
+    for (const int pattern : {0, 127, 255, -1, -2}) {
+      SCOPED_TRACE(pattern);
+      SCOPED_TRACE(shape[0]);
+      Bitmap bitmap(shape[0], shape[1], false);
+      auto& pixels = bitmap.RowMajorData();
+      for (size_t i = 0; i < pixels.size(); ++i) {
+        pixels[i] =
+            pattern >= 0 ? static_cast<uint8_t>(pattern)
+            : pattern == -1
+                ? static_cast<uint8_t>(i * 37 + 11)
+                : static_cast<uint8_t>(i == pixels.size() / 2 ? 255 : 0);
+      }
+      const auto input = pixels;
+      std::vector<uint8_t> expected(static_cast<size_t>(shape[2]) * shape[3]);
+      OIIO::ImageBuf source(
+          OIIO::ImageSpec(shape[0], shape[1], 1, OIIO::TypeDesc::UINT8),
+          pixels.data());
+      OIIO::ImageBuf target(
+          OIIO::ImageSpec(shape[2], shape[3], 1, OIIO::TypeDesc::UINT8),
+          expected.data());
+#if OIIO_VERSION >= OIIO_MAKE_VERSION(3, 0, 0)
+      ASSERT_TRUE(OIIO::ImageBufAlgo::resize(
+          target, source, {{"filtername", "triangle"}}));
+#else
+      ASSERT_TRUE(OIIO::ImageBufAlgo::resize(target, source, "triangle", 0.0f));
+#endif
+      ASSERT_EQ(bitmap.RowMajorData(), input);
+      bitmap.Rescale(shape[2], shape[3], Bitmap::RescaleFilter::kBilinear);
+      EXPECT_EQ(bitmap.RowMajorData(), expected);
+      EXPECT_EQ(bitmap.Width(), shape[2]);
+      EXPECT_EQ(bitmap.Height(), shape[3]);
+      EXPECT_EQ(bitmap.Channels(), 1);
+    }
+  }
+}
+
 TEST(Bitmap, RescaleFilters) {
   Bitmap bitmap(4, 4, /*as_rgb=*/false);
   bitmap.Fill(BitmapColor<uint8_t>(0));
