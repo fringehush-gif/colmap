@@ -1607,6 +1607,69 @@ void WriteSolidColorImages(const Reconstruction& reconstruction,
   }
 }
 
+TEST(Reconstruction, ExtractColorSamplesUseCurrentAssociationsAndColor) {
+  Reconstruction reconstruction;
+  GenerateReconstruction(1, &reconstruction);
+  std::vector<Eigen::Vector2d> coordinates(10, Eigen::Vector2d::Zero());
+  std::vector<std::optional<Eigen::Vector3ub>> colors(10, std::nullopt);
+  colors[0] = Eigen::Vector3ub(10, 20, 30);
+  colors[1] = Eigen::Vector3ub(40, 50, 60);
+  colors[2] = Eigen::Vector3ub(70, 80, 90);
+  colors[4] = Eigen::Vector3ub(0, 0, 0);
+  colors[5] = Eigen::Vector3ub(100, 110, 120);
+
+  // Samples precede triangulation: associations are established afterwards.
+  Track first_track;
+  first_track.AddElement(1, 0);
+  first_track.AddElement(1, 1);
+  Track colored_track;
+  colored_track.AddElement(1, 2);
+  Track invalid_track;
+  invalid_track.AddElement(1, 3);
+  Track black_track;
+  black_track.AddElement(1, 4);
+  black_track.AddElement(1, 5);
+  const auto first =
+      reconstruction.AddPoint3D(Eigen::Vector3d::Zero(), first_track);
+  const auto colored = reconstruction.AddPoint3D(
+      Eigen::Vector3d::Zero(), colored_track, Eigen::Vector3ub(1, 2, 3));
+  const auto invalid =
+      reconstruction.AddPoint3D(Eigen::Vector3d::Zero(), invalid_track);
+  const auto black =
+      reconstruction.AddPoint3D(Eigen::Vector3d::Zero(), black_track);
+
+  ASSERT_TRUE(
+      reconstruction.ExtractColorsForImageFromSamples(1, coordinates, colors));
+  EXPECT_EQ(reconstruction.Point3D(first).color, *colors[0]);
+  EXPECT_EQ(reconstruction.Point3D(colored).color, Eigen::Vector3ub(1, 2, 3));
+  EXPECT_EQ(reconstruction.Point3D(invalid).color, Eigen::Vector3ub(0, 0, 0));
+  EXPECT_EQ(reconstruction.Point3D(black).color, *colors[5]);
+}
+
+TEST(Reconstruction, ExtractColorSamplesRejectChangedSnapshotWithoutWrites) {
+  Reconstruction reconstruction;
+  GenerateReconstruction(1, &reconstruction);
+  Track track;
+  track.AddElement(1, 0);
+  const auto point = reconstruction.AddPoint3D(Eigen::Vector3d::Zero(), track);
+  std::vector<Eigen::Vector2d> coordinates(10, Eigen::Vector2d::Zero());
+  std::vector<std::optional<Eigen::Vector3ub>> colors(
+      10, Eigen::Vector3ub(10, 20, 30));
+  coordinates.back().x() = 1;
+  EXPECT_FALSE(
+      reconstruction.ExtractColorsForImageFromSamples(1, coordinates, colors));
+  EXPECT_EQ(reconstruction.Point3D(point).color, Eigen::Vector3ub(0, 0, 0));
+  coordinates.back().x() = 0;
+  colors.pop_back();
+  EXPECT_FALSE(
+      reconstruction.ExtractColorsForImageFromSamples(1, coordinates, colors));
+  colors.emplace_back(Eigen::Vector3ub(10, 20, 30));
+  coordinates.pop_back();
+  EXPECT_FALSE(
+      reconstruction.ExtractColorsForImageFromSamples(1, coordinates, colors));
+  EXPECT_EQ(reconstruction.Point3D(point).color, Eigen::Vector3ub(0, 0, 0));
+}
+
 TEST(Reconstruction, ExtractColorsForAllImages) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions options;

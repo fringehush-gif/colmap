@@ -1084,6 +1084,13 @@ bool Reconstruction::ExtractColorsForImage(const image_t image_id,
     return false;
   }
 
+  ExtractColorsForImageFromBitmap(image_id, bitmap);
+  return true;
+}
+
+void Reconstruction::ExtractColorsForImageFromBitmap(const image_t image_id,
+                                                     const Bitmap& bitmap) {
+  const class Image& image = Image(image_id);
   const Eigen::Vector3ub kBlackColor(0, 0, 0);
   for (const Point2D& point2D : image.Points2D()) {
     if (point2D.HasPoint3D()) {
@@ -1098,7 +1105,34 @@ bool Reconstruction::ExtractColorsForImage(const image_t image_id,
       }
     }
   }
+}
 
+bool Reconstruction::ExtractColorsForImageFromSamples(
+    const image_t image_id,
+    const std::vector<Eigen::Vector2d>& coordinates,
+    const std::vector<std::optional<Eigen::Vector3ub>>& colors) {
+  const class Image& image = Image(image_id);
+  if (coordinates.size() != image.NumPoints2D() ||
+      colors.size() != coordinates.size()) {
+    return false;
+  }
+  // Validate the entire snapshot before applying any color. Triangulation and
+  // refinement change associations, but normally keep observation coordinates.
+  for (point2D_t index = 0; index < image.NumPoints2D(); ++index) {
+    if (image.Point2D(index).xy != coordinates[index]) {
+      return false;
+    }
+  }
+  const Eigen::Vector3ub kBlackColor(0, 0, 0);
+  for (point2D_t index = 0; index < image.NumPoints2D(); ++index) {
+    const Point2D& point2D = image.Point2D(index);
+    if (point2D.HasPoint3D()) {
+      struct Point3D& point3D = Point3D(point2D.point3D_id);
+      if (point3D.color == kBlackColor && colors[index].has_value()) {
+        point3D.color = *colors[index];
+      }
+    }
+  }
   return true;
 }
 
