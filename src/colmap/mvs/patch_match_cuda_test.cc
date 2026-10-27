@@ -778,6 +778,35 @@ TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {
   }
 }
 
+TEST_F(CudaTest, SparseSourceCapabilityAndUnavailableContract) {
+  Inputs input = MakeInputs(0, 9, 257, 513);
+  std::vector<PatchMatch::Problem> problems(3);
+  std::vector<const PatchMatch::Problem*> pointers;
+  for (int ref = 0; ref < 3; ++ref) {
+    auto& problem = problems[ref];
+    problem.ref_image_idx = ref;
+    problem.images = &input.images;
+    problem.depth_maps = &input.depths;
+    problem.normal_maps = &input.normals;
+    for (int id = 0; id < static_cast<int>(input.images.size()); ++id) {
+      if (id != ref) problem.src_image_idxs.push_back(id);
+    }
+    pointers.push_back(&problem);
+  }
+  const bool supported = PatchMatchSparseSources::IsSupported();
+#if CUDART_VERSION < 13020
+  EXPECT_FALSE(supported);
+#endif
+  if (!supported) {
+    EXPECT_EQ(PatchMatchSparseSources::Budget(pointers, true), 0);
+    EXPECT_FALSE(PatchMatchSparseSources::Create(pointers, true));
+  } else {
+    // A supported lane must still admit this known-profitable fixture;
+    // Budget==0 must not turn a regression into a capability skip.
+    EXPECT_GT(PatchMatchSparseSources::Budget(pointers, true), 0);
+  }
+}
+
 TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
   // One workspace identity; five references reuse differently ordered subsets.
   // Varying source dimensions exercise the original zero-padded layer extent.
@@ -839,6 +868,11 @@ TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
         EXPECT_TRUE(std::any_of(depth.begin(), depth.end(), [](float value) {
           return value > 0.0f;
         }));
+      }
+      if (!PatchMatchSparseSources::IsSupported()) {
+        EXPECT_EQ(PatchMatchSparseSources::Budget(pointers, geometry), 0);
+        EXPECT_FALSE(PatchMatchSparseSources::Create(pointers, geometry));
+        continue;
       }
       ASSERT_GT(PatchMatchSparseSources::Budget(pointers, geometry), 0);
       auto shared = PatchMatchSparseSources::Create(pointers, geometry);
@@ -935,6 +969,22 @@ TEST_F(CudaTest, ImmutableSourceDepthLeasesPreserveThreeViewGeoOutput) {
     expected.push_back(read(owner));
   }
 
+  // Lease semantics are independent of sparse-array capability. Run this
+  // comparison on older toolkits/devices too, before the sparse-only section.
+  for (int ref = 0; ref < kReferences; ++ref) {
+    PatchMatchCuda leased(options, new_problems[ref]);
+    leased.Run();
+    const auto actual = read(leased);
+    ExpectExactlyEqual(std::get<0>(expected[ref]), std::get<0>(actual));
+    ExpectExactlyEqual(std::get<1>(expected[ref]), std::get<1>(actual));
+    ExpectExactlyEqual(std::get<2>(expected[ref]), std::get<2>(actual));
+    EXPECT_EQ(std::get<3>(expected[ref]), std::get<3>(actual));
+  }
+  if (!PatchMatchSparseSources::IsSupported()) {
+    EXPECT_EQ(PatchMatchSparseSources::Budget(new_pointers, true), 0);
+    EXPECT_FALSE(PatchMatchSparseSources::Create(new_pointers, true));
+    return;
+  }
   ASSERT_GT(PatchMatchSparseSources::Budget(new_pointers, true), 0);
   auto shared = PatchMatchSparseSources::Create(new_pointers, true);
   ASSERT_TRUE(shared);

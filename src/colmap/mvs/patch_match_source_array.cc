@@ -348,6 +348,14 @@ struct PatchMatchSparseSources::Impl {
 PatchMatchSparseSources::PatchMatchSparseSources(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
 PatchMatchSparseSources::~PatchMatchSparseSources() = default;
+bool PatchMatchSparseSources::IsSupported() {
+#ifdef COLMAP_SPARSE_SOURCE_RUNTIME
+  SourceSupport support;
+  return support.Query();
+#else
+  return false;
+#endif
+}
 size_t PatchMatchSparseSources::Budget(
     const std::vector<const PatchMatch::Problem*>& problems, bool geometric) {
 #ifdef COLMAP_SPARSE_SOURCE_RUNTIME
