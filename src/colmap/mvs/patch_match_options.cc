@@ -43,11 +43,23 @@ void PatchMatchOptions::Print() const {
   PrintOption(write_consistency_graph);
   PrintOption(rotation_buffer_reuse);
   PrintOption(checkpoint_hmm);
+  PrintOption(probability_unorm16);
   PrintOption(allow_missing_files);
   PrintOption(num_threads);
 }
 
 bool PatchMatchOptions::Check() const {
+  if (probability_unorm16 && !checkpoint_hmm) {
+    LOG(ERROR)
+        << "PatchMatchStereo.probability_unorm16 requires checkpoint_hmm";
+    return false;
+  }
+#if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+  if (probability_unorm16) {
+    LOG(ERROR) << "PatchMatchStereo.probability_unorm16 requires CUDA";
+    return false;
+  }
+#endif
 #ifdef COLMAP_HIP_ENABLED
   if (checkpoint_hmm) {
     LOG(ERROR) << "PatchMatchStereo.checkpoint_hmm requires CUDA";

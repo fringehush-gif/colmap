@@ -1,0 +1,365 @@
+{
+  "candidate": "UN2",
+  "change": "Optional UNORM16 persistent previous selection probabilities; HMM and solver arithmetic remain FP32",
+  "option": "PatchMatchStereo.probability_unorm16",
+  "default": false,
+  "requires": [
+    "CUDA",
+    "checkpoint_hmm"
+  ],
+  "baseCommit": "d297c1ed12ee392731ec638bfbbc2ada01d53ebd",
+  "storageMeasurements": {
+    "scene": "FountainP11",
+    "gpu": "RTX3080Ti",
+    "cpuWorkers": 12,
+    "references": 5,
+    "sourcesPerReference": 10,
+    "order": "C-T-C",
+    "warmup": false,
+    "observationsPerResolution": {
+      "control": 2,
+      "candidate": 1
+    },
+    "measurementClass": "shared diagnostic; compiled storage implementation before runtime-option integration",
+    "results": [
+      {
+        "resolution": 1536,
+        "calls": [
+          {
+            "arm": "C",
+            "wallSeconds": 5.504866167029832,
+            "cpuSeconds": 6.114457999999999,
+            "peakRssMiB": 1253.28125,
+            "sampledMeanRssMiB": 1016.1381392045455,
+            "sampledWholeDevicePeakVramMiB": 3224.2265625,
+            "sampledWholeDeviceMeanVramMiB": 2863.6725260416665
+          },
+          {
+            "arm": "T",
+            "wallSeconds": 5.347713073017076,
+            "cpuSeconds": 5.911852,
+            "peakRssMiB": 1238.78515625,
+            "sampledMeanRssMiB": 1011.7844460227273,
+            "sampledWholeDevicePeakVramMiB": 3086.2265625,
+            "sampledWholeDeviceMeanVramMiB": 2818.6725260416665
+          },
+          {
+            "arm": "C",
+            "wallSeconds": 5.192093549994752,
+            "cpuSeconds": 5.7121889999999995,
+            "peakRssMiB": 1252.86328125,
+            "sampledMeanRssMiB": 1023.2088068181819,
+            "sampledWholeDevicePeakVramMiB": 3206.2265625,
+            "sampledWholeDeviceMeanVramMiB": 2901.005859375
+          }
+        ]
+      },
+      {
+        "resolution": 3072,
+        "calls": [
+          {
+            "arm": "C",
+            "wallSeconds": 17.91093345702393,
+            "cpuSeconds": 21.334575,
+            "peakRssMiB": 3447.79296875,
+            "sampledMeanRssMiB": 3008.4161241319443,
+            "sampledWholeDevicePeakVramMiB": 5993.7265625,
+            "sampledWholeDeviceMeanVramMiB": 5319.097439236111
+          },
+          {
+            "arm": "T",
+            "wallSeconds": 17.879736614006106,
+            "cpuSeconds": 21.100154,
+            "peakRssMiB": 3443.140625,
+            "sampledMeanRssMiB": 3000.5794270833335,
+            "sampledWholeDevicePeakVramMiB": 5391.7265625,
+            "sampledWholeDeviceMeanVramMiB": 4836.764105902777
+          },
+          {
+            "arm": "C",
+            "wallSeconds": 17.915388781984802,
+            "cpuSeconds": 21.513441,
+            "peakRssMiB": 3447.41796875,
+            "sampledMeanRssMiB": 3029.461371527778,
+            "sampledWholeDevicePeakVramMiB": 5981.7265625,
+            "sampledWholeDeviceMeanVramMiB": 5348.652994791667
+          }
+        ]
+      }
+    ]
+  },
+  "qualityMeasurements": {
+    "scene": "ETH3D Facade",
+    "referenceViews": 1,
+    "sourcesPerReference": 20,
+    "observationsPerArmPerResolution": 1,
+    "groundTruth": "Official laser accuracy/completeness/F1; independent laser XYZ PCA normals",
+    "measurementClass": "shared diagnostic; fixed retained native PHOTO, GEO only",
+    "results": [
+      {
+        "resolution": 1536,
+        "arms": {
+          "native": {
+            "f1At2cmPercent": 11.0093,
+            "accuracyAt2cmPercent": 62.51409999999999,
+            "completenessAt2cmPercent": 6.03616,
+            "officialTolerancesMeters": [
+              0.01,
+              0.02,
+              0.05,
+              0.1,
+              0.2,
+              0.5
+            ],
+            "officialAccuracy": [
+              0.482653,
+              0.625141,
+              0.841398,
+              0.955935,
+              0.979437,
+              0.99215
+            ],
+            "officialCompleteness": [
+              0.0172836,
+              0.0603616,
+              0.164849,
+              0.214097,
+              0.237529,
+              0.269229
+            ],
+            "officialF1": [
+              0.0333721,
+              0.110093,
+              0.275685,
+              0.349842,
+              0.382336,
+              0.42353
+            ],
+            "wallSeconds": 6.560439758002758,
+            "cpuSeconds": 6.107925,
+            "peakRssMiB": 1009.28125,
+            "sampledMeanRssMiB": 606.8082932692307,
+            "sampledWholeDevicePeakVramMiB": 725.6640625,
+            "sampledWholeDeviceMeanVramMiB": 432.3314732142857
+          },
+          "candidate": {
+            "f1At2cmPercent": 11.0161,
+            "accuracyAt2cmPercent": 62.348800000000004,
+            "completenessAt2cmPercent": 6.0418,
+            "officialTolerancesMeters": [
+              0.01,
+              0.02,
+              0.05,
+              0.1,
+              0.2,
+              0.5
+            ],
+            "officialAccuracy": [
+              0.481475,
+              0.623488,
+              0.840389,
+              0.956276,
+              0.979547,
+              0.992364
+            ],
+            "officialCompleteness": [
+              0.0172916,
+              0.060418,
+              0.164944,
+              0.214004,
+              0.237292,
+              0.268713
+            ],
+            "officialF1": [
+              0.0333843,
+              0.110161,
+              0.275764,
+              0.34974,
+              0.382036,
+              0.42291
+            ],
+            "wallSeconds": 4.645528412016574,
+            "cpuSeconds": 4.7505049999999995,
+            "peakRssMiB": 984.328125,
+            "sampledMeanRssMiB": 694.026171875,
+            "sampledWholeDevicePeakVramMiB": 663.6640625,
+            "sampledWholeDeviceMeanVramMiB": 487.93125
+          }
+        }
+      },
+      {
+        "resolution": 3072,
+        "arms": {
+          "native": {
+            "f1At2cmPercent": 16.2857,
+            "accuracyAt2cmPercent": 65.4658,
+            "completenessAt2cmPercent": 9.29955,
+            "officialTolerancesMeters": [
+              0.01,
+              0.02,
+              0.05,
+              0.1,
+              0.2,
+              0.5
+            ],
+            "officialAccuracy": [
+              0.52737,
+              0.654658,
+              0.874378,
+              0.983003,
+              0.992743,
+              0.996606
+            ],
+            "officialCompleteness": [
+              0.0476795,
+              0.0929955,
+              0.183664,
+              0.214561,
+              0.235397,
+              0.268591
+            ],
+            "officialF1": [
+              0.0874525,
+              0.162857,
+              0.303563,
+              0.352239,
+              0.380556,
+              0.423142
+            ],
+            "wallSeconds": 15.474861234019045,
+            "cpuSeconds": 17.885852999999997,
+            "peakRssMiB": 2401.18359375,
+            "sampledMeanRssMiB": 1759.1779233870968,
+            "sampledWholeDevicePeakVramMiB": 2041.6640625,
+            "sampledWholeDeviceMeanVramMiB": 1594.37255859375
+          },
+          "candidate": {
+            "f1At2cmPercent": 16.308500000000002,
+            "accuracyAt2cmPercent": 65.5204,
+            "completenessAt2cmPercent": 9.31332,
+            "officialTolerancesMeters": [
+              0.01,
+              0.02,
+              0.05,
+              0.1,
+              0.2,
+              0.5
+            ],
+            "officialAccuracy": [
+              0.528278,
+              0.655204,
+              0.874736,
+              0.983149,
+              0.992847,
+              0.996649
+            ],
+            "officialCompleteness": [
+              0.0477875,
+              0.0931332,
+              0.183664,
+              0.21419,
+              0.235015,
+              0.268444
+            ],
+            "officialF1": [
+              0.0876466,
+              0.163085,
+              0.303585,
+              0.351748,
+              0.380065,
+              0.422964
+            ],
+            "wallSeconds": 14.461723597021773,
+            "cpuSeconds": 16.499441,
+            "peakRssMiB": 2402.58984375,
+            "sampledMeanRssMiB": 1788.9839709051723,
+            "sampledWholeDevicePeakVramMiB": 1803.6640625,
+            "sampledWholeDeviceMeanVramMiB": 1451.753125
+          }
+        }
+      }
+    ],
+    "normalStrata": [
+      {
+        "resolution": 1536,
+        "stratum": "uniform",
+        "sampled": 1024,
+        "accepted": 301,
+        "controlAngleDegrees": {
+          "mean": 11.346987498997047,
+          "median": 4.757223806240213,
+          "p95": 58.36340520084476
+        },
+        "candidateAngleDegrees": {
+          "mean": 11.144011217006735,
+          "median": 4.485352207564315,
+          "p95": 50.610690115312174
+        }
+      },
+      {
+        "resolution": 1536,
+        "stratum": "changedAnyPlane",
+        "sampled": 1024,
+        "accepted": 291,
+        "controlAngleDegrees": {
+          "mean": 12.121562131705753,
+          "median": 5.12587882386589,
+          "p95": 60.64533447873352
+        },
+        "candidateAngleDegrees": {
+          "mean": 12.211817659055589,
+          "median": 4.953099434340757,
+          "p95": 55.23737340167865
+        }
+      },
+      {
+        "resolution": 3072,
+        "stratum": "uniform",
+        "sampled": 1024,
+        "accepted": 337,
+        "controlAngleDegrees": {
+          "mean": 12.774552602659933,
+          "median": 5.627400471594947,
+          "p95": 60.61757270729354
+        },
+        "candidateAngleDegrees": {
+          "mean": 12.499656810696855,
+          "median": 5.478161448281228,
+          "p95": 56.23316040927618
+        }
+      },
+      {
+        "resolution": 3072,
+        "stratum": "changedAnyPlane",
+        "sampled": 1024,
+        "accepted": 320,
+        "controlAngleDegrees": {
+          "mean": 11.722309103759947,
+          "median": 6.109350128122856,
+          "p95": 49.487097391646365
+        },
+        "candidateAngleDegrees": {
+          "mean": 11.326362405412695,
+          "median": 5.590326833350012,
+          "p95": 44.60593473619865
+        }
+      }
+    ]
+  },
+  "finalRuntimeQualification": {
+    "gpuTestsPassed": 50,
+    "newTypedPairAndFiveReferenceCases": 2,
+    "rotationReuse": [
+      false,
+      true
+    ],
+    "defaultExactDepthNormalFiles": 20,
+    "resolutions": [
+      1536,
+      3072
+    ],
+    "optionManagerRoundTripPassed": true,
+    "productionTranslationUnitsRebuilt": 8,
+    "cudaTranslationUnitsRebuilt": 1
+  }
+}

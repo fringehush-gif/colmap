@@ -238,8 +238,10 @@ void PatchMatchController::Run() {
         for (size_t next = index; next < batch_end; ++next)
           batch_shapes.emplace_back(std::get<0>(shape(next)),
                                     std::get<1>(shape(next)));
-        if (CanBatchPatchMatchViews(
-                batch_shapes, phase.geom_consistency, phase.checkpoint_hmm)) {
+        if (CanBatchPatchMatchViews(batch_shapes,
+                                    phase.geom_consistency,
+                                    phase.checkpoint_hmm,
+                                    phase.probability_unorm16)) {
           std::vector<size_t> indices;
           for (size_t next = index; next < batch_end; ++next)
             indices.push_back(next);
@@ -259,7 +261,8 @@ void PatchMatchController::Run() {
                                      std::get<0>(second_shape),
                                      std::get<1>(second_shape),
                                      phase.geom_consistency,
-                                     phase.checkpoint_hmm)) {
+                                     phase.checkpoint_hmm,
+                                     phase.probability_unorm16)) {
             thread_pool_->AddTask(&PatchMatchController::ProcessProblemPair,
                                   this,
                                   phase,
@@ -727,7 +730,8 @@ void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
                               second_ref.GetWidth(),
                               second_ref.GetHeight(),
                               options.geom_consistency,
-                              options.checkpoint_hmm)) {
+                              options.checkpoint_hmm,
+                              options.probability_unorm16)) {
     run_native(first);
     run_native(second);
     return;
@@ -846,7 +850,8 @@ void PatchMatchController::ProcessProblemBatch(
                                    b.GetWidth(),
                                    b.GetHeight(),
                                    options.geom_consistency,
-                                   options.checkpoint_hmm)) {
+                                   options.checkpoint_hmm,
+                                   options.probability_unorm16)) {
           if (!owners[i])
             owners[i] = std::make_unique<PatchMatchCuda>(input[i]->options,
                                                          input[i]->problem);
@@ -913,8 +918,10 @@ void PatchMatchController::ProcessProblemBatch(
     }
     shapes.emplace_back(std::get<0>(this_shape), std::get<1>(this_shape));
   }
-  if (!CanBatchPatchMatchViews(
-          shapes, options.geom_consistency, options.checkpoint_hmm)) {
+  if (!CanBatchPatchMatchViews(shapes,
+                               options.geom_consistency,
+                               options.checkpoint_hmm,
+                               options.probability_unorm16)) {
     pair_or_single_fallback();
     return;
   }

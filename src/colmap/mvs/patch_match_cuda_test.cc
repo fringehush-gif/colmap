@@ -569,7 +569,8 @@ TEST_F(CudaTest, PairedTallInitialCostStripeTailsPreserveOutputs) {
 void ExpectReferenceBatchOutputs(const size_t count,
                                  const bool geometry,
                                  const bool reuse,
-                                 const bool checkpoint = false) {
+                                 const bool checkpoint = false,
+                                 const bool unorm16 = false) {
   const auto make_problem = [](Inputs& images) {
     PatchMatch::Problem problem;
     problem.ref_image_idx = 0;
@@ -587,14 +588,18 @@ void ExpectReferenceBatchOutputs(const size_t count,
   options.num_samples = defaults.num_samples;
   options.num_iterations = defaults.num_iterations;
   options.sigma_spatial = options.window_radius;
+  if (unorm16) {
+    options.checkpoint_hmm = true;
+    options.probability_unorm16 = true;
+  }
   std::vector<std::unique_ptr<Inputs> > inputs;
   std::vector<PatchMatch::Problem> problems;
   for (size_t i = 0; i < count; ++i) {
     inputs.push_back(std::make_unique<Inputs>(
-        MakeInputs(static_cast<int>(i % 2),
+        MakeInputs(unorm16 ? 0 : static_cast<int>(i % 2),
                    9,
-                   checkpoint ? 129 : (i % 2 ? 153 : 149),
-                   checkpoint ? 257 : 0)));
+                   unorm16 ? 25 : (checkpoint ? 129 : (i % 2 ? 153 : 149)),
+                   unorm16 ? 33 : (checkpoint ? 257 : 0))));
     problems.push_back(make_problem(*inputs.back()));
   }
   const auto construct = [&]() {
@@ -639,7 +644,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
   if (!checkpoint) incumbent.clear();
   options.checkpoint_hmm = checkpoint;
   auto batch = construct();
-  if (checkpoint) {
+  if (checkpoint && !unorm16) {
     for (size_t i = 0; i < count; ++i)
       EXPECT_LT(batch[i]->PairPeakBytes(), incumbent[i]->PairPeakBytes());
   }
@@ -696,6 +701,28 @@ TEST_F(CudaTest, ThreeViewCheckpointGeometricBatchPreservesFullStorageOutputs) {
 
 TEST_F(CudaTest, FiveViewCheckpointGeometricBatchPreservesFullStorageOutputs) {
   ExpectReferenceBatchOutputs(5, true, true, true);
+}
+
+TEST_F(CudaTest, Unorm16CheckpointPhotoPairAndFiveRefPreserveOutputs) {
+  EXPECT_TRUE(CanPairPatchMatchViews(33, 25, 33, 25, false, true, true));
+  EXPECT_TRUE(CanBatchPatchMatchViews(
+      std::vector<std::pair<size_t, size_t> >(5, {33, 25}), false, true, true));
+  for (const bool reuse : {false, true}) {
+    SCOPED_TRACE(::testing::Message() << "rotation_reuse=" << reuse);
+    ExpectReferenceBatchOutputs(3, false, reuse, true, true);
+    ExpectReferenceBatchOutputs(5, false, reuse, true, true);
+  }
+}
+
+TEST_F(CudaTest, Unorm16CheckpointGeometricPairAndFiveRefPreserveOutputs) {
+  EXPECT_TRUE(CanPairPatchMatchViews(33, 25, 33, 25, true, true, true));
+  EXPECT_TRUE(CanBatchPatchMatchViews(
+      std::vector<std::pair<size_t, size_t> >(5, {33, 25}), true, true, true));
+  for (const bool reuse : {false, true}) {
+    SCOPED_TRACE(::testing::Message() << "rotation_reuse=" << reuse);
+    ExpectReferenceBatchOutputs(3, true, reuse, true, true);
+    ExpectReferenceBatchOutputs(5, true, reuse, true, true);
+  }
 }
 
 TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {

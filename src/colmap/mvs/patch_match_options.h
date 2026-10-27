@@ -117,6 +117,10 @@ struct PatchMatchOptions {
   bool checkpoint_hmm = false;
 #endif
 
+  // Store previous selection probabilities as UNORM16 in checkpoint mode.
+  // This changes source sampling and may change depth and normals.
+  bool probability_unorm16 = false;
+
   void Print() const;
   bool Check() const;
 };
