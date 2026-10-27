@@ -728,6 +728,59 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
     return false;
   }
 
+  // The ordinary RGB8-to-gray route otherwise holds a full RGB image while
+  // CloneAsGrey allocates its output. Keep the same decoder and gray
+  // expression, but convert bounded RGB rows directly into the final gray pixel
+  // storage.
+  constexpr int kGrayBatchRows = 64;
+  const std::string format = input->format_name();
+  if (!as_rgb && !linearize_colorspace && format == "jpeg" &&
+      image_spec.format == OIIO::TypeDesc::UINT8 &&
+      image_spec.channelformats.empty() && file_channels == 3 && width_ > 0 &&
+      height_ > 0 &&
+      width_ <= std::numeric_limits<int>::max() / (3 * kGrayBatchRows) &&
+      height_ <= std::numeric_limits<int>::max() / width_ &&
+      image_spec.depth == 1 && image_spec.x == 0 && image_spec.y == 0 &&
+      image_spec.z == 0 && image_spec.tile_width == 0 &&
+      image_spec.tile_height == 0 && !image_spec.deep) {
+    const size_t width = static_cast<size_t>(width_);
+    std::vector<uint8_t> gray(width * static_cast<size_t>(height_));
+    std::vector<uint8_t> rgb_rows(
+        width * 3 * static_cast<size_t>(std::min(kGrayBatchRows, height_)));
+    for (int begin = 0; begin < height_;) {
+      const int end = begin + std::min(kGrayBatchRows, height_ - begin);
+      if (!input->read_scanlines(0,
+                                 0,
+                                 begin,
+                                 end,
+                                 0,
+                                 0,
+                                 3,
+                                 OIIO::TypeDesc::UINT8,
+                                 rgb_rows.data())) {
+        const std::string error = input->geterror();
+        input->close();
+        VLOG(3) << "Failed to read bitmap: " << error;
+        return false;
+      }
+      ConvertPackedRGB8ToGrey(rgb_rows.data(),
+                              width * static_cast<size_t>(end - begin),
+                              gray.data() + width * static_cast<size_t>(begin));
+      begin = end;
+    }
+    input->close();
+    // Match ReadFromFile followed by CloneAsGrey: retain the complete decoder
+    // ImageSpec (including EXIF), changing only its channel count. Preserve the
+    // bitmap's existing linear_colorspace_ field, also for reused objects.
+    auto meta_data = std::make_unique<OIIOMetaData>();
+    meta_data->image_spec = image_spec;
+    meta_data->image_spec.nchannels = 1;
+    meta_data_ = std::move(meta_data);
+    channels_ = 1;
+    data_ = std::move(gray);
+    return true;
+  }
+
   data_.resize(width_ * height_ * channels_);
   // Note that OIIO supports reading a subset of channels.
   if (!input->read_image(
