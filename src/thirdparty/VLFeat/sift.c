@@ -701,7 +701,8 @@ fast_expn (double x)
   i = (int)vl_floor_d (x) ;
   r = x - i ;
   a = expn_tab [i    ] ;
-  b = expn_tab [i + 1] ;
+  /* The last table point has no right neighbor, including after rounding. */
+  b = expn_tab [VL_MIN(i + 1, EXPN_SZ)] ;
   return a + r * (b - a) ;
 }
 
