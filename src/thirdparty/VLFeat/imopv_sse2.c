@@ -50,7 +50,7 @@ _vl_imconvcol_sse2_float_span (void const *buffer,
 
 /* GCC >= 9's runtime AVX feature includes OSXSAVE and XCR0 XMM/YMM checks.
    VLFeat's older vl_cpu_has_avx() checks only CPUID and is not sufficient.
-   Keep other compilers (including MSVC) on the accepted SSE2 implementation.
+   Keep unqualified compilers and floating modes on accepted SSE2.
    The target attribute isolates AVX from the baseline TU; reset the ISA so an
    inherited -march cannot silently add AVX2/AVX512/FMA requirements to this leaf. */
 #if defined(VL_ARCH_X64) && defined(__GNUC__) && (__GNUC__ >= 9) && \
@@ -58,8 +58,37 @@ _vl_imconvcol_sse2_float_span (void const *buffer,
     !defined(__FMA__) && !defined(__FMA4__) && !defined(__AVX512F__)
 #define VL_IMOPV_PRIVATE_AVX_FLOAT 1
 #include <immintrin.h>
+#elif defined(VL_ARCH_X64) && defined(_MSC_VER) && (_MSC_VER >= 1939) && \
+      !defined(_M_ARM64EC) && !defined(__clang__) && \
+      !defined(_M_FP_FAST) && !defined(_M_FP_CONTRACT) && \
+      !defined(_M_FP_EXCEPT) && !defined(_M_FP_STRICT) && \
+      !defined(VL_IMOPV_MSVC_FORCE_SSE2)
+/* MSVC's qualified default/precise mode has no contraction or
+   exception tracking. No global /arch change: audit leaf containment in the
+   final object. Other compiler/FP modes retain the accepted SSE2 path. */
+#define VL_IMOPV_PRIVATE_AVX_FLOAT 1
+#include <immintrin.h>
+#include <intrin.h>
 
+static __declspec(noinline) vl_bool
+_vl_imopv_msvc_avx_ready(void)
+{
+  int info[4] ;
+  unsigned int const required = (1u << 26) | (1u << 27) | (1u << 28) ;
+  __cpuidex(info, 0, 0) ;
+  if (info[0] < 1) return VL_FALSE ;
+  __cpuidex(info, 1, 0) ;
+  if (((unsigned int)info[2] & required) != required) return VL_FALSE ;
+  return (_xgetbv(0) & 6) == 6 ;
+}
+#endif
+
+#if defined(VL_IMOPV_PRIVATE_AVX_FLOAT)
+#if defined(_MSC_VER)
+static __declspec(noinline) void
+#else
 static void __attribute__((target("arch=x86-64,avx,no-avx2,no-avx512f,no-fma,no-fma4"), noinline))
+#endif
 _vl_imconvcol_vf_avx_block32
 (float *dst, vl_size dst_stride,
  float const *src, vl_size src_height, vl_size src_stride,
@@ -258,7 +287,11 @@ VL_XCAT3(_vl_imconvcol_v, SFX, _sse2)
 #if (FLT == VL_TYPE_FLOAT) && defined(VL_ARCH_X64) && defined(VL_IMOPV_PRIVATE_AVX_FLOAT)
   /* Do not cache this in a mutable function-static: calls can be concurrent.
      GCC's initialized runtime feature table includes OS YMM-state support. */
+#if defined(_MSC_VER)
+  use_avx = separate_buffers && _vl_imopv_msvc_avx_ready() ;
+#else
   use_avx = separate_buffers && (__builtin_cpu_supports("avx") != 0) ;
+#endif
 #endif
 
   /* let filt point to the last sample of the filter */
