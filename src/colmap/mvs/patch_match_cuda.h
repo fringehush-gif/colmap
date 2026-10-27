@@ -11,6 +11,7 @@
 #include "colmap/mvs/normal_map.h"
 #include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/patch_match_hmm_checkpoint.h"
+#include "colmap/mvs/patch_match_probability_unorm16.h"
 #include "colmap/mvs/patch_match_state_map.h"
 #include "colmap/util/cuda_to_hip.h"
 
@@ -154,6 +155,8 @@ class PatchMatchCuda {
   std::unique_ptr<GpuMat<float>> normal_map_;
   std::unique_ptr<PatchMatchStateMap> sel_prob_map_;
   std::unique_ptr<PatchMatchStateMap> prev_sel_prob_map_;
+  // Exactly one previous-probability owner is allocated per reference.
+  std::unique_ptr<PatchMatchProbabilityUnorm16> prev_sel_prob_unorm16_map_;
   std::unique_ptr<PatchMatchStateMap> cost_map_;
   std::unique_ptr<PatchMatchHmmCheckpoint> hmm_checkpoint_;
   // Canonical original-image perimeter; corners retain one shared state.
@@ -198,6 +201,14 @@ bool CanPairPatchMatchViews(size_t first_width,
                             size_t second_height,
                             bool geometric,
                             bool checkpoint_hmm);
+// Select the occupancy query for the actual previous-probability storage.
+bool CanPairPatchMatchViews(size_t first_width,
+                            size_t first_height,
+                            size_t second_width,
+                            size_t second_height,
+                            bool geometric,
+                            bool checkpoint_hmm,
+                            bool probability_unorm16);
 
 // Both instances own prepared, independent real inputs on one CUDA device.
 void RunPatchMatchPair(PatchMatchCuda& first,
@@ -214,6 +225,11 @@ bool CanBatchPatchMatchViews(
     const std::vector<std::pair<size_t, size_t>>& view_shapes,
     bool geometric,
     bool checkpoint_hmm);
+bool CanBatchPatchMatchViews(
+    const std::vector<std::pair<size_t, size_t>>& view_shapes,
+    bool geometric,
+    bool checkpoint_hmm,
+    bool probability_unorm16);
 #endif
 
 }  // namespace mvs

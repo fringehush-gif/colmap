@@ -129,6 +129,30 @@ TEST(OptionManager, PatchMatchRotationBufferReuseRoundTrip) {
 #endif
 }
 
+TEST(OptionManager, PatchMatchProbabilityUnorm16RoundTrip) {
+  const auto config_path = CreateTestDir() / "probability-unorm16.ini";
+  OptionManager writer;
+  writer.AddPatchMatchStereoOptions();
+  EXPECT_FALSE(writer.patch_match_stereo->probability_unorm16);
+  EXPECT_TRUE(writer.patch_match_stereo->Check());
+  writer.patch_match_stereo->probability_unorm16 = true;
+  writer.patch_match_stereo->checkpoint_hmm = false;
+  EXPECT_FALSE(writer.patch_match_stereo->Check());
+  writer.patch_match_stereo->checkpoint_hmm = true;
+#if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
+  ASSERT_TRUE(writer.patch_match_stereo->Check());
+  writer.Write(config_path);
+  OptionManager reader;
+  reader.AddPatchMatchStereoOptions();
+  ASSERT_TRUE(reader.Read(config_path));
+  EXPECT_TRUE(reader.patch_match_stereo->probability_unorm16);
+  reader.ResetOptions(/*reset_paths=*/false);
+  EXPECT_FALSE(reader.patch_match_stereo->probability_unorm16);
+#else
+  EXPECT_FALSE(writer.patch_match_stereo->Check());
+#endif
+}
+
 TEST(OptionManager, StereoFusionDiagnosticOptionRoundTrip) {
   const auto config_path = CreateTestDir() / "fusion-diagnostic.ini";
   OptionManager writer;

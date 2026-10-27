@@ -1130,6 +1130,12 @@ void OptionManager::AddPatchMatchStereoOptions() {
       "Reduce GPU memory by checkpointing backward HMM messages. Replays "
       "each stripe and copies rotated planes; runtime depends on the "
       "workload.");
+  AddDefaultOption(
+      "PatchMatchStereo.probability_unorm16",
+      &patch_match_stereo->probability_unorm16,
+      "Store previous selection probabilities as UNORM16 in checkpoint "
+      "mode. Saves GPU memory but may change depth and normals; disabled "
+      "by default.");
   AddDefaultOption("PatchMatchStereo.num_threads",
                    &patch_match_stereo->num_threads);
 }
