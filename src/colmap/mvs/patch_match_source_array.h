@@ -18,6 +18,8 @@ namespace mvs {
 // release. No GPU LUT or changed shader sampling interface.
 class PatchMatchSparseSources {
  public:
+  // Build/device/driver-entrypoint support, independent of batch profitability.
+  static bool IsSupported();
   static size_t Budget(const std::vector<const PatchMatch::Problem*>& problems,
                        bool geometric);
   static std::shared_ptr<const PatchMatchSparseSources> Create(
