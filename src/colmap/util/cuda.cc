@@ -4,9 +4,11 @@
 
 #include "colmap/util/cudacc.h"
 #include "colmap/util/logging.h"
+#include "colmap/util/misc.h"
 
 #include <algorithm>
 #include <iostream>
+#include <string>
 
 namespace colmap {
 namespace {
@@ -26,7 +28,14 @@ int GetNumCudaDevices() {
   int num_cuda_devices = 0;
   const cudaError_t error = cudaGetDeviceCount(&num_cuda_devices);
 #if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
-  if (error == cudaErrorNoDevice || error == cudaErrorInsufficientDriver) {
+  if (error == cudaErrorInsufficientDriver) {
+    // Preserve the zero-device result for callers that can fall back to CPU,
+    // but do not discard the reason why GPU initialization failed.
+    LOG(WARNING) << "Cannot enumerate GPU devices: "
+                 << GetCudaErrorMessage(error);
+    return 0;
+  }
+  if (error == cudaErrorNoDevice) {
     return 0;
   }
 #endif
@@ -115,6 +124,25 @@ void SetCudaDevicesBlockingSync(const std::vector<int>& gpu_indices) {
 #else
   LOG(FATAL_THROW) << "Blocking CUDA host synchronization requires CUDA >= 12";
 #endif
+}
+
+bool CudaDeviceSupportsBf16(const std::string& gpu_index) {
+  std::vector<int> indices;
+  try {
+    indices = CSVToVector<int>(gpu_index);
+  } catch (const std::exception&) {
+    return false;
+  }
+  if (indices.size() != 1) {
+    return false;
+  }
+  cudaDeviceProp properties{};
+  if (cudaGetDeviceProperties(&properties, std::max(0, indices.front())) !=
+      cudaSuccess) {
+    return false;
+  }
+  // BF16 matrix kernels require Ampere (compute capability 8.0) or newer.
+  return properties.major >= 8;
 }
 
 }  // namespace colmap
