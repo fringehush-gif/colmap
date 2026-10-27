@@ -40,6 +40,20 @@ class PatchMatch {
     // Input depth maps for the geometric consistency term.
     std::vector<DepthMap>* depth_maps = nullptr;
 
+    // Optional immutable source maps retained from Workspace leases. The
+    // reference depth remains in depth_maps because initialization owns it.
+    std::vector<std::shared_ptr<const DepthMap>>* source_depth_leases = nullptr;
+
+    const DepthMap& InputDepthMap(const int image_idx) const {
+      if (source_depth_leases != nullptr && image_idx != ref_image_idx &&
+          image_idx >= 0 &&
+          static_cast<size_t>(image_idx) < source_depth_leases->size()) {
+        const auto& lease = source_depth_leases->at(image_idx);
+        if (lease != nullptr) return *lease;
+      }
+      return depth_maps->at(image_idx);
+    }
+
     // Input normal maps for the geometric consistency term.
     std::vector<NormalMap>* normal_maps = nullptr;
 
@@ -115,6 +129,7 @@ class PatchMatchController : public BaseController {
     PatchMatch::Problem problem;
     std::vector<Image> images;
     std::vector<DepthMap> depth_maps;
+    std::vector<std::shared_ptr<const DepthMap>> source_depth_leases;
     std::vector<NormalMap> normal_maps;
     std::filesystem::path depth_path, normal_path, consistency_path;
     PreparedProblem() = default;
