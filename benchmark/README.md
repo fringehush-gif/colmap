@@ -12,6 +12,9 @@ resumed. Custom rotation-buffer reuse was enabled. Preserve these conditions whe
 reusing the numbers. Later changes cannot be added to that headline.
 
 - [Pinned historical report](https://github.com/fringehush-gif/colmap/blob/d297c1ed12ee392731ec638bfbbc2ada01d53ebd/benchmark/upstream_validation_20261025.md)
+- [Earlier October 22 evidence](upstream_validation_20261022.json): Fountain
+  seven-stage pipeline, two observations per build; the separate Façade section
+  is dense-only from provided cameras. Both COLMAP arms used optimized Ceres P.
 - [Unrounded historical observations](upstream_validation_20261025.json): per-call
   wall/CPU/host memory and sampled whole-board VRAM, with timing and missing-data
   qualifications. Linux RSS and Windows working set are distinct measurements.
@@ -19,7 +22,8 @@ reusing the numbers. Later changes cannot be added to that headline.
   source revisions, Ceres enabling definitions, artifact identities, test selections,
   defaults and remaining runtime/quality gates.
 
-A compatible upstream-versus-custom Ceres comparison with COLMAP held fixed is
-pending. It starts with a short screen at 12 and 24 workers and records automatic
-selection, actual solver/activation and stopping behavior. No new Ceres or
-whole-stack speedup is claimed here.
+A separate [Ceres comparison with COLMAP fixed](ceres_attribution_20261027.md)
+records four measured observations per arm at 12 and 24 workers, automatic
+selection, actual solver and variable stopping work on one near-converged input.
+It supplies bounded Ceres-library evidence, not a whole-stack speedup or
+per-optimization activation measurement.
