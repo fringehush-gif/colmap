@@ -594,7 +594,7 @@
       "cpu": "Ryzen 3900X"
     },
     {
-      "case": "outdoor-death-1500-3080ti",
+      "case": "outdoor-scene-1500-3080ti",
       "platform": "Linux/WSL2",
       "gpu": "RTX 3080 Ti",
       "cpuWorkers": 12,

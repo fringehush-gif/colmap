@@ -11,7 +11,7 @@ transitions; the custom Façade run
 resumed. Custom rotation-buffer reuse was enabled. Preserve these conditions when
 reusing the numbers. Later changes cannot be added to that headline.
 
-- [Pinned historical report](https://github.com/fringehush-gif/colmap/blob/d297c1ed12ee392731ec638bfbbc2ada01d53ebd/benchmark/upstream_validation_20261025.md)
+- [Historical report, with neutral scene label](upstream_validation_20261025.md)
 - [Earlier October 22 evidence](upstream_validation_20261022.json): Fountain
   seven-stage pipeline, two observations per build; the separate Façade section
   is dense-only from provided cameras. Both COLMAP arms used optimized Ceres P.
