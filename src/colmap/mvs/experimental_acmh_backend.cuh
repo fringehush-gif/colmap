@@ -126,10 +126,44 @@ __global__ void InitialDonorMean(GpuMatView<float> costs,
   scores.Set(r, c, isfinite(sum) ? sum / sources : FLT_MAX);
 }
 
+__device__ inline int CountGeometricSupport(const RefCamera camera,
+                                            const Plane& p,
+                                            int r,
+                                            int c,
+                                            int num_sources,
+                                            cudaTextureObject_t poses,
+                                            cudaTextureObject_t source_depths,
+                                            const SweepOptions& options) {
+  float point[3];
+  ComputePointAtDepth(camera, r, c, p.depth, point);
+  const float min_tri_cos = cos(options.filter_min_triangulation_angle);
+  int count = 0;
+  for (int source = 0; source < num_sources; ++source) {
+    float tri, inc;
+    ComputeViewingAngles(poses, point, p.normal, source, &tri, &inc);
+    bool accepted = tri <= min_tri_cos && inc > 0.0f;
+    accepted = accepted &&
+               ComputeGeomConsistencyCost(camera,
+                                          poses,
+                                          source_depths,
+                                          r,
+                                          c,
+                                          p.depth,
+                                          source,
+                                          options.geom_consistency_max_cost) <=
+                   options.filter_geom_consistency_max_cost;
+    count += accepted;
+  }
+  return count;
+}
+
 // One warp owns two rows of sixteen checkerboard pixels each. All lanes
 // cooperate in publishing the compact halo before any bounds return. Donors
 // remain opposite color, so scheduling order within a color cannot change data.
-template <int kWindowSize, int kWindowStep, bool kGeometry>
+template <int kWindowSize,
+          int kWindowStep,
+          bool kGeometry,
+          bool kWeightedFinal = false>
 __global__ void Search(const RefCamera camera,
                        GpuMatView<float> costs,
                        GpuMatView<float> depths,
@@ -145,6 +179,7 @@ __global__ void Search(const RefCamera camera,
                        SweepOptions options,
                        int color,
                        unsigned int step) {
+  static_assert(!kWeightedFinal || kGeometry);
   using Cost = CompactPhotoConsistencyCostComputer<kWindowSize, kWindowStep>;
   constexpr int radius = kWindowSize / 2;
   constexpr int tile_width = Cost::kTileWidth;
@@ -260,6 +295,11 @@ __global__ void Search(const RefCamera camera,
   }
   float scores[15] = {0};
   float native_scores[15] = {0};
+  // Only a final filtered geometric selector uses these fifteen saturating
+  // two-bit counters. Requested minima above three use exact post-fold counts.
+  unsigned int packed_support = 0;
+  const int required_support = options.filter_min_num_consistent;
+  const float filter_min_tri_cos = cos(options.filter_min_triangulation_angle);
   float joint_total = 0.0f;
   float native_total = 0.0f;
   float current_point[3];
@@ -271,7 +311,7 @@ __global__ void Search(const RefCamera camera,
   const float iteration = float(step / 4);
   const float tau = 0.8f * expf(-(iteration * iteration) / 90.0f);
   // Jointly choose a source from the eight propagated hypotheses. The
-  // selected source weight is shared across all twelve candidates, including
+  // selected source weight is shared across all fifteen candidates, including
   // incumbent and refinement. A small floor preserves a defined fallback.
   for (int source = 0; source < costs.GetDepth(); ++source) {
     cost.src_image_idx = source;
@@ -318,15 +358,44 @@ __global__ void Search(const RefCamera camera,
     for (int h = 0; h < 15; ++h) {
       float value = ncc[h];
       if constexpr (kGeometry) {
-        value += options.geom_consistency_regularizer *
-                 ComputeGeomConsistencyCost(camera,
-                                            poses,
-                                            source_depths,
-                                            r,
-                                            c,
-                                            candidates[h].depth,
-                                            source,
-                                            options.geom_consistency_max_cost);
+        if constexpr (kWeightedFinal) {
+          const float geom =
+              ComputeGeomConsistencyCost(camera,
+                                         poses,
+                                         source_depths,
+                                         r,
+                                         c,
+                                         candidates[h].depth,
+                                         source,
+                                         options.geom_consistency_max_cost);
+          value += options.geom_consistency_regularizer * geom;
+          // This is the geometric part of the unchanged final filter. Every
+          // source is counted, including one with zero or low PHOTO weight.
+          const unsigned int shift = static_cast<unsigned int>(2 * h);
+          if (required_support > 0 && required_support <= 3 &&
+              ((packed_support >> shift) & 3u) <
+                  static_cast<unsigned int>(required_support) &&
+              geom <= options.filter_geom_consistency_max_cost) {
+            float point[3], tri, inc;
+            ComputePointAtDepth(camera, r, c, candidates[h].depth, point);
+            ComputeViewingAngles(
+                poses, point, candidates[h].normal, source, &tri, &inc);
+            if (tri <= filter_min_tri_cos && inc > 0.0f)
+              packed_support += 1u << shift;
+          }
+        } else {
+          // Leave the published weighted fold byte-identical.
+          value +=
+              options.geom_consistency_regularizer *
+              ComputeGeomConsistencyCost(camera,
+                                         poses,
+                                         source_depths,
+                                         r,
+                                         c,
+                                         candidates[h].depth,
+                                         source,
+                                         options.geom_consistency_max_cost);
+        }
       }
       scores[h] += weight * value;
       native_scores[h] += native_weight * value;
@@ -344,6 +413,47 @@ __global__ void Search(const RefCamera camera,
   int winner = 0;
   for (int h = 1; h < 15; ++h)
     if (isfinite(scores[h]) && scores[h] < scores[winner]) winner = h;
+  if constexpr (kWeightedFinal) {
+    // Change a winner only if it cannot pass the unchanged geometric filter.
+    // Use the configured geometric support minimum (normally two).
+    // The unchanged subsequent photo filter may still reject this plane.
+    if (isfinite(scores[winner])) {
+      const int winner_support =
+          required_support <= 3 ? int((packed_support >> (2 * winner)) & 3u)
+                                : CountGeometricSupport(camera,
+                                                        candidates[winner],
+                                                        r,
+                                                        c,
+                                                        costs.GetDepth(),
+                                                        poses,
+                                                        source_depths,
+                                                        options);
+      if (winner_support < options.filter_min_num_consistent) {
+        int supported_winner = -1;
+        float supported_score = FLT_MAX;
+        for (int h = 0; h < 15; ++h) {
+          if (!isfinite(scores[h]) ||
+              (supported_winner >= 0 && !(scores[h] < supported_score)))
+            continue;
+          const int support = required_support <= 3
+                                  ? int((packed_support >> (2 * h)) & 3u)
+                                  : CountGeometricSupport(camera,
+                                                          candidates[h],
+                                                          r,
+                                                          c,
+                                                          costs.GetDepth(),
+                                                          poses,
+                                                          source_depths,
+                                                          options);
+          if (support >= required_support) {
+            supported_winner = h;
+            supported_score = scores[h];
+          }
+        }
+        if (supported_winner >= 0) winner = supported_winner;
+      }
+    }
+  }
   if (winner != 0) {
     depths.Set(r, c, candidates[winner].depth);
     normals.SetSlice(r, c, candidates[winner].normal);
@@ -416,7 +526,8 @@ template <int kWindowSize,
           bool kGeometry,
           bool kFilterPhoto,
           bool kFilterGeometry,
-          bool kCheckpoint>
+          bool kCheckpoint,
+          bool kWeightedFinal = false>
 void Launch(const RefCamera camera,
             GpuMatView<float> costs,
             GpuMatView<float> depth,
@@ -435,6 +546,8 @@ void Launch(const RefCamera camera,
             SweepOptions options,
             unsigned int step,
             GpuMatView<float> donor_scores) {
+  static_assert(!kWeightedFinal ||
+                (kGeometry && kFilterPhoto && kFilterGeometry));
   const dim3 hmm_grid((costs.GetWidth() + 127) / 128, costs.GetDepth());
   const dim3 pixel_grid((costs.GetWidth() + 31) / 32, costs.GetHeight());
   const dim3 search_grid((costs.GetWidth() + 31) / 32,
@@ -450,7 +563,7 @@ void Launch(const RefCamera camera,
   prepass.Print(" Checkerboard frozen HMM");
   CudaTimer search;
   for (int color = 0; color < 2; ++color) {
-    Search<kWindowSize, kWindowStep, kGeometry>
+    Search<kWindowSize, kWindowStep, kGeometry, kWeightedFinal>
         <<<search_grid, 32>>>(camera,
                               costs,
                               depth,

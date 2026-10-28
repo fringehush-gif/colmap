@@ -172,7 +172,8 @@ struct Inputs {
 // deliberately non-square, odd, and not CUDA block multiples.
 Inputs MakeInputs(const int variant,
                   const int num_source_images = 2,
-                  const int ref_height = 0) {
+                  const int ref_height = 0,
+                  const float photo_plane_z = kPlaneZ) {
   Inputs inputs;
   for (int i = 0; i <= num_source_images; ++i) {
     const int width = (variant == 0 ? 47 : 39) + 2 * i;
@@ -210,8 +211,10 @@ Inputs MakeInputs(const int variant,
         const float world_ray_x = c * ray_x - s;
         const float world_ray_z = s * ray_x + c;
         const float z = kPlaneZ / world_ray_z;
-        const float x = camera_x + z * world_ray_x;
-        const float y = camera_y + z * ray_y;
+        const float photo_z =
+            photo_plane_z == kPlaneZ ? z : photo_plane_z / world_ray_z;
+        const float x = camera_x + photo_z * world_ray_x;
+        const float y = camera_y + photo_z * ray_y;
         const float value = 128.0f + 42.0f * std::sin(8.0f * x + 3.0f * y) +
                             35.0f * std::cos(5.0f * x - 11.0f * y) +
                             24.0f * std::sin(17.0f * x + 13.0f * y);
@@ -379,6 +382,38 @@ class ScopedPatchMatchBackend {
       setenv("COLMAP_PATCH_MATCH_BACKEND", value, 1);
     } else {
       unsetenv("COLMAP_PATCH_MATCH_BACKEND");
+    }
+#endif
+  }
+
+  std::string previous_;
+  bool had_previous_ = false;
+};
+
+class ScopedWeightedFinalSupport {
+ public:
+  explicit ScopedWeightedFinalSupport(const char* value) {
+    const char* current = std::getenv("COLMAP_ACMH_WEIGHTED_FINAL_SUPPORT");
+    if (current) {
+      previous_ = current;
+      had_previous_ = true;
+    }
+    Set(value);
+  }
+
+  ~ScopedWeightedFinalSupport() {
+    Set(had_previous_ ? previous_.c_str() : nullptr);
+  }
+
+ private:
+  static void Set(const char* value) {
+#ifdef _WIN32
+    _putenv_s("COLMAP_ACMH_WEIGHTED_FINAL_SUPPORT", value ? value : "");
+#else
+    if (value) {
+      setenv("COLMAP_ACMH_WEIGHTED_FINAL_SUPPORT", value, 1);
+    } else {
+      unsetenv("COLMAP_ACMH_WEIGHTED_FINAL_SUPPORT");
     }
 #endif
   }
@@ -995,6 +1030,130 @@ TEST_F(CudaTest, ExperimentalAcmhOddPartialTilesKeepFacingNormals) {
   options.filter = true;
   const Result geo = RunPatchMatch(&inputs, options);
   ExpectNonempty(geo, inputs, true);
+}
+
+TEST_F(CudaTest, ExperimentalWeightedFinalSupportUsesConfiguredMinimum) {
+  ScopedPatchMatchBackend backend("experimental-acmh-weighted");
+  for (const int minimum : {0, 2, 4, 5}) {
+    SCOPED_TRACE(minimum);
+    Inputs inputs = MakeInputs(0, 4, 0, 3.1f);
+    PatchMatchOptions options = MakeOptions(true, true, false);
+    options.window_radius = 5;
+    options.window_step = 2;
+    options.num_samples = 15;
+    options.num_iterations = 1;
+    options.geom_consistency_regularizer = 0.0;
+    options.filter_geom_consistency_max_cost = 0.1;
+    options.filter_min_num_consistent = minimum;
+    for (size_t row = 5; row + 5 < inputs.depths[0].GetHeight(); row += 7) {
+      for (size_t col = 5; col + 5 < inputs.depths[0].GetWidth(); col += 11) {
+        inputs.depths[0].Set(row, col, 3.1f);
+      }
+    }
+    Result control;
+    {
+      ScopedWeightedFinalSupport off(nullptr);
+      control = RunPatchMatch(&inputs, options);
+    }
+    ScopedWeightedFinalSupport on("1");
+    const Result candidate = RunPatchMatch(&inputs, options);
+    const Result repeated = RunPatchMatch(&inputs, options);
+    if (minimum <= 4) ExpectNonempty(candidate, inputs, true);
+    ExpectEquivalent(candidate, repeated);
+    if (minimum == 0 || minimum == 5) ExpectEquivalent(control, candidate);
+    size_t retained = 0;
+    size_t gained = 0;
+    for (size_t row = 0; row < candidate.depths.GetHeight(); ++row) {
+      for (size_t col = 0; col < candidate.depths.GetWidth(); ++col) {
+        if (candidate.depths.Get(row, col) <= 0.0f) continue;
+        ++retained;
+        gained += control.depths.Get(row, col) <= 0.0f;
+        EXPECT_GE(
+            candidate.consistent_images[row * candidate.depths.GetWidth() + col]
+                .size(),
+            static_cast<size_t>(minimum));
+      }
+    }
+    if (minimum == 2 || minimum == 4) {
+      EXPECT_GT(gained, 0);
+    }
+    if (minimum <= 4) {
+      EXPECT_GT(retained, 0);
+    } else {
+      EXPECT_EQ(retained, 0);
+    }
+  }
+}
+
+TEST_F(CudaTest, ExperimentalWeightedFinalSupportPreservesOtherStages) {
+  for (const bool native : {false, true}) {
+    ScopedPatchMatchBackend backend(native ? "default"
+                                           : "experimental-acmh-weighted");
+    for (const bool geometry : {false, true}) {
+      Inputs inputs = MakeInputs(0, 4);
+      PatchMatchOptions options = MakeOptions(geometry, false, false);
+      options.window_radius = 5;
+      options.window_step = 2;
+      options.num_samples = 15;
+      Result control;
+      {
+        ScopedWeightedFinalSupport off(nullptr);
+        control = RunPatchMatch(&inputs, options);
+      }
+      ScopedWeightedFinalSupport on("1");
+      ExpectEquivalent(control, RunPatchMatch(&inputs, options));
+    }
+  }
+}
+
+TEST_F(CudaTest, ExperimentalWeightedFinalSupportDoesNotBypassPhotoFilter) {
+  ScopedPatchMatchBackend backend("experimental-acmh-weighted");
+  Inputs inputs = MakeInputs(0, 4, 0, 3.1f);
+  PatchMatchOptions options = MakeOptions(true, true, false);
+  options.window_radius = 5;
+  options.window_step = 2;
+  options.num_samples = 15;
+  options.num_iterations = 1;
+  options.geom_consistency_regularizer = 0.0;
+  options.filter_geom_consistency_max_cost = 0.1;
+  options.filter_min_num_consistent = 2;
+  for (size_t row = 5; row + 5 < inputs.depths[0].GetHeight(); row += 7) {
+    for (size_t col = 5; col + 5 < inputs.depths[0].GetWidth(); col += 11) {
+      inputs.depths[0].Set(row, col, 3.1f);
+    }
+  }
+  Result control;
+  {
+    ScopedWeightedFinalSupport off(nullptr);
+    control = RunPatchMatch(&inputs, options);
+  }
+  ScopedWeightedFinalSupport on("1");
+  const Result permissive = RunPatchMatch(&inputs, options);
+  ExpectNonempty(permissive, inputs, true);
+  options.filter_min_ncc = 1.0;
+  const Result strict = RunPatchMatch(&inputs, options);
+  ExpectEquivalent(strict, RunPatchMatch(&inputs, options));
+  EXPECT_EQ(permissive.selection.GetData(), strict.selection.GetData());
+  size_t gained = 0;
+  size_t rejected_gains = 0;
+  bool refreshed_gain = false;
+  for (size_t row = 0; row < permissive.depths.GetHeight(); ++row) {
+    for (size_t col = 0; col < permissive.depths.GetWidth(); ++col) {
+      if (control.depths.Get(row, col) > 0.0f ||
+          permissive.depths.Get(row, col) <= 0.0f)
+        continue;
+      ++gained;
+      rejected_gains += strict.depths.Get(row, col) <= 0.0f;
+      for (int source = 0; source < 4; ++source) {
+        refreshed_gain =
+            refreshed_gain || control.selection.Get(row, col, source) !=
+                                  permissive.selection.Get(row, col, source);
+      }
+    }
+  }
+  EXPECT_GT(gained, 0);
+  EXPECT_GT(rejected_gains, 0);
+  EXPECT_TRUE(refreshed_gain);
 }
 
 INSTANTIATE_TEST_SUITE_P(PhotoAndGeometry,

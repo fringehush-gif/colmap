@@ -38,4 +38,26 @@ These are one-reference results; source-view solves and fusion are excluded.
   fallback. Native default and experimental depth and normal maps matched
   the measured precursor implementations byte for byte at both sizes.
 
+## Optional final geometric-support rescue
+
+On the final filtered geometric sweep, replace an unsupported winning plane with the
+best-scoring supported plane from the same 15 hypotheses, if one exists.
+Support uses `--PatchMatchStereo.filter_min_num_consistent`; the final
+photometric filter still applies.
+
+Enable with `COLMAP_ACMH_WEIGHTED_FINAL_SUPPORT=1` in the weighted backend's
+process environment. Leave it unset for the existing behavior.
+
+Façade ref75, 20 sources, GEO5, one matched OFF/ON run per resolution:
+
+| Size | 2 cm accuracy OFF → ON | Completeness OFF → ON | F1 OFF → ON |
+| --- | ---: | ---: | ---: |
+| 1536 | 63.1371 → 62.8186% | 6.2608 → 6.4725% | 11.3920 → 11.7359% |
+| 3072 | 65.6797 → 65.3807% | 10.0095 → 10.4769% | 17.3716 → 18.0597% |
+
+In these runs, coverage increased while accuracy decreased. These figures compare
+OFF and ON within the weighted backend. Source solves and fusion are excluded;
+GEO time was 3.265 → 3.292 s at 1536 (+0.8%) and 11.953 → 12.331 s at
+3072 (+3.2%), with one warm-up per arm and CTTC N2 on an RTX 3080 Ti.
+
 Totally vibe coded.

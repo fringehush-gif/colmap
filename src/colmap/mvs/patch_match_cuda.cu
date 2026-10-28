@@ -2001,6 +2001,11 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   const char* backend = std::getenv("COLMAP_PATCH_MATCH_BACKEND");
   const bool experimental =
       backend && std::strcmp(backend, "experimental-acmh-weighted") == 0;
+  // Optional same-pool rescue, only in the final filtered geometric sweep.
+  const char* weighted_final_env =
+      std::getenv("COLMAP_ACMH_WEIGHTED_FINAL_SUPPORT");
+  const bool weighted_final_support = experimental && weighted_final_env &&
+                                      std::strcmp(weighted_final_env, "1") == 0;
   THROW_CHECK(!backend || backend[0] == '\0' ||
               std::strcmp(backend, "default") == 0 || experimental)
       << "Unknown COLMAP_PATCH_MATCH_BACKEND";
@@ -2124,14 +2129,15 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
                          : no_checkpoint;
 
 #ifndef COLMAP_HIP_ENABLED
-#define EXPERIMENTAL_SWEEP_FUNC                                              \
+#define EXPERIMENTAL_SWEEP_FUNC(WEIGHTED_FINAL)                              \
   if constexpr (kWindowSize == 11 && kWindowStep == 2) {                     \
     experimental_acmh::Launch<kWindowSize,                                   \
                               kWindowStep,                                   \
                               kGeomConsistencyTerm,                          \
                               kFilterPhotoConsistency,                       \
                               kFilterGeomConsistency,                        \
-                              kCheckpointHmm>(                               \
+                              kCheckpointHmm,                                \
+                              WEIGHTED_FINAL>(                               \
         MakeRefCamera(ref_K_host_[rotation_in_half_pi_],                     \
                       ref_inv_K_host_[rotation_in_half_pi_]),                \
         cost_map_->View(),                                                   \
@@ -2152,11 +2158,20 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
         static_cast<unsigned int>(iter * 4 + sweep),                         \
         donor_scores->View());                                               \
   }
-#define CALL_SWEEP_FUNC     \
-  if (experimental) {       \
-    EXPERIMENTAL_SWEEP_FUNC \
-  } else {                  \
-    NATIVE_SWEEP_FUNC       \
+#define CALL_SWEEP_FUNC                                              \
+  if (experimental) {                                                \
+    if constexpr (kGeomConsistencyTerm && kFilterPhotoConsistency && \
+                  kFilterGeomConsistency) {                          \
+      if (last_sweep && weighted_final_support) {                    \
+        EXPERIMENTAL_SWEEP_FUNC(true)                                \
+      } else {                                                       \
+        EXPERIMENTAL_SWEEP_FUNC(false)                               \
+      }                                                              \
+    } else {                                                         \
+      EXPERIMENTAL_SWEEP_FUNC(false)                                 \
+    }                                                                \
+  } else {                                                           \
+    NATIVE_SWEEP_FUNC                                                \
   }
 #else
 #define CALL_SWEEP_FUNC NATIVE_SWEEP_FUNC

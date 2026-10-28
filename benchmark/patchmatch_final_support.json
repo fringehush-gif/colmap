@@ -1,0 +1,137 @@
+{
+  "candidate": "V45 final geometric support rescue",
+  "dataset": "ETH3D Facade",
+  "referenceId": 75,
+  "orderedSourceCount": 20,
+  "gpu": "RTX 3080 Ti",
+  "cpuThreads": 12,
+  "mode": "weighted checkerboard, GEO5, filtering enabled",
+  "flag": "COLMAP_ACMH_WEIGHTED_FINAL_SUPPORT",
+  "timing": {
+    "order": "warm C T then C T T C at each resolution",
+    "observationsPerArmPerResolution": 2,
+    "scope": "native GEO CLI; source generation, binding and fusion excluded",
+    "units": {
+      "wall": "s",
+      "cpu": "CPU-s",
+      "rssMiB": "MiB, mean of wait4 lifetime peaks",
+      "sampledMeanRssMiB": "MiB, mean of per-run RSS sample means",
+      "instructionsG": "billion user instructions",
+      "cacheMissM": "million user cache misses",
+      "gpuMeanMiB": "MiB, mean of per-run whole-device sample means",
+      "gpuMaxMiB": "MiB, maximum observed whole-device sample"
+    },
+    "sampling": "process 0.5 s; board 1 s; means include startup/teardown",
+    "groups": [
+      {
+        "size": 1536,
+        "arm": "candidate",
+        "n": 2,
+        "wall": 3.2924455869942904,
+        "cpu": 3.8949105,
+        "rssMiB": 938.310546875,
+        "instructionsG": 13.425264712,
+        "cacheMissM": 21.683096,
+        "gpuMeanMiB": 1660.6533203125,
+        "gpuMaxMiB": 1847.03125,
+        "gpuSamples": [
+          4,
+          4
+        ],
+        "sampledMeanRssMiB": 732.453125
+      },
+      {
+        "size": 1536,
+        "arm": "control",
+        "n": 2,
+        "wall": 3.264884167991113,
+        "cpu": 3.8721565,
+        "rssMiB": 938.421875,
+        "instructionsG": 13.342785094,
+        "cacheMissM": 21.6026545,
+        "gpuMeanMiB": 1531.98046875,
+        "gpuMaxMiB": 1848.21875,
+        "gpuSamples": [
+          4,
+          4
+        ],
+        "sampledMeanRssMiB": 730.6428571428571
+      },
+      {
+        "size": 3072,
+        "arm": "candidate",
+        "n": 2,
+        "wall": 12.330975092481822,
+        "cpu": 15.6621005,
+        "rssMiB": 2428.146484375,
+        "instructionsG": 53.299128543500004,
+        "cacheMissM": 38.5041555,
+        "gpuMeanMiB": 2505.006159855769,
+        "gpuMaxMiB": 3064.89453125,
+        "gpuSamples": [
+          13,
+          13
+        ],
+        "sampledMeanRssMiB": 1895.6551009114582
+      },
+      {
+        "size": 3072,
+        "arm": "control",
+        "n": 2,
+        "wall": 11.953107173496392,
+        "cpu": 15.3237995,
+        "rssMiB": 2428.30859375,
+        "instructionsG": 52.8902956775,
+        "cacheMissM": 38.1572365,
+        "gpuMeanMiB": 2655.435546875,
+        "gpuMaxMiB": 3036.15234375,
+        "gpuSamples": [
+          12,
+          12
+        ],
+        "sampledMeanRssMiB": 1894.7928059895833
+      }
+    ]
+  },
+  "quality": {
+    "scope": "Historical official single-view ETH3D scores; all 12 public-source replays produced exact retained depth/normal maps",
+    "thresholdCm": 2,
+    "1536": {
+      "accuracy": [
+        63.1371,
+        62.8186
+      ],
+      "completeness": [
+        6.2608,
+        6.4725
+      ],
+      "f1": [
+        11.392,
+        11.7359
+      ]
+    },
+    "3072": {
+      "accuracy": [
+        65.6797,
+        65.3807
+      ],
+      "completeness": [
+        10.0095,
+        10.4769
+      ],
+      "f1": [
+        17.3716,
+        18.0597
+      ]
+    },
+    "units": "percent; arrays ordered OFF, ON"
+  },
+  "validation": {
+    "gpuTests": 42,
+    "skipped": 0,
+    "geoReplays": 12,
+    "exactRetainedOutputMaps": 24,
+    "inputMaps": 84,
+    "freshCalibrationImageConfigStabilityChecked": true
+  }
+}
