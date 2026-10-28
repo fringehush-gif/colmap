@@ -1113,6 +1113,8 @@ void OptionManager::AddPatchMatchStereoOptions() {
       &patch_match_stereo->direct_source_upload,
       "Upload source layers without a padded host raster volume. Disable to "
       "use the legacy padded upload path.");
+  AddDefaultOption("PatchMatchStereo.sparse_source_sharing",
+                   &patch_match_stereo->sparse_source_sharing);
   AddDefaultOption("PatchMatchStereo.reference_only_normal_materialization",
                    &patch_match_stereo->reference_only_normal_materialization);
   AddDefaultOption("PatchMatchStereo.allow_missing_files",

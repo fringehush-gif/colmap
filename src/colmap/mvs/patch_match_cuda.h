@@ -25,6 +25,7 @@ namespace mvs {
 template <typename T>
 class PatchMatchSourceArray;
 class PatchMatchSparseSources;
+struct SparseSourceTestFailure;
 
 class PatchMatchCuda {
  public:
@@ -33,7 +34,8 @@ class PatchMatchCuda {
   PatchMatchCuda(const PatchMatchOptions& options,
                  const PatchMatch::Problem& problem,
                  std::shared_ptr<const PatchMatchSparseSources> shared = {},
-                 const PatchMatchCuda* geometry_donor = nullptr);
+                 const PatchMatchCuda* geometry_donor = nullptr,
+                 const SparseSourceTestFailure* failure = nullptr);
   ~PatchMatchCuda();
 
   void Run();
@@ -47,7 +49,8 @@ class PatchMatchCuda {
   size_t PairPeakBytes() const;
   // Requires same-shape, serial rotations on the current CUDA device.
   bool CanShareGeometryRotation() const;
-  void UseSparseSources(std::shared_ptr<const PatchMatchSparseSources> shared);
+  void UseSparseSources(std::shared_ptr<const PatchMatchSparseSources> shared,
+                        const SparseSourceTestFailure* failure = nullptr);
 #endif
 
  private:
