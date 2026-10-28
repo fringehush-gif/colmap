@@ -75,6 +75,10 @@ struct ONNXSessionConfig {
   std::function<std::shared_ptr<void>(Ort::SessionOptions&)>
       register_custom_ops;
   bool require_cuda = false;
+  // Use requested-size CUDA arena growth and reclaim unused arena regions
+  // after each synchronous Run (API 31 or newer). CPU sessions ignore this.
+  // The default preserves the execution provider's allocation/reuse policy.
+  bool cuda_arena_reclaim = false;
   // An optional-model caller can log a recovered construction failure itself.
   // This does not suppress logging or exceptions from Run().
   bool log_initialization_errors = true;
@@ -121,6 +125,9 @@ class ONNXModel {
   }
 
  private:
+  friend struct ONNXModelTestAccess;
+  Ort::RunOptions CreateRunOptions() const;
+
   void InitializeSession(const std::string& model_path,
                          int num_threads,
                          bool use_gpu,
@@ -145,6 +152,8 @@ class ONNXModel {
   Ort::SessionOptions session_options_;
   std::unique_ptr<Ort::Session> session_;
   ONNXExecutionProvider execution_provider_ = ONNXExecutionProvider::CPU;
+  // Set only when shrink was requested and CUDA provider append succeeded.
+  int cuda_arena_shrink_device_ = -1;
   std::vector<std::vector<int64_t>> input_shapes_;
   std::vector<Ort::AllocatedStringPtr> input_name_strs_;
   std::vector<char*> input_names_;

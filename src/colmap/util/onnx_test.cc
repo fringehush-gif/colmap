@@ -12,12 +12,21 @@
 #include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
 namespace colmap {
+
+struct ONNXModelTestAccess {
+  static Ort::RunOptions RunOptions(const ONNXModel& model) {
+    return model.CreateRunOptions();
+  }
+};
+
 namespace {
 
 std::filesystem::path WriteIdentityModel() {
@@ -43,6 +52,65 @@ std::filesystem::path WriteIdentityModel() {
 template <typename T>
 Ort::Value MakeTensor(std::vector<T>* data, const std::vector<int64_t>& shape) {
   return CreateONNXTensor(*data, shape);
+}
+
+void CheckFloatTensor(const Ort::Value& tensor,
+                      const std::vector<float>& expected,
+                      const std::vector<int64_t>& shape) {
+  ASSERT_TRUE(tensor.IsTensor());
+  const auto info = tensor.GetTensorTypeAndShapeInfo();
+  ASSERT_EQ(info.GetElementType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  ASSERT_EQ(info.GetShape(), shape);
+  ASSERT_EQ(info.GetElementCount(), expected.size());
+  ASSERT_EQ(tensor.GetTensorMemoryInfo().GetDeviceType(),
+            OrtMemoryInfoDeviceType_CPU);
+  const float* data = tensor.GetTensorData<float>();
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_FLOAT_EQ(data[i], expected[i]);
+  }
+}
+
+void CheckIdentityRepeatedRuns(const bool use_gpu, const bool reclaim_arena) {
+  // Keep borrowed input buffers alive independently of the session/output
+  // values.
+  std::vector<std::vector<float>> data{
+      {1.25f, -2.5f}, {7.0f, 0.125f}, {-4.5f, 6.75f}};
+  std::vector<std::vector<Ort::Value>> retained;
+  {
+    ONNXSessionConfig config;
+    config.require_cuda = use_gpu;
+    config.cuda_arena_reclaim = reclaim_arena;
+    ONNXModel model(
+        WriteIdentityModel().string(), 1, use_gpu, "-1", false, config);
+    ASSERT_EQ(
+        model.execution_provider(),
+        use_gpu ? ONNXExecutionProvider::CUDA : ONNXExecutionProvider::CPU);
+#if ORT_API_VERSION >= 31
+    auto run_options = ONNXModelTestAccess::RunOptions(model);
+    const char* shrink =
+        run_options.GetConfigEntry("memory.enable_memory_arena_shrinkage");
+    if (use_gpu && reclaim_arena) {
+      ASSERT_NE(shrink, nullptr);
+      EXPECT_STREQ(shrink, "gpu:0");
+    } else {
+      EXPECT_EQ(shrink, nullptr);
+    }
+#endif
+    for (size_t run = 0; run < data.size(); ++run) {
+      std::vector<Ort::Value> inputs;
+      inputs.push_back(CreateONNXTensor(data[run], {1, 2}));
+      retained.push_back(model.Run(inputs));
+      for (size_t previous = 0; previous <= run; ++previous) {
+        ASSERT_EQ(retained[previous].size(), 1);
+        CheckFloatTensor(retained[previous][0], data[previous], {1, 2});
+      }
+    }
+  }
+  // Session destruction must not invalidate values returned by earlier Runs.
+  for (size_t run = 0; run < data.size(); ++run) {
+    ASSERT_EQ(retained[run].size(), 1);
+    CheckFloatTensor(retained[run][0], data[run], {1, 2});
+  }
 }
 
 class ErrorLogSink : public google::LogSink {
@@ -117,6 +185,31 @@ TEST(ONNXModelTest, MetadataAndInference) {
   EXPECT_FLOAT_EQ(output_data[0], input_data[0]);
   EXPECT_FLOAT_EQ(output_data[1], input_data[1]);
 }
+
+TEST(ONNXModelTest, CpuArenaPolicyRepeatedRuns) {
+  for (const bool reclaim_arena : {false, true}) {
+    SCOPED_TRACE(reclaim_arena);
+    CheckIdentityRepeatedRuns(/*use_gpu=*/false, reclaim_arena);
+  }
+}
+
+#if defined(COLMAP_CUDA_ENABLED) && ORT_API_VERSION < 31
+TEST(ONNXModelTest, CudaArenaPolicyRequiresApi31) {
+  // Rejection happens before provider append, so no CUDA device is required.
+  ONNXSessionConfig config;
+  config.require_cuda = true;
+  config.cuda_arena_reclaim = true;
+  EXPECT_THROW(
+      ONNXModel(WriteIdentityModel().string(), 1, true, "-1", true, config),
+      std::invalid_argument);
+}
+
+TEST(ONNXModelTest, CudaDefaultArenaPolicyOnOlderApi) {
+  if (GetNumCudaDevices() == 0) GTEST_SKIP() << "CUDA device required";
+  // The ordinary policy still supports existing CUDA sessions on older APIs.
+  CheckIdentityRepeatedRuns(/*use_gpu=*/true, /*reclaim_arena=*/false);
+}
+#endif
 
 TEST(ONNXModelTest, OwnedSnapshotDoesNotReopenItsLabel) {
   const auto path = WriteIdentityModel();
@@ -290,6 +383,78 @@ std::filesystem::path WriteCpuStringModel() {
   WriteBinaryBlob(path, {kModel, sizeof(kModel) - 1});
   return path;
 }
+
+#if ORT_API_VERSION >= 31
+void CheckCudaArenaRepeatedRuns(const std::string& gpu_index,
+                                const bool reclaim_arena) {
+  std::vector<std::vector<float>> data{{1.25f, -2.5f, 3.0f, 4.0f},
+                                       {7.0f, 0.125f},
+                                       {-4.5f, 6.75f, 8.0f, -0.5f, 2.0f, 9.0f}};
+  std::vector<std::vector<Ort::Value>> retained;
+  const auto check = [&](const size_t run) {
+    ASSERT_EQ(retained[run].size(), 2);
+    const int64_t batch = static_cast<int64_t>(data[run].size() / 2);
+    CheckFloatTensor(retained[run][0], data[run], {batch, 2});
+    const auto& shape = retained[run][1];
+    ASSERT_TRUE(shape.IsTensor());
+    const auto info = shape.GetTensorTypeAndShapeInfo();
+    ASSERT_EQ(info.GetElementType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    ASSERT_EQ(info.GetShape(), (std::vector<int64_t>{2}));
+    ASSERT_EQ(shape.GetTensorMemoryInfo().GetDeviceType(),
+              OrtMemoryInfoDeviceType_CPU);
+    EXPECT_EQ(shape.GetTensorData<int64_t>()[0], batch);
+    EXPECT_EQ(shape.GetTensorData<int64_t>()[1], 2);
+  };
+  {
+    ONNXSessionConfig config;
+    config.require_cuda = true;
+    config.cuda_arena_reclaim = reclaim_arena;
+    // The capability probe proves MatMul actually stays on CUDA, allowing
+    // Shape.
+    ONNXModel model(
+        WriteMixedProbeModel().string(), 1, true, gpu_index, true, config);
+    ASSERT_EQ(model.execution_provider(), ONNXExecutionProvider::CUDA);
+    auto run_options = ONNXModelTestAccess::RunOptions(model);
+    const char* shrink =
+        run_options.GetConfigEntry("memory.enable_memory_arena_shrinkage");
+    if (reclaim_arena) {
+      ASSERT_NE(shrink, nullptr);
+      EXPECT_STREQ(shrink, gpu_index == "1" ? "gpu:1" : "gpu:0");
+    } else {
+      EXPECT_EQ(shrink, nullptr);
+    }
+    for (size_t run = 0; run < data.size(); ++run) {
+      const int64_t batch = static_cast<int64_t>(data[run].size() / 2);
+      std::vector<Ort::Value> inputs;
+      inputs.push_back(CreateONNXTensor(data[run], {batch, 2}));
+      retained.push_back(model.Run(inputs));
+      for (size_t previous = 0; previous <= run; ++previous) check(previous);
+    }
+  }
+  for (size_t run = 0; run < data.size(); ++run) check(run);
+}
+
+TEST(ONNXModelTest, CudaArenaPolicyDefaultDevices) {
+  if (GetNumCudaDevices() == 0) GTEST_SKIP() << "CUDA device required";
+  for (const std::string gpu_index : {"-1", "0"}) {
+    SCOPED_TRACE(gpu_index);
+    for (const bool reclaim_arena : {false, true}) {
+      SCOPED_TRACE(reclaim_arena);
+      CheckCudaArenaRepeatedRuns(gpu_index, reclaim_arena);
+    }
+  }
+}
+
+TEST(ONNXModelTest, CudaArenaPolicyNonzeroDevice) {
+  if (GetNumCudaDevices() < 2) {
+    GTEST_SKIP() << "Two visible CUDA devices required for logical device 1";
+  }
+  for (const bool reclaim_arena : {false, true}) {
+    SCOPED_TRACE(reclaim_arena);
+    CheckCudaArenaRepeatedRuns("1", reclaim_arena);
+  }
+}
+#endif
 
 TEST(ONNXModelTest, CudaCapabilityProbeAllowsShapeNodes) {
   if (GetNumCudaDevices() == 0) GTEST_SKIP() << "CUDA device required";

@@ -30,6 +30,20 @@ void CreateRandomRgbImage(const int width, const int height, Bitmap* bitmap) {
   }
 }
 
+TEST(AlikedOptions, NativeArenaDefaultsOn) {
+  AlikedExtractionOptions options;
+  EXPECT_TRUE(options.n16rot_native_reclaim_arena);
+  EXPECT_TRUE(options.Check());
+
+  options.n16rot_native_model_path = "native.onnx";
+  EXPECT_TRUE(options.Check());
+
+  options.n16rot_native_reclaim_arena = false;
+  EXPECT_TRUE(options.Check());
+  options.n16rot_native_model_path.clear();
+  EXPECT_TRUE(options.Check());
+}
+
 class ParameterizedAlikedTests
     : public testing::TestWithParam<FeatureExtractorType> {};
 
@@ -172,26 +186,30 @@ TEST_P(ParameterizedAlikedTests, MinScore) {
 }
 
 TEST_P(ParameterizedAlikedTests, NativeRequestKeepsOriginalOnCpu) {
-  const auto& expected = SharedDefaultExtractionFor(GetParam());
-  FeatureExtractionOptions options(GetParam());
-  options.use_gpu = false;
-  options.aliked->min_score = 0.0;
-  const auto missing_native = CreateTestDir() / "missing-native.onnx";
-  ASSERT_FALSE(std::filesystem::exists(missing_native));
-  options.aliked->n16rot_native_model_path = missing_native.string();
-  auto extractor = CreateAlikedFeatureExtractor(options);
-  FeatureKeypoints keypoints;
-  FeatureDescriptors descriptors;
-  ASSERT_TRUE(extractor->Extract(expected.image, &keypoints, &descriptors));
-  EXPECT_EQ(keypoints, *expected.keypoints);
-  EXPECT_EQ(descriptors.type, expected.descriptors->type);
-  ASSERT_EQ(descriptors.data.rows(), expected.descriptors->data.rows());
-  ASSERT_EQ(descriptors.data.cols(), expected.descriptors->data.cols());
-  ASSERT_GT(descriptors.data.size(), 0);
-  EXPECT_EQ(std::memcmp(descriptors.data.data(),
-                        expected.descriptors->data.data(),
-                        descriptors.data.size()),
-            0);
+  for (const bool reclaim_arena : {false, true}) {
+    SCOPED_TRACE(reclaim_arena);
+    const auto& expected = SharedDefaultExtractionFor(GetParam());
+    FeatureExtractionOptions options(GetParam());
+    options.use_gpu = false;
+    options.aliked->min_score = 0.0;
+    const auto missing_native = CreateTestDir() / "missing-native.onnx";
+    ASSERT_FALSE(std::filesystem::exists(missing_native));
+    options.aliked->n16rot_native_model_path = missing_native.string();
+    options.aliked->n16rot_native_reclaim_arena = reclaim_arena;
+    auto extractor = CreateAlikedFeatureExtractor(options);
+    FeatureKeypoints keypoints;
+    FeatureDescriptors descriptors;
+    ASSERT_TRUE(extractor->Extract(expected.image, &keypoints, &descriptors));
+    EXPECT_EQ(keypoints, *expected.keypoints);
+    EXPECT_EQ(descriptors.type, expected.descriptors->type);
+    ASSERT_EQ(descriptors.data.rows(), expected.descriptors->data.rows());
+    ASSERT_EQ(descriptors.data.cols(), expected.descriptors->data.cols());
+    ASSERT_GT(descriptors.data.size(), 0);
+    EXPECT_EQ(std::memcmp(descriptors.data.data(),
+                          expected.descriptors->data.data(),
+                          descriptors.data.size()),
+              0);
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(AlikedTests,

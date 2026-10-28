@@ -32,6 +32,10 @@ struct AlikedExtractionOptions {
   // use this graph; otherwise extraction uses the configured original model.
   std::string n16rot_native_model_path;
 
+  // Use requested-size CUDA arena growth and post-run shrinking for the native
+  // graph only. Enabled by default; ignored when using the original model.
+  bool n16rot_native_reclaim_arena = true;
+
   bool Check() const;
 };
 

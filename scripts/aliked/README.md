@@ -35,3 +35,11 @@ explicitly when optional ONNX is absent. Run them normally and with python
 -O; no weights are required. Synthetic native fixtures can be regenerated
 with scripts/aliked/generate_test_graphs.py --output a-fresh-directory.
 
+
+
+Reclaim unused GPU memory (CUDA arena) is enabled for the admitted native
+graph by default, using requested-size growth and post-run shrinking. Disable it with
+AlikedExtraction.n16rot_native_reclaim_arena=0, the GUI checkbox, or
+AlikedExtractionOptions.n16rot_native_reclaim_arena in Python. The option is
+ignored without an admitted native graph; CPU/original-model fallback keeps
+the ordinary memory policy. This option makes no memory-cap guarantee.

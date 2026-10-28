@@ -140,6 +140,14 @@ void BindFeatureExtraction(py::module& m) {
                          "Optional local transformed N16ROT CUDA graph. "
                          "Empty disables it; unsupported or mismatched "
                          "models use the original model.")
+          .def_readwrite(
+              "n16rot_native_reclaim_arena",
+              &AlikedExtractionOptions::n16rot_native_reclaim_arena,
+              "Reclaim unused GPU memory (CUDA arena) with requested-size "
+              "growth and post-run "
+              "shrinking for the native graph only. Default true; "
+              "ignored without an admitted native graph. Original-model "
+              "fallback keeps the default memory policy.")
           .def_readwrite("n32_model_path",
                          &AlikedExtractionOptions::n32_model_path,
                          "Path to the ONNX model file for the n32 ALIKED "

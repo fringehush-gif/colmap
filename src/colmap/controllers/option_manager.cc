@@ -338,6 +338,8 @@ void OptionManager::AddFeatureExtractionOptions() {
                    &feature_extraction->aliked->n16rot_model_path);
   AddDefaultOption("AlikedExtraction.n16rot_native_model_path",
                    &feature_extraction->aliked->n16rot_native_model_path);
+  AddDefaultOption("AlikedExtraction.n16rot_native_reclaim_arena",
+                   &feature_extraction->aliked->n16rot_native_reclaim_arena);
   AddDefaultOption("AlikedExtraction.n32_model_path",
                    &feature_extraction->aliked->n32_model_path);
 

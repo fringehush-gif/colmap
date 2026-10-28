@@ -157,6 +157,7 @@ void ONNXModel::ConfigureSessionOptions(int num_threads) {
   // Reset any previously appended execution providers (e.g. when rebuilding for
   // a CPU-only fallback after an accelerator fails to initialize).
   session_options_ = Ort::SessionOptions();
+  cuda_arena_shrink_device_ = -1;
 
   // Use sequential execution mode with a single inter-op thread, since our
   // models (ALIKED, LightGlue) are sequential CNNs/Transformers without
@@ -216,7 +217,22 @@ void ONNXModel::InitializeSession(const std::string& model_path,
     if (gpu_indices[0] >= 0) {
       cuda_options.device_id = gpu_indices[0];
     }
+#if ORT_API_VERSION >= 31
+    if (config.cuda_arena_reclaim) {
+      cuda_options.arena_extend_strategy = 1;
+    }
+#else
+    if (config.cuda_arena_reclaim) {
+      throw std::invalid_argument(
+          "CUDA arena policy requires ONNX Runtime API 31 or newer");
+    }
+#endif
     session_options_.AppendExecutionProvider_CUDA(cuda_options);
+#if ORT_API_VERSION >= 31
+    if (config.cuda_arena_reclaim) {
+      cuda_arena_shrink_device_ = cuda_options.device_id;
+    }
+#endif
   }
 #endif
 
@@ -354,10 +370,25 @@ void ONNXModel::CheckCudaCapabilityProbeAssignments() const {
 }
 #endif
 
+Ort::RunOptions ONNXModel::CreateRunOptions() const {
+  Ort::RunOptions run_options;
+#if ORT_API_VERSION >= 31
+  if (execution_provider_ == ONNXExecutionProvider::CUDA &&
+      cuda_arena_shrink_device_ >= 0) {
+    const std::string device =
+        "gpu:" + std::to_string(cuda_arena_shrink_device_);
+    run_options.AddConfigEntry("memory.enable_memory_arena_shrinkage",
+                               device.c_str());
+  }
+#endif
+  return run_options;
+}
+
 std::vector<Ort::Value> ONNXModel::Run(
     const std::vector<Ort::Value>& input_tensors) const {
   try {
-    return session_->Run(Ort::RunOptions(),
+    Ort::RunOptions run_options = CreateRunOptions();
+    return session_->Run(run_options,
                          input_names_.data(),
                          input_tensors.data(),
                          input_tensors.size(),

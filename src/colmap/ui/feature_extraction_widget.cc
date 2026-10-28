@@ -188,6 +188,8 @@ AlikedExtractionWidget::AlikedExtractionWidget(QWidget* parent,
   AddOptionText(&aliked_options.n16rot_model_path, "aliked.n16rot_model_path");
   AddOptionText(&aliked_options.n16rot_native_model_path,
                 "aliked.n16rot_native_model_path");
+  AddOptionBool(&aliked_options.n16rot_native_reclaim_arena,
+                "aliked.n16rot_native_reclaim_arena");
   AddOptionText(&aliked_options.n32_model_path, "aliked.n32_model_path");
 }
 

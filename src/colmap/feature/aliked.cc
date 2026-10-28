@@ -161,6 +161,7 @@ LoadedAlikedModel LoadAlikedModel(const FeatureExtractionOptions& options) {
       if (prepared.native) {
         ONNXSessionConfig config;
         config.require_cuda = true;
+        config.cuda_arena_reclaim = options.aliked->n16rot_native_reclaim_arena;
         config.log_initialization_errors = false;
         config.register_custom_ops = RegisterAlikedNativeOps;
         config.model_data = std::move(prepared.native);
