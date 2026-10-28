@@ -27,3 +27,10 @@ Invalid depth/normal samples keep native random initialization. Maps are limited
 to 1024 px per side; 384 px is the tested donor size. Native initialization remains
 the default. Coarse flags require photometric mode and the default backend; incompatible
 settings fail before map loading.
+
+Eligible coarse PHOTO2 references can run in batches of three to five. Native
+PHOTO5 and GEO settings are unchanged. On 11 Fountain references, isolated fine
+PHOTO time fell from 6.697 to 5.194 s at 1536 and 18.217 to 16.474 s at 3072
+(two runs per arm, 3080 Ti). Sampled device-memory maxima rose from 2420 to
+3379 MiB and 3150 to 6938 MiB. Coarse generation and GEO were excluded.
+Depth/normal maps matched the singleton runs.

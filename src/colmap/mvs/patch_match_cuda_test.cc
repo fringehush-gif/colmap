@@ -534,6 +534,191 @@ TEST_F(CudaTest, CoarseOptInDisablesOnlyPairAndBatchAdmission) {
   EXPECT_EQ(CanBatchPatchMatchViews(shapes, false), default_batch);
 }
 
+TEST_F(CudaTest, CoarsePhoto2BatchUsesExistingAdmissionCap) {
+  ScopedCoarseTestEnvironment init("COLMAP_NATIVE_COARSE_INIT", "coarse-root");
+  ScopedCoarseTestEnvironment refine("COLMAP_NATIVE_COARSE_REFINE_SCHEDULE",
+                                     "1");
+  ScopedCoarseTestEnvironment replay("COLMAP_NATIVE_COARSE_FIRST_SWEEP_RANDOM",
+                                     "1");
+  const std::vector<std::pair<size_t, size_t> > shapes(5, {47, 149});
+  bool ordinary_admission = false;
+  {
+    ScopedCoarseTestEnvironment clear_init("COLMAP_NATIVE_COARSE_INIT",
+                                           std::nullopt);
+    ordinary_admission = CanBatchPatchMatchViews(shapes, false);
+  }
+  EXPECT_EQ(CanBatchPatchMatchViews(shapes, false), ordinary_admission);
+  EXPECT_FALSE(CanBatchPatchMatchViews(shapes, true));
+  EXPECT_FALSE(CanPairPatchMatchViews(47, 149, 47, 149, false));
+}
+
+void ExpectCoarsePhoto2BatchOutputs(const size_t count, const bool reuse) {
+  const auto root =
+      std::filesystem::temp_directory_path() /
+      ("colmap-coarse-batch-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  ASSERT_TRUE(std::filesystem::create_directory(root));
+  struct Cleanup {
+    std::filesystem::path root;
+    ~Cleanup() {
+      std::error_code error;
+      std::filesystem::remove_all(root, error);
+    }
+  } cleanup{root};
+  ScopedCoarseTestEnvironment clear_init("COLMAP_NATIVE_COARSE_INIT",
+                                         std::nullopt);
+  ScopedCoarseTestEnvironment clear_export("COLMAP_NATIVE_COARSE_EXPORT",
+                                           std::nullopt);
+  ScopedCoarseTestEnvironment clear_refine(
+      "COLMAP_NATIVE_COARSE_REFINE_SCHEDULE", std::nullopt);
+  ScopedCoarseTestEnvironment clear_replay(
+      "COLMAP_NATIVE_COARSE_FIRST_SWEEP_RANDOM", std::nullopt);
+
+  auto options = MakeOptions(false, false, reuse);
+  options.window_radius = 5;
+  options.num_samples = 15;
+  options.num_iterations = 2;
+  std::vector<std::unique_ptr<Inputs> > inputs;
+  std::vector<PatchMatch::Problem> problems;
+  for (size_t i = 0; i < count; ++i) {
+    auto owned = std::make_unique<Inputs>(MakeInputs(0, 3, 149));
+    for (size_t dummy_index = 0; dummy_index < i; ++dummy_index) {
+      Image dummy = CloneWithPath(
+          owned->images.front(),
+          "dummy-" + std::to_string(i) + "-" + std::to_string(dummy_index));
+      DepthMap dummy_depth = owned->depths.front();
+      NormalMap dummy_normal = owned->normals.front();
+      owned->images.insert(owned->images.begin(), std::move(dummy));
+      owned->depths.insert(owned->depths.begin(), std::move(dummy_depth));
+      owned->normals.insert(owned->normals.begin(), std::move(dummy_normal));
+    }
+    PatchMatch::Problem problem;
+    problem.ref_image_idx = static_cast<int>(i);
+    for (size_t source = i + 1; source < owned->images.size(); ++source)
+      problem.src_image_idxs.push_back(static_cast<int>(source));
+    problem.images = &owned->images;
+    problem.depth_maps = &owned->depths;
+    problem.normal_maps = &owned->normals;
+    inputs.push_back(std::move(owned));
+    problems.push_back(problem);
+  }
+
+  {
+    ScopedCoarseTestEnvironment export_camera("COLMAP_NATIVE_COARSE_EXPORT",
+                                              root.string());
+    for (size_t i = 0; i < count; ++i) {
+      // Construction writes the exact reference binding and fine K. Build a
+      // smaller synthetic donor with the same K scaling as Image::Rescale.
+      PatchMatchCuda exporter(options, problems[i]);
+      const DepthMap& full_depth = inputs[i]->depths[i];
+      const NormalMap& full_normal = inputs[i]->normals[i];
+      const size_t coarse_width = (full_depth.GetWidth() + 1) / 2;
+      const size_t coarse_height = (full_depth.GetHeight() + 1) / 2;
+      DepthMap donor(coarse_width, coarse_height, kDepthMin, kDepthMax);
+      NormalMap donor_normal(coarse_width, coarse_height);
+      for (size_t row = 0; row < coarse_height; ++row) {
+        for (size_t col = 0; col < coarse_width; ++col) {
+          const size_t full_row = std::min(
+              2 * row, static_cast<size_t>(full_depth.GetHeight()) - 1);
+          const size_t full_col =
+              std::min(2 * col, static_cast<size_t>(full_depth.GetWidth()) - 1);
+          const bool invalidate = i % 2 == 1 && (row + 3 * col) % 19 == 0;
+          donor.Set(row,
+                    col,
+                    invalidate ? -1.0f : full_depth.Get(full_row, full_col));
+          for (size_t channel = 0; channel < 3; ++channel)
+            donor_normal.Set(row,
+                             col,
+                             channel,
+                             full_normal.Get(full_row, full_col, channel));
+        }
+      }
+      donor.Write(root / (std::to_string(i) + ".depth.bin"));
+      donor_normal.Write(root / (std::to_string(i) + ".normal.bin"));
+      const auto camera_path = root / (std::to_string(i) + ".camera.bin");
+      std::array<char, 40> camera_bytes{};
+      {
+        std::ifstream camera(camera_path, std::ios::binary);
+        ASSERT_TRUE(camera.is_open());
+        camera.read(camera_bytes.data(), camera_bytes.size());
+        ASSERT_EQ(camera.gcount(), camera_bytes.size());
+      }
+      const uint16_t one = 1;
+      ASSERT_EQ(*reinterpret_cast<const uint8_t*>(&one), 1);
+      float K[4];
+      std::memcpy(K, camera_bytes.data() + 8, sizeof(K));
+      const float sx = static_cast<float>(coarse_width) / full_depth.GetWidth();
+      const float sy =
+          static_cast<float>(coarse_height) / full_depth.GetHeight();
+      K[0] *= sx;
+      K[1] = (K[1] + 0.5f) * sx - 0.5f;
+      K[2] *= sy;
+      K[3] = (K[3] + 0.5f) * sy - 0.5f;
+      const float inv_K[4] = {
+          1.0f / K[0], -K[1] / K[0], 1.0f / K[2], -K[3] / K[2]};
+      const uint32_t dimensions[2] = {static_cast<uint32_t>(coarse_width),
+                                      static_cast<uint32_t>(coarse_height)};
+      std::memcpy(camera_bytes.data(), dimensions, sizeof(dimensions));
+      std::memcpy(camera_bytes.data() + 8, K, sizeof(K));
+      std::memcpy(camera_bytes.data() + 24, inv_K, sizeof(inv_K));
+      {
+        std::ofstream camera(camera_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(camera.is_open());
+        camera.write(camera_bytes.data(), camera_bytes.size());
+        ASSERT_TRUE(camera.good());
+      }
+      ASSERT_TRUE(
+          std::filesystem::exists(root / (std::to_string(i) + ".binding.bin")));
+      ASSERT_EQ(std::filesystem::file_size(camera_path), 40);
+    }
+  }
+
+  ScopedCoarseTestEnvironment import("COLMAP_NATIVE_COARSE_INIT",
+                                     root.string());
+  ScopedCoarseTestEnvironment refine("COLMAP_NATIVE_COARSE_REFINE_SCHEDULE",
+                                     "1");
+  ScopedCoarseTestEnvironment replay("COLMAP_NATIVE_COARSE_FIRST_SWEEP_RANDOM",
+                                     "1");
+  using Snapshot = std::tuple<DepthMap, NormalMap, Mat<float> >;
+  std::vector<Snapshot> expected;
+  for (const auto& problem : problems) {
+    PatchMatchCuda singleton(options, problem);
+    singleton.Run();
+    expected.emplace_back(singleton.GetDepthMap(),
+                          singleton.GetNormalMap(),
+                          singleton.GetSelProbMap());
+  }
+
+  std::vector<std::unique_ptr<PatchMatchCuda> > owners;
+  std::vector<PatchMatchCuda*> views;
+  std::vector<cudaStream_t> streams(count, nullptr);
+  for (const auto& problem : problems) {
+    owners.push_back(std::make_unique<PatchMatchCuda>(options, problem));
+    views.push_back(owners.back().get());
+  }
+  for (auto& stream : streams)
+    CUDA_SAFE_CALL(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+  RunPatchMatchBatch(views, streams);
+  for (auto& stream : streams) {
+    CUDA_SAFE_CALL(cudaStreamDestroy(stream));
+    stream = nullptr;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    SCOPED_TRACE(::testing::Message()
+                 << "count=" << count << " view=" << i << " reuse=" << reuse);
+    ExpectExactlyEqual(std::get<0>(expected[i]), owners[i]->GetDepthMap());
+    ExpectExactlyEqual(std::get<1>(expected[i]), owners[i]->GetNormalMap());
+    ExpectExactlyEqual(std::get<2>(expected[i]), owners[i]->GetSelProbMap());
+  }
+}
+
+TEST_F(CudaTest, CoarsePhoto2ThreeToFiveViewBatchPreservesSingletonMaps) {
+  for (const bool reuse : {false, true})
+    for (size_t count = 3; count <= 5; ++count)
+      ExpectCoarsePhoto2BatchOutputs(count, reuse);
+}
+
 TEST_F(CudaTest, CoarseBindingRejectsAmbiguousNameAndCorruption) {
   const auto root =
       std::filesystem::temp_directory_path() /

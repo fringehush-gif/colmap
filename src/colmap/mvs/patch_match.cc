@@ -14,6 +14,7 @@
 #include "colmap/util/threading.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -70,6 +71,22 @@ bool DefaultReferencePairSettings(const PatchMatchOptions& o) {
          o.allow_missing_files == d.allow_missing_files &&
          o.write_consistency_graph == d.write_consistency_graph &&
          !o.checkpoint_hmm && o.geom_consistency == o.filter;
+}
+
+// Keep ordinary batch settings unchanged. Admit the two-iteration
+// coarse photometric method only with its replay and refinement schedule.
+bool CoarsePhotoBatchSettings(const PatchMatchOptions& o) {
+  const char* init = std::getenv("COLMAP_NATIVE_COARSE_INIT");
+  const char* refine = std::getenv("COLMAP_NATIVE_COARSE_REFINE_SCHEDULE");
+  const char* replay = std::getenv("COLMAP_NATIVE_COARSE_FIRST_SWEEP_RANDOM");
+  if (!init || !init[0] || !refine || refine[0] != '1' || refine[1] ||
+      !replay || replay[0] != '1' || replay[1] || o.geom_consistency ||
+      o.filter || o.num_iterations != 2) {
+    return false;
+  }
+  PatchMatchOptions default_iteration_check = o;
+  default_iteration_check.num_iterations = PatchMatchOptions().num_iterations;
+  return DefaultReferencePairSettings(default_iteration_check);
 }
 }  // namespace
 #endif
@@ -206,7 +223,8 @@ void PatchMatchController::Run() {
       GetEffectiveNumThreads(options_.num_threads));
 
 #ifndef COLMAP_HIP_ENABLED
-  if (gpu_indices_.size() == 1 && DefaultReferencePairSettings(options_)) {
+  if (gpu_indices_.size() == 1 && (DefaultReferencePairSettings(options_) ||
+                                   CoarsePhotoBatchSettings(options_))) {
     SetBestCudaDevice(gpu_indices_.front());
     const auto& model = workspace_->GetModel();
     const auto shape = [&](size_t index) {

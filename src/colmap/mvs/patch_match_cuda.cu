@@ -87,6 +87,13 @@ bool NativeCoarseInitRequested() {
   return init != nullptr && init[0] != '\0';
 }
 
+bool CoarsePhotoBatchFlagsSet() {
+  const char* refine = std::getenv("COLMAP_NATIVE_COARSE_REFINE_SCHEDULE");
+  const char* replay = std::getenv("COLMAP_NATIVE_COARSE_FIRST_SWEEP_RANDOM");
+  return refine && refine[0] == '1' && refine[1] == '\0' && replay &&
+         replay[0] == '1' && replay[1] == '\0';
+}
+
 bool KeepInitialRandomPlane(const PatchMatchOptions& options) {
   const char* flag = std::getenv("COLMAP_NATIVE_COARSE_FIRST_SWEEP_RANDOM");
   if (flag == nullptr || flag[0] == '\0') return false;
@@ -2595,7 +2602,10 @@ bool CanBatchPatchMatchViews(
     const std::vector<std::pair<size_t, size_t>>& view_shapes, bool geometric) {
   if (!NativePatchMatchBackendRequested()) return false;
 #ifndef COLMAP_HIP_ENABLED
-  if (NativeCoarseInitRequested()) return false;
+  // The resident-wave cap also applies to coarse PHOTO2, which uses
+  // the same eight sweeps for every reference.
+  if (NativeCoarseInitRequested() && (geometric || !CoarsePhotoBatchFlagsSet()))
+    return false;
 #endif
   const size_t count = view_shapes.size();
   if (count < 3 || count > 5) return false;
@@ -2707,10 +2717,23 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
   THROW_CHECK_EQ(streams.size(), views.size());
   THROW_CHECK(views.front() != nullptr);
   PatchMatchCuda& first = *views.front();
-  const auto validate = [&first](PatchMatchCuda& p) {
+#ifndef COLMAP_HIP_ENABLED
+  const bool coarse_photo = NativeCoarseInitRequested();
+#else
+  const bool coarse_photo = false;
+#endif
+  const auto validate = [&first, coarse_photo](PatchMatchCuda& p) {
     THROW_CHECK_EQ(p.options_.window_radius, 5);
     THROW_CHECK_EQ(p.options_.window_step, 1);
-    THROW_CHECK_EQ(p.options_.num_iterations, 5);
+    THROW_CHECK_EQ(p.options_.num_iterations, coarse_photo ? 2 : 5);
+#ifndef COLMAP_HIP_ENABLED
+    if (coarse_photo) {
+      THROW_CHECK(CoarsePhotoBatchFlagsSet());
+      THROW_CHECK(!p.options_.geom_consistency);
+      THROW_CHECK(!p.options_.filter);
+      THROW_CHECK(KeepInitialRandomPlane(p.options_));
+    }
+#endif
     THROW_CHECK(!p.options_.checkpoint_hmm);
     THROW_CHECK_EQ(p.options_.rotation_buffer_reuse,
                    first.options_.rotation_buffer_reuse);
@@ -2784,11 +2807,11 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     }
     p.consistency_mask_->FillWithScalar(0);
   };
-  const auto launch = [](PatchMatchCuda& p,
-                         cudaStream_t stream,
-                         int iter,
-                         int sweep,
-                         bool last) {
+  const auto launch = [coarse_photo](PatchMatchCuda& p,
+                                     cudaStream_t stream,
+                                     int iter,
+                                     int sweep,
+                                     bool last) {
     THROW_CHECK_GE(p.rotation_in_half_pi_, 0);
     THROW_CHECK_LT(p.rotation_in_half_pi_, 4);
     THROW_CHECK_EQ(
@@ -2815,45 +2838,61 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     o.filter_geom_consistency_max_cost =
         p.options_.filter_geom_consistency_max_cost;
     o.perturbation = 1.0f / std::pow(2.0f, iter + sweep / 4.0f);
+    if (coarse_photo) {
+      const float total_steps = p.options_.num_iterations * 4;
+      const float progress = (iter * 4 + sweep) / (total_steps - 1.0f);
+      o.perturbation = 1.0f / std::pow(2.0f, 4.75f * progress);
+    }
     o.prev_sel_prob_weight = static_cast<float>(iter * 4 + sweep) /
                              static_cast<float>(p.options_.num_iterations * 4);
     const dim3 block(8, 4 * kCooperativeSampleBatchSize, 1);
     const dim3 grid((p.cost_map_->GetWidth() - 1) / 8 + 1, 1, 1);
     const GpuMatView<float> no_checkpoint{nullptr, 0, 0, 0, 0};
-#define PAIR_LAUNCH(GEOM, PHOTO_FILTER, GEO_FILTER)                           \
-  SweepFromTopToBottom<11, 1, GEOM, PHOTO_FILTER, GEO_FILTER, true, 8, false> \
-      <<<grid, block, 0, stream>>>(                                           \
-          MakeRefCamera(p.ref_K_host_[p.rotation_in_half_pi_],                \
-                        p.ref_inv_K_host_[p.rotation_in_half_pi_]),           \
-          p.global_workspace_->View(),                                        \
-          p.rand_state_map_->View(),                                          \
-          (PatchMatchRngPerimeter{p.ref_width_, p.ref_height_}),              \
-          static_cast<unsigned int>(p.rotation_in_half_pi_),                  \
-          p.cost_map_->View(),                                                \
-          p.depth_map_->View(),                                               \
-          p.normal_map_->View(),                                              \
-          (PackedConsistencyMaskView{p.consistency_mask_->View()}),           \
-          p.sel_prob_map_->View(),                                            \
-          p.prev_sel_prob_map_->View(),                                       \
-          no_checkpoint,                                                      \
-          no_checkpoint,                                                      \
-          p.ref_image_texture_->GetObj(),                                     \
-          p.ref_image_->sum_image->View(),                                    \
-          p.ref_image_->squared_sum_image->View(),                            \
-          p.src_images_texture_->GetObj(),                                    \
-          p.src_depth_maps_texture_ == nullptr                                \
-              ? 0                                                             \
-              : p.src_depth_maps_texture_->GetObj(),                          \
-          p.poses_texture_[p.rotation_in_half_pi_]->GetObj(),                 \
-          o)
+#define PAIR_LAUNCH(GEOM, PHOTO_FILTER, GEO_FILTER, REPLAY)     \
+  SweepFromTopToBottom<11,                                      \
+                       1,                                       \
+                       GEOM,                                    \
+                       PHOTO_FILTER,                            \
+                       GEO_FILTER,                              \
+                       true,                                    \
+                       8,                                       \
+                       false,                                   \
+                       REPLAY><<<grid, block, 0, stream>>>(     \
+      MakeRefCamera(p.ref_K_host_[p.rotation_in_half_pi_],      \
+                    p.ref_inv_K_host_[p.rotation_in_half_pi_]), \
+      p.global_workspace_->View(),                              \
+      p.rand_state_map_->View(),                                \
+      (PatchMatchRngPerimeter{p.ref_width_, p.ref_height_}),    \
+      static_cast<unsigned int>(p.rotation_in_half_pi_),        \
+      p.cost_map_->View(),                                      \
+      p.depth_map_->View(),                                     \
+      p.normal_map_->View(),                                    \
+      (PackedConsistencyMaskView{p.consistency_mask_->View()}), \
+      p.sel_prob_map_->View(),                                  \
+      p.prev_sel_prob_map_->View(),                             \
+      no_checkpoint,                                            \
+      no_checkpoint,                                            \
+      p.ref_image_texture_->GetObj(),                           \
+      p.ref_image_->sum_image->View(),                          \
+      p.ref_image_->squared_sum_image->View(),                  \
+      p.src_images_texture_->GetObj(),                          \
+      p.src_depth_maps_texture_ == nullptr                      \
+          ? 0                                                   \
+          : p.src_depth_maps_texture_->GetObj(),                \
+      p.poses_texture_[p.rotation_in_half_pi_]->GetObj(),       \
+      o)
     if (p.options_.geom_consistency) {
       if (last) {
-        PAIR_LAUNCH(true, true, true);
+        PAIR_LAUNCH(true, true, true, false);
       } else {
-        PAIR_LAUNCH(true, false, false);
+        PAIR_LAUNCH(true, false, false, false);
       }
     } else {
-      PAIR_LAUNCH(false, false, false);
+      if (coarse_photo && iter == 0 && sweep == 0) {
+        PAIR_LAUNCH(false, false, false, true);
+      } else {
+        PAIR_LAUNCH(false, false, false, false);
+      }
     }
 #undef PAIR_LAUNCH
   };
