@@ -1,0 +1,33 @@
+ALIKED native CUDA source notices
+
+The Resize coordinate and bilinear interpolation arithmetic in
+fused_concat_kernel.cu (ReadBilinear) is adapted from
+ONNX Runtime v1.31.1:
+  onnxruntime/core/providers/cuda/tensor/resize_impl.h
+  onnxruntime/core/providers/cuda/tensor/resize_impl.cu
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+Those adapted portions are licensed under MIT; the complete upstream
+copyright and permission notice is in LICENSE-ONNXRUNTIME.
+This attribution applies to those portions, not the entire local kernel.
+
+The normalized sampler is an independent local implementation. Its
+coordinate, exceptional-coordinate and interpolation arithmetic follows
+the ONNX Runtime v1.31.1 scalar behavior; no whole ORT operator was copied.
+Existing MIT declarations are retained. The MIT permission text for
+the local native contribution is in LICENSE-MIT.
+
+The graph exporter scripts/aliked/export_onnx.py combines the BSD-3-Clause
+Resize/Concat transformation with the MIT sampled-normalization
+transformation. Its source identifies these portions; LICENSE-MIT retains
+the MIT permission text.
+
+Primary source and license references:
+https://github.com/microsoft/onnxruntime/blob/v1.31.1/LICENSE
+https://github.com/microsoft/onnxruntime/blob/v1.31.1/onnxruntime/core/providers/cuda/tensor/resize_impl.h
+https://github.com/microsoft/onnxruntime/blob/v1.31.1/onnxruntime/core/providers/cuda/tensor/resize_impl.cu
+https://github.com/microsoft/onnxruntime/blob/v1.31.1/onnxruntime/core/providers/cuda/tensor/grid_sample_impl.cu
+https://github.com/microsoft/onnxruntime/blob/v1.31.1/onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.h
+
+Model weights, model redistribution rights and runtime SDK distribution
+are outside this source notice.

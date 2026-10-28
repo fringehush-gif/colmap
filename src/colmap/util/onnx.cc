@@ -117,24 +117,36 @@ void ThrowCheckONNXElementType(const std::string_view name,
       << " != " << FormatONNXElementType(expected_type);
 }
 
+std::string ResolveONNXModelPath(const std::string& model_path) {
+  static std::mutex download_mutex;
+  const std::lock_guard<std::mutex> lock(download_mutex);
+  return MaybeDownloadAndCacheFile(model_path).string();
+}
+
 ONNXModel::ONNXModel(std::string model_path,
                      int num_threads,
                      bool use_gpu,
                      const std::string& gpu_index,
-                     bool is_capability_probe) {
-  {
-    static std::mutex download_mutex;
-    const std::lock_guard<std::mutex> lock(download_mutex);
-    model_path = MaybeDownloadAndCacheFile(model_path).string();
+                     bool is_capability_probe,
+                     ONNXSessionConfig config) {
+  if (config.model_data) {
+    THROW_CHECK(!config.model_data->empty()) << "Empty ONNX model snapshot";
+    model_data_ = config.model_data;
+  } else {
+    model_path = ResolveONNXModelPath(model_path);
   }
 
   const int num_eff_threads = GetEffectiveNumThreads(num_threads);
 
   try {
-    InitializeSession(
-        model_path, num_eff_threads, use_gpu, gpu_index, is_capability_probe);
+    InitializeSession(model_path,
+                      num_eff_threads,
+                      use_gpu,
+                      gpu_index,
+                      is_capability_probe,
+                      config);
   } catch (...) {
-    if (is_capability_probe) {
+    if (is_capability_probe || !config.log_initialization_errors) {
       throw;
     }
     RethrowONNXException();
@@ -163,9 +175,22 @@ void ONNXModel::InitializeSession(const std::string& model_path,
                                   int num_threads,
                                   bool use_gpu,
                                   const std::string& gpu_index,
-                                  bool is_capability_probe) {
+                                  bool is_capability_probe,
+                                  const ONNXSessionConfig& config) {
   ConfigureSessionOptions(num_threads);
   execution_provider_ = SelectONNXExecutionProvider(use_gpu);
+  if (config.require_cuda &&
+      execution_provider_ != ONNXExecutionProvider::CUDA) {
+    throw std::runtime_error("This model requires the CUDA execution provider");
+  }
+  const auto register_custom_ops = [&]() {
+    if (config.register_custom_ops) {
+      auto owner = config.register_custom_ops(session_options_);
+      if (!owner) throw std::runtime_error("Custom-op owner is missing");
+      custom_ops_owner_ = std::move(owner);
+    }
+  };
+  register_custom_ops();
 
   bool inspect_cuda_probe = false;
 #if ORT_API_VERSION >= 24
@@ -224,11 +249,18 @@ void ONNXModel::InitializeSession(const std::string& model_path,
 #else
   const char* model_path_cstr = model_path.c_str();
 #endif
+  const auto create_session = [&]() {
+    if (model_data_) {
+      return std::make_unique<Ort::Session>(
+          env_, model_data_->data(), model_data_->size(), session_options_);
+    }
+    return std::make_unique<Ort::Session>(
+        env_, model_path_cstr, session_options_);
+  };
   try {
-    session_ =
-        std::make_unique<Ort::Session>(env_, model_path_cstr, session_options_);
+    session_ = create_session();
   } catch (const Ort::Exception& e) {
-    if (!use_coreml || is_capability_probe) {
+    if (!use_coreml || is_capability_probe || config.require_cuda) {
       throw;
     }
     // Some models cannot be compiled by CoreML (e.g. unsupported dynamic
@@ -236,9 +268,9 @@ void ONNXModel::InitializeSession(const std::string& model_path,
     LOG(WARNING) << "Failed to initialize ONNX session with CoreML ("
                  << e.what() << "); falling back to CPU execution provider";
     ConfigureSessionOptions(num_threads);
+    register_custom_ops();
     execution_provider_ = ONNXExecutionProvider::CPU;
-    session_ =
-        std::make_unique<Ort::Session>(env_, model_path_cstr, session_options_);
+    session_ = create_session();
   }
 
 #if ORT_API_VERSION >= 24

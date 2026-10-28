@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <memory>
 #include <vector>
 
 #include <glog/logging.h>
@@ -115,6 +116,55 @@ TEST(ONNXModelTest, MetadataAndInference) {
   const float* output_data = outputs[0].GetTensorData<float>();
   EXPECT_FLOAT_EQ(output_data[0], input_data[0]);
   EXPECT_FLOAT_EQ(output_data[1], input_data[1]);
+}
+
+TEST(ONNXModelTest, OwnedSnapshotDoesNotReopenItsLabel) {
+  const auto path = WriteIdentityModel();
+  auto bytes = std::make_shared<std::vector<char>>();
+  ReadBinaryBlob(path.string(), bytes.get());
+  std::weak_ptr<const std::vector<char>> lifetime = bytes;
+  const auto missing_label = CreateTestDir() / "absent.onnx";
+  ASSERT_FALSE(std::filesystem::exists(missing_label));
+  std::unique_ptr<ONNXModel> model;
+  {
+    ONNXSessionConfig config;
+    config.model_data = bytes;
+    model = std::make_unique<ONNXModel>(
+        missing_label.string(), 1, false, "0", false, config);
+  }
+  bytes.reset();
+  ASSERT_FALSE(lifetime.expired());
+  ASSERT_TRUE(std::filesystem::remove(path));
+  std::vector<float> data{1.25f, -2.5f};
+  std::vector<Ort::Value> inputs;
+  inputs.emplace_back(CreateONNXTensor(data, {1, 2}));
+  const auto outputs = model->Run(inputs);
+  ASSERT_EQ(outputs.size(), 1);
+  ASSERT_EQ(outputs[0].GetTensorMemoryInfo().GetDeviceType(),
+            OrtMemoryInfoDeviceType_CPU);
+  EXPECT_FLOAT_EQ(outputs[0].GetTensorData<float>()[0], data[0]);
+  EXPECT_FLOAT_EQ(outputs[0].GetTensorData<float>()[1], data[1]);
+  model.reset();
+  EXPECT_TRUE(lifetime.expired());
+}
+
+TEST(ONNXModelTest, EmptySnapshotDoesNotLoadTheExistingPath) {
+  ONNXSessionConfig config;
+  config.model_data = std::make_shared<const std::vector<char>>();
+  EXPECT_ANY_THROW(
+      ONNXModel(WriteIdentityModel().string(), 1, false, "0", false, config));
+}
+
+TEST(ONNXModelTest, OptionalInitializationCanLeaveLoggingToCaller) {
+  ONNXSessionConfig config;
+  config.log_initialization_errors = false;
+  const std::string invalid = "not an ONNX model";
+  config.model_data =
+      std::make_shared<const std::vector<char>>(invalid.begin(), invalid.end());
+  ErrorLogSink log_sink;
+  EXPECT_THROW(ONNXModel("in-memory-invalid", 1, false, "0", false, config),
+               Ort::Exception);
+  EXPECT_EQ(log_sink.NumErrorLogs(), 0);
 }
 
 TEST(ThrowCheckONNXElementTypeTest, AcceptsMatchingType) {

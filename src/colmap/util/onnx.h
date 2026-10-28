@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -20,6 +21,10 @@ enum class ONNXExecutionProvider {
 
 // Resolve the execution provider requested by `use_gpu` for this build.
 ONNXExecutionProvider SelectONNXExecutionProvider(bool use_gpu);
+
+// Resolve an ONNX resource through the existing cache, serializing downloads
+// with ordinary ONNXModel construction.
+std::string ResolveONNXModelPath(const std::string& model_path);
 
 // Format tensor shape as a string for logging/error messages.
 std::string FormatONNXTensorShape(const std::vector<int64_t>& shape);
@@ -64,6 +69,20 @@ void ThrowCheckONNXElementType(std::string_view name,
                                ONNXTensorElementDataType type,
                                ONNXTensorElementDataType expected_type);
 
+// Optional per-session registration. The returned owner must retain the domain
+// and descriptors until after both the session and its options are destroyed.
+struct ONNXSessionConfig {
+  std::function<std::shared_ptr<void>(Ort::SessionOptions&)>
+      register_custom_ops;
+  bool require_cuda = false;
+  // An optional-model caller can log a recovered construction failure itself.
+  // This does not suppress logging or exceptions from Run().
+  bool log_initialization_errors = true;
+  // Optional owned ONNX snapshot. When supplied, model_path is only a label:
+  // no file is resolved or reopened. External tensor files are unsupported.
+  std::shared_ptr<const std::vector<char>> model_data;
+};
+
 // Wrapper for ONNX Runtime session management.
 // Handles model loading, input/output shape parsing, and inference.
 class ONNXModel {
@@ -77,7 +96,8 @@ class ONNXModel {
             int num_threads,
             bool use_gpu,
             const std::string& gpu_index,
-            bool is_capability_probe = false);
+            bool is_capability_probe = false,
+            ONNXSessionConfig config = {});
 
   std::vector<Ort::Value> Run(
       const std::vector<Ort::Value>& input_tensors) const;
@@ -105,7 +125,8 @@ class ONNXModel {
                          int num_threads,
                          bool use_gpu,
                          const std::string& gpu_index,
-                         bool is_capability_probe);
+                         bool is_capability_probe,
+                         const ONNXSessionConfig& config);
 
   // Apply the common, provider-independent session options (threading,
   // execution mode, graph optimization). Resets any previously appended
@@ -119,6 +140,8 @@ class ONNXModel {
 
   Ort::Env env_;
   Ort::AllocatorWithDefaultOptions allocator_;
+  std::shared_ptr<const std::vector<char>> model_data_;
+  std::shared_ptr<void> custom_ops_owner_;
   Ort::SessionOptions session_options_;
   std::unique_ptr<Ort::Session> session_;
   ONNXExecutionProvider execution_provider_ = ONNXExecutionProvider::CPU;

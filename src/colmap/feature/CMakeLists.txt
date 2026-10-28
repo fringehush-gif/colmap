@@ -58,6 +58,45 @@ if(ONNX_ENABLED)
     target_link_libraries(colmap_feature PRIVATE colmap_onnx_util)
 endif()
 
+# Deliberately narrow first qualification target; all existing defaults stay off.
+option(ALIKED_NATIVE_CUDA_ENABLED "Build experimental ALIKED CUDA custom ops" OFF)
+if(ALIKED_NATIVE_CUDA_ENABLED)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CUDA_ENABLED OR NOT ONNX_ENABLED)
+        message(FATAL_ERROR "ALIKED native ops require Linux, CUDA and ONNX")
+    endif()
+    if(NOT CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.2" OR
+       CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.3")
+        message(FATAL_ERROR "ALIKED native ops currently require CUDA 13.2")
+    endif()
+    target_sources(colmap_feature PRIVATE
+        aliked_native/custom_ops.h aliked_native/custom_ops.cc
+        aliked_native/model.h aliked_native/model.cc
+        aliked_native/ort_status_boundary.h
+        aliked_native/fused_concat_op.cc aliked_native/fused_concat_kernel.h
+        aliked_native/fused_concat_kernel.cu
+        aliked_native/normalized_grid_sample_op.cc
+        aliked_native/normalized_grid_sample_kernel.h
+        aliked_native/normalized_grid_sample_kernel.cu)
+    # Keep these per-source options last, after inherited CUDA math/stream flags.
+    set_source_files_properties(
+        aliked_native/fused_concat_kernel.cu
+        aliked_native/normalized_grid_sample_kernel.cu
+        PROPERTIES COMPILE_OPTIONS
+            "--ftz=false;--prec-div=true;--prec-sqrt=true;--fmad=true;--default-stream=legacy")
+    set_property(TARGET colmap_feature PROPERTY CUDA_ARCHITECTURES 86)
+    target_compile_definitions(colmap_feature PRIVATE COLMAP_ALIKED_NATIVE_CUDA_ENABLED)
+    target_link_libraries(colmap_feature PRIVATE CUDA::cudart)
+    COLMAP_ADD_TEST(
+        NAME aliked_native_test
+        SRCS aliked_native/custom_ops_test.cc aliked_native/test_models.h
+        LINK_LIBS
+            colmap_feature
+            colmap_onnx_util
+            onnxruntime::onnxruntime
+            CUDA::cudart
+    )
+endif()
+
 if(CUDA_ENABLED OR HIP_ENABLED)
     # loma.cc calls CudaDeviceSupportsBf16 from colmap_util_cuda.
     target_link_libraries(colmap_feature PRIVATE colmap_util_cuda)

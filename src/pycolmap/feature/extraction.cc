@@ -135,6 +135,11 @@ void BindFeatureExtraction(py::module& m) {
                          &AlikedExtractionOptions::n16rot_model_path,
                          "Path to the ONNX model file for the n16rot ALIKED "
                          "extractor.")
+          .def_readwrite("n16rot_native_model_path",
+                         &AlikedExtractionOptions::n16rot_native_model_path,
+                         "Optional local transformed N16ROT CUDA graph. "
+                         "Empty disables it; unsupported or mismatched "
+                         "models use the original model.")
           .def_readwrite("n32_model_path",
                          &AlikedExtractionOptions::n32_model_path,
                          "Path to the ONNX model file for the n32 ALIKED "

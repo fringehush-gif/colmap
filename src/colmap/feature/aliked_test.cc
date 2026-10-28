@@ -5,7 +5,9 @@
 #include "colmap/feature/matcher.h"
 #include "colmap/math/random.h"
 #include "colmap/sensor/bitmap.h"
+#include "colmap/util/testing.h"
 
+#include <cstring>
 #include <map>
 #include <memory>
 
@@ -167,6 +169,29 @@ TEST_P(ParameterizedAlikedTests, MinScore) {
                        << ") from high-score extraction not found in "
                           "low-score extraction";
   }
+}
+
+TEST_P(ParameterizedAlikedTests, NativeRequestKeepsOriginalOnCpu) {
+  const auto& expected = SharedDefaultExtractionFor(GetParam());
+  FeatureExtractionOptions options(GetParam());
+  options.use_gpu = false;
+  options.aliked->min_score = 0.0;
+  const auto missing_native = CreateTestDir() / "missing-native.onnx";
+  ASSERT_FALSE(std::filesystem::exists(missing_native));
+  options.aliked->n16rot_native_model_path = missing_native.string();
+  auto extractor = CreateAlikedFeatureExtractor(options);
+  FeatureKeypoints keypoints;
+  FeatureDescriptors descriptors;
+  ASSERT_TRUE(extractor->Extract(expected.image, &keypoints, &descriptors));
+  EXPECT_EQ(keypoints, *expected.keypoints);
+  EXPECT_EQ(descriptors.type, expected.descriptors->type);
+  ASSERT_EQ(descriptors.data.rows(), expected.descriptors->data.rows());
+  ASSERT_EQ(descriptors.data.cols(), expected.descriptors->data.cols());
+  ASSERT_GT(descriptors.data.size(), 0);
+  EXPECT_EQ(std::memcmp(descriptors.data.data(),
+                        expected.descriptors->data.data(),
+                        descriptors.data.size()),
+            0);
 }
 
 INSTANTIATE_TEST_SUITE_P(AlikedTests,

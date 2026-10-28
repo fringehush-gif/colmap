@@ -186,6 +186,8 @@ AlikedExtractionWidget::AlikedExtractionWidget(QWidget* parent,
   AddOptionInt(&aliked_options.max_num_features, "aliked.max_num_features");
   AddOptionDouble(&aliked_options.min_score, "aliked.min_score", 0.0, 1.0);
   AddOptionText(&aliked_options.n16rot_model_path, "aliked.n16rot_model_path");
+  AddOptionText(&aliked_options.n16rot_native_model_path,
+                "aliked.n16rot_native_model_path");
   AddOptionText(&aliked_options.n32_model_path, "aliked.n32_model_path");
 }
 

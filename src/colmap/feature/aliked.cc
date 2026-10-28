@@ -7,6 +7,11 @@
 #include "colmap/feature/utils.h"
 #include "colmap/util/onnx.h"
 
+#ifdef COLMAP_ALIKED_NATIVE_CUDA_ENABLED
+#include "colmap/feature/aliked_native/custom_ops.h"
+#include "colmap/feature/aliked_native/model.h"
+#endif
+
 #include <algorithm>
 #include <memory>
 
@@ -67,64 +72,145 @@ struct InputPadder {
   std::vector<float> padded_;
 };
 
+int ValidateAlikedModel(const ONNXModel& model) {
+  // Validate sparse model inputs: image [1, 3, H, W], max_keypoints (scalar),
+  // min_score (scalar).
+  THROW_CHECK_EQ(model.input_shapes().size(), 3);
+  ThrowCheckONNXNode(model.input_names()[0],
+                     "image",
+                     model.input_shapes()[0],
+                     {-1, 3, -1, -1});
+  ThrowCheckONNXElementType(model.input_names()[0],
+                            model.input_element_types()[0],
+                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  ThrowCheckONNXNode(
+      model.input_names()[1], "max_keypoints", model.input_shapes()[1], {});
+  ThrowCheckONNXElementType(model.input_names()[1],
+                            model.input_element_types()[1],
+                            ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  ThrowCheckONNXNode(
+      model.input_names()[2], "min_score", model.input_shapes()[2], {});
+  ThrowCheckONNXElementType(model.input_names()[2],
+                            model.input_element_types()[2],
+                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+
+  // Validate sparse model outputs: keypoints [1, K, 2], descriptors [1, K,
+  // D], scores [1, K]. Note: Some dimensions may be dynamic (-1) in ONNX.
+  THROW_CHECK_EQ(model.output_shapes().size(), 3);
+  ThrowCheckONNXNode(model.output_names()[0],
+                     "keypoints",
+                     model.output_shapes()[0],
+                     {-1, -1, -1});
+  ThrowCheckONNXElementType(model.output_names()[0],
+                            model.output_element_types()[0],
+                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  ThrowCheckONNXNode(model.output_names()[1],
+                     "descriptors",
+                     model.output_shapes()[1],
+                     {-1, -1, -1});
+  ThrowCheckONNXElementType(model.output_names()[1],
+                            model.output_element_types()[1],
+                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  const int descriptor_dim = static_cast<int>(model.output_shapes()[1][2]);
+  THROW_CHECK_GT(descriptor_dim, 0);
+  VLOG(2) << "ALIKED descriptor dimension: " << descriptor_dim;
+  ThrowCheckONNXNode(
+      model.output_names()[2], "scores", model.output_shapes()[2], {-1, -1});
+  ThrowCheckONNXElementType(model.output_names()[2],
+                            model.output_element_types()[2],
+                            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  return descriptor_dim;
+}
+
+struct LoadedAlikedModel {
+  std::unique_ptr<ONNXModel> model;
+  int descriptor_dim;
+};
+
+LoadedAlikedModel LoadAlikedModel(const FeatureExtractionOptions& options) {
+  THROW_CHECK(options.Check());
+  const auto* api_base = OrtGetApiBase();
+  if (!api_base || !api_base->GetApi(ORT_API_VERSION)) {
+    throw std::runtime_error(
+        "Loaded ONNX Runtime does not support this build's API");
+  }
+  const auto construct = [&](const std::string& path,
+                             ONNXSessionConfig config) {
+    return std::make_unique<ONNXModel>(path,
+                                       options.num_threads,
+                                       options.use_gpu,
+                                       options.gpu_index,
+                                       false,
+                                       std::move(config));
+  };
+  std::shared_ptr<const std::vector<char>> original_snapshot;
+  if (!options.aliked->n16rot_native_model_path.empty()) {
+    std::string fallback_reason;
+    if (options.type != FeatureExtractorType::ALIKED_N16ROT) {
+      fallback_reason = "native operators support N16ROT only";
+    } else if (!options.use_gpu) {
+      fallback_reason = "native operators require GPU extraction";
+    } else {
+#ifdef COLMAP_ALIKED_NATIVE_CUDA_ENABLED
+      auto prepared =
+          PrepareAlikedNativeModelData(options.aliked->n16rot_model_path,
+                                       options.aliked->n16rot_native_model_path,
+                                       options.gpu_index);
+      original_snapshot = std::move(prepared.original);
+      fallback_reason = std::move(prepared.fallback_reason);
+      if (prepared.native) {
+        ONNXSessionConfig config;
+        config.require_cuda = true;
+        config.log_initialization_errors = false;
+        config.register_custom_ops = RegisterAlikedNativeOps;
+        config.model_data = std::move(prepared.native);
+        std::unique_ptr<ONNXModel> model;
+        try {
+          model = construct(options.aliked->n16rot_native_model_path,
+                            std::move(config));
+        } catch (const Ort::Exception& error) {
+          switch (error.GetOrtErrorCode()) {
+            case ORT_INVALID_PROTOBUF:
+            case ORT_INVALID_GRAPH:
+            case ORT_NOT_IMPLEMENTED:
+              fallback_reason = error.what();
+              break;
+            default:
+              throw;
+          }
+        }
+        if (model) {
+          try {
+            const int descriptor_dim = ValidateAlikedModel(*model);
+            LOG(INFO) << "ALIKED using qualified native N16ROT CUDA graph";
+            return LoadedAlikedModel{std::move(model), descriptor_dim};
+          } catch (const std::invalid_argument& error) {
+            fallback_reason = error.what();
+          }
+        }
+      }
+#else
+      fallback_reason = "native CUDA operators are not built";
+#endif
+    }
+    LOG(WARNING) << "ALIKED native graph unavailable (" << fallback_reason
+                 << "); using configured original model";
+  }
+  ONNXSessionConfig original_config;
+  original_config.model_data = std::move(original_snapshot);
+  auto model =
+      construct(GetExtractorModelPath(options), std::move(original_config));
+  const int descriptor_dim = ValidateAlikedModel(*model);
+  return LoadedAlikedModel{std::move(model), descriptor_dim};
+}
+
 class AlikedFeatureExtractor : public FeatureExtractor {
  public:
   explicit AlikedFeatureExtractor(const FeatureExtractionOptions& options)
-      : options_(options),
-        model_(GetExtractorModelPath(options),
-               options.num_threads,
-               options.use_gpu,
-               options.gpu_index) {
-    THROW_CHECK(options.Check());
-
-    // Validate sparse model inputs: image [1, 3, H, W], max_keypoints (scalar),
-    // min_score (scalar).
-    THROW_CHECK_EQ(model_.input_shapes().size(), 3);
-    ThrowCheckONNXNode(model_.input_names()[0],
-                       "image",
-                       model_.input_shapes()[0],
-                       {-1, 3, -1, -1});
-    ThrowCheckONNXElementType(model_.input_names()[0],
-                              model_.input_element_types()[0],
-                              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-    ThrowCheckONNXNode(
-        model_.input_names()[1], "max_keypoints", model_.input_shapes()[1], {});
-    ThrowCheckONNXElementType(model_.input_names()[1],
-                              model_.input_element_types()[1],
-                              ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-    ThrowCheckONNXNode(
-        model_.input_names()[2], "min_score", model_.input_shapes()[2], {});
-    ThrowCheckONNXElementType(model_.input_names()[2],
-                              model_.input_element_types()[2],
-                              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-
-    // Validate sparse model outputs: keypoints [1, K, 2], descriptors [1, K,
-    // D], scores [1, K]. Note: Some dimensions may be dynamic (-1) in ONNX.
-    THROW_CHECK_EQ(model_.output_shapes().size(), 3);
-    ThrowCheckONNXNode(model_.output_names()[0],
-                       "keypoints",
-                       model_.output_shapes()[0],
-                       {-1, -1, -1});
-    ThrowCheckONNXElementType(model_.output_names()[0],
-                              model_.output_element_types()[0],
-                              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-    ThrowCheckONNXNode(model_.output_names()[1],
-                       "descriptors",
-                       model_.output_shapes()[1],
-                       {-1, -1, -1});
-    ThrowCheckONNXElementType(model_.output_names()[1],
-                              model_.output_element_types()[1],
-                              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-    descriptor_dim_ = static_cast<int>(model_.output_shapes()[1][2]);
-    THROW_CHECK_GT(descriptor_dim_, 0);
-    VLOG(2) << "ALIKED descriptor dimension: " << descriptor_dim_;
-    ThrowCheckONNXNode(model_.output_names()[2],
-                       "scores",
-                       model_.output_shapes()[2],
-                       {-1, -1});
-    ThrowCheckONNXElementType(model_.output_names()[2],
-                              model_.output_element_types()[2],
-                              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      : options_(options) {
+    auto loaded = LoadAlikedModel(options);
+    model_ = std::move(loaded.model);
+    descriptor_dim_ = loaded.descriptor_dim;
   }
 
   bool Extract(const Bitmap& bitmap,
@@ -144,7 +230,7 @@ class AlikedFeatureExtractor : public FeatureExtractor {
     std::vector<float>* padded_input = padder.MaybePad(input, 3);
 
     // Prepare image input tensor.
-    std::vector<int64_t> image_shape = model_.input_shapes()[0];
+    std::vector<int64_t> image_shape = model_->input_shapes()[0];
     image_shape[0] = 1;
     image_shape[1] = 3;
     image_shape[2] = padder.padded_height;
@@ -162,7 +248,7 @@ class AlikedFeatureExtractor : public FeatureExtractor {
     input_tensors.emplace_back(CreateONNXScalarTensor(min_score));
 
     // Run model inference.
-    const std::vector<Ort::Value> output_tensors = model_.Run(input_tensors);
+    const std::vector<Ort::Value> output_tensors = model_->Run(input_tensors);
     THROW_CHECK_EQ(output_tensors.size(), 3);
 
     // Parse keypoints shape: [1, K, 2].
@@ -240,7 +326,7 @@ class AlikedFeatureExtractor : public FeatureExtractor {
 
  private:
   const FeatureExtractionOptions options_;
-  ONNXModel model_;
+  std::unique_ptr<ONNXModel> model_;
   int descriptor_dim_;
 };
 

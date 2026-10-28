@@ -27,6 +27,11 @@ struct AlikedExtractionOptions {
   std::string n16rot_model_path = kDefaultAlikedN16RotFeatureExtractorUri;
   std::string n32_model_path = kDefaultAlikedN32FeatureExtractorUri;
 
+  // Optional local transformed N16ROT CUDA graph. Empty disables native ops.
+  // Only a qualified original/derived pair on a supported build and device can
+  // use this graph; otherwise extraction uses the configured original model.
+  std::string n16rot_native_model_path;
+
   bool Check() const;
 };
 
