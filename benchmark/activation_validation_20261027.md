@@ -1,7 +1,8 @@
 # Source, activation and validation checkpoint — 2026-10-27
 
 **The historical upstream COLMAP arm used our custom Ceres dependency on the
-main host. It was not a fully stock stack. Ceres attribution is still pending.**
+main host. It was not a fully stock stack. A separately pinned Ceres comparison
+is linked below; it does not revise those historical timings.**
 
 This separates the immutable October 25 measurement from current source integration.
 It adds no speed claim. An enabled build path does not prove admission in every call.
@@ -37,7 +38,7 @@ fall back. The composed build has no collected per-solve activation/fallback cen
 Fixed thread-index reduction does not make chunk-to-worker scheduling deterministic.
 CPU assembly checks and CUDA vector checks establish different paths.
 
-Ceres attribution remains pending. Start with upstream versus custom Ceres while holding COLMAP fixed, comparing 12 and 24 workers and recording automatic selection. Keep normal solver choice and stopping behavior in the first short screen. The earlier shared custom dependency cannot serve as stock Ceres. Balanced repeats follow only when warranted, with loaded-library identities and activation/fallback counts.
+The [separate Ceres comparison](ceres_attribution_20261027.md) now records N=4 per current library/worker setting, with COLMAP fixed, normal stopping, actual 12/24 workers and automatic selection. Its near-converged input, variable work, source pins and artifact/loader limits are explicit. It is not a fixed-work, per-optimization activation, historical-Ceres-contribution or whole-stack claim. Per-solve activation/fallback counts and broader structural scaling remain pending.
 
 ## Defaults, platforms and test selection
 
