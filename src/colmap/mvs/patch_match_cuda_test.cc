@@ -14,14 +14,20 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <future>
+#include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
+#include <system_error>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -434,6 +440,160 @@ class CudaTest : public ::testing::Test {
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
   }
 };
+
+void SetCoarseTestEnvironment(const char* name,
+                              const std::optional<std::string>& value) {
+#ifdef _WIN32
+  ASSERT_EQ(_putenv_s(name, value ? value->c_str() : ""), 0);
+#else
+  ASSERT_EQ(value ? setenv(name, value->c_str(), 1) : unsetenv(name), 0);
+#endif
+}
+
+class ScopedCoarseTestEnvironment {
+ public:
+  ScopedCoarseTestEnvironment(const char* name,
+                              const std::optional<std::string>& value)
+      : name_(name) {
+    const char* previous = std::getenv(name);
+    if (previous != nullptr) previous_ = previous;
+    SetCoarseTestEnvironment(name, value);
+  }
+  ~ScopedCoarseTestEnvironment() {
+    SetCoarseTestEnvironment(name_.c_str(), previous_);
+  }
+
+ private:
+  std::string name_;
+  std::optional<std::string> previous_;
+};
+
+Image CloneWithPath(const Image& source, const std::filesystem::path& path) {
+  Image copy(path,
+             source.GetWidth(),
+             source.GetHeight(),
+             source.GetK(),
+             source.GetR(),
+             source.GetT());
+  copy.SetBitmap(source.GetBitmap());
+  return copy;
+}
+
+TEST_F(CudaTest, CoarseFlagsRejectWeightedBackendAndGeometryBeforeIO) {
+  ScopedCoarseTestEnvironment init("COLMAP_NATIVE_COARSE_INIT", std::nullopt);
+  ScopedCoarseTestEnvironment export_maps("COLMAP_NATIVE_COARSE_EXPORT",
+                                          std::nullopt);
+  ScopedCoarseTestEnvironment refine("COLMAP_NATIVE_COARSE_REFINE_SCHEDULE",
+                                     std::nullopt);
+  ScopedCoarseTestEnvironment replay("COLMAP_NATIVE_COARSE_FIRST_SWEEP_RANDOM",
+                                     std::nullopt);
+  Inputs inputs = MakeInputs(0);
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  problem.src_image_idxs = {1, 2};
+  problem.images = &inputs.images;
+  problem.depth_maps = &inputs.depths;
+  problem.normal_maps = &inputs.normals;
+  for (const char* variable : {"COLMAP_NATIVE_COARSE_INIT",
+                               "COLMAP_NATIVE_COARSE_EXPORT",
+                               "COLMAP_NATIVE_COARSE_REFINE_SCHEDULE",
+                               "COLMAP_NATIVE_COARSE_FIRST_SWEEP_RANDOM"}) {
+    ScopedCoarseTestEnvironment active(variable, std::string("1"));
+    for (const bool weighted : {false, true}) {
+      ScopedPatchMatchBackend backend(weighted ? "experimental-acmh-weighted"
+                                               : "default");
+      auto options = MakeOptions(!weighted, false, false);
+      try {
+        PatchMatchCuda solver(options, problem);
+        FAIL() << "Unsupported coarse configuration was accepted";
+      } catch (const std::exception& error) {
+        const std::string expected =
+            weighted ? "Coarse flags require the default PatchMatch backend"
+                     : "Coarse flags require photometric mode";
+        EXPECT_NE(std::string(error.what()).find(expected), std::string::npos);
+      }
+    }
+  }
+}
+
+TEST_F(CudaTest, CoarseOptInDisablesOnlyPairAndBatchAdmission) {
+  ScopedCoarseTestEnvironment clear_init("COLMAP_NATIVE_COARSE_INIT",
+                                         std::nullopt);
+  const std::vector<std::pair<size_t, size_t> > shapes(5, {47, 149});
+  const bool default_pair = CanPairPatchMatchViews(47, 149, 47, 149, false);
+  const bool default_batch = CanBatchPatchMatchViews(shapes, false);
+  {
+    ScopedCoarseTestEnvironment init("COLMAP_NATIVE_COARSE_INIT",
+                                     "coarse-root");
+    EXPECT_FALSE(CanPairPatchMatchViews(47, 149, 47, 149, false));
+    EXPECT_FALSE(CanBatchPatchMatchViews(shapes, false));
+    Inputs geometric = MakeInputs(0);
+    EXPECT_ANY_THROW(RunPatchMatch(&geometric, MakeOptions(true, true, false)));
+  }
+  EXPECT_EQ(CanPairPatchMatchViews(47, 149, 47, 149, false), default_pair);
+  EXPECT_EQ(CanBatchPatchMatchViews(shapes, false), default_batch);
+}
+
+TEST_F(CudaTest, CoarseBindingRejectsAmbiguousNameAndCorruption) {
+  const auto root =
+      std::filesystem::temp_directory_path() /
+      ("colmap-coarse-test-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  ASSERT_TRUE(std::filesystem::create_directory(root));
+  struct Cleanup {
+    std::filesystem::path root;
+    ~Cleanup() {
+      std::error_code error;
+      std::filesystem::remove_all(root, error);
+    }
+  } cleanup{root};
+  ScopedCoarseTestEnvironment clear_init("COLMAP_NATIVE_COARSE_INIT",
+                                         std::nullopt);
+  ScopedCoarseTestEnvironment clear_export("COLMAP_NATIVE_COARSE_EXPORT",
+                                           std::nullopt);
+  Inputs inputs = MakeInputs(0);
+  inputs.images[0] = CloneWithPath(inputs.images[0], "a/frame.png");
+  inputs.images[1] = CloneWithPath(inputs.images[1], "b/frame.png");
+  {
+    ScopedCoarseTestEnvironment export_camera("COLMAP_NATIVE_COARSE_EXPORT",
+                                              root.string());
+    EXPECT_ANY_THROW(RunPatchMatch(&inputs, MakeOptions(false, false, false)));
+    EXPECT_FALSE(std::filesystem::exists(root / "0.binding.bin"));
+  }
+  inputs.images[1] = CloneWithPath(inputs.images[1], "b/right.png");
+  {
+    ScopedCoarseTestEnvironment export_camera("COLMAP_NATIVE_COARSE_EXPORT",
+                                              root.string());
+    RunPatchMatch(&inputs, MakeOptions(false, false, false));
+  }
+  const auto binding_path = root / "0.binding.bin";
+  ASSERT_TRUE(std::filesystem::exists(root / "0.camera.bin"));
+  std::ifstream input(binding_path, std::ios::binary);
+  ASSERT_TRUE(input.is_open());
+  const std::string original((std::istreambuf_iterator<char>(input)),
+                             std::istreambuf_iterator<char>());
+  input.close();
+  ASSERT_GT(original.size(), 56);
+  auto write_binding = [&](const std::string& bytes) {
+    std::ofstream output(binding_path, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(output.is_open());
+    output.write(bytes.data(), bytes.size());
+    ASSERT_TRUE(output.good());
+  };
+  ScopedCoarseTestEnvironment import("COLMAP_NATIVE_COARSE_INIT",
+                                     root.string());
+  write_binding(original.substr(0, 3));
+  EXPECT_ANY_THROW(RunPatchMatch(&inputs, MakeOptions(false, false, false)));
+  std::string wrong_name = original;
+  wrong_name[4] = wrong_name[4] == 'a' ? 'b' : 'a';
+  write_binding(wrong_name);
+  EXPECT_ANY_THROW(RunPatchMatch(&inputs, MakeOptions(false, false, false)));
+  std::string wrong_pose = original;
+  wrong_pose[original.size() - 1] ^= 1;
+  write_binding(wrong_pose);
+  EXPECT_ANY_THROW(RunPatchMatch(&inputs, MakeOptions(false, false, false)));
+}
 
 // Parameter order: geometric consistency, filtering.
 class PatchMatchCudaTest

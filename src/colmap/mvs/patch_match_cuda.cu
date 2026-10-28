@@ -23,8 +23,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <sstream>
+#include <string>
 #include <vector>
 
 // The number of threads per Cuda thread block. Warning: Do not change this
@@ -55,6 +58,45 @@ RefCamera MakeRefCamera(const float K[4], const float inv_K[4]) {
   std::copy_n(inv_K, 4, camera.inv_K);
   return camera;
 }
+
+void ValidateNativeCoarseConfiguration(const PatchMatchOptions& options) {
+  const char* const variables[] = {"COLMAP_NATIVE_COARSE_INIT",
+                                   "COLMAP_NATIVE_COARSE_EXPORT",
+                                   "COLMAP_NATIVE_COARSE_REFINE_SCHEDULE",
+                                   "COLMAP_NATIVE_COARSE_FIRST_SWEEP_RANDOM"};
+  bool active = false;
+  for (const char* variable : variables) {
+    const char* value = std::getenv(variable);
+    active = active || (value != nullptr && value[0] != '\0');
+  }
+  if (!active) return;
+#ifdef COLMAP_HIP_ENABLED
+  THROW_CHECK(false) << "Coarse initialization requires CUDA";
+#endif
+  const char* backend = std::getenv("COLMAP_PATCH_MATCH_BACKEND");
+  THROW_CHECK(!backend || backend[0] == '\0' ||
+              std::strcmp(backend, "default") == 0)
+      << "Coarse flags require the default PatchMatch backend";
+  THROW_CHECK(!options.geom_consistency)
+      << "Coarse flags require photometric mode";
+}
+
+#ifndef COLMAP_HIP_ENABLED
+bool NativeCoarseInitRequested() {
+  const char* init = std::getenv("COLMAP_NATIVE_COARSE_INIT");
+  return init != nullptr && init[0] != '\0';
+}
+
+bool KeepInitialRandomPlane(const PatchMatchOptions& options) {
+  const char* flag = std::getenv("COLMAP_NATIVE_COARSE_FIRST_SWEEP_RANDOM");
+  if (flag == nullptr || flag[0] == '\0') return false;
+  THROW_CHECK(std::strcmp(flag, "1") == 0);
+  THROW_CHECK(!options.geom_consistency);
+  const char* init = std::getenv("COLMAP_NATIVE_COARSE_INIT");
+  THROW_CHECK(init != nullptr && init[0] != '\0');
+  return true;
+}
+#endif
 
 }  // namespace
 
@@ -921,6 +963,12 @@ __global__ void SeedPerimeter(GpuMatView<curandState> out,
   out.Set(0, slot, state);
 }
 
+#ifndef COLMAP_HIP_ENABLED
+namespace native_coarse_v1 {
+#include "native_coarse_photo_init.cuh"
+}
+#endif
+
 // Rotate normals by 90deg around z-axis in counter-clockwise direction.
 __global__ void RotateNormalMap(GpuMatView<float> normal_map) {
   const int row = blockDim.y * blockIdx.y + threadIdx.y;
@@ -1050,7 +1098,8 @@ template <int kWindowSize,
           bool kFilterGeomConsistency = false,
           bool kCooperative = false,
           int kBlockWidth = THREADS_PER_BLOCK,
-          bool kCheckpointHmm = false>
+          bool kCheckpointHmm = false,
+          bool kReplayInitialPlane = false>
 __global__ void SweepFromTopToBottom(
     const RefCamera camera,
     GpuMatView<float> global_workspace,
@@ -1282,6 +1331,7 @@ __global__ void SweepFromTopToBottom(
     float costs[kNumCosts] = {0};
     float depths[kNumCosts] = {0};
     const float* normals[kNumCosts] = {nullptr};
+    float saved_random_normal[3] = {0};
     if (owner && col < cost_map.GetWidth()) {
       pcc_computer.row = row;
       pcc_computer.local_ref_sum = ref_sum_image.Get(row, col);
@@ -1405,6 +1455,32 @@ __global__ void SweepFromTopToBottom(
       normals[2] = rand_param_state.normal;
       normals[3] = rand_param_state.normal;
       normals[4] = curr_param_state.normal;
+      if constexpr (kReplayInitialPlane) {
+        // Match FusedInitialize at the original orientation without retaining
+        // its depth/normal matrices. This state never touches the sweep RNG.
+        curandState original_state;
+        curand_init(OriginalSeed(static_cast<size_t>(row),
+                                 static_cast<size_t>(col),
+                                 depth_map.GetWidth()),
+                    0,
+                    0,
+                    &original_state);
+        const float saved_random_depth = GenerateRandomDepth(
+            options.depth_min, options.depth_max, &original_state);
+        GenerateRandomNormal(
+            camera, row, col, &original_state, saved_random_normal);
+        const bool seeded =
+            saved_random_depth != curr_param_state.depth ||
+            saved_random_normal[0] != curr_param_state.normal[0] ||
+            saved_random_normal[1] != curr_param_state.normal[1] ||
+            saved_random_normal[2] != curr_param_state.normal[2];
+        if (seeded) {
+          // Keep the native random plane in the first native weighted Search.
+          // This replaces one hybrid challenger; it does not add NCC work.
+          depths[4] = saved_random_depth;
+          normals[4] = saved_random_normal;
+        }
+      }
       if constexpr (kCooperative) {
         const int lane = threadIdx.x;
         cooperative_job.ref_sum[lane] = pcc_computer.local_ref_sum;
@@ -1880,6 +1956,7 @@ PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
       ref_width_(0),
       ref_height_(0),
       rotation_in_half_pi_(0) {
+  ValidateNativeCoarseConfiguration(options_);
 #ifdef COLMAP_HIP_ENABLED
   THROW_CHECK(!options_.rotation_buffer_reuse)
       << "PatchMatchStereo.rotation_buffer_reuse requires CUDA";
@@ -2060,6 +2137,30 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
   const float total_num_steps = options_.num_iterations * 4;
 
+#ifndef COLMAP_HIP_ENABLED
+  // Restore the native five-iteration final radius during an opt-in short
+  // photo pass. Ordinary and geometric runs retain the public schedule.
+  const char* coarse_init = std::getenv("COLMAP_NATIVE_COARSE_INIT");
+  const char* refine_schedule =
+      std::getenv("COLMAP_NATIVE_COARSE_REFINE_SCHEDULE");
+  const bool seeded_refinement =
+      !options_.geom_consistency && options_.num_iterations < 5 &&
+      coarse_init && coarse_init[0] && refine_schedule &&
+      refine_schedule[0] == '1' && refine_schedule[1] == '\0';
+  if (seeded_refinement) {
+    LOG(INFO) << "Native coarse refinement schedule: sweeps="
+              << options_.num_iterations * 4 << " finalExponent=4.75";
+  }
+  const bool keep_initial_random = KeepInitialRandomPlane(options_);
+  if (keep_initial_random) {
+    // The first unrotated sweep replays the original initialization draws.
+    // No captured random maps or rotation scratch are borrowed.
+    LOG(INFO) << "Native coarse first-sweep random plane: enabled";
+  }
+#else
+  const bool keep_initial_random = false;
+#endif
+
   SweepOptions sweep_options;
   sweep_options.depth_min = options_.depth_min;
   sweep_options.depth_max = options_.depth_max;
@@ -2112,6 +2213,18 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
       // Expenentially reduce amount of perturbation during the optimization.
       sweep_options.perturbation = 1.0f / std::pow(2.0f, iter + sweep / 4.0f);
+#ifndef COLMAP_HIP_ENABLED
+      if (seeded_refinement) {
+        const float progress = (iter * 4 + sweep) / (total_num_steps - 1.0f);
+        sweep_options.perturbation = 1.0f / std::pow(2.0f, 4.75f * progress);
+        if ((iter == 0 && sweep == 0) ||
+            (iter == options_.num_iterations - 1 && sweep == 3)) {
+          LOG(INFO) << "Native coarse refinement radius: step="
+                    << iter * 4 + sweep
+                    << " value=" << sweep_options.perturbation;
+        }
+      }
+#endif
 
       // Linearly increase the influence of previous selection probabilities.
       sweep_options.prev_sel_prob_weight =
@@ -2127,6 +2240,59 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           kCheckpointHmm ? hmm_checkpoint_->Stripe(cost_map_->GetWidth(),
                                                    cost_map_->GetHeight())
                          : no_checkpoint;
+      const bool offer_initial_random =
+          keep_initial_random && iter == 0 && sweep == 0;
+      THROW_CHECK(!offer_initial_random || rotation_in_half_pi_ == 0);
+#define NATIVE_SWEEP_VARIANT(REPLAY)                              \
+  SweepFromTopToBottom<kWindowSize,                               \
+                       kWindowStep,                               \
+                       kGeomConsistencyTerm,                      \
+                       kFilterPhotoConsistency,                   \
+                       kFilterGeomConsistency,                    \
+                       kCooperative,                              \
+                       kSweepBlockWidth,                          \
+                       kCheckpointHmm,                            \
+                       REPLAY>                                    \
+      <<<sweep_kernel_grid_size, sweep_kernel_block_size>>>(      \
+          MakeRefCamera(ref_K_host_[rotation_in_half_pi_],        \
+                        ref_inv_K_host_[rotation_in_half_pi_]),   \
+          global_workspace_->View(),                              \
+          rand_state_map_->View(),                                \
+          (PatchMatchRngPerimeter{ref_width_, ref_height_}),      \
+          static_cast<unsigned int>(rotation_in_half_pi_),        \
+          cost_map_->View(),                                      \
+          depth_map_->View(),                                     \
+          normal_map_->View(),                                    \
+          (PackedConsistencyMaskView{consistency_mask_->View()}), \
+          (kCheckpointHmm ? prev_sel_prob_map_->View()            \
+                          : sel_prob_map_->View()),               \
+          prev_sel_prob_map_->View(),                             \
+          checkpoints,                                            \
+          beta_stripe,                                            \
+          ref_image_texture_->GetObj(),                           \
+          ref_image_->sum_image->View(),                          \
+          ref_image_->squared_sum_image->View(),                  \
+          src_images_texture_->GetObj(),                          \
+          src_depth_maps_texture_ == nullptr                      \
+              ? 0                                                 \
+              : src_depth_maps_texture_->GetObj(),                \
+          poses_texture_[rotation_in_half_pi_]->GetObj(),         \
+          sweep_options);
+
+#ifdef COLMAP_HIP_ENABLED
+#define NATIVE_SWEEP_FUNC NATIVE_SWEEP_VARIANT(false)
+#else
+#define NATIVE_SWEEP_FUNC               \
+  if constexpr (kGeomConsistencyTerm) { \
+    NATIVE_SWEEP_VARIANT(false)         \
+  } else {                              \
+    if (offer_initial_random) {         \
+      NATIVE_SWEEP_VARIANT(true)        \
+    } else {                            \
+      NATIVE_SWEEP_VARIANT(false)       \
+    }                                   \
+  }
+#endif
 
 #ifndef COLMAP_HIP_ENABLED
 #define EXPERIMENTAL_SWEEP_FUNC(WEIGHTED_FINAL)                              \
@@ -2177,41 +2343,6 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 #define CALL_SWEEP_FUNC NATIVE_SWEEP_FUNC
 #endif
 
-#define NATIVE_SWEEP_FUNC                                         \
-  SweepFromTopToBottom<kWindowSize,                               \
-                       kWindowStep,                               \
-                       kGeomConsistencyTerm,                      \
-                       kFilterPhotoConsistency,                   \
-                       kFilterGeomConsistency,                    \
-                       kCooperative,                              \
-                       kSweepBlockWidth,                          \
-                       kCheckpointHmm>                            \
-      <<<sweep_kernel_grid_size, sweep_kernel_block_size>>>(      \
-          MakeRefCamera(ref_K_host_[rotation_in_half_pi_],        \
-                        ref_inv_K_host_[rotation_in_half_pi_]),   \
-          global_workspace_->View(),                              \
-          rand_state_map_->View(),                                \
-          (PatchMatchRngPerimeter{ref_width_, ref_height_}),      \
-          static_cast<unsigned int>(rotation_in_half_pi_),        \
-          cost_map_->View(),                                      \
-          depth_map_->View(),                                     \
-          normal_map_->View(),                                    \
-          (PackedConsistencyMaskView{consistency_mask_->View()}), \
-          (kCheckpointHmm ? prev_sel_prob_map_->View()            \
-                          : sel_prob_map_->View()),               \
-          prev_sel_prob_map_->View(),                             \
-          checkpoints,                                            \
-          beta_stripe,                                            \
-          ref_image_texture_->GetObj(),                           \
-          ref_image_->sum_image->View(),                          \
-          ref_image_->squared_sum_image->View(),                  \
-          src_images_texture_->GetObj(),                          \
-          src_depth_maps_texture_ == nullptr                      \
-              ? 0                                                 \
-              : src_depth_maps_texture_->GetObj(),                \
-          poses_texture_[rotation_in_half_pi_]->GetObj(),         \
-          sweep_options);
-
       if (last_sweep) {
         if (options_.filter) {
           if (!options_.rotation_buffer_reuse) {
@@ -2259,6 +2390,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
 #undef CALL_SWEEP_FUNC
 #undef NATIVE_SWEEP_FUNC
+#undef NATIVE_SWEEP_VARIANT
 #ifndef COLMAP_HIP_ENABLED
 #undef EXPERIMENTAL_SWEEP_FUNC
 #endif
@@ -2447,6 +2579,9 @@ bool CanPairPatchMatchViews(size_t first_width,
                             size_t second_height,
                             bool geometric) {
   if (!NativePatchMatchBackendRequested()) return false;
+#ifndef COLMAP_HIP_ENABLED
+  if (NativeCoarseInitRequested()) return false;
+#endif
   if (!first_width || !first_height || !second_width || !second_height) {
     return false;
   }
@@ -2459,6 +2594,9 @@ bool CanPairPatchMatchViews(size_t first_width,
 bool CanBatchPatchMatchViews(
     const std::vector<std::pair<size_t, size_t>>& view_shapes, bool geometric) {
   if (!NativePatchMatchBackendRequested()) return false;
+#ifndef COLMAP_HIP_ENABLED
+  if (NativeCoarseInitRequested()) return false;
+#endif
   const size_t count = view_shapes.size();
   if (count < 3 || count > 5) return false;
   const size_t width = view_shapes.front().first;
@@ -3106,6 +3244,14 @@ void PatchMatchCuda::InitTransforms() {
 }
 
 void PatchMatchCuda::InitWorkspaceMemory() {
+#ifndef COLMAP_HIP_ENABLED
+  if (options_.geom_consistency) {
+    const char* export_root = std::getenv("COLMAP_NATIVE_COARSE_EXPORT");
+    THROW_CHECK(!NativeCoarseInitRequested() &&
+                !(export_root && export_root[0]))
+        << "Native coarse camera export/import is photometric only";
+  }
+#endif
   // Validate helper arithmetic and the original PRNG's int dimensions.
   THROW_CHECK_GT(ref_width_, 0);
   THROW_CHECK_GT(ref_height_, 0);
@@ -3156,6 +3302,24 @@ void PatchMatchCuda::InitWorkspaceMemory() {
         options_.depth_max);
   }
   CUDA_SYNC_AND_CHECK();
+#ifndef COLMAP_HIP_ENABLED
+  if (!options_.geom_consistency) {
+    const char* init = std::getenv("COLMAP_NATIVE_COARSE_INIT");
+    const char* export_root = std::getenv("COLMAP_NATIVE_COARSE_EXPORT");
+    if ((init && init[0]) || (export_root && export_root[0])) {
+      THROW_CHECK_EQ(rotation_in_half_pi_, 0);
+      native_coarse_v1::InitializePhotoFromCoarse(
+          MakeRefCamera(ref_K_host_[0], ref_inv_K_host_[0]),
+          depth_map_->View(),
+          normal_map_->View(),
+          problem_.ref_image_idx,
+          problem_.images->at(problem_.ref_image_idx),
+          *problem_.images,
+          options_.depth_min,
+          options_.depth_max);
+    }
+  }
+#endif
   VLOG(1) << "Perimeter RNG initialization states: " << perimeter_states
           << ", retained pitched bytes: " << rand_state_map_->GetPitch()
           << ", avoided full-map logical bytes: "
