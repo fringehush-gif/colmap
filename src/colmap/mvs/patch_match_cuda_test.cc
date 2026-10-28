@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/consistency_graph.h"
+#include "colmap/mvs/native_coarse_batch_budget.h"
 #include "colmap/mvs/packed_consistency_mask.h"
 #include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/patch_match_hmm_checkpoint.h"
@@ -44,6 +45,43 @@ TEST(PatchMatchCuda, RotationBufferReuseRequiresCuda) {
   GTEST_SKIP() << "The rotation-buffer option is CUDA-only";
 }
 #else
+
+TEST(PatchMatchCuda, CoarseBatchReserveScalesWithDeviceCapacity) {
+  constexpr size_t kGiB = size_t(1) << 30;
+  EXPECT_EQ(NativeCoarseBatchReserveBytes(12 * kGiB), kGiB);
+  EXPECT_EQ(NativeCoarseBatchReserveBytes(8 * kGiB), 2 * kGiB / 3);
+  EXPECT_EQ(NativeCoarseBatchReserveBytes(4 * kGiB), size_t(512) << 20);
+}
+
+TEST(PatchMatchCuda, CoarseBatchBudgetHasExactAndOverflowSafeBoundary) {
+  constexpr size_t kGiB = size_t(1) << 30;
+  EXPECT_TRUE(NativeCoarseBatchFits(5 * kGiB + kGiB, kGiB, 5, kGiB));
+  EXPECT_FALSE(NativeCoarseBatchFits(5 * kGiB + kGiB - 1, kGiB, 5, kGiB));
+  EXPECT_FALSE(NativeCoarseBatchFits(5 * kGiB + kGiB, kGiB, 0, kGiB));
+  EXPECT_FALSE(NativeCoarseBatchFits(std::numeric_limits<size_t>::max(),
+                                     std::numeric_limits<size_t>::max(),
+                                     2,
+                                     kGiB));
+  EXPECT_FALSE(NativeCoarseBatchFits(kGiB - 1, 0, 3, kGiB));
+}
+
+TEST(PatchMatchCuda, CoarseBatchChoosesLargestEligiblePrefixOrSingleton) {
+  constexpr size_t kGiB = size_t(1) << 30;
+  const std::array<bool, 3> all = {true, true, true};
+  EXPECT_EQ(LargestNativeCoarseBatchPrefix(5, all, 6 * kGiB, kGiB, kGiB), 5);
+  EXPECT_EQ(LargestNativeCoarseBatchPrefix(5, all, 5 * kGiB, kGiB, kGiB), 4);
+  EXPECT_EQ(LargestNativeCoarseBatchPrefix(5, all, 4 * kGiB, kGiB, kGiB), 3);
+  EXPECT_EQ(LargestNativeCoarseBatchPrefix(5, all, 3 * kGiB, kGiB, kGiB), 0);
+  EXPECT_EQ(LargestNativeCoarseBatchPrefix(2, all, 6 * kGiB, kGiB, kGiB), 0);
+  EXPECT_EQ(LargestNativeCoarseBatchPrefix(
+                5, {true, false, true}, 5 * kGiB, kGiB, kGiB),
+            3);
+  EXPECT_EQ(LargestNativeCoarseBatchPrefix(
+                5, {false, false, false}, 6 * kGiB, kGiB, kGiB),
+            0);
+  // A later live snapshot can revoke the final rotation/transient headroom.
+  EXPECT_FALSE(NativeCoarseBatchFits(2 * kGiB - 1, kGiB, 1, kGiB));
+}
 
 TEST(PatchMatchCuda, PackedConsistencyMaskDepthCoversSourceTails) {
   for (const auto& [sources, expected] :

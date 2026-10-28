@@ -1,0 +1,51 @@
+{
+  "candidates": ["V35 coarse initialization", "V43 batching", "V44 admission"],
+  "quality": {
+    "scope": "Retained one-reference ETH3D scores; native PHOTO5 versus coarse PHOTO2, then GEO5",
+    "dataset": "Facade",
+    "referenceId": 75,
+    "sourceCount": 20,
+    "observationsPerMethodPerResolution": 1,
+    "thresholdCm": 2,
+    "f1Percent": {"1536": [11.0093, 11.0104], "3072": [16.2857, 16.4438]},
+    "arrayOrder": ["native", "coarse"]
+  },
+  "batching": {
+    "scope": "Retained isolated fine PHOTO2 CLI; coarse pass, GEO and fusion excluded",
+    "dataset": "FountainP11",
+    "gpu": "RTX 3080 Ti",
+    "cpuThreads": 12,
+    "cudaWorkers": 1,
+    "methodParent": "V35+V40 singleton refinement",
+    "orderPerResolution": "warm C T, then C T T C",
+    "observationsPerArmPerResolution": 2,
+    "arrayOrder": ["singleton", "batch"],
+    "wallSeconds": {"1536": [6.6968, 5.1935], "3072": [18.2172, 16.4743]},
+    "wallReductionPercent": {"1536": 22.45, "3072": 9.57},
+    "cpuSeconds": {"1536": [6.778, 5.406], "3072": [19.786, 18.296]},
+    "userInstructionsBillion": {"1536": [24.042, 18.246], "3072": [71.216, 65.861]},
+    "maximumWait4RssMiB": {"1536": [649.2, 750.5], "3072": [818.7, 1144.1]},
+    "sampledWholeDeviceMaximumMiB": {"1536": [2420.1, 3378.6], "3072": [3150.1, 6938.1]}
+  },
+  "admission": {
+    "reserve": "max(512 MiB, total device bytes / 12)",
+    "eligibleBatchSizes": [3, 4, 5],
+    "reportedFreeGiB": 2,
+    "injectedHeadroomGroups": [3, 1, 1],
+    "revokedHeadroomGroups": [1, 1, 1, 1, 1],
+    "retainedFallbackMapsPerCase": 10,
+    "allocationErrorHandling": "Existing error path; no new allocation-error recovery"
+  },
+  "finalCompositionValidation": {
+    "gpuTests": 50,
+    "skips": 0,
+    "realCases": 8,
+    "exactRetainedMaps": 96,
+    "resolutions": [1536, 3072],
+    "casesPerResolution": ["native PHOTO5", "coarse PHOTO2", "weighted GEO5 OFF", "weighted GEO5 ON"],
+    "coarseGroups": [5, 5, 1],
+    "orderedRostersUnchanged": true,
+    "currentInputStabilityChecked": true,
+    "build": "Incremental CUDA/controller/test compile and CLI/test relink"
+  }
+}

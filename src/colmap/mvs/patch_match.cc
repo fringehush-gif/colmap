@@ -4,6 +4,7 @@
 
 #include "colmap/math/math.h"
 #include "colmap/mvs/consistency_graph.h"
+#include "colmap/mvs/native_coarse_batch_budget.h"
 #include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/mvs/patch_match_io.h"
 #include "colmap/mvs/workspace.h"
@@ -14,6 +15,7 @@
 #include "colmap/util/threading.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <limits>
 #include <memory>
@@ -73,8 +75,8 @@ bool DefaultReferencePairSettings(const PatchMatchOptions& o) {
          !o.checkpoint_hmm && o.geom_consistency == o.filter;
 }
 
-// Keep ordinary batch settings unchanged. Admit the two-iteration
-// coarse photometric method only with its replay and refinement schedule.
+// Keep default batch admission unchanged. Also admit the optional
+// two-iteration coarse photometric method.
 bool CoarsePhotoBatchSettings(const PatchMatchOptions& o) {
   const char* init = std::getenv("COLMAP_NATIVE_COARSE_INIT");
   const char* refine = std::getenv("COLMAP_NATIVE_COARSE_REFINE_SCHEDULE");
@@ -255,15 +257,29 @@ void PatchMatchController::Run() {
         for (size_t next = index; next < batch_end; ++next)
           batch_shapes.emplace_back(std::get<0>(shape(next)),
                                     std::get<1>(shape(next)));
-        if (CanBatchPatchMatchViews(batch_shapes, phase.geom_consistency)) {
+        size_t scheduled_count = 0;
+        if (CoarsePhotoBatchSettings(phase)) {
+          for (size_t count = batch_shapes.size(); count >= 3; --count) {
+            const std::vector<std::pair<size_t, size_t>> prefix(
+                batch_shapes.begin(), batch_shapes.begin() + count);
+            if (CanBatchPatchMatchViews(prefix, phase.geom_consistency)) {
+              scheduled_count = count;
+              break;
+            }
+          }
+        } else if (CanBatchPatchMatchViews(batch_shapes,
+                                           phase.geom_consistency)) {
+          scheduled_count = batch_shapes.size();
+        }
+        if (scheduled_count >= 3) {
           std::vector<size_t> indices;
-          for (size_t next = index; next < batch_end; ++next)
+          for (size_t next = index; next < index + scheduled_count; ++next)
             indices.push_back(next);
           thread_pool_->AddTask(&PatchMatchController::ProcessProblemBatch,
                                 this,
                                 phase,
                                 std::move(indices));
-          index = batch_end;
+          index += scheduled_count;
           continue;
         }
         if (index + 1 < problems_.size()) {
@@ -836,6 +852,36 @@ void PatchMatchController::ProcessProblemBatch(
   };
   std::vector<std::unique_ptr<PatchMatchCuda>> owners(input.size());
   constexpr size_t kExternalMargin = size_t(256) << 20;
+  const auto run_batch = [&](const size_t count) {
+    std::vector<PatchMatchCuda*> views;
+    for (size_t i = 0; i < count; ++i) views.push_back(owners[i].get());
+    struct BatchStreams {
+      std::vector<cudaStream_t> values;
+      explicit BatchStreams(size_t count) : values(count, nullptr) {
+        try {
+          for (auto& stream : values)
+            CUDA_SAFE_CALL(
+                cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        } catch (...) {
+          for (auto stream : values)
+            if (stream) (void)cudaStreamDestroy(stream);
+          throw;
+        }
+      }
+      ~BatchStreams() {
+        for (auto stream : values) {
+          if (stream) {
+            (void)cudaStreamSynchronize(stream);
+            (void)cudaStreamDestroy(stream);
+          }
+        }
+      }
+    } streams(count);
+    LOG(INFO) << "Running " << count << " reference PatchMatch batch";
+    RunPatchMatchBatch(views, streams.values);
+    for (size_t i = 0; i < count; ++i) write_cuda(*input[i], *owners[i]);
+    for (size_t i = 0; i < count; ++i) owners[i].reset();
+  };
   const auto pair_or_single_fallback = [&]() {
     for (size_t i = 0; i < input.size();) {
       if (i + 1 < input.size()) {
@@ -923,6 +969,67 @@ void PatchMatchController::ProcessProblemBatch(
       std::make_unique<PatchMatchCuda>(input[0]->options, input[0]->problem);
   CUDA_SYNC_AND_CHECK();
   const size_t first_peak = owners[0]->PairPeakBytes();
+  if (CoarsePhotoBatchSettings(options)) {
+    std::array<bool, 3> eligible = {false, false, false};
+    for (size_t count = 3; count <= input.size(); ++count) {
+      const std::vector<std::pair<size_t, size_t>> prefix(
+          shapes.begin(), shapes.begin() + count);
+      eligible[count - 3] =
+          CanBatchPatchMatchViews(prefix, options.geom_consistency);
+    }
+    size_t maximum_count = input.size();
+    size_t free_bytes = 0, total_bytes = 0;
+    while (maximum_count >= 3) {
+      CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+      const size_t reserve = NativeCoarseBatchReserveBytes(total_bytes);
+      const size_t count = LargestNativeCoarseBatchPrefix(
+          maximum_count, eligible, free_bytes, first_peak, reserve);
+      if (count == 0) break;
+      bool admitted = true;
+      for (size_t i = 1; i < count; ++i) {
+        CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+        if (!NativeCoarseBatchFits(
+                free_bytes, first_peak, count - i + 1, reserve)) {
+          admitted = false;
+          break;
+        }
+        owners[i] = std::make_unique<PatchMatchCuda>(input[i]->options,
+                                                     input[i]->problem);
+        CUDA_SYNC_AND_CHECK();
+        CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+        if (owners[i]->PairPeakBytes() > first_peak ||
+            !NativeCoarseBatchFits(
+                free_bytes, first_peak, count - i, reserve)) {
+          admitted = false;
+          break;
+        }
+      }
+      CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+      if (!NativeCoarseBatchFits(free_bytes, first_peak, 1, reserve)) {
+        admitted = false;
+      }
+      if (admitted) {
+        LOG(INFO) << "Coarse PHOTO batch admitted " << count << " of "
+                  << input.size() << " references; free=" << free_bytes
+                  << " reserve=" << reserve << " owner_peak=" << first_peak
+                  << " predicted_peak=" << count * first_peak;
+        run_batch(count);
+        for (size_t i = count; i < input.size(); ++i) run_native(*input[i]);
+        return;
+      }
+      // A failed larger attempt must release every speculative owner before
+      // testing a smaller prefix or running any singleton.
+      for (size_t i = 1; i < owners.size(); ++i) owners[i].reset();
+      maximum_count = count - 1;
+    }
+    LOG(INFO) << "Coarse PHOTO batch fell back to " << input.size()
+              << " singleton references; free=" << free_bytes
+              << " reserve=" << NativeCoarseBatchReserveBytes(total_bytes)
+              << " owner_peak=" << first_peak;
+    owners[0].reset();
+    for (const auto& prepared : input) run_native(*prepared);
+    return;
+  }
   bool memory_admitted = true;
   for (size_t i = 1; i < input.size(); ++i) {
     size_t free_bytes = 0, total_bytes = 0;
@@ -955,34 +1062,7 @@ void PatchMatchController::ProcessProblemBatch(
     pair_or_single_fallback();
     return;
   }
-  std::vector<PatchMatchCuda*> views;
-  for (auto& owner : owners) views.push_back(owner.get());
-  struct BatchStreams {
-    std::vector<cudaStream_t> values;
-    explicit BatchStreams(size_t count) : values(count, nullptr) {
-      try {
-        for (auto& stream : values)
-          CUDA_SAFE_CALL(
-              cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-      } catch (...) {
-        for (auto stream : values)
-          if (stream) (void)cudaStreamDestroy(stream);
-        throw;
-      }
-    }
-    ~BatchStreams() {
-      for (auto stream : values) {
-        if (stream) {
-          (void)cudaStreamSynchronize(stream);
-          (void)cudaStreamDestroy(stream);
-        }
-      }
-    }
-  } streams(input.size());
-  LOG(INFO) << "Running " << input.size() << " reference PatchMatch batch";
-  RunPatchMatchBatch(views, streams.values);
-  for (size_t i = 0; i < input.size(); ++i) write_cuda(*input[i], *owners[i]);
-  for (auto& owner : owners) owner.reset();
+  run_batch(input.size());
 #endif
 }
 

@@ -34,3 +34,9 @@ PHOTO time fell from 6.697 to 5.194 s at 1536 and 18.217 to 16.474 s at 3072
 (two runs per arm, 3080 Ti). Sampled device-memory maxima rose from 2420 to
 3379 MiB and 3150 to 6938 MiB. Coarse generation and GEO were excluded.
 Depth/normal maps matched the singleton runs.
+
+Batch admission chooses the largest eligible three-to-five-reference prefix
+with observed free memory above its working set and a reserve of at least
+512 MiB (or one twelfth of device memory). Detected headroom loss falls back to
+smaller batches or single references; allocation failures are not recovered.
+Both sizes retained identical maps. No separate speed gain is claimed.
