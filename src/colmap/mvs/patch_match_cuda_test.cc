@@ -934,8 +934,8 @@ TEST_F(CudaTest, SparseSourceProvenanceRejectsUnknownOrChangedOwners) {
 
 TEST_F(CudaTest, SparseSourceCleanRefusalsReleasePartialSetup) {
   if (!PatchMatchSparseSources::IsSupported()) {
-    EXPECT_FALSE(PatchMatchSparseSources::IsSupported());
-    return;
+    GTEST_SKIP() << "Sparse source arrays are unavailable on this CUDA "
+                 << "runtime/device";
   }
   Inputs input = MakeInputs(0, 9, 257, 513);
   std::vector<std::shared_ptr<const Bitmap> > bitmaps;
@@ -1068,7 +1068,10 @@ TEST_F(CudaTest, SparseSourceCleanRefusalsReleasePartialSetup) {
 }
 
 TEST_F(CudaTest, ControllerReadmitsInitialLaterAndGeometryAttachmentRefusals) {
-  if (!PatchMatchSparseSources::IsSupported()) return;
+  if (!PatchMatchSparseSources::IsSupported()) {
+    GTEST_SKIP() << "Sparse source arrays are unavailable on this CUDA "
+                 << "runtime/device";
+  }
   size_t width = 0, height = 0;
   for (const auto& shape : std::vector<std::pair<size_t, size_t> >{
            {513, 257}, {1025, 513}, {1536, 1024}}) {
@@ -1208,7 +1211,10 @@ TEST_F(CudaTest, ControllerReadmitsInitialLaterAndGeometryAttachmentRefusals) {
 }
 
 TEST_F(CudaTest, SparseSourceCleanupFailureNeverPermitsReadmission) {
-  if (!PatchMatchSparseSources::IsSupported()) return;
+  if (!PatchMatchSparseSources::IsSupported()) {
+    GTEST_SKIP() << "Sparse source arrays are unavailable on this CUDA "
+                 << "runtime/device";
+  }
   // Re-exec a fresh process: do not resume a CUDA context after fork or after
   // unresolved ownership. This test exits immediately on its terminal error.
   GTEST_FLAG_SET(death_test_style, "threadsafe");
