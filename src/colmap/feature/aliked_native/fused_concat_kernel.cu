@@ -14,7 +14,7 @@ __device__ float ReadBilinear(const float* input,
                               int iw) {
   // Resize-derived arithmetic: ONNX Runtime v1.31.1 resize_impl.{h,cu}.
   // Copyright (c) Microsoft Corporation. All rights reserved.
-  // MIT; see ../LICENSE-ONNXRUNTIME. Preserve multiply before divide.
+  // MIT; see LICENSE-ONNXRUNTIME. Preserve multiply before divide.
   float fy = static_cast<float>(y) * static_cast<float>(ih - 1) /
              static_cast<float>(h - 1);
   float fx = static_cast<float>(x) * static_cast<float>(iw - 1) /
