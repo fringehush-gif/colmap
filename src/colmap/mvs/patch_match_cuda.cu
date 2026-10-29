@@ -3576,14 +3576,13 @@ void PatchMatchCuda::InitAlternateOrientationMemory(
   add(consistency_mask_);
   add(alternate_consistency_mask_);
   add(global_workspace_);
-  LOG(INFO) << "Rotation reuse retained pitched bytes: " << pitched_bytes
-            << ", curandState bytes: " << sizeof(curandState)
-            << ", reference array logical bytes: "
-            << size_t{2} * ref_width_ * ref_height_
-            << ", immutable statistics array logical bytes: "
-            << (ref_statistics_texture_
-                    ? sizeof(uint2) * ref_width_ * ref_height_
-                    : 0);
+  VLOG(1) << "Rotation reuse retained pitched bytes: " << pitched_bytes
+          << ", curandState bytes: " << sizeof(curandState)
+          << ", reference array logical bytes: "
+          << size_t{2} * ref_width_ * ref_height_
+          << ", immutable statistics array logical bytes: "
+          << (ref_statistics_texture_ ? sizeof(uint2) * ref_width_ * ref_height_
+                                      : 0);
 }
 #endif
 

@@ -19,10 +19,13 @@ class CudaBlockingSync : public ::testing::Test {
       GTEST_SKIP() << "No CUDA device available";
     }
     ASSERT_EQ(cudaGetDevice(&device_), cudaSuccess);
-    original_flags_.resize(GetNumCudaDevices());
-    for (int device = 0; device < original_flags_.size(); ++device) {
+    device_captured_ = true;
+    const int num_devices = GetNumCudaDevices();
+    original_flags_.resize(num_devices);
+    for (int device = 0; device < num_devices; ++device) {
       ASSERT_EQ(cudaSetDevice(device), cudaSuccess);
       ASSERT_EQ(cudaGetDeviceFlags(&original_flags_[device]), cudaSuccess);
+      ++captured_flags_;
     }
     ASSERT_EQ(cudaSetDevice(device_), cudaSuccess);
     flags_ = original_flags_[device_];
@@ -30,17 +33,24 @@ class CudaBlockingSync : public ::testing::Test {
 
   void TearDown() override {
     if (!IsSkipped()) {
-      for (int device = 0; device < original_flags_.size(); ++device) {
-        EXPECT_EQ(cudaSetDevice(device), cudaSuccess);
-        EXPECT_EQ(
-            cudaSetDeviceFlags(original_flags_[device] & ~cudaDeviceMapHost),
-            cudaSuccess);
+      for (int device = 0; device < captured_flags_; ++device) {
+        const cudaError_t status = cudaSetDevice(device);
+        EXPECT_EQ(status, cudaSuccess);
+        if (status == cudaSuccess) {
+          EXPECT_EQ(
+              cudaSetDeviceFlags(original_flags_[device] & ~cudaDeviceMapHost),
+              cudaSuccess);
+        }
       }
-      EXPECT_EQ(cudaSetDevice(device_), cudaSuccess);
+      if (device_captured_) {
+        EXPECT_EQ(cudaSetDevice(device_), cudaSuccess);
+      }
     }
   }
 
   int device_ = 0;
+  int captured_flags_ = 0;
+  bool device_captured_ = false;
   unsigned int flags_ = 0;
   std::vector<unsigned int> original_flags_;
 };
