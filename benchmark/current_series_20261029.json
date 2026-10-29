@@ -1,0 +1,1999 @@
+{
+  "schema": "colmap.currentSeriesCheckpoint/v1",
+  "status": "linux-measurements-complete-remote-comparison-pending",
+  "date": "2026-10-29",
+  "pending": [
+    "Remote-host final comparison"
+  ],
+  "sourceScope": "Qualified retained compositions with recorded producer chains; not fresh compilation of every public source file or a whole-stock-stack comparison.",
+  "mainHost": {
+    "cpu": "AMD Ryzen 9 3900X",
+    "gpu": "NVIDIA RTX 3080 Ti",
+    "osScope": "Linux under WSL2"
+  },
+  "ceresFixedEight": {
+    "observationsPerLibraryWorkerCell": 2,
+    "excludedWarmups": 4,
+    "measuredCalls": 8,
+    "modelCount": 1,
+    "workerSettings": [
+      12,
+      24
+    ],
+    "cells": {
+      "stock-12": {
+        "nativeTimeSeconds": {
+          "n": 2,
+          "mean": 3.0650000000000004,
+          "median": 3.0650000000000004,
+          "minimum": 2.99,
+          "maximum": 3.14
+        },
+        "cpuTotalSeconds": {
+          "n": 2,
+          "mean": 14.235,
+          "median": 14.235,
+          "minimum": 13.99,
+          "maximum": 14.48
+        },
+        "peakRssKiB": {
+          "n": 2,
+          "mean": 567950.0,
+          "median": 567950.0,
+          "minimum": 567884.0,
+          "maximum": 568016.0
+        },
+        "majorFaults": {
+          "n": 2,
+          "mean": 0.0,
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "minorFaults": {
+          "n": 2,
+          "mean": 131565.5,
+          "median": 131565.5,
+          "minimum": 131562.0,
+          "maximum": 131569.0
+        },
+        "counters": {
+          "cycles:u": {
+            "n": 2,
+            "mean": 37647613654.5,
+            "median": 37647613654.5,
+            "minimum": 37190699630.0,
+            "maximum": 38104527679.0
+          },
+          "instructions:u": {
+            "n": 2,
+            "mean": 39055606479.5,
+            "median": 39055606479.5,
+            "minimum": 39053681250.0,
+            "maximum": 39057531709.0
+          },
+          "cache-references:u": {
+            "n": 2,
+            "mean": 1446513379.0,
+            "median": 1446513379.0,
+            "minimum": 1419434122.0,
+            "maximum": 1473592636.0
+          },
+          "cache-misses:u": {
+            "n": 2,
+            "mean": 337634395.5,
+            "median": 337634395.5,
+            "minimum": 333580178.0,
+            "maximum": 341688613.0
+          },
+          "branches:u": {
+            "n": 2,
+            "mean": 4611227819.5,
+            "median": 4611227819.5,
+            "minimum": 4610898383.0,
+            "maximum": 4611557256.0
+          },
+          "branch-misses:u": {
+            "n": 2,
+            "mean": 37340974.5,
+            "median": 37340974.5,
+            "minimum": 37001601.0,
+            "maximum": 37680348.0
+          }
+        }
+      },
+      "fork-12": {
+        "nativeTimeSeconds": {
+          "n": 2,
+          "mean": 2.0999999999999996,
+          "median": 2.0999999999999996,
+          "minimum": 2.03,
+          "maximum": 2.17
+        },
+        "cpuTotalSeconds": {
+          "n": 2,
+          "mean": 6.91,
+          "median": 6.91,
+          "minimum": 6.71,
+          "maximum": 7.11
+        },
+        "peakRssKiB": {
+          "n": 2,
+          "mean": 576382.0,
+          "median": 576382.0,
+          "minimum": 576288.0,
+          "maximum": 576476.0
+        },
+        "majorFaults": {
+          "n": 2,
+          "mean": 0.0,
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "minorFaults": {
+          "n": 2,
+          "mean": 133646.5,
+          "median": 133646.5,
+          "minimum": 133646.0,
+          "maximum": 133647.0
+        },
+        "counters": {
+          "cycles:u": {
+            "n": 2,
+            "mean": 26362940037.5,
+            "median": 26362940037.5,
+            "minimum": 25712852444.0,
+            "maximum": 27013027631.0
+          },
+          "instructions:u": {
+            "n": 2,
+            "mean": 38204736694.5,
+            "median": 38204736694.5,
+            "minimum": 38204423346.0,
+            "maximum": 38205050043.0
+          },
+          "cache-references:u": {
+            "n": 2,
+            "mean": 1034022788.0,
+            "median": 1034022788.0,
+            "minimum": 1017159915.0,
+            "maximum": 1050885661.0
+          },
+          "cache-misses:u": {
+            "n": 2,
+            "mean": 187640240.0,
+            "median": 187640240.0,
+            "minimum": 180869981.0,
+            "maximum": 194410499.0
+          },
+          "branches:u": {
+            "n": 2,
+            "mean": 4473232443.5,
+            "median": 4473232443.5,
+            "minimum": 4473170900.0,
+            "maximum": 4473293987.0
+          },
+          "branch-misses:u": {
+            "n": 2,
+            "mean": 20193939.5,
+            "median": 20193939.5,
+            "minimum": 19642357.0,
+            "maximum": 20745522.0
+          }
+        }
+      },
+      "stock-24": {
+        "nativeTimeSeconds": {
+          "n": 2,
+          "mean": 3.19,
+          "median": 3.19,
+          "minimum": 3.13,
+          "maximum": 3.25
+        },
+        "cpuTotalSeconds": {
+          "n": 2,
+          "mean": 22.76,
+          "median": 22.76,
+          "minimum": 22.380000000000003,
+          "maximum": 23.14
+        },
+        "peakRssKiB": {
+          "n": 2,
+          "mean": 587122.0,
+          "median": 587122.0,
+          "minimum": 587100.0,
+          "maximum": 587144.0
+        },
+        "majorFaults": {
+          "n": 2,
+          "mean": 0.0,
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "minorFaults": {
+          "n": 2,
+          "mean": 136717.0,
+          "median": 136717.0,
+          "minimum": 136709.0,
+          "maximum": 136725.0
+        },
+        "counters": {
+          "cycles:u": {
+            "n": 2,
+            "mean": 47254232565.5,
+            "median": 47254232565.5,
+            "minimum": 47019903506.0,
+            "maximum": 47488561625.0
+          },
+          "instructions:u": {
+            "n": 2,
+            "mean": 39142244986.5,
+            "median": 39142244986.5,
+            "minimum": 39141937927.0,
+            "maximum": 39142552046.0
+          },
+          "cache-references:u": {
+            "n": 2,
+            "mean": 1716445116.5,
+            "median": 1716445116.5,
+            "minimum": 1716003538.0,
+            "maximum": 1716886695.0
+          },
+          "cache-misses:u": {
+            "n": 2,
+            "mean": 386039278.0,
+            "median": 386039278.0,
+            "minimum": 381196062.0,
+            "maximum": 390882494.0
+          },
+          "branches:u": {
+            "n": 2,
+            "mean": 4626140997.0,
+            "median": 4626140997.0,
+            "minimum": 4626067481.0,
+            "maximum": 4626214513.0
+          },
+          "branch-misses:u": {
+            "n": 2,
+            "mean": 49753559.0,
+            "median": 49753559.0,
+            "minimum": 49437525.0,
+            "maximum": 50069593.0
+          }
+        }
+      },
+      "fork-24": {
+        "nativeTimeSeconds": {
+          "n": 2,
+          "mean": 2.0549999999999997,
+          "median": 2.0549999999999997,
+          "minimum": 2.04,
+          "maximum": 2.07
+        },
+        "cpuTotalSeconds": {
+          "n": 2,
+          "mean": 8.504999999999999,
+          "median": 8.504999999999999,
+          "minimum": 8.45,
+          "maximum": 8.56
+        },
+        "peakRssKiB": {
+          "n": 2,
+          "mean": 603764.0,
+          "median": 603764.0,
+          "minimum": 603680.0,
+          "maximum": 603848.0
+        },
+        "majorFaults": {
+          "n": 2,
+          "mean": 0.0,
+          "median": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.0
+        },
+        "minorFaults": {
+          "n": 2,
+          "mean": 140873.0,
+          "median": 140873.0,
+          "minimum": 140866.0,
+          "maximum": 140880.0
+        },
+        "counters": {
+          "cycles:u": {
+            "n": 2,
+            "mean": 30262491320.5,
+            "median": 30262491320.5,
+            "minimum": 29973069405.0,
+            "maximum": 30551913236.0
+          },
+          "instructions:u": {
+            "n": 2,
+            "mean": 38354156587.5,
+            "median": 38354156587.5,
+            "minimum": 38353495429.0,
+            "maximum": 38354817746.0
+          },
+          "cache-references:u": {
+            "n": 2,
+            "mean": 1095103200.5,
+            "median": 1095103200.5,
+            "minimum": 1084840098.0,
+            "maximum": 1105366303.0
+          },
+          "cache-misses:u": {
+            "n": 2,
+            "mean": 194435729.5,
+            "median": 194435729.5,
+            "minimum": 194107071.0,
+            "maximum": 194764388.0
+          },
+          "branches:u": {
+            "n": 2,
+            "mean": 4493517070.0,
+            "median": 4493517070.0,
+            "minimum": 4493397662.0,
+            "maximum": 4493636478.0
+          },
+          "branch-misses:u": {
+            "n": 2,
+            "mean": 25723799.5,
+            "median": 25723799.5,
+            "minimum": 25710221.0,
+            "maximum": 25737378.0
+          }
+        }
+      }
+    },
+    "solver": {
+      "actualWorkersMatchRequested": true,
+      "selectedSolver": "SPARSE_SCHUR",
+      "linearSolvesPerCall": 8,
+      "successfulStepsPerCall": 9,
+      "unsuccessfulStepsPerCall": 0,
+      "iterationsPerCall": 9,
+      "residualsPerCall": 630090,
+      "termination": "iteration limit"
+    },
+    "qualification": {
+      "geometryAndCostComparisonsPassed": 10,
+      "exactRosterAssociationsObservationsTracksRGB": true,
+      "maximumPointDifferenceSceneUnitsReported": 1.354e-12,
+      "maximumRelativeFinalCostDifferenceReported": 4.1e-15,
+      "allCallsMajorFaults": 0
+    },
+    "activationScope": "Actual harness mappings selected each library. Per-solve custom-path activation/fallback census was not collected; matching solve counts do not prove identical linear systems or trajectories.",
+    "gpuTelemetry": {
+      "vram": null,
+      "power": null,
+      "energy": null,
+      "scope": "CPU BA lane; GPU telemetry not collected."
+    },
+    "limits": [
+      "Whole-BA process wall includes model loading/output writing, not isolated solver or kernel time.",
+      "One model, N2 per cell; no end-to-end or provider-adoption claim.",
+      "Six perf events counted with 100% reported running; complete lifetime/thread/descendant coverage not independently established."
+    ],
+    "libraryIdentityBindings": {
+      "stock": "fixed8_stock_ceres",
+      "fork": "fixed8_fork_ceres"
+    },
+    "sourceQualification": "Official upstream Schur headers and test restored for stock; private headers excluded from its consumers. Affected objects rebuilt in both arms with matched common objects/toolchain. Inherited unaffected objects retain the documented retrospective provenance limit; neither arm is a full clean-tree rebuild."
+  },
+  "qualifiedForkCeresCompilerDefinitions": {
+    "CERES_PRIVATE_SCHUR_ACCUMULATION_CANDIDATE": 1,
+    "CERES_PRIVATE_SCHUR_RHS_CANDIDATE": 1,
+    "CERES_PRIVATE_SCHUR_MATRIX_REUSE_CANDIDATE": 1,
+    "CERES_PRIVATE_SCHUR_ACTIVE_PATTERN_CANDIDATE": 0,
+    "CERES_PRIVATE_SCHUR_ACTIVE_PATTERN_CACHE_CANDIDATE": 0
+  },
+  "compilerDefinitionScope": "Exact five qualified definitions from activation matrix; compiler definitions, not upstream CMake option names. Build enablement does not prove admission in every solve.",
+  "actualLoadedLibraries": {
+    "historical_custom_ceres": {
+      "library": "libceres.so.2.3.0",
+      "sourceContext": "Historical custom 8d41e570 plus documented Schur/numeric overlays; not stock Ceres.",
+      "sha256": "ed5de6c5840bd15dacd77ea537e42bc4cdf5e01bffb7e8b4850b95c6121927e7",
+      "identityStatus": "SHA-256 bound to exact measured loaded bytes",
+      "bytes": 7528808,
+      "recordedSourceRevision": "8d41e570"
+    },
+    "current_custom_ceres": {
+      "library": "libceres.so.2.3.0",
+      "sourceContext": "Current qualified custom Ceres closure; distinct from historical closure.",
+      "sha256": "e4d0cb95ff671334056456a67d6068545633842074b76e11ef7475ac89c32009",
+      "identityStatus": "SHA-256 bound to exact measured loaded bytes",
+      "bytes": 7528992,
+      "forkSourceCommit": "94a6f21e89c00a5aeadf6eff7dcab48439d419df"
+    },
+    "historical_ort_1_30_0": {
+      "library": "libonnxruntime.so.1.30.0",
+      "sha256": "292591ed61befc515112570ae8eb9bb0d47716cd0ed60c38865800de4e829544",
+      "identityStatus": "SHA-256 bound to exact measured loaded bytes",
+      "bytes": 32515904
+    },
+    "current_ort_1_31_1": {
+      "library": "libonnxruntime.so.1.31.1",
+      "sha256": "43c4028a88fd86be88d795b3423a7bdeddcbae6aa8e775a950e7bff1bbc1702d",
+      "identityStatus": "SHA-256 bound to exact measured loaded bytes",
+      "bytes": 33076832
+    },
+    "fixed8_stock_ceres": {
+      "library": "libceres.so.2.3.0",
+      "sourceContext": "Separately qualified stock comparison library; not the historical P11 dependency.",
+      "sha256": "4d4b8de75170ade2c8249a90f5b2adf452dfe4a4f3a4e2bd01071dca4b8f751d",
+      "identityStatus": "SHA-256 bound to exact measured loaded bytes",
+      "bytes": 7412664,
+      "upstreamSourceCommit": "07a952622c2118433c783b1c3bd3fabe68420fc5"
+    },
+    "fixed8_fork_ceres": {
+      "library": "libceres.so.2.3.0",
+      "sourceContext": "Separately qualified fork comparison library; not substituted behind historical binaries.",
+      "sha256": "36a1f778e1c6650d1b7784aaa6a0f7866a13e36355541d4d14bc59d311ca8c03",
+      "identityStatus": "SHA-256 bound to exact measured loaded bytes",
+      "bytes": 7528992,
+      "forkSourceCommit": "94a6f21e89c00a5aeadf6eff7dcab48439d419df",
+      "upstreamBaseCommit": "07a952622c2118433c783b1c3bd3fabe68420fc5"
+    }
+  },
+  "artifactIdentityScope": "SHA-256 identifies exact measured executable and loaded-library bytes; reproducible rebuilds may produce different bytes. Native activation is established by the retained process evidence.",
+  "p11Screens": [
+    {
+      "observationsPerBuild": 1,
+      "resolution": 1536,
+      "requestedNativeWorkers": 12,
+      "order": [
+        "baseline",
+        "D4",
+        "final"
+      ],
+      "arms": [
+        {
+          "arm": "baseline",
+          "nativeWallSeconds": 344.0440152308438,
+          "nativeCpuSeconds": 578.663096,
+          "largestStagePeakRssBytes": 1805713408,
+          "majorFaults": 363,
+          "wholeBoardSampledPeaks": {
+            "gpuMemoryUsed": {
+              "maximum": 1412.09765625,
+              "unit": "MiB",
+              "validSamples": 117
+            },
+            "gpuPower": {
+              "maximum": 192.147,
+              "unit": "W",
+              "validSamples": 117
+            }
+          },
+          "wholeBoardSampledEnergyWindows": [
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 2.7922330440487713,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 0.9227152640232816,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.8647309033244921,
+              "coveredSeconds": 5.999884153017774,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 6.938440768048167,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 310.3368906380834,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 2
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 1.3071456470061094,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.9904265656187695,
+              "coveredSeconds": 284.99979660799727,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 287.7545963540906,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 53417.414737337574,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 95
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 2.487665958935395,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.9308588880689233,
+              "coveredSeconds": 38.999814504990354,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 41.896591422031634,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 920.947425553794,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 13
+            }
+          ],
+          "stages": [
+            {
+              "stage": "features",
+              "wallSeconds": 2.7838223489234224,
+              "cpuSeconds": 6.086664,
+              "peakRssBytes": 639848448,
+              "majorFaults": 151,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "matching",
+              "wallSeconds": 0.9142490259837359,
+              "cpuSeconds": 3.583318,
+              "peakRssBytes": 619266048,
+              "majorFaults": 100,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "mapping",
+              "wallSeconds": 6.929999178973958,
+              "cpuSeconds": 15.17595,
+              "peakRssBytes": 541798400,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "undistortion",
+              "wallSeconds": 1.2987265200354159,
+              "cpuSeconds": 10.893938,
+              "peakRssBytes": 766861312,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "patchmatch",
+              "wallSeconds": 287.74602052301634,
+              "cpuSeconds": 289.054318,
+              "peakRssBytes": 1235841024,
+              "majorFaults": 112,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "fusion",
+              "wallSeconds": 2.4791310139698908,
+              "cpuSeconds": 16.248351,
+              "peakRssBytes": 926654464,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "meshing",
+              "wallSeconds": 41.89206661994103,
+              "cpuSeconds": 237.620557,
+              "peakRssBytes": 1805713408,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            }
+          ],
+          "sourceCommit": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+          "sourceLabel": "qualified retained composition",
+          "patchMatchDefaults": {},
+          "ceresLibrary": "historical_custom_ceres",
+          "onnxRuntimeLibrary": "historical_ort_1_30_0",
+          "executableArtifact": {
+            "bytes": 67713089,
+            "sha256": "08e721002d707398267d32e5b5a3e3e831e77e078cf06acf3094d577b5f46292"
+          },
+          "cudaRuntimeArtifact": {
+            "bytes": 791737,
+            "sha256": "4d3889fb134c729e296e36ef79bd17dc401b3b804b134a36692f6b69a8d8fdfe"
+          }
+        },
+        {
+          "arm": "D4",
+          "nativeWallSeconds": 51.10296990477946,
+          "nativeCpuSeconds": 175.74876,
+          "largestStagePeakRssBytes": 1533460480,
+          "majorFaults": 417,
+          "wholeBoardSampledPeaks": {
+            "gpuMemoryUsed": {
+              "maximum": 2508.09765625,
+              "unit": "MiB",
+              "validSamples": 21
+            },
+            "gpuPower": {
+              "maximum": 329.458,
+              "unit": "W",
+              "validSamples": 21
+            }
+          },
+          "wholeBoardSampledEnergyWindows": [
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 2.5616237360518426,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 0.9174879220081493,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.8643002245172853,
+              "coveredSeconds": 5.999793563969433,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 6.941793365054764,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 325.396307585106,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 2
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 1.3076759970281273,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.9766345418366795,
+              "coveredSeconds": 20.999778055003844,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 21.502186493948102,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 5937.090995472549,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 7
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 1.0068638829980046,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.8738584481923504,
+              "coveredSeconds": 14.999871916952543,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 17.16510488395579,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 954.3303071763526,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 5
+            }
+          ],
+          "stages": [
+            {
+              "stage": "features",
+              "wallSeconds": 2.553098942968063,
+              "cpuSeconds": 5.825929,
+              "peakRssBytes": 633360384,
+              "majorFaults": 102,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "matching",
+              "wallSeconds": 0.9131964949192479,
+              "cpuSeconds": 3.751125,
+              "peakRssBytes": 626946048,
+              "majorFaults": 100,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "mapping",
+              "wallSeconds": 6.937441152986139,
+              "cpuSeconds": 17.478885,
+              "peakRssBytes": 539295744,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "undistortion",
+              "wallSeconds": 1.2990709110163152,
+              "cpuSeconds": 11.324331,
+              "peakRssBytes": 764608512,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "patchmatch",
+              "wallSeconds": 21.49779267597478,
+              "cpuSeconds": 23.17406,
+              "peakRssBytes": 1504747520,
+              "majorFaults": 112,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "fusion",
+              "wallSeconds": 1.0023721489124,
+              "cpuSeconds": 7.154439,
+              "peakRssBytes": 711909376,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "meshing",
+              "wallSeconds": 16.899997578002512,
+              "cpuSeconds": 107.039991,
+              "peakRssBytes": 1533460480,
+              "majorFaults": 103,
+              "counterAcceptance": true
+            }
+          ],
+          "sourceCommit": "d4d5f2fdf74eb79ced79755afcbe638eb4942791",
+          "sourceLabel": "qualified retained composition",
+          "patchMatchDefaults": {
+            "rotation_buffer_reuse": 0,
+            "checkpoint_hmm": 0
+          },
+          "ceresLibrary": "historical_custom_ceres",
+          "onnxRuntimeLibrary": "historical_ort_1_30_0",
+          "executableArtifact": {
+            "bytes": 85958337,
+            "sha256": "475274589d3f3d9728ff0a0dce5fbb964d62f70576c262d3b7ddfd4b7b3ce7dc"
+          },
+          "cudaRuntimeArtifact": {
+            "bytes": 791737,
+            "sha256": "4d3889fb134c729e296e36ef79bd17dc401b3b804b134a36692f6b69a8d8fdfe"
+          }
+        },
+        {
+          "arm": "final",
+          "nativeWallSeconds": 48.7435843271669,
+          "nativeCpuSeconds": 170.264858,
+          "largestStagePeakRssBytes": 1521836032,
+          "majorFaults": 741,
+          "wholeBoardSampledPeaks": {
+            "gpuMemoryUsed": {
+              "maximum": 1942.09765625,
+              "unit": "MiB",
+              "validSamples": 19
+            },
+            "gpuPower": {
+              "maximum": 327.415,
+              "unit": "W",
+              "validSamples": 19
+            }
+          },
+          "wholeBoardSampledEnergyWindows": [
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 2.5000826290342957,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 1.0065333020174876,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.5297860806495125,
+              "coveredSeconds": 2.999881235999055,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 5.6624387570191175,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 243.44486212317733,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 1
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 1.3630719650536776,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.8949479371050164,
+              "coveredSeconds": 17.999844595091417,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 20.11272818094585,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 4961.937316453894,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 6
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 1.0698569059604779,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.8792107455282736,
+              "coveredSeconds": 14.999890214996412,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 17.060631130007096,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 1089.0439469269963,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 5
+            }
+          ],
+          "stages": [
+            {
+              "stage": "features",
+              "wallSeconds": 2.494840103085153,
+              "cpuSeconds": 3.197786,
+              "peakRssBytes": 656424960,
+              "majorFaults": 148,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "matching",
+              "wallSeconds": 1.0022677349625155,
+              "cpuSeconds": 3.89399,
+              "peakRssBytes": 620322816,
+              "majorFaults": 146,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "mapping",
+              "wallSeconds": 5.658098738989793,
+              "cpuSeconds": 15.18965,
+              "peakRssBytes": 529346560,
+              "majorFaults": 46,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "undistortion",
+              "wallSeconds": 1.3585400769952685,
+              "cpuSeconds": 10.837461,
+              "peakRssBytes": 765100032,
+              "majorFaults": 46,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "patchmatch",
+              "wallSeconds": 20.108220408088528,
+              "cpuSeconds": 19.673450000000003,
+              "peakRssBytes": 1308811264,
+              "majorFaults": 160,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "fusion",
+              "wallSeconds": 1.0652933230157942,
+              "cpuSeconds": 7.2298789999999995,
+              "peakRssBytes": 710901760,
+              "majorFaults": 46,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "meshing",
+              "wallSeconds": 17.05632394202985,
+              "cpuSeconds": 110.242642,
+              "peakRssBytes": 1521836032,
+              "majorFaults": 149,
+              "counterAcceptance": true
+            }
+          ],
+          "sourceCommit": "cbbed62a3b26693d4b626f6cc656de8baa4dc003",
+          "sourceLabel": "qualified retained composition",
+          "patchMatchDefaults": {
+            "rotation_buffer_reuse": 0,
+            "checkpoint_hmm": 1
+          },
+          "ceresLibrary": "current_custom_ceres",
+          "onnxRuntimeLibrary": "current_ort_1_31_1",
+          "executableArtifact": {
+            "bytes": 86635080,
+            "sha256": "1bdaaa4b380561d10bdefce0043c446e0f91ab93da2a3d958c1f60cb603a86ab"
+          },
+          "cudaRuntimeArtifact": {
+            "bytes": 791737,
+            "sha256": "4d3889fb134c729e296e36ef79bd17dc401b3b804b134a36692f6b69a8d8fdfe"
+          }
+        }
+      ],
+      "settings": {
+        "ambientOMP": 12,
+        "ambientBLAS": 1,
+        "ambientMKL": 1,
+        "featurePipeline": "SIFT; no ALIKED activation measured",
+        "shippedPatchMatchDefaults": true,
+        "baselineForkFlags": "unavailable; no fork-only override",
+        "loaderDiagnosticsIncludedInNativeTime": true
+      },
+      "historicalContext": {
+        "separateCohort": true,
+        "ambientOMP": 1,
+        "D4RotationReuse": 1,
+        "D4CheckpointHMM": 0,
+        "dependencyContext": "Both historical main-host arms used their documented common custom Ceres closure. Historical tables are unchanged."
+      },
+      "quality": {
+        "status": "structural-and-crossarm-analysis-complete",
+        "perBuild": [
+          {
+            "arm": "baseline",
+            "registeredImages": 11,
+            "databaseIntegrity": "ok",
+            "databaseTableCounts": {
+              "cameras": {
+                "records": 1
+              },
+              "descriptors": {
+                "nonemptyRecords": 11,
+                "records": 11,
+                "sumRows": 118468
+              },
+              "images": {
+                "records": 11
+              },
+              "keypoints": {
+                "nonemptyRecords": 11,
+                "records": 11,
+                "sumRows": 118468
+              },
+              "matches": {
+                "nonemptyRecords": 55,
+                "records": 55,
+                "sumRows": 108974
+              },
+              "two_view_geometries": {
+                "nonemptyRecords": 55,
+                "records": 55,
+                "sumRows": 107042
+              }
+            },
+            "finiteMapCount": 44,
+            "fusedPoints": 434441,
+            "meshVertices": 1350019,
+            "meshFaces": 2669897
+          },
+          {
+            "arm": "D4",
+            "registeredImages": 11,
+            "databaseIntegrity": "ok",
+            "databaseTableCounts": {
+              "cameras": {
+                "records": 1
+              },
+              "descriptors": {
+                "nonemptyRecords": 11,
+                "records": 11,
+                "sumRows": 118468
+              },
+              "images": {
+                "records": 11
+              },
+              "keypoints": {
+                "nonemptyRecords": 11,
+                "records": 11,
+                "sumRows": 118468
+              },
+              "matches": {
+                "nonemptyRecords": 55,
+                "records": 55,
+                "sumRows": 108974
+              },
+              "two_view_geometries": {
+                "nonemptyRecords": 55,
+                "records": 55,
+                "sumRows": 107042
+              }
+            },
+            "finiteMapCount": 44,
+            "fusedPoints": 441791,
+            "meshVertices": 1373128,
+            "meshFaces": 2722245
+          },
+          {
+            "arm": "final",
+            "registeredImages": 11,
+            "databaseIntegrity": "ok",
+            "databaseTableCounts": {
+              "cameras": {
+                "records": 1
+              },
+              "descriptors": {
+                "nonemptyRecords": 11,
+                "records": 11,
+                "sumRows": 118468
+              },
+              "images": {
+                "records": 11
+              },
+              "keypoints": {
+                "nonemptyRecords": 11,
+                "records": 11,
+                "sumRows": 118468
+              },
+              "matches": {
+                "nonemptyRecords": 55,
+                "records": 55,
+                "sumRows": 108974
+              },
+              "two_view_geometries": {
+                "nonemptyRecords": 55,
+                "records": 55,
+                "sumRows": 107042
+              }
+            },
+            "finiteMapCount": 44,
+            "fusedPoints": 440497,
+            "meshVertices": 1344442,
+            "meshFaces": 2663167
+          }
+        ],
+        "databaseScope": {
+          "applicationTables": [
+            "cameras",
+            "descriptors",
+            "frame_data",
+            "frames",
+            "images",
+            "keypoints",
+            "matches",
+            "pose_priors",
+            "rig_sensors",
+            "rigs",
+            "two_view_geometries"
+          ],
+          "allThreePairwiseSchemasAndTypedRowsEqual": true,
+          "tableComparisons": 33,
+          "imageIdNameRosterEqual": true,
+          "integrityChecked": true,
+          "inputBytesVerifiedBeforeAfter": true,
+          "method": "Typed scalar values, exact binary64 float bits and BLOB size plus128-bit checksums. Physical SQLite file equality is not claimed; checksum values are not exported."
+        },
+        "comparisons": [
+          {
+            "candidate": "D4",
+            "reference": "baseline",
+            "cameraCenterNormalizedMax": 1.762065820253064e-05,
+            "cameraRotationDegreesMax": 0.002172082712925851,
+            "fusedNormalizedP99": {
+              "candidateToUpstream": 0.003131602618878196,
+              "upstreamToCandidate": 0.0031895926832700016
+            },
+            "meshClosestTriangle": {
+              "candidateToReference": {
+                "queryCount": 100000,
+                "p99SceneUnits": 0.052390401229550826,
+                "maximumSceneUnits": 0.32594887129670985
+              },
+              "referenceToCandidate": {
+                "queryCount": 100000,
+                "p99SceneUnits": 0.004891112501399115,
+                "maximumSceneUnits": 0.0982247335566239
+              }
+            }
+          },
+          {
+            "candidate": "final",
+            "reference": "baseline",
+            "cameraCenterNormalizedMax": 5.462650793082844e-06,
+            "cameraRotationDegreesMax": 0.0016645950141328987,
+            "fusedNormalizedP99": {
+              "candidateToUpstream": 0.0031097704829138708,
+              "upstreamToCandidate": 0.0031228743807802323
+            },
+            "meshClosestTriangle": {
+              "candidateToReference": {
+                "queryCount": 100000,
+                "p99SceneUnits": 0.04756103500657715,
+                "maximumSceneUnits": 0.7228197276351238
+              },
+              "referenceToCandidate": {
+                "queryCount": 100000,
+                "p99SceneUnits": 0.005330478087770129,
+                "maximumSceneUnits": 0.08153125220713511
+              }
+            }
+          }
+        ],
+        "alignment": "one camera-center Sim3; no ICP",
+        "queriesPerDirection": 100000,
+        "querySelection": "deterministic evenly spaced vertices",
+        "interpretation": "Cross-run agreement, not independent accuracy, equivalence or a quality winner."
+      },
+      "limits": [
+        "One sequential observation per build, not balanced acceptance or per-patch attribution.",
+        "Unequal major faults limit interpretation.",
+        "Peak RSS is maximum direct-native-child stage wait4 RSS, not host commit.",
+        "VRAM/power are 3-second sampled whole-board maxima and may miss spikes.",
+        "Energy windows include other clients/setup/teardown and lack native-phase alignment; no process energy claim.",
+        "Host commit coverage unavailable."
+      ]
+    },
+    {
+      "observationsPerBuild": 1,
+      "resolution": 3072,
+      "requestedNativeWorkers": 12,
+      "order": [
+        "baseline",
+        "D4",
+        "final"
+      ],
+      "arms": [
+        {
+          "arm": "baseline",
+          "nativeWallSeconds": 802.5614410481649,
+          "nativeCpuSeconds": 1366.558653,
+          "largestStagePeakRssBytes": 4986089472,
+          "majorFaults": 362,
+          "wholeBoardSampledPeaks": {
+            "gpuMemoryUsed": {
+              "maximum": 2732.09765625,
+              "unit": "MiB",
+              "validSamples": 271
+            },
+            "gpuPower": {
+              "maximum": 245.946,
+              "unit": "W",
+              "validSamples": 271
+            }
+          },
+          "wholeBoardSampledEnergyWindows": [
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 2.6869889879599214,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 0.9604691759450361,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.7870009909348379,
+              "coveredSeconds": 5.999824939062819,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 7.623656142968684,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 324.16376816749516,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 2
+            },
+            {
+              "coverageFraction": 0.7911460067706602,
+              "coveredSeconds": 2.9998769080266356,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 3.791811982053332,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 64.35185949253338,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 1
+            },
+            {
+              "coverageFraction": 0.9961437860155714,
+              "coveredSeconds": 659.9998182079289,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 662.5547711820109,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 144554.36752368358,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 220
+            },
+            {
+              "coverageFraction": 0.9300529716729427,
+              "coveredSeconds": 11.999797543976456,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 12.902273213956505,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 356.46628187317435,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 4
+            },
+            {
+              "coverageFraction": 0.9903370059507848,
+              "coveredSeconds": 110.99987501092255,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 112.08293171308469,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 2533.3649781028034,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 37
+            }
+          ],
+          "stages": [
+            {
+              "stage": "features",
+              "wallSeconds": 2.682611517026089,
+              "cpuSeconds": 2.690632,
+              "peakRssBytes": 692613120,
+              "majorFaults": 150,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "matching",
+              "wallSeconds": 0.9560453440062702,
+              "cpuSeconds": 3.8577690000000002,
+              "peakRssBytes": 621355008,
+              "majorFaults": 100,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "mapping",
+              "wallSeconds": 7.619331481051631,
+              "cpuSeconds": 17.983342999999998,
+              "peakRssBytes": 541118464,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "undistortion",
+              "wallSeconds": 3.7767180560622364,
+              "cpuSeconds": 36.759637999999995,
+              "peakRssBytes": 790933504,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "patchmatch",
+              "wallSeconds": 662.5503828739747,
+              "cpuSeconds": 675.702041,
+              "peakRssBytes": 3234385920,
+              "majorFaults": 112,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "fusion",
+              "wallSeconds": 12.897794440039434,
+              "cpuSeconds": 70.656368,
+              "peakRssBytes": 3271307264,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "meshing",
+              "wallSeconds": 112.07855733600445,
+              "cpuSeconds": 558.908862,
+              "peakRssBytes": 4986089472,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            }
+          ],
+          "sourceCommit": "8dd74ef6ca84a0950e5b181df26c6e78e56d73d6",
+          "sourceLabel": "qualified retained composition",
+          "patchMatchDefaults": {},
+          "ceresLibrary": "historical_custom_ceres",
+          "onnxRuntimeLibrary": "historical_ort_1_30_0",
+          "executableArtifact": {
+            "bytes": 67713089,
+            "sha256": "08e721002d707398267d32e5b5a3e3e831e77e078cf06acf3094d577b5f46292"
+          },
+          "cudaRuntimeArtifact": {
+            "bytes": 791737,
+            "sha256": "4d3889fb134c729e296e36ef79bd17dc401b3b804b134a36692f6b69a8d8fdfe"
+          }
+        },
+        {
+          "arm": "D4",
+          "nativeWallSeconds": 139.26889352104627,
+          "nativeCpuSeconds": 471.60696600000006,
+          "largestStagePeakRssBytes": 4084027392,
+          "majorFaults": 418,
+          "wholeBoardSampledPeaks": {
+            "gpuMemoryUsed": {
+              "maximum": 6970.09765625,
+              "unit": "MiB",
+              "validSamples": 50
+            },
+            "gpuPower": {
+              "maximum": 356.322,
+              "unit": "W",
+              "validSamples": 50
+            }
+          },
+          "wholeBoardSampledEnergyWindows": [
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 2.640980827040039,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 0.9767870879732072,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.8242011242115337,
+              "coveredSeconds": 5.999673955957405,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 7.279380941996351,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 314.18825585451845,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 2
+            },
+            {
+              "coverageFraction": 0.7827641060791383,
+              "coveredSeconds": 2.9996096009854227,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 3.832073517027311,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 63.2542674607801,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 1
+            },
+            {
+              "coverageFraction": 0.9868836551562704,
+              "coveredSeconds": 74.99987029493786,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 75.99666881002486,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 22884.576728999466,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 25
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 2.909078140044585,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.9853510341813911,
+              "coveredSeconds": 44.999748782021925,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 45.66874872101471,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 1873.071042069324,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 15
+            }
+          ],
+          "stages": [
+            {
+              "stage": "features",
+              "wallSeconds": 2.636343047954142,
+              "cpuSeconds": 2.654302,
+              "peakRssBytes": 691740672,
+              "majorFaults": 102,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "matching",
+              "wallSeconds": 0.9724038509884849,
+              "cpuSeconds": 3.9674029999999996,
+              "peakRssBytes": 616054784,
+              "majorFaults": 100,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "mapping",
+              "wallSeconds": 7.274903495097533,
+              "cpuSeconds": 18.92493,
+              "peakRssBytes": 536690688,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "undistortion",
+              "wallSeconds": 3.827687675016932,
+              "cpuSeconds": 37.617294,
+              "peakRssBytes": 789745664,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "patchmatch",
+              "wallSeconds": 75.99244701000862,
+              "cpuSeconds": 85.876868,
+              "peakRssBytes": 4084027392,
+              "majorFaults": 112,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "fusion",
+              "wallSeconds": 2.9006710129324347,
+              "cpuSeconds": 26.104686,
+              "peakRssBytes": 1738141696,
+              "majorFaults": 0,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "meshing",
+              "wallSeconds": 45.66443742904812,
+              "cpuSeconds": 296.46148300000004,
+              "peakRssBytes": 2952409088,
+              "majorFaults": 104,
+              "counterAcceptance": true
+            }
+          ],
+          "sourceCommit": "d4d5f2fdf74eb79ced79755afcbe638eb4942791",
+          "sourceLabel": "qualified retained composition",
+          "patchMatchDefaults": {
+            "rotation_buffer_reuse": 0,
+            "checkpoint_hmm": 0
+          },
+          "ceresLibrary": "historical_custom_ceres",
+          "onnxRuntimeLibrary": "historical_ort_1_30_0",
+          "executableArtifact": {
+            "bytes": 85958337,
+            "sha256": "475274589d3f3d9728ff0a0dce5fbb964d62f70576c262d3b7ddfd4b7b3ce7dc"
+          },
+          "cudaRuntimeArtifact": {
+            "bytes": 791737,
+            "sha256": "4d3889fb134c729e296e36ef79bd17dc401b3b804b134a36692f6b69a8d8fdfe"
+          }
+        },
+        {
+          "arm": "final",
+          "nativeWallSeconds": 135.43825984478462,
+          "nativeCpuSeconds": 463.530616,
+          "largestStagePeakRssBytes": 2985914368,
+          "majorFaults": 741,
+          "wholeBoardSampledPeaks": {
+            "gpuMemoryUsed": {
+              "maximum": 4720.09765625,
+              "unit": "MiB",
+              "validSamples": 49
+            },
+            "gpuPower": {
+              "maximum": 358.539,
+              "unit": "W",
+              "validSamples": 49
+            }
+          },
+          "wholeBoardSampledEnergyWindows": [
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 2.678868160932325,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.0,
+              "coveredSeconds": 0.0,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 1.0569234879221767,
+              "reason": "no-valid-contiguous-power-intervals",
+              "sampledWholeDeviceEnergyJoules": null,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 0
+            },
+            {
+              "coverageFraction": 0.9244963042286318,
+              "coveredSeconds": 5.99987279297784,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 6.489882940077223,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 414.17401472399246,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 2
+            },
+            {
+              "coverageFraction": 0.7697373759782006,
+              "coveredSeconds": 2.999831906054169,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 3.897214815951884,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 69.31411602128763,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 1
+            },
+            {
+              "coverageFraction": 0.9602479558508927,
+              "coveredSeconds": 68.99973358795978,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 71.85616294993088,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 21710.18317519196,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 23
+            },
+            {
+              "coverageFraction": 0.9811605631849342,
+              "coveredSeconds": 2.999841551994905,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 3.0574420380871743,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 291.47660455803293,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 1
+            },
+            {
+              "coverageFraction": 0.9690649026444035,
+              "coveredSeconds": 44.99976140097715,
+              "edgeExtrapolation": false,
+              "excludedIntervals": [],
+              "interpolationAcrossGaps": false,
+              "nativePhaseAlignmentProved": false,
+              "observationWindowSeconds": 46.43627199600451,
+              "reason": null,
+              "sampledWholeDeviceEnergyJoules": 1805.1103005207253,
+              "scope": "sampled-whole-device; includes-other-clients; no-COLMAP-only-attribution",
+              "validIntervals": 15
+            }
+          ],
+          "stages": [
+            {
+              "stage": "features",
+              "wallSeconds": 2.6747119260253385,
+              "cpuSeconds": 2.62325,
+              "peakRssBytes": 690499584,
+              "majorFaults": 148,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "matching",
+              "wallSeconds": 1.052570091909729,
+              "cpuSeconds": 4.3584060000000004,
+              "peakRssBytes": 617586688,
+              "majorFaults": 146,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "mapping",
+              "wallSeconds": 6.485587169067003,
+              "cpuSeconds": 20.603692,
+              "peakRssBytes": 526610432,
+              "majorFaults": 46,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "undistortion",
+              "wallSeconds": 3.892805479001254,
+              "cpuSeconds": 37.67653,
+              "peakRssBytes": 788680704,
+              "majorFaults": 46,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "patchmatch",
+              "wallSeconds": 71.85184153693262,
+              "cpuSeconds": 72.200621,
+              "peakRssBytes": 2858184704,
+              "majorFaults": 160,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "fusion",
+              "wallSeconds": 3.0529612759128213,
+              "cpuSeconds": 26.838042,
+              "peakRssBytes": 1739255808,
+              "majorFaults": 46,
+              "counterAcceptance": true
+            },
+            {
+              "stage": "meshing",
+              "wallSeconds": 46.427782365935855,
+              "cpuSeconds": 299.230075,
+              "peakRssBytes": 2985914368,
+              "majorFaults": 149,
+              "counterAcceptance": true
+            }
+          ],
+          "sourceCommit": "cbbed62a3b26693d4b626f6cc656de8baa4dc003",
+          "sourceLabel": "qualified retained composition",
+          "patchMatchDefaults": {
+            "rotation_buffer_reuse": 0,
+            "checkpoint_hmm": 1
+          },
+          "ceresLibrary": "current_custom_ceres",
+          "onnxRuntimeLibrary": "current_ort_1_31_1",
+          "executableArtifact": {
+            "bytes": 86635080,
+            "sha256": "1bdaaa4b380561d10bdefce0043c446e0f91ab93da2a3d958c1f60cb603a86ab"
+          },
+          "cudaRuntimeArtifact": {
+            "bytes": 791737,
+            "sha256": "4d3889fb134c729e296e36ef79bd17dc401b3b804b134a36692f6b69a8d8fdfe"
+          }
+        }
+      ],
+      "settings": {
+        "ambientOMP": 12,
+        "ambientBLAS": 1,
+        "ambientMKL": 1,
+        "featurePipeline": "SIFT; no ALIKED activation measured",
+        "shippedPatchMatchDefaults": true,
+        "baselineForkFlags": "unavailable; no fork-only override",
+        "loaderDiagnosticsIncludedInNativeTime": true
+      },
+      "historicalContext": {
+        "separateCohort": true,
+        "ambientOMP": 1,
+        "D4RotationReuse": 1,
+        "D4CheckpointHMM": 0,
+        "dependencyContext": "Both historical main-host arms used their documented common custom Ceres closure. Historical tables are unchanged."
+      },
+      "quality": {
+        "status": "structural-and-crossarm-analysis-complete",
+        "perBuild": [
+          {
+            "arm": "baseline",
+            "registeredImages": 11,
+            "databaseIntegrity": "ok",
+            "databaseTableCounts": {
+              "cameras": {
+                "records": 1
+              },
+              "descriptors": {
+                "nonemptyRecords": 11,
+                "records": 11,
+                "sumRows": 122673
+              },
+              "images": {
+                "records": 11
+              },
+              "keypoints": {
+                "nonemptyRecords": 11,
+                "records": 11,
+                "sumRows": 122673
+              },
+              "matches": {
+                "nonemptyRecords": 55,
+                "records": 55,
+                "sumRows": 116746
+              },
+              "two_view_geometries": {
+                "nonemptyRecords": 55,
+                "records": 55,
+                "sumRows": 114713
+              }
+            },
+            "finiteMapCount": 44,
+            "fusedPoints": 1672880,
+            "meshVertices": 4465123,
+            "meshFaces": 8894297
+          },
+          {
+            "arm": "D4",
+            "registeredImages": 11,
+            "databaseIntegrity": "ok",
+            "databaseTableCounts": {
+              "cameras": {
+                "records": 1
+              },
+              "descriptors": {
+                "nonemptyRecords": 11,
+                "records": 11,
+                "sumRows": 122673
+              },
+              "images": {
+                "records": 11
+              },
+              "keypoints": {
+                "nonemptyRecords": 11,
+                "records": 11,
+                "sumRows": 122673
+              },
+              "matches": {
+                "nonemptyRecords": 55,
+                "records": 55,
+                "sumRows": 116746
+              },
+              "two_view_geometries": {
+                "nonemptyRecords": 55,
+                "records": 55,
+                "sumRows": 114713
+              }
+            },
+            "finiteMapCount": 44,
+            "fusedPoints": 1671061,
+            "meshVertices": 4651850,
+            "meshFaces": 9275901
+          },
+          {
+            "arm": "final",
+            "registeredImages": 11,
+            "databaseIntegrity": "ok",
+            "databaseTableCounts": {
+              "cameras": {
+                "records": 1
+              },
+              "descriptors": {
+                "nonemptyRecords": 11,
+                "records": 11,
+                "sumRows": 122673
+              },
+              "images": {
+                "records": 11
+              },
+              "keypoints": {
+                "nonemptyRecords": 11,
+                "records": 11,
+                "sumRows": 122673
+              },
+              "matches": {
+                "nonemptyRecords": 55,
+                "records": 55,
+                "sumRows": 116746
+              },
+              "two_view_geometries": {
+                "nonemptyRecords": 55,
+                "records": 55,
+                "sumRows": 114713
+              }
+            },
+            "finiteMapCount": 44,
+            "fusedPoints": 1687278,
+            "meshVertices": 4512653,
+            "meshFaces": 8994590
+          }
+        ],
+        "databaseScope": {
+          "applicationTables": [
+            "cameras",
+            "descriptors",
+            "frame_data",
+            "frames",
+            "images",
+            "keypoints",
+            "matches",
+            "pose_priors",
+            "rig_sensors",
+            "rigs",
+            "two_view_geometries"
+          ],
+          "allThreePairwiseSchemasAndTypedRowsEqual": true,
+          "tableComparisons": 33,
+          "imageIdNameRosterEqual": true,
+          "integrityChecked": true,
+          "inputBytesVerifiedBeforeAfter": true,
+          "method": "Typed scalar values, exact binary64 float bits and BLOB size plus128-bit checksums. Physical SQLite file equality is not claimed; checksum values are not exported."
+        },
+        "comparisons": [
+          {
+            "candidate": "D4",
+            "reference": "baseline",
+            "cameraCenterNormalizedMax": 2.1241659474128127e-05,
+            "cameraRotationDegreesMax": 0.002235298761571486,
+            "fusedNormalizedP99": {
+              "candidateToUpstream": 0.0017051318134236983,
+              "upstreamToCandidate": 0.0017157646132615722
+            },
+            "meshClosestTriangle": {
+              "candidateToReference": {
+                "queryCount": 100000,
+                "p99SceneUnits": 0.006107010606828507,
+                "maximumSceneUnits": 0.20415993256517762
+              },
+              "referenceToCandidate": {
+                "queryCount": 100000,
+                "p99SceneUnits": 0.0035104131623714652,
+                "maximumSceneUnits": 0.11542326309321466
+              }
+            }
+          },
+          {
+            "candidate": "final",
+            "reference": "baseline",
+            "cameraCenterNormalizedMax": 2.1241656266813335e-05,
+            "cameraRotationDegreesMax": 0.002235297457173766,
+            "fusedNormalizedP99": {
+              "candidateToUpstream": 0.0016857895366684391,
+              "upstreamToCandidate": 0.0017200070587420156
+            },
+            "meshClosestTriangle": {
+              "candidateToReference": {
+                "queryCount": 100000,
+                "p99SceneUnits": 0.004283756218060289,
+                "maximumSceneUnits": 0.1742810441977665
+              },
+              "referenceToCandidate": {
+                "queryCount": 100000,
+                "p99SceneUnits": 0.003524113308172863,
+                "maximumSceneUnits": 0.16636898547531997
+              }
+            }
+          }
+        ],
+        "alignment": "one camera-center Sim3; no ICP",
+        "queriesPerDirection": 100000,
+        "querySelection": "deterministic evenly spaced vertices",
+        "interpretation": "Cross-run agreement, not independent accuracy, equivalence or a quality winner."
+      },
+      "limits": [
+        "One sequential observation per build, not balanced acceptance or per-patch attribution.",
+        "Unequal major faults limit interpretation.",
+        "Peak RSS is maximum direct-native-child stage wait4 RSS, not host commit.",
+        "VRAM/power are 3-second sampled whole-board maxima and may miss spikes.",
+        "Energy windows include other clients/setup/teardown and lack native-phase alignment; no process energy claim.",
+        "Host commit coverage unavailable."
+      ]
+    }
+  ],
+  "coverageScope": "Linux checkpoint: one fresh three-build pipeline at each resolution, with separately qualified Ceres fixed-work comparisons. Remote final-series performance remains pending."
+}

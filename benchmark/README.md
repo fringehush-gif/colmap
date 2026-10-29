@@ -27,3 +27,6 @@ records four measured observations per arm at 12 and 24 workers, automatic
 selection, actual solver and variable stopping work on one near-converged input.
 It supplies bounded Ceres-library evidence, not a whole-stack speedup or
 per-optimization activation measurement.
+
+Latest Linux checkpoint: [October 29 measurements](current_series_20261029.md)
+compare three retained builds at 1536/3072 and separate fixed-eight Ceres calls.
