@@ -108,6 +108,21 @@ TEST(OptionManager, PatchMatchSourceUploadRoundTrip) {
   EXPECT_FALSE(reader.patch_match_stereo->direct_source_upload);
 }
 
+TEST(OptionManager, PatchMatchSparseSourceSharingRoundTrip) {
+  const auto config_path = CreateTestDir() / "sparse-source-sharing.ini";
+  OptionManager writer;
+  writer.AddPatchMatchStereoOptions();
+  EXPECT_TRUE(writer.patch_match_stereo->sparse_source_sharing);
+  writer.patch_match_stereo->sparse_source_sharing = false;
+  writer.Write(config_path);
+  OptionManager reader;
+  reader.AddPatchMatchStereoOptions();
+  ASSERT_TRUE(reader.Read(config_path));
+  EXPECT_FALSE(reader.patch_match_stereo->sparse_source_sharing);
+  reader.ResetOptions(/*reset_paths=*/false);
+  EXPECT_TRUE(reader.patch_match_stereo->sparse_source_sharing);
+}
+
 TEST(OptionManager, PatchMatchRotationBufferReuseRoundTrip) {
   const auto config_path = CreateTestDir() / "rotation-buffer-reuse.ini";
   OptionManager writer;

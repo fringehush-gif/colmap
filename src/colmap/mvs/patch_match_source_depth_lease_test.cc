@@ -81,6 +81,59 @@ struct PreparedLikeProblem {
   }
 };
 
+TEST(PatchMatchSourceBitmapLease,
+     AccessorConsumesLeaseAndKeepsReferencePrivate) {
+  const float identity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const float translation[3] = {0, 0, 0};
+  std::vector<Image> images;
+  Bitmap original(10, 5, false);
+  original.Fill(BitmapColor<uint8_t>(1, 1, 1));
+  for (int i = 0; i < 2; ++i) {
+    images.emplace_back("", 10, 5, identity, identity, translation);
+    images.back().SetBitmap(original);
+  }
+  auto source = std::make_shared<Bitmap>(10, 5, false);
+  source->Fill(BitmapColor<uint8_t>(7, 7, 7));
+  std::vector<std::shared_ptr<const Bitmap>> leases(2, source);
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  problem.images = &images;
+  problem.source_bitmap_leases = &leases;
+  EXPECT_EQ(&problem.InputBitmap(0), &images[0].GetBitmap());
+  EXPECT_EQ(&problem.InputBitmap(1), source.get());
+  EXPECT_NE(problem.InputBitmap(1).RowMajorData(),
+            images[1].GetBitmap().RowMajorData());
+  leases[1].reset();
+  EXPECT_EQ(&problem.InputBitmap(1), &images[1].GetBitmap());
+  leases[1] = std::shared_ptr<const Bitmap>(std::shared_ptr<const Bitmap>{},
+                                            source.get());
+  EXPECT_EQ(&problem.InputBitmap(1), &images[1].GetBitmap());
+  std::weak_ptr<const Bitmap> weak = source;
+  leases[0].reset();
+  source.reset();
+  ASSERT_TRUE(weak.expired());
+  EXPECT_EQ(problem.InputBitmap(1).RowMajorData(), original.RowMajorData());
+  leases[1] = std::make_shared<Bitmap>(9, 5, false);
+  EXPECT_EQ(&problem.InputBitmap(1), &images[1].GetBitmap());
+  leases[1] = std::make_shared<Bitmap>(10, 5, true);
+  EXPECT_EQ(&problem.InputBitmap(1), &images[1].GetBitmap());
+}
+
+TEST(PatchMatchSourceDepthLease, NonOwningExpiredLeaseUsesRetainedCopy) {
+  PreparedLikeProblem prepared(2, 0);
+  prepared.owned_depths[1] = DepthMap(10, 5, 1.0f, 10.0f);
+  prepared.owned_depths[1].Fill(2.0f);
+  auto owner = std::make_shared<DepthMap>(10, 5, 1.0f, 10.0f);
+  owner->Fill(7.0f);
+  prepared.source_leases[1] = std::shared_ptr<const DepthMap>(
+      std::shared_ptr<const DepthMap>{}, owner.get());
+  std::weak_ptr<const DepthMap> weak = owner;
+  owner.reset();
+  ASSERT_TRUE(weak.expired());
+  EXPECT_EQ(prepared.problem.InputDepthMap(1).GetPtr(),
+            prepared.owned_depths[1].GetPtr());
+}
+
 TEST(PatchMatchSourceDepthLease, FivePreparedReferencesBorrowOneSource) {
   const FiveViewWorkspace fixture;
   CachedWorkspace workspace(fixture.Options(16 * 1024));

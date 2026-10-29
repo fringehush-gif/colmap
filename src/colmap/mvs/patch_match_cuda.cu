@@ -1923,7 +1923,8 @@ PatchMatchCuda::PatchMatchCuda(
     const PatchMatchOptions& options,
     const PatchMatch::Problem& problem,
     std::shared_ptr<const PatchMatchSparseSources> shared,
-    const PatchMatchCuda* geometry_donor)
+    const PatchMatchCuda* geometry_donor,
+    const SparseSourceTestFailure* failure)
     : options_(options),
       problem_(problem),
       ref_width_(0),
@@ -1945,8 +1946,8 @@ PatchMatchCuda::PatchMatchCuda(
 #endif
   InitRefImage();
 #ifndef COLMAP_HIP_ENABLED
-  if (shared)
-    UseSparseSources(std::move(shared));
+  if (shared && options_.sparse_source_sharing)
+    UseSparseSources(std::move(shared), failure);
   else
 #endif
     InitSourceImages();
@@ -1962,16 +1963,25 @@ PatchMatchCuda::PatchMatchCuda(
 PatchMatchCuda::~PatchMatchCuda() = default;
 #ifndef COLMAP_HIP_ENABLED
 void PatchMatchCuda::UseSparseSources(
-    std::shared_ptr<const PatchMatchSparseSources> shared) {
+    std::shared_ptr<const PatchMatchSparseSources> shared,
+    const SparseSourceTestFailure* failure) {
+  if (!options_.sparse_source_sharing) return;
   THROW_CHECK(shared && shared->Matches(problem_, options_.geom_consistency));
   // Create both views before replacing either dense owner. Inputs and state
   // remain untouched; no consuming kernel may have run before this attachment.
   auto images = PatchMatchSourceArray<uint8_t>::FromSparse(
-      shared, problem_.ref_image_idx);
-  auto depths = options_.geom_consistency
-                    ? PatchMatchSourceArray<float>::FromSparse(
-                          shared, problem_.ref_image_idx)
-                    : nullptr;
+      shared, problem_.ref_image_idx, failure);
+  std::unique_ptr<PatchMatchSourceArray<float>> depths;
+  try {
+    if (options_.geom_consistency)
+      depths = PatchMatchSourceArray<float>::FromSparse(
+          shared, problem_.ref_image_idx, failure);
+  } catch (const SparseSourceResourceRefused&) {
+    // Preserve the first dense owner. The earlier temporary image view must
+    // be explicitly released before allowing sparse-only readmission.
+    if (images) images->Close();
+    throw;
+  }
   THROW_CHECK(images && (!options_.geom_consistency || depths));
   src_images_texture_ = std::move(images);
   src_depth_maps_texture_ = std::move(depths);
@@ -3209,10 +3219,11 @@ void PatchMatchCuda::InitSourceImages() {
       image_slices.reserve(problem_.src_image_idxs.size());
       for (const auto image_idx : problem_.src_image_idxs) {
         const Image& image = problem_.images->at(image_idx);
-        image_slices.push_back({image.GetBitmap().RowMajorData().data(),
-                                image.GetWidth(),
-                                image.GetHeight(),
-                                image.GetWidth()});
+        image_slices.push_back(
+            {problem_.InputBitmap(image_idx).RowMajorData().data(),
+             image.GetWidth(),
+             image.GetHeight(),
+             image.GetWidth()});
       }
       src_images_texture_ = PatchMatchSourceArray<uint8_t>::FromHostSlices(
           texture_desc, max_width, max_height, image_slices);
@@ -3225,7 +3236,7 @@ void PatchMatchCuda::InitSourceImages() {
           kDefaultValue);
       for (size_t i = 0; i < problem_.src_image_idxs.size(); ++i) {
         const Image& image = problem_.images->at(problem_.src_image_idxs[i]);
-        const Bitmap& bitmap = image.GetBitmap();
+        const Bitmap& bitmap = problem_.InputBitmap(problem_.src_image_idxs[i]);
         // The texture reads each layer with a row stride of max_width, while
         // the bitmap rows are packed with the image's own width. Images
         // narrower than max_width must therefore be copied row by row - a

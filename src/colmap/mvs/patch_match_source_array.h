@@ -7,10 +7,40 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace colmap {
 namespace mvs {
+
+// Per-call test-only operation outcome; no global runtime/driver interposition.
+// code uses the selected operation's actual CUDA runtime or driver domain.
+// A nonzero host-staging failure models std::bad_alloc. Code zero observes
+// call counts without replacing an operation. Chaining allows a setup and
+// cleanup failure in one isolated call. Nothing retains this pointer on
+// success.
+struct SparseSourceTestFailure {
+  const char* operation;
+  int code;
+  size_t fail_on_call = 1;
+  mutable size_t calls = 0;
+  const SparseSourceTestFailure* next = nullptr;
+};
+
+// Only this exception permits sparse-only resource readmission. It is emitted
+// after all partial sparse setup has been explicitly and successfully released.
+// Ordinary PatchMatchCuda/dense allocation failures are outside this contract.
+class SparseSourceResourceRefused : public std::runtime_error {
+ public:
+  SparseSourceResourceRefused(const std::string& operation, int code)
+      : std::runtime_error(operation + " refused (code " +
+                           std::to_string(code) + ")"),
+        operation(operation),
+        code(code) {}
+  std::string operation;
+  int code;
+};
 
 // Batch only: one workspace and immutable source-map generation. Inputs stay
 // unchanged through Create; source IDs from different workspaces never alias.
@@ -18,13 +48,22 @@ namespace mvs {
 // release. No GPU LUT or changed shader sampling interface.
 class PatchMatchSparseSources {
  public:
-  // Build/device/driver-entrypoint support, independent of batch profitability.
+  // Build, device and required entrypoint capability, independent of a
+  // particular batch's profitability or source provenance.
   static bool IsSupported();
-  static size_t Budget(const std::vector<const PatchMatch::Problem*>& problems,
-                       bool geometric);
-  static std::shared_ptr<const PatchMatchSparseSources> Create(
+  static bool HasConsistentInputs(
       const std::vector<const PatchMatch::Problem*>& problems, bool geometric);
+  static size_t Budget(const std::vector<const PatchMatch::Problem*>& problems,
+                       bool geometric,
+                       const SparseSourceTestFailure* failure = nullptr);
+  static std::shared_ptr<const PatchMatchSparseSources> Create(
+      const std::vector<const PatchMatch::Problem*>& problems,
+      bool geometric,
+      const SparseSourceTestFailure* failure = nullptr);
   ~PatchMatchSparseSources();
+  // Only after all consumer views are released/joined. Cleanup failure is
+  // terminal and must not be caught as a resource refusal.
+  void Close() const;
   bool Matches(const PatchMatch::Problem& problem, bool geometric) const;
 
  private:
@@ -32,6 +71,7 @@ class PatchMatchSparseSources {
   friend class PatchMatchSourceArray;
   struct Impl;
   explicit PatchMatchSparseSources(std::unique_ptr<Impl> impl);
+  void AbandonAfterTerminalViewFailure(const char* operation, int code) const;
   std::unique_ptr<Impl> impl_;
 };
 
@@ -53,8 +93,11 @@ class PatchMatchSourceArray {
       size_t height,
       const std::vector<HostSlice>& slices);
   static std::unique_ptr<PatchMatchSourceArray> FromSparse(
-      std::shared_ptr<const PatchMatchSparseSources> bank, int reference);
+      std::shared_ptr<const PatchMatchSparseSources> bank,
+      int reference,
+      const SparseSourceTestFailure* failure = nullptr);
   ~PatchMatchSourceArray();
+  void Close();
   cudaTextureObject_t GetObj() const;
   size_t GetWidth() const;
   size_t GetHeight() const;

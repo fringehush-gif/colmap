@@ -165,6 +165,11 @@ void BindMVS(py::module& m) {
               "Upload source image/depth slices directly; false selects "
               "the legacy padded host upload.")
           .def_readwrite(
+              "sparse_source_sharing",
+              &PMOpts::sparse_source_sharing,
+              "Share immutable CUDA source storage within admitted batches; "
+              "false preserves ordinary batch scheduling.")
+          .def_readwrite(
               "reference_only_normal_materialization",
               &PMOpts::reference_only_normal_materialization,
               "Validate source normals without decoding them; reference "
