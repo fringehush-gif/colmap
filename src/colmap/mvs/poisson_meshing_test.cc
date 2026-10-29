@@ -14,14 +14,23 @@
 #include "thirdparty/PoissonRecon/Geometry.h"
 #include "thirdparty/PoissonRecon/PolygonIndexChain.h"
 #include "thirdparty/PoissonRecon/RegularTree.h"
+#include "thirdparty/PoissonRecon/normal_capture.h"
 #include "thirdparty/PoissonRecon/trim_gpu_adapter.h"
 
 // NestedVector requires stream declarations supplied by RegularTree.
 #include "thirdparty/PoissonRecon/NestedVector.h"
 
+// Exercise the host-only auxiliary scale diagnostic seam without a GPU.
+#ifndef POISSON_AUX_NATIVE_GPU
+#define POISSON_AUX_NATIVE_GPU
+#define POISSON_AUX_NATIVE_DECL
+#include "thirdparty/PoissonRecon/native_aux.h.inc"
+#undef POISSON_AUX_NATIVE_DECL
+#undef POISSON_AUX_NATIVE_GPU
+#endif
+
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
 #include "thirdparty/PoissonRecon/aux_gpu.h"
-#include "thirdparty/PoissonRecon/normal_capture.h"
 #include "thirdparty/PoissonRecon/trim_gpu.h"
 #endif
 
@@ -38,6 +47,7 @@
 #include <limits>
 #include <list>
 #include <locale>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -50,6 +60,46 @@
 namespace colmap {
 namespace mvs {
 namespace {
+
+struct AuxDiagnosticNode {};
+struct AuxDiagnosticTree {
+  AuxDiagnosticNode node;
+  AuxDiagnosticTree& tree() { return *this; }
+  template <typename Fn>
+  void processNodes(Fn fn) {
+    fn(&node);
+  }
+};
+
+TEST(PoissonMeshing, AuxiliaryScaleDiagnosticsRequireVerify) {
+  for (const bool verify : {false, true}) {
+    AuxDiagnosticTree tree;
+    AuxNativeScale::Scope scope(&tree, true);
+    scope.nodes_.push_back(&tree.node);
+    scope.ready_ = true;
+    scope.verify_ = verify;
+    int visits = 0;
+    auto field = [](const AuxDiagnosticNode*) { return true; };
+    auto apply = [&visits](const AuxDiagnosticNode*) { ++visits; };
+    testing::internal::CaptureStderr();
+    bool applied;
+    try {
+      applied = scope.Apply<AuxDiagnosticNode>(tree, field, apply);
+    } catch (...) {
+      testing::internal::GetCapturedStderr();
+      throw;
+    }
+    const std::string output = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(applied);
+    EXPECT_EQ(visits, 1);
+    if (verify) {
+      EXPECT_NE(output.find("# AuxScaleVerify"), std::string::npos);
+      EXPECT_NE(output.find("# AuxScaleTraversal"), std::string::npos);
+    } else {
+      EXPECT_TRUE(output.empty());
+    }
+  }
+}
 
 void WriteRandomPlyPoints(const std::filesystem::path& path,
                           int num_points = 100) {
@@ -359,6 +409,139 @@ TEST(PoissonMeshing, StandardAndReorderedRgbInputsRetainOrderedGeometry) {
   }
 }
 
+PoissonNormalGpu::Record MakeNormalRecord() {
+  PoissonNormalGpu::Record record{};
+  std::fill(std::begin(record.node), std::end(record.node), UINT32_MAX);
+  return record;
+}
+
+struct NormalCaptureAllocationState {
+  inline static int attempts = 0;
+  inline static int fail_at = -1;
+  inline static std::size_t live_bytes = 0;
+};
+
+template <class T>
+struct NormalCaptureTestAllocator {
+  using value_type = T;
+  using is_always_equal = std::true_type;
+
+  NormalCaptureTestAllocator() = default;
+  template <class U>
+  NormalCaptureTestAllocator(const NormalCaptureTestAllocator<U>&) {}
+
+  T* allocate(std::size_t count) {
+    if (NormalCaptureAllocationState::attempts++ ==
+        NormalCaptureAllocationState::fail_at) {
+      throw std::bad_alloc();
+    }
+    T* result = std::allocator<T>{}.allocate(count);
+    NormalCaptureAllocationState::live_bytes += count * sizeof(T);
+    return result;
+  }
+  void deallocate(T* data, std::size_t count) {
+    NormalCaptureAllocationState::live_bytes -= count * sizeof(T);
+    std::allocator<T>{}.deallocate(data, count);
+  }
+  template <class U>
+  bool operator==(const NormalCaptureTestAllocator<U>&) const {
+    return true;
+  }
+  template <class U>
+  bool operator!=(const NormalCaptureTestAllocator<U>&) const {
+    return false;
+  }
+};
+
+TEST(PoissonMeshing, NormalCaptureAdmissionFailureReleasesReservations) {
+  using Record = PoissonNormalGpu::Record;
+  using Records = std::vector<Record, NormalCaptureTestAllocator<Record>>;
+  using Blocks = std::vector<Records, NormalCaptureTestAllocator<Records>>;
+  using Tree = PoissonRecon::FEMTree<3, float>;
+  using Value = PoissonRecon::Point<float, 3>;
+
+  // Fail the outer resize, then the second worker reserve after partial
+  // success.
+  for (int fail_at : {0, 2}) {
+    ASSERT_EQ(NormalCaptureAllocationState::live_bytes, 0);
+    NormalCaptureAllocationState::attempts = 0;
+    NormalCaptureAllocationState::fail_at = fail_at;
+    Blocks blocks;
+    ASSERT_FALSE(PoissonNormalCapture::Prepare(blocks, 3, 6));
+    EXPECT_EQ(NormalCaptureAllocationState::attempts, fail_at + 1);
+    EXPECT_TRUE(blocks.empty());
+    EXPECT_EQ(blocks.capacity(), 0);
+    EXPECT_EQ(NormalCaptureAllocationState::live_bytes, 0);
+
+    // Admission refusal leaves no capture target: ordinary callbacks can write
+    // their native field once, and the caller's thread-local owner is restored.
+    Tree::FEMTreeNode node;
+    node.nodeData.nodeIndex = 0;
+    PoissonRecon::SparseNodeData<Value, PoissonRecon::UIntPack<0, 0, 0>> field;
+    const Value zero;
+    Value contribution;
+    for (int channel = 0; channel < 3; ++channel) contribution[channel] = 1;
+    std::vector<Record> previous_records;
+    PoissonNormalCapture::ThreadScope previous(&previous_records);
+    int callbacks = 0;
+    for (int sample = 0; sample < 6; ++sample) {
+      PoissonNormalCapture::ThreadScope cpu_scope(nullptr);
+      ASSERT_EQ(PoissonNormalCapture::target, nullptr);
+      ++callbacks;
+      PoissonRecon::Atomic<Value>::Add(field.at(&node, zero), contribution);
+    }
+    EXPECT_EQ(callbacks, 6);
+    ASSERT_EQ(field.size(), 1);
+    for (int channel = 0; channel < 3; ++channel) {
+      EXPECT_EQ(field.at(&node, zero)[channel], 6);
+    }
+    EXPECT_EQ(PoissonNormalCapture::target, &previous_records);
+  }
+  NormalCaptureAllocationState::fail_at = -1;
+}
+
+TEST(PoissonMeshing, NormalCapturePreparationRetainsReadyStorage) {
+  std::vector<std::vector<PoissonNormalGpu::Record>> blocks;
+  ASSERT_TRUE(PoissonNormalCapture::Prepare(blocks, 3, 6));
+  ASSERT_EQ(blocks.size(), 3);
+  for (const auto& records : blocks) {
+    EXPECT_TRUE(records.empty());
+    EXPECT_GE(records.capacity(), 6);
+  }
+}
+
+TEST(PoissonMeshing, NormalReplayBadAllocAfterMutationPropagates) {
+  using Tree = PoissonRecon::FEMTree<3, float>;
+  using Value = PoissonRecon::Point<float, 3>;
+  Tree::FEMTreeNode nodes[2];
+  nodes[0].nodeData.nodeIndex = 0;
+  nodes[1].nodeData.nodeIndex = 1;
+  PoissonRecon::SparseNodeData<Value, PoissonRecon::UIntPack<0, 0, 0>> field;
+  const Value zero;
+  auto record = MakeNormalRecord();
+  record.node[0] = 0;
+  record.node[1] = 1;
+  record.coefficient[0] = record.coefficient[1] = 1;
+  record.value[0] = 2;
+  const std::vector<std::vector<PoissonNormalGpu::Record>> blocks{{record}};
+  int callbacks = 0;
+  EXPECT_THROW(PoissonNormalCapture::Replay(
+                   blocks,
+                   2,
+                   [&](std::uint32_t index) { return &nodes[index]; },
+                   [&](Tree::FEMTreeNode* node, const float*, float) {
+                     ++callbacks;
+                     field.at(node, zero)[0] += 2;
+                     throw std::bad_alloc();
+                   }),
+               std::bad_alloc);
+  EXPECT_EQ(callbacks, 1);
+  ASSERT_EQ(field.size(), 1);
+  EXPECT_EQ(field.at(&nodes[0], zero)[0], 2);
+  EXPECT_EQ(field.index(&nodes[1]), -1);
+  EXPECT_EQ(blocks.front().size(), 1);
+}
+
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
 TEST(PoissonMeshing, EmptyGpuAuxiliaryViewPreservesOutput) {
   const ::AuxNativeGpu::View view{};
@@ -453,12 +636,6 @@ TEST(PoissonMeshing, GpuTrimBoundaryGraphAndNonmanifoldRejection) {
   EXPECT_STREQ(stats.reason, "nonmanifold");
   ASSERT_EQ(graph.size(), 1);
   EXPECT_EQ(graph.front(), std::uint64_t(0x0000000200000001));
-}
-
-PoissonNormalGpu::Record MakeNormalRecord() {
-  PoissonNormalGpu::Record record{};
-  std::fill(std::begin(record.node), std::end(record.node), UINT32_MAX);
-  return record;
 }
 
 TEST(PoissonMeshing, NormalReplayRetainsNativeFirstTouchAndRepeatedSlots) {

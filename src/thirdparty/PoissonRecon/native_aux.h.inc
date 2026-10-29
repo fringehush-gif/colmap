@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Auxiliary-field CUDA integration for FEMTree.inl. Include twice:
-//   #define POISSON_AUX_NATIVE_DECL
-//   #include "native_aux.h.inc"             // FEMTree.h, BEFORE namespace
-//   PoissonRecon #undef POISSON_AUX_NATIVE_DECL #define POISSON_AUX_NATIVE_BODY
-//   #include "native_aux.h.inc"             // first statement in
-//   #undef POISSON_AUX_NATIVE_BODY            // updateExtrapolatedDataField,
-//   line 1087
+// Auxiliary-field CUDA integration for FEMTree. Define
+// POISSON_AUX_NATIVE_DECL before including at global scope and
+// POISSON_AUX_NATIVE_BODY before including inside updateExtrapolatedDataField.
 // Compile only with POISSON_AUX_NATIVE_GPU. The body either returns after
 // complete materialization, or falls through to the original method untouched.
 #if defined(POISSON_AUX_NATIVE_DECL) && defined(POISSON_AUX_NATIVE_GPU)
@@ -89,16 +85,19 @@ struct Scope {
           nodes_.size(),
           scan_seconds);
     }
-    const auto scale_started = std::chrono::steady_clock::now();
+    const auto scale_started = verify_ ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
     for (const void* n : nodes_) node_functor(static_cast<const Node*>(n));
-    const double scale_seconds =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                      scale_started)
-            .count();
-    std::fprintf(stderr,
-                 "# AuxScaleTraversal nodes=%zu seconds=%.6f\n",
-                 nodes_.size(),
-                 scale_seconds);
+    if (verify_) {
+      const double scale_seconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        scale_started)
+              .count();
+      std::fprintf(stderr,
+                   "# AuxScaleTraversal nodes=%zu seconds=%.6f\n",
+                   nodes_.size(),
+                   scale_seconds);
+    }
     return true;
   }
 };
@@ -485,46 +484,48 @@ if constexpr (Dim == 3 && std::is_same_v<Real, float> &&
                              std::chrono::steady_clock::now() - reference_start)
                              .count());
           }
-          const double pack_seconds =
-              std::chrono::duration<double>(pack_end - pack_start).count();
-          const double materialize_seconds =
-              std::chrono::duration<double>(materialize_end - materialize_start)
-                  .count();
-          const uint64_t host_bytes =
-              (uint64_t)by_index.capacity() * sizeof(int32_t) +
-              (uint64_t)tmp.capacity() * sizeof(Tmp) +
-              (uint64_t)seed_owner.capacity() * sizeof(uint32_t) +
-              (uint64_t)raw.capacity() * sizeof(AuxNativeGpu::Four) +
-              (uint64_t)order.capacity() * sizeof(uint32_t) +
-              (uint64_t)remap.capacity() * sizeof(uint32_t) +
-              (uint64_t)level_offsets.capacity() * sizeof(uint32_t) +
-              (uint64_t)child_offsets.capacity() * sizeof(uint32_t) +
-              (uint64_t)children.capacity() * sizeof(uint32_t) +
-              (uint64_t)seed_offsets.capacity() * sizeof(uint32_t) +
-              (uint64_t)seed_ids.capacity() * sizeof(uint32_t) +
-              (uint64_t)output_nodes.capacity() * sizeof(Node*) +
-              (uint64_t)output.capacity() * sizeof(AuxNativeGpu::Four);
-          std::fprintf(stderr,
-                       "# AuxNativeGPU nodes=%u seeds=%zu newAncestors=%llu "
-                       "packAncestorVisits=%llu nativeAncestorJobs=%llu "
-                       "outOfBounds=%llu hostBytes=%llu pack=%.6f gpu=%.6f "
-                       "upload=%.6f kernel=%.6f download=%.6f materialize=%.6f "
-                       "deviceBytes=%llu integralChannels=%llu\n",
-                       N,
-                       raw.size(),
-                       (unsigned long long)new_ancestors,
-                       (unsigned long long)pack_ancestor_visits,
-                       (unsigned long long)native_ancestor_jobs,
-                       (unsigned long long)out_of_bounds,
-                       (unsigned long long)host_bytes,
-                       pack_seconds,
-                       gpu_stats.total_seconds,
-                       gpu_stats.upload_seconds,
-                       gpu_stats.kernel_seconds,
-                       gpu_stats.download_seconds,
-                       materialize_seconds,
-                       (unsigned long long)gpu_stats.device_bytes,
-                       (unsigned long long)gpu_stats.integral_channels);
+          if (std::strcmp(aux_mode, "verify") == 0) {
+            const double pack_seconds =
+                std::chrono::duration<double>(pack_end - pack_start).count();
+            const double materialize_seconds =
+                std::chrono::duration<double>(materialize_end - materialize_start)
+                    .count();
+            const uint64_t host_bytes =
+                (uint64_t)by_index.capacity() * sizeof(int32_t) +
+                (uint64_t)tmp.capacity() * sizeof(Tmp) +
+                (uint64_t)seed_owner.capacity() * sizeof(uint32_t) +
+                (uint64_t)raw.capacity() * sizeof(AuxNativeGpu::Four) +
+                (uint64_t)order.capacity() * sizeof(uint32_t) +
+                (uint64_t)remap.capacity() * sizeof(uint32_t) +
+                (uint64_t)level_offsets.capacity() * sizeof(uint32_t) +
+                (uint64_t)child_offsets.capacity() * sizeof(uint32_t) +
+                (uint64_t)children.capacity() * sizeof(uint32_t) +
+                (uint64_t)seed_offsets.capacity() * sizeof(uint32_t) +
+                (uint64_t)seed_ids.capacity() * sizeof(uint32_t) +
+                (uint64_t)output_nodes.capacity() * sizeof(Node*) +
+                (uint64_t)output.capacity() * sizeof(AuxNativeGpu::Four);
+            std::fprintf(stderr,
+                         "# AuxNativeGPU nodes=%u seeds=%zu newAncestors=%llu "
+                         "packAncestorVisits=%llu nativeAncestorJobs=%llu "
+                         "outOfBounds=%llu hostBytes=%llu pack=%.6f gpu=%.6f "
+                         "upload=%.6f kernel=%.6f download=%.6f materialize=%.6f "
+                         "deviceBytes=%llu integralChannels=%llu\n",
+                         N,
+                         raw.size(),
+                         (unsigned long long)new_ancestors,
+                         (unsigned long long)pack_ancestor_visits,
+                         (unsigned long long)native_ancestor_jobs,
+                         (unsigned long long)out_of_bounds,
+                         (unsigned long long)host_bytes,
+                         pack_seconds,
+                         gpu_stats.total_seconds,
+                         gpu_stats.upload_seconds,
+                         gpu_stats.kernel_seconds,
+                         gpu_stats.download_seconds,
+                         materialize_seconds,
+                         (unsigned long long)gpu_stats.device_bytes,
+                         (unsigned long long)gpu_stats.integral_channels);
+          }
           // Publish only a complete successful field, after optional
           // nativeReference verification. Recursive reference calls
           // never reset or publish the caller's lexical scope.
