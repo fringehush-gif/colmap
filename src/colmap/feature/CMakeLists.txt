@@ -54,6 +54,10 @@ if(OPENMP_FOUND)
     target_link_libraries(colmap_feature PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+if(CUDA_ENABLED OR HIP_ENABLED)
+    target_link_libraries(colmap_feature PRIVATE colmap_util_cuda)
+endif()
+
 if(ONNX_ENABLED)
     target_link_libraries(colmap_feature PRIVATE colmap_onnx_util)
 endif()
