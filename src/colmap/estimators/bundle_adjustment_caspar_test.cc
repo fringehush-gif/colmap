@@ -8,6 +8,8 @@
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/models.h"
 
+#include <stdexcept>
+
 #include <gtest/gtest.h>
 
 // Due to pose normalization operations, constant variables may not be perfectly
@@ -59,6 +61,86 @@ constexpr double kConstantPoseVarEps = 1e-9;
 
 namespace colmap {
 namespace {
+
+caspar::GraphSolver MakeParameterTestSolver(
+    const caspar::SolverParams<double>& params, const int device) {
+  return caspar::GraphSolver(params,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             1,
+                             device);
+}
+
+TEST(CasparParameters, RejectsInvalidUpdates) {
+  caspar::SolverParams<double> valid;
+  auto solver = MakeParameterTestSolver(valid, 0);
+  const auto expect_constructor_error = [](const auto& params,
+                                           const char* message) {
+    try {
+      MakeParameterTestSolver(params, -1);
+      ADD_FAILURE() << "Expected constructor parameter error";
+    } catch (const std::runtime_error& error) {
+      EXPECT_STREQ(error.what(), message);
+    }
+  };
+  auto invalid = valid;
+  for (const int count : {0, -1}) {
+    invalid = valid;
+    invalid.pcg_iter_max = count;
+    EXPECT_THROW(solver.set_params(invalid), std::runtime_error);
+    expect_constructor_error(invalid, "params.pcg_iter_max must be at least 1");
+  }
+  for (const double threshold : {0.0, -1.0}) {
+    invalid = valid;
+    invalid.pcg_rel_error_exit = threshold;
+    EXPECT_THROW(solver.set_params(invalid), std::runtime_error);
+    expect_constructor_error(invalid,
+                             "params.pcg_rel_error_exit must be positive");
+  }
+  invalid = valid;
+  invalid.diag_init = -1.0;
+  EXPECT_THROW(solver.set_params(invalid), std::runtime_error);
+  expect_constructor_error(invalid, "params.diag_init must be positive");
+  valid.diag_init = 0.0;
+  valid.pcg_iter_max = 1;
+  EXPECT_NO_THROW(solver.set_params(valid));
+}
 
 TEST(DefaultBundleAdjuster, RigThrowsErrorOnVariableSensorFromRig) {
   Reconstruction reconstruction;
