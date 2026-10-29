@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
+import importlib
+import json
 import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pycolmap
@@ -336,3 +341,109 @@ def test_reconstruction_delete_all_points2d_and_points3d(
     reconstruction_copy = pycolmap.Reconstruction(synthetic_reconstruction)
     reconstruction_copy.delete_all_points2D_and_points3D()
     assert reconstruction_copy.num_points3D() == 0
+
+
+def test_extract_colors_with_python_bitmap_loader_completes(tmp_path: Path) -> None:
+    # Run in a child so a worker waiting for the GIL cannot hang pytest.
+    script = textwrap.dedent(
+        """\
+        import importlib
+        import json
+        import sys
+        from pathlib import Path
+
+        sys.path[:] = json.loads(sys.argv[2])
+        import numpy as np
+        import pycolmap
+
+        core = importlib.import_module("pycolmap._core")
+        assert Path(core.__file__).resolve() == Path(sys.argv[3]).resolve()
+        pycolmap.set_random_seed(0)
+        options = pycolmap.SyntheticDatasetOptions()
+        options.num_rigs = 1
+        options.num_cameras_per_rig = 1
+        options.num_frames_per_rig = 3
+        options.num_points3D = 50
+        reconstruction = pycolmap.synthesize_dataset(options)
+        image_ids = reconstruction.reg_image_ids()
+        assert image_ids and reconstruction.num_points3D() > 0
+
+        root = Path(sys.argv[1])
+        paths = [root / reconstruction.image(i).name for i in image_ids]
+        width, height = options.camera_width, options.camera_height
+        pixels = np.empty((height, width, 3), dtype=np.uint8)
+        pixels[:] = (23, 71, 157)
+        expected_ids = set()
+        for image_id in image_ids:
+            for point in reconstruction.image(image_id).points2D:
+                x, y = point.xy
+                if (
+                    point.has_point3D()
+                    and 1 <= x < width - 1
+                    and 1 <= y < height - 1
+                ):
+                    expected_ids.add(point.point3D_id)
+        assert expected_ids
+        calls = []
+
+        def loader(path):
+            calls.append(Path(path))
+            return pixels
+
+        with pycolmap.BitmapReadScope(
+            paths, loader, True, True, [(width, height)] * len(paths)
+        ) as scope:
+            reconstruction.extract_colors_for_all_images(root, num_threads=1)
+            assert len(calls) == len(paths) and set(calls) == set(paths)
+            assert scope.stats()["bitmapReads"] == len(paths)
+            for point_id in expected_ids:
+                np.testing.assert_array_equal(
+                    reconstruction.point3D(point_id).color, (23, 71, 157)
+                )
+        assert scope.closed
+
+        def failing_loader(path):
+            raise RuntimeError("expected bitmap loader failure")
+
+        with pycolmap.BitmapReadScope(
+            paths, failing_loader, True, True, [(width, height)] * len(paths)
+        ) as failed_scope:
+            try:
+                reconstruction.extract_colors_for_all_images(root, num_threads=1)
+            except RuntimeError as error:
+                assert "expected bitmap loader failure" in str(error)
+            else:
+                raise AssertionError("loader failure did not propagate")
+        assert failed_scope.closed
+
+        calls.clear()
+        with pycolmap.BitmapReadScope(
+            paths, loader, True, True, [(width, height)] * len(paths)
+        ) as recovery_scope:
+            reconstruction.extract_colors_for_all_images(root, num_threads=1)
+            assert len(calls) == len(paths) and set(calls) == set(paths)
+            assert recovery_scope.stats()["bitmapReads"] == len(paths)
+            for point_id in expected_ids:
+                np.testing.assert_array_equal(
+                    reconstruction.point3D(point_id).color, (23, 71, 157)
+                )
+        assert recovery_scope.closed
+        """
+    )
+    core_path = importlib.import_module("pycolmap._core").__file__
+    assert core_path is not None
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(tmp_path.resolve()),
+            json.dumps(sys.path),
+            str(Path(core_path).resolve()),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
