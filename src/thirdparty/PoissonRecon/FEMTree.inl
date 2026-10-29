@@ -1012,16 +1012,11 @@ SparseNodeData< OutData , UIntPack< DataSigs ... > > FEMTree< Dim , Real >::setI
                 &state,
                 [](void* context) {
                     auto& s=*static_cast<ImportState*>(context);
-                    std::size_t released=0;
                     for(auto& records:*s.records) {
-                        released+=records.capacity()*sizeof(PoissonNormalGpu::Record);
                         std::vector<PoissonNormalGpu::Record>().swap(records);
                     }
                     // Release captures before allocating the final typed field.
                     s.field->_indices.resize(s.count,-1);
-                    std::cout << "# NormalSlabReadback nodes=" << s.count
-                              << " released_capture_capacity_bytes=" << released
-                              << " host_slab_bytes=" << std::min<std::size_t>(s.count,kReadbackSlabNodes)*16u << std::endl;
                 },
                 [](void* context,std::size_t begin,std::size_t count,
                    const float* field,const std::uint32_t* touched) {

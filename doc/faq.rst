@@ -873,8 +873,9 @@ avoid repeated allocation. With one CUDA worker, eligible references can also
 be paired while rotation reuse is enabled. Pairing requires enough device
 occupancy and available memory; other references run individually.
 HMM checkpointing reduces retained message storage
-but adds recurrence replay and source-plane copies. Both default to false;
-measure elapsed time and peak memory on the intended workload and hardware.
+but adds recurrence replay and source-plane copies. Rotation reuse defaults to
+false; HMM checkpointing defaults to true in CUDA builds excluding HIP.
+Measure elapsed time and peak memory on the intended workload and hardware.
 Keep these options fixed when comparing GPU worker counts. For example::
 
     colmap patch_match_stereo \

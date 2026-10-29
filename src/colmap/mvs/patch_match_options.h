@@ -43,11 +43,8 @@ struct PatchMatchOptions {
   // to be geometrically consistent.
   double filter_geom_consistency_max_cost = 1.0f;
 
-  // Cache size in gigabytes for patch match, which keeps the bitmaps, depth
-  // maps, and normal maps of this number of images in memory. A higher value
-  // leads to less disk access and faster computation, while a lower value
-  // leads to reduced memory usage. Note that a single image can consume a lot
-  // of memory, if the consistency graph is dense.
+  // Cache size in gigabytes for bitmaps, depth maps, and normal maps. A higher
+  // value can reduce disk access at the cost of increased memory usage.
   double cache_size = 32.0;
 
   // Upload each source image/depth slice directly instead of constructing a
@@ -109,8 +106,8 @@ struct PatchMatchOptions {
   bool rotation_buffer_reuse = false;
 
   // Save GPU memory by checkpointing backward HMM messages and replaying
-  // each stripe. Adds recurrence work and rotation copies. CUDA enables this
-  // by default; set false to retain the full probability volumes.
+  // each stripe. Adds recurrence work and rotation copies. Non-HIP CUDA builds
+  // enable this by default; set false to retain the full probability volumes.
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
   bool checkpoint_hmm = true;
 #else
