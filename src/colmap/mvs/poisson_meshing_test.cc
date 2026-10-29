@@ -444,6 +444,15 @@ TEST(PoissonMeshing, ThreadSafeChildrenInitializedOnce) {
 }
 
 TEST(PoissonMeshing, FinalizerWorkerCountsRetainFiniteColoredMesh) {
+  using Pool = PoissonRecon::ThreadPool;
+  struct RestorePoolState {
+    unsigned int num_threads;
+    Pool::ParallelType parallelization;
+    ~RestorePoolState() {
+      Pool::SetNumThreads(num_threads);
+      Pool::ParallelizationType = parallelization;
+    }
+  } restore{Pool::NumThreads(), Pool::ParallelizationType};
   const auto test_dir = CreateTestDir();
   const auto input_path = test_dir / "points.ply";
   WriteRandomPlyPoints(input_path);

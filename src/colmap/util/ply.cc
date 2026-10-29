@@ -30,10 +30,8 @@ T ReadFromBuffer(const char* buffer, size_t offset) {
   return value;
 }
 
-// Byte size of a PLY scalar property type (e.g. "float", "int", "uchar").
-// Shared by header stride computation, bounds validation, and binary decoding
-// so that all of them agree on every type's width. Terminates on unknown
-// types; callers must only pass validated header types.
+// Scalar byte width shared by header validation and binary decoding.
+// Throws for unsupported PLY scalar types.
 size_t PlyScalarTypeSize(const std::string& type) {
   if (type == "float" || type == "float32" || type == "int" ||
       type == "int32" || type == "uint" || type == "uint32") {

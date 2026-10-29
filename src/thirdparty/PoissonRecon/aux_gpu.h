@@ -23,12 +23,13 @@ struct Stats {
   double global_sums[4] = {};
   const char* reason = "not-run";
 };
-// Output is scaled by 4^localDepth. The existing native 32^depth pass remains.
-// False means inadmissible input/capacity, before any reconstruction mutation.
-// A CUDA execution failure throws; it must not masquerade as successful work.
 // Preflight the actual gather kernel on the current device before host CSR
 // packing. False reports a known unavailable device/kernel in stats.reason;
 // other errors throw.
 bool Available(Stats& stats);
+
+// Output is scaled by 4^localDepth. The existing native 32^depth pass remains.
+// False means inadmissible input/capacity, before any reconstruction mutation.
+// A CUDA execution failure throws; it must not masquerade as successful work.
 bool Reduce(const View& input, Four* output, Stats& stats);
 }  // namespace AuxNativeGpu
