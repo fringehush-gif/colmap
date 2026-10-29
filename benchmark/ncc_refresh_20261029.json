@@ -1,0 +1,339 @@
+{
+  "candidate": "NCC-R2",
+  "parent": "c0214d5b80821dd85076cf3b04ebe584e58b2342",
+  "change": "Reuse raw winning-hypothesis NCC scores, process cached updates first, then distribute missing-source evaluations. Sampling, RNG draws and per-source HMM arithmetic remain unchanged.",
+  "platform": "Linux/WSL, CUDA sm86",
+  "gpu": "RTX 3080 Ti",
+  "settings": {
+    "resolutions": [
+      1536,
+      3072
+    ],
+    "referencesPerScene": 5,
+    "sourcesPerReference": {
+      "Facade": 20,
+      "FountainP11": 10
+    },
+    "cpuThreads": 12,
+    "iterations": 5,
+    "samples": 15,
+    "windowRadius": 5,
+    "windowStep": 1,
+    "nccCostUnorm16": true,
+    "checkpointHmm": true,
+    "probabilityUnorm16": false,
+    "rotationBufferReuse": false,
+    "geometry": false,
+    "filter": false,
+    "referenceBatchSize": 5
+  },
+  "method": {
+    "order": [
+      "warm C",
+      "warm T",
+      "C",
+      "T",
+      "T",
+      "C"
+    ],
+    "timedRunsPerArmPerResolution": 2,
+    "cpuCounters": "User-mode perf counts after native launch; the initial attachment gap is excluded. Reported event running time is 100% within counted attachment.",
+    "memory": "RSS sampled every 0.5 s and whole-device VRAM every 1 s. Means weighted by sample count; peaks are observed samples."
+  },
+  "measurements": {
+    "Facade": {
+      "1536": {
+        "C": {
+          "n": 2,
+          "wallSeconds": [
+            7.689685567980632,
+            7.694340729038231
+          ],
+          "wallMeanSeconds": 7.692013148509432,
+          "cpuMeanSeconds": 8.1601855,
+          "maximumRssMiB": 947.16796875,
+          "sampledRss": {
+            "samples": 32,
+            "mean": 788665984.0,
+            "peak": 902934528
+          },
+          "sampledWholeDeviceVramMiB": {
+            "samples": 16,
+            "mean": 1899.30712890625,
+            "peak": 2236.09765625
+          },
+          "countersMean": {
+            "instructions:u": 33983528516.0,
+            "cycles:u": 29042542225.0,
+            "cache-references:u": 214777317.0,
+            "cache-misses:u": 34566015.5
+          }
+        },
+        "T": {
+          "n": 2,
+          "wallSeconds": [
+            7.392984100035392,
+            7.440922876005061
+          ],
+          "wallMeanSeconds": 7.416953488020226,
+          "cpuMeanSeconds": 7.89361,
+          "maximumRssMiB": 953.74609375,
+          "sampledRss": {
+            "samples": 30,
+            "mean": 786505864.5333333,
+            "peak": 873185280
+          },
+          "sampledWholeDeviceVramMiB": {
+            "samples": 16,
+            "mean": 1922.80712890625,
+            "peak": 2236.09765625
+          },
+          "countersMean": {
+            "instructions:u": 32976158843.5,
+            "cycles:u": 28158381500.5,
+            "cache-references:u": 220278234.0,
+            "cache-misses:u": 34391809.0
+          }
+        },
+        "wallChangePercent": -3.5759125105305767
+      },
+      "3072": {
+        "C": {
+          "n": 2,
+          "wallSeconds": [
+            25.206117000081576,
+            25.270811968948692
+          ],
+          "wallMeanSeconds": 25.238464484515134,
+          "cpuMeanSeconds": 27.974736,
+          "maximumRssMiB": 1673.6796875,
+          "sampledRss": {
+            "samples": 102,
+            "mean": 1499133550.4313726,
+            "peak": 1682112512
+          },
+          "sampledWholeDeviceVramMiB": {
+            "samples": 52,
+            "mean": 5361.585186298077,
+            "peak": 5838.09765625
+          },
+          "countersMean": {
+            "instructions:u": 118940742586.5,
+            "cycles:u": 103134169248.5,
+            "cache-references:u": 497107931.5,
+            "cache-misses:u": 58102548.0
+          }
+        },
+        "T": {
+          "n": 2,
+          "wallSeconds": [
+            24.454517954029143,
+            24.608355385018513
+          ],
+          "wallMeanSeconds": 24.531436669523828,
+          "cpuMeanSeconds": 27.392284,
+          "maximumRssMiB": 1679.43359375,
+          "sampledRss": {
+            "samples": 98,
+            "mean": 1503346061.0612245,
+            "peak": 1758822400
+          },
+          "sampledWholeDeviceVramMiB": {
+            "samples": 50,
+            "mean": 5376.8046875,
+            "peak": 5772.09765625
+          },
+          "countersMean": {
+            "instructions:u": 115776775496.5,
+            "cycles:u": 99890583784.0,
+            "cache-references:u": 501715634.0,
+            "cache-misses:u": 58413197.5
+          }
+        },
+        "wallChangePercent": -2.8013899792719066
+      }
+    },
+    "FountainP11": {
+      "1536": {
+        "C": {
+          "n": 2,
+          "wallSeconds": [
+            4.742803836008534,
+            4.842580638942309
+          ],
+          "wallMeanSeconds": 4.792692237475421,
+          "cpuMeanSeconds": 4.972899999999999,
+          "maximumRssMiB": 787.25,
+          "sampledRss": {
+            "samples": 20,
+            "mean": 637884211.2,
+            "peak": 761872384
+          },
+          "sampledWholeDeviceVramMiB": {
+            "samples": 10,
+            "mean": 1535.4328125,
+            "peak": 1732.09765625
+          },
+          "countersMean": {
+            "instructions:u": 19228095590.0,
+            "cycles:u": 17285282273.5,
+            "cache-references:u": 161129744.5,
+            "cache-misses:u": 25152302.5
+          }
+        },
+        "T": {
+          "n": 2,
+          "wallSeconds": [
+            4.7450768440030515,
+            4.7943834599573165
+          ],
+          "wallMeanSeconds": 4.769730151980184,
+          "cpuMeanSeconds": 4.9301195,
+          "maximumRssMiB": 792.98828125,
+          "sampledRss": {
+            "samples": 20,
+            "mean": 642690457.6,
+            "peak": 780574720
+          },
+          "sampledWholeDeviceVramMiB": {
+            "samples": 10,
+            "mean": 1534.6328125,
+            "peak": 1726.09765625
+          },
+          "countersMean": {
+            "instructions:u": 18888474672.5,
+            "cycles:u": 17000459205.0,
+            "cache-references:u": 164456253.5,
+            "cache-misses:u": 25402809.5
+          }
+        },
+        "wallChangePercent": -0.47910619663182885
+      },
+      "3072": {
+        "C": {
+          "n": 2,
+          "wallSeconds": [
+            15.70591489400249,
+            15.605254972004332
+          ],
+          "wallMeanSeconds": 15.65558493300341,
+          "cpuMeanSeconds": 17.2922065,
+          "maximumRssMiB": 1184.265625,
+          "sampledRss": {
+            "samples": 63,
+            "mean": 1003240691.8095238,
+            "peak": 1238626304
+          },
+          "sampledWholeDeviceVramMiB": {
+            "samples": 32,
+            "mean": 3473.889892578125,
+            "peak": 3802.09765625
+          },
+          "countersMean": {
+            "instructions:u": 68796103738.5,
+            "cycles:u": 62602721835.5,
+            "cache-references:u": 332744651.5,
+            "cache-misses:u": 37541643.0
+          }
+        },
+        "T": {
+          "n": 2,
+          "wallSeconds": [
+            15.605468273046426,
+            15.605975687969476
+          ],
+          "wallMeanSeconds": 15.605721980507951,
+          "cpuMeanSeconds": 17.269202999999997,
+          "maximumRssMiB": 1190.25,
+          "sampledRss": {
+            "samples": 62,
+            "mean": 1007420316.9032258,
+            "peak": 1158078464
+          },
+          "sampledWholeDeviceVramMiB": {
+            "samples": 32,
+            "mean": 3444.546142578125,
+            "peak": 3868.09765625
+          },
+          "countersMean": {
+            "instructions:u": 68538942969.0,
+            "cycles:u": 62520608338.5,
+            "cache-references:u": 339157783.5,
+            "cache-misses:u": 39052312.0
+          }
+        },
+        "wallChangePercent": -0.31849945376581923
+      }
+    }
+  },
+  "validation": {
+    "photoMapFilesCompared": 240,
+    "photoMapsByteExact": true,
+    "extraCorrectnessCases": 8,
+    "extraMapFilesCompared": 32,
+    "extraMapsByteExact": true,
+    "cases": [
+      "FP32 PHOTO",
+      "17-sample U16 PHOTO",
+      "U16 PHOTO plus UN2",
+      "fixed-bank U16 GEO, one iteration"
+    ],
+    "focusedGpuTests": 4,
+    "selectedKernelRegisters": 96,
+    "selectedKernelStackBytes": 112,
+    "selectedKernelSharedBytes": 10272,
+    "newDataBuffers": false,
+    "newBarriers": false
+  },
+  "gpuCounterDiagnostic": {
+    "scope": "One 3072 PHOTO Sweep, reference 52 with 20 sources; skip 16/count 1, seven NCU sections and replayed counters. Separate from CTTC timings.",
+    "profiledMapsByteExact": true,
+    "grid": "(384, 1, 1)",
+    "block": "(8, 16, 1)",
+    "metrics": {
+      "smsp__inst_executed.sum": {
+        "C": 28189064151.0,
+        "T": 28021335656.0,
+        "unit": "inst",
+        "changePercent": -0.5950126407231249
+      },
+      "smsp__thread_inst_executed_per_inst_executed.ratio": {
+        "C": 21.5,
+        "T": 20.44,
+        "unit": "",
+        "changePercent": -4.930232558139524
+      },
+      "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio": {
+        "C": 6.019674,
+        "T": 5.450823,
+        "unit": "inst",
+        "changePercent": -9.449863896284095
+      },
+      "smsp__average_warps_issue_stalled_tex_throttle_per_issue_active.ratio": {
+        "C": 1.204035,
+        "T": 0.871931,
+        "unit": "inst",
+        "changePercent": -27.58258688493275
+      },
+      "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio": {
+        "C": 5.49763,
+        "T": 5.873237,
+        "unit": "inst",
+        "changePercent": 6.832162222630478
+      },
+      "smsp__issue_active.avg.pct_of_peak_sustained_active": {
+        "C": 28.823523,
+        "T": 29.700769,
+        "unit": "%",
+        "changePercent": 3.043507207637308
+      },
+      "l1tex__throughput.avg.pct_of_peak_sustained_active": {
+        "C": 72.77304,
+        "T": 72.426808,
+        "unit": "%",
+        "changePercent": -0.47576959819185527
+      }
+    }
+  },
+  "sourceSha256": "87b0e527654cd1e3452bf9853ae0e559140de8067c74269459eb7b734f482bff"
+}
