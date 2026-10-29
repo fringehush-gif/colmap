@@ -19,6 +19,7 @@ void PatchMatchOptions::Print() const {
   LOG_HEADING2("PatchMatchOptions");
   PrintOption(max_image_size);
   PrintOption(direct_source_upload);
+  PrintOption(sparse_source_sharing);
   PrintOption(reference_only_normal_materialization);
   PrintOption(gpu_index);
   PrintOption(depth_min);

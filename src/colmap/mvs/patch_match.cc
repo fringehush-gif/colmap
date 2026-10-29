@@ -48,6 +48,7 @@ struct PairStreams {
 };
 
 bool DefaultReferencePairSettings(const PatchMatchOptions& o) {
+  // sparse_source_sharing is intentionally independent of batch/pair admission.
   const PatchMatchOptions d;
   return o.depth_min == d.depth_min && o.depth_max == d.depth_max &&
          o.sigma_spatial == d.sigma_spatial && o.sigma_color == d.sigma_color &&
@@ -123,11 +124,12 @@ void PatchMatch::Check() const {
     THROW_CHECK_LT(image_idx, problem_.images->size()) << image_idx;
 
     const Image& image = problem_.images->at(image_idx);
-    THROW_CHECK_GT(image.GetBitmap().Width(), 0) << image_idx;
-    THROW_CHECK_GT(image.GetBitmap().Height(), 0) << image_idx;
-    THROW_CHECK(image.GetBitmap().IsGrey()) << image_idx;
-    THROW_CHECK_EQ(image.GetWidth(), image.GetBitmap().Width()) << image_idx;
-    THROW_CHECK_EQ(image.GetHeight(), image.GetBitmap().Height()) << image_idx;
+    const Bitmap& bitmap = problem_.InputBitmap(image_idx);
+    THROW_CHECK_GT(bitmap.Width(), 0) << image_idx;
+    THROW_CHECK_GT(bitmap.Height(), 0) << image_idx;
+    THROW_CHECK(bitmap.IsGrey()) << image_idx;
+    THROW_CHECK_EQ(image.GetWidth(), bitmap.Width()) << image_idx;
+    THROW_CHECK_EQ(image.GetHeight(), bitmap.Height()) << image_idx;
 
     // Make sure, the calibration matrix only contains fx, fy, cx, cy.
     THROW_CHECK_LT(std::abs(image.GetK()[1] - 0.0f), 1e-6f) << image_idx;
@@ -493,7 +495,8 @@ void PatchMatchController::ReadGpuIndices() {
 
 bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
                                           const size_t problem_idx,
-                                          PreparedProblem* prepared) {
+                                          PreparedProblem* prepared,
+                                          const bool retain_sparse_sources) {
   if (CheckIfStopped()) {
     return false;
   }
@@ -553,6 +556,10 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
   auto& depth_maps = prepared->depth_maps;
   auto& normal_maps = prepared->normal_maps;
   images = model.images;
+  if (retain_sparse_sources && options.sparse_source_sharing) {
+    prepared->source_bitmap_leases.resize(model.images.size());
+    problem.source_bitmap_leases = &prepared->source_bitmap_leases;
+  }
   if (options.geom_consistency) {
     depth_maps.resize(model.images.size());
     normal_maps.resize(model.images.size());
@@ -613,13 +620,21 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
       futures.reserve(valid_image_idxs.size());
       for (const auto image_idx : valid_image_idxs) {
         futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
-          images.at(image_idx).SetBitmap(
-              *workspace_->GetBitmapLease(image_idx));
+          const auto bitmap_lease = workspace_->GetBitmapLease(image_idx);
+          images.at(image_idx).SetBitmap(*bitmap_lease);
+          if (retain_sparse_sources && options.sparse_source_sharing &&
+              image_idx != problem.ref_image_idx &&
+              bitmap_lease.use_count() > 0 && bitmap_lease->IsGrey() &&
+              bitmap_lease->Width() == images.at(image_idx).GetWidth() &&
+              bitmap_lease->Height() == images.at(image_idx).GetHeight()) {
+            prepared->source_bitmap_leases.at(image_idx) = bitmap_lease;
+          }
           if (options.geom_consistency) {
             const auto depth_lease = workspace_->GetDepthMapLease(image_idx);
             // Only source maps may alias the immutable workspace owner. The
             // reference retains its independent mutable initialization copy.
             if (image_idx != problem.ref_image_idx &&
+                depth_lease.use_count() > 0 &&
                 depth_lease->GetWidth() == images.at(image_idx).GetWidth() &&
                 depth_lease->GetHeight() == images.at(image_idx).GetHeight()) {
               prepared->source_depth_leases.at(image_idx) = depth_lease;
@@ -791,13 +806,21 @@ void PatchMatchController::ProcessProblemBatch(
   input.reserve(problem_indices.size());
   for (const size_t index : problem_indices) {
     auto prepared = std::make_unique<PreparedProblem>();
-    if (PrepareProblem(options, index, prepared.get())) {
+    if (PrepareProblem(options, index, prepared.get(), true)) {
       PatchMatch(prepared->options, prepared->problem).Check();
       input.push_back(std::move(prepared));
     }
   }
   if (input.empty()) return;
   SetBestCudaDevice(gpu_indices_.at(thread_pool_->GetThreadIndex()));
+  const auto* sparse_failure =
+      sparse_test_hooks_ ? sparse_test_hooks_->failure : nullptr;
+  const auto query_memory =
+      [&](const char* phase, size_t* free, size_t* total) {
+        CUDA_SAFE_CALL(cudaMemGetInfo(free, total));
+        if (sparse_test_hooks_)
+          sparse_test_hooks_->memory_queries.push_back({phase, *free, *total});
+      };
   const auto shape = [](const PreparedProblem& p) {
     const auto& ref = p.problem.images->at(p.problem.ref_image_idx);
     size_t source_width = 0, source_height = 0;
@@ -812,8 +835,8 @@ void PatchMatchController::ProcessProblemBatch(
                            source_width,
                            source_height);
   };
-  const auto write_cuda = [](const PreparedProblem& p,
-                             const PatchMatchCuda& cuda) {
+  const auto write_cuda = [&](const PreparedProblem& p,
+                              const PatchMatchCuda& cuda) {
     cuda.GetDepthMap().Write(p.depth_path);
     cuda.GetNormalMap().Write(p.normal_path);
     if (p.options.write_consistency_graph) {
@@ -822,19 +845,29 @@ void PatchMatchController::ProcessProblemBatch(
           ref.GetWidth(), ref.GetHeight(), cuda.GetConsistentImageIdxs())
           .Write(p.consistency_path);
     }
+    if (sparse_test_hooks_)
+      sparse_test_hooks_->written_references.push_back(p.problem.ref_image_idx);
   };
-  const auto run_native = [](const PreparedProblem& p) {
+  const auto run_native = [&](const PreparedProblem& p) {
     PatchMatch solver(p.options, p.problem);
     solver.Run();
     solver.GetDepthMap().Write(p.depth_path);
     solver.GetNormalMap().Write(p.normal_path);
     if (p.options.write_consistency_graph)
       solver.GetConsistencyGraph().Write(p.consistency_path);
+    if (sparse_test_hooks_)
+      sparse_test_hooks_->written_references.push_back(p.problem.ref_image_idx);
   };
   std::vector<std::unique_ptr<PatchMatchCuda>> owners(input.size());
   constexpr size_t kExternalMargin = size_t(256) << 20;
   const auto pair_or_single_fallback = [&]() {
     for (size_t i = 0; i < input.size();) {
+      // Include unpairable and final singleton selections. This observation
+      // does not reserve capacity or guarantee ordinary owner/rotation malloc.
+      size_t selection_free_bytes = 0, selection_total_bytes = 0;
+      query_memory("pair-or-single-selection",
+                   &selection_free_bytes,
+                   &selection_total_bytes);
       if (i + 1 < input.size()) {
         const auto& a =
             input[i]->problem.images->at(input[i]->problem.ref_image_idx);
@@ -853,7 +886,7 @@ void PatchMatchController::ProcessProblemBatch(
           CUDA_SYNC_AND_CHECK();
           const size_t owned_peak = owners[i]->PairPeakBytes();
           size_t free_bytes = 0, total_bytes = 0;
-          CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+          query_memory("admission", &free_bytes, &total_bytes);
           if (!owners[i + 1] &&
               owned_peak <=
                   std::numeric_limits<size_t>::max() - kExternalMargin &&
@@ -863,7 +896,7 @@ void PatchMatchController::ProcessProblemBatch(
             CUDA_SYNC_AND_CHECK();
           }
           if (owners[i + 1]) {
-            CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+            query_memory("admission", &free_bytes, &total_bytes);
             const bool enough_for_rotation =
                 options.rotation_buffer_reuse
                     ? free_bytes >= kExternalMargin
@@ -927,27 +960,44 @@ void PatchMatchController::ProcessProblemBatch(
   for (const auto& prepared : input)
     source_problems.push_back(&prepared->problem);
   std::shared_ptr<const PatchMatchSparseSources> shared;
-  const size_t union_budget = PatchMatchSparseSources::Budget(
-      source_problems, options.geom_consistency);
   size_t free_bytes = 0, total_bytes = 0;
-  CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
-  // The first independent owner stays intact during union construction.
-  // Reserve the full remaining independent peaks plus the incumbent extra
-  // transient peak. Rejecting sharing retains the exact old batch path.
-  const size_t maximum = std::numeric_limits<size_t>::max();
-  if (union_budget && union_budget <= maximum - kExternalMargin &&
-      first_peak <= (maximum - kExternalMargin - union_budget) / input.size() &&
-      free_bytes >=
-          union_budget + input.size() * first_peak + kExternalMargin) {
-    shared = PatchMatchSparseSources::Create(source_problems,
-                                             options.geom_consistency);
-    if (shared) owners[0]->UseSparseSources(shared);
+  try {
+    const size_t union_budget =
+        options.sparse_source_sharing
+            ? PatchMatchSparseSources::Budget(
+                  source_problems, options.geom_consistency, sparse_failure)
+            : 0;
+    query_memory("admission", &free_bytes, &total_bytes);
+    // The first independent owner stays intact during union construction.
+    // Reserve the full remaining independent peaks plus the incumbent extra
+    // transient peak. Rejecting sharing retains the exact old batch path.
+    const size_t maximum = std::numeric_limits<size_t>::max();
+    if (union_budget && union_budget <= maximum - kExternalMargin &&
+        first_peak <=
+            (maximum - kExternalMargin - union_budget) / input.size() &&
+        free_bytes >=
+            union_budget + input.size() * first_peak + kExternalMargin) {
+      shared = PatchMatchSparseSources::Create(
+          source_problems, options.geom_consistency, sparse_failure);
+      if (shared) owners[0]->UseSparseSources(shared, sparse_failure);
+    }
+  } catch (const SparseSourceResourceRefused& error) {
+    // No consuming kernel has run and the first dense owner is unchanged.
+    // Close must succeed before any fresh memory query or smaller admission.
+    if (shared) shared->Close();
+    shared.reset();
+    query_memory("after-initial-sparse-refusal", &free_bytes, &total_bytes);
+    LOG(WARNING)
+        << "Sparse source setup refused; readmitting pairs/singletons: "
+        << error.what();
+    pair_or_single_fallback();
+    return;
   }
   const auto admit_remaining = [&]() {
     bool memory_admitted = true;
     for (size_t i = 1; i < input.size(); ++i) {
       size_t free_bytes = 0, total_bytes = 0;
-      CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+      query_memory("admission", &free_bytes, &total_bytes);
       const size_t remaining = input.size() - i + 1;
       if (first_peak > (std::numeric_limits<size_t>::max() - kExternalMargin) /
                            remaining ||
@@ -959,7 +1009,8 @@ void PatchMatchController::ProcessProblemBatch(
           input[i]->options,
           input[i]->problem,
           shared,
-          shared_geometry ? owners[0].get() : nullptr);
+          shared_geometry ? owners[0].get() : nullptr,
+          sparse_failure);
       CUDA_SYNC_AND_CHECK();
       if (owners[i]->PairPeakBytes() > first_peak ||
           (shared_geometry && !owners[i]->CanShareGeometryRotation())) {
@@ -969,37 +1020,63 @@ void PatchMatchController::ProcessProblemBatch(
       }
     }
     size_t free_bytes = 0, total_bytes = 0;
-    CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+    query_memory("admission", &free_bytes, &total_bytes);
     if (first_peak > std::numeric_limits<size_t>::max() - kExternalMargin ||
         free_bytes < first_peak + kExternalMargin)
       memory_admitted = false;
+    if (memory_admitted && options.geom_consistency && shared &&
+        shared_geometry && sparse_test_hooks_ &&
+        sparse_test_hooks_->refuse_geometry_admission_once) {
+      sparse_test_hooks_->refuse_geometry_admission_once = false;
+      memory_admitted = false;
+    }
     return memory_admitted;
   };
-  bool memory_admitted = admit_remaining();
-  if (!memory_admitted && shared_geometry) {
-    // Reject geometry sharing independently: keep any qualified source bank
-    // while restoring the parent's private alternate geometry owners.
+  bool memory_admitted = false;
+  try {
+    memory_admitted = admit_remaining();
+    if (!memory_admitted && shared_geometry) {
+      if (sparse_test_hooks_) ++sparse_test_hooks_->geometry_fallback_entries;
+      // Reject geometry sharing independently: keep any qualified source bank
+      // while restoring the parent's private alternate geometry owners.
+      for (auto& owner : owners) owner.reset();
+      shared_geometry = false;
+      owners[0] = std::make_unique<PatchMatchCuda>(input[0]->options,
+                                                   input[0]->problem,
+                                                   shared,
+                                                   nullptr,
+                                                   sparse_failure);
+      CUDA_SYNC_AND_CHECK();
+      memory_admitted =
+          owners[0]->PairPeakBytes() <= first_peak && admit_remaining();
+    }
+    if (!memory_admitted && shared) {
+      // Do not lower concurrency because the optional source bank was rejected.
+      // Restore the incumbent independent-source closure only after its parent
+      // source-sharing admission has also failed.
+      for (auto& owner : owners) owner.reset();
+      shared->Close();
+      shared.reset();
+      owners[0] = std::make_unique<PatchMatchCuda>(input[0]->options,
+                                                   input[0]->problem);
+      CUDA_SYNC_AND_CHECK();
+      memory_admitted =
+          owners[0]->PairPeakBytes() <= first_peak && admit_remaining();
+    }
+  } catch (const SparseSourceResourceRefused& error) {
+    // The first owner can already use sparse views. Retain none of the
+    // attached owners, then close the bank before smaller readmission.
     for (auto& owner : owners) owner.reset();
-    shared_geometry = false;
-    owners[0] = std::make_unique<PatchMatchCuda>(
-        input[0]->options, input[0]->problem, shared);
-    CUDA_SYNC_AND_CHECK();
-    memory_admitted =
-        owners[0]->PairPeakBytes() <= first_peak && admit_remaining();
-  }
-  if (!memory_admitted && shared) {
-    // Do not lower concurrency because the optional source bank was rejected.
-    // Restore the incumbent independent-source closure only after its parent
-    // source-sharing admission has also failed.
-    for (auto& owner : owners) owner.reset();
+    if (shared) shared->Close();
     shared.reset();
-    owners[0] =
-        std::make_unique<PatchMatchCuda>(input[0]->options, input[0]->problem);
-    CUDA_SYNC_AND_CHECK();
-    memory_admitted =
-        owners[0]->PairPeakBytes() <= first_peak && admit_remaining();
+    query_memory("after-later-sparse-refusal", &free_bytes, &total_bytes);
+    LOG(WARNING) << "Later sparse source attachment refused; readmitting "
+                    "pairs/singletons: "
+                 << error.what();
+    pair_or_single_fallback();
+    return;
   }
-  CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+  query_memory("admission", &free_bytes, &total_bytes);
   if (!memory_admitted) {
     if (first_peak > std::numeric_limits<size_t>::max() - kExternalMargin ||
         free_bytes < first_peak + kExternalMargin)

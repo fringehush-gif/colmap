@@ -51,6 +51,10 @@ struct PatchMatchOptions {
   // padded host stack. Disabled by default; true selects direct uploads.
   bool direct_source_upload = false;
 
+  // Share immutable source texture storage within an admitted CUDA batch.
+  // False disables only sparse source sharing, preserving batch scheduling.
+  bool sparse_source_sharing = true;
+
   // During geometric PatchMatch, source normals are unused by the CUDA path.
   // Validate them without creating decoded CPU arrays; false restores the
   // ordinary materialization path. Reference normals are always materialized.
