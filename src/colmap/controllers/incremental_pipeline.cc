@@ -89,8 +89,8 @@ struct ColorSamples {
   std::vector<std::optional<Eigen::Vector3ub>> colors;
 };
 
-// nullopt defers a managed path to the mapping thread; a null payload is a
-// completed file-read failure and must not be retried.
+// nullopt defers managed paths and speculative read failures to the mapping
+// thread, where the ordinary color read can retry at the barrier.
 using PrefetchedColorImage =
     std::future<std::optional<std::unique_ptr<ColorSamples>>>;
 
@@ -137,7 +137,7 @@ PrefetchedColorImage PrefetchColorImage(const std::filesystem::path& image_path,
               return std::nullopt;
             }
             if (!*read) {
-              return std::unique_ptr<ColorSamples>();
+              return std::nullopt;
             }
             auto samples = std::make_unique<ColorSamples>();
             samples->coordinates = std::move(coordinates);

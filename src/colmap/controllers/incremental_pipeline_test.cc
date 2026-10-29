@@ -5,15 +5,163 @@
 #include "colmap/estimators/bundle_adjustment_caspar.h"
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 #include "colmap/geometry/rigid3_matchers.h"
+#include "colmap/math/random.h"
 #include "colmap/scene/database.h"
 #include "colmap/scene/reconstruction_matchers.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <fstream>
+#include <thread>
+
+#include <OpenImageIO/imageio.h>
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace {
+
+enum class ColorReadMode { kSuccess, kTransient, kFailure };
+ColorReadMode color_read_mode;
+std::thread::id mapping_thread;
+std::atomic<int> injected_prefetch_failures{0};
+std::atomic<int> serial_successes{0};
+
+class MapperColorTestInput : public OIIO::ImageInput {
+ public:
+  const char* format_name() const override { return "png"; }
+  bool open(const std::string& name, OIIO::ImageSpec& spec) override {
+    if (std::filesystem::path(name).extension() != ".colmap_mapper_color") {
+      return false;
+    }
+    is_mapping_thread_ = std::this_thread::get_id() == mapping_thread;
+    m_spec = OIIO::ImageSpec(128, 128, 3, OIIO::TypeDesc::UINT8);
+    spec = m_spec;
+    return true;
+  }
+  bool close() override { return true; }
+  bool read_native_scanline(int, int, int, int, void* data) override {
+    if (color_read_mode == ColorReadMode::kFailure ||
+        (color_read_mode == ColorReadMode::kTransient && !is_mapping_thread_)) {
+      if (color_read_mode == ColorReadMode::kTransient) {
+        ++injected_prefetch_failures;
+      }
+      errorfmt("Injected mapper color read failure");
+      return false;
+    }
+    std::fill_n(static_cast<uint8_t*>(data), 128 * 3, uint8_t{73});
+    if (is_mapping_thread_) {
+      ++serial_successes;
+    }
+    return true;
+  }
+
+ private:
+  bool is_mapping_thread_ = false;
+};
+
+void CheckMapperColorReads(const ColorReadMode mode, const bool overlap) {
+  static const char* extensions[] = {"colmap_mapper_color", nullptr};
+  static const bool registered = [] {
+    OIIO::declare_imageio_format(
+        "colmap_mapper_color",
+        []() -> OIIO::ImageInput* { return new MapperColorTestInput; },
+        extensions,
+        nullptr,
+        nullptr,
+        "test");
+    return true;
+  }();
+  (void)registered;
+  const auto root = CreateTestDir() / (overlap ? "overlap" : "serial");
+  std::filesystem::create_directories(root);
+  const auto database = Database::Open(root / "database.db");
+  Reconstruction truth;
+  SyntheticDatasetOptions synthetic;
+  synthetic.num_rigs = 2;
+  synthetic.num_cameras_per_rig = 1;
+  synthetic.num_frames_per_rig = 7;
+  synthetic.num_points3D = 50;
+  synthetic.camera_has_prior_focal_length = false;
+  synthetic.camera_width = 128;
+  synthetic.camera_height = 128;
+  synthetic.camera_params = {160, 64, 64, 0.05};
+  synthetic.image_extension = ".colmap_mapper_color";
+  SetPRNGSeed(0);
+  SynthesizeDataset(synthetic, &truth, database.get());
+  for (const auto& [id, image] : truth.Images()) {
+    std::ofstream(root / image.Name()).close();
+  }
+  auto manager = std::make_shared<ReconstructionManager>();
+  auto options = std::make_shared<IncrementalPipelineOptions>();
+  options->image_path = root;
+  options->extract_colors = true;
+  options->overlap_color_decode = overlap;
+  options->num_threads = 1;
+  options->random_seed = 0;
+  color_read_mode = mode;
+  mapping_thread = std::this_thread::get_id();
+  injected_prefetch_failures = 0;
+  serial_successes = 0;
+  int later_images = 0;
+  IncrementalPipeline mapper(options, database, manager);
+  mapper.AddCallback(IncrementalPipeline::INITIAL_IMAGE_PAIR_REG_CALLBACK, [&] {
+    ASSERT_EQ(manager->Size(), 1);
+    auto& reconstruction = *manager->Get(0);
+    for (const auto& [id, point] : reconstruction.Points3D()) {
+      reconstruction.Point3D(id).color.setZero();
+    }
+    serial_successes = 0;
+  });
+  mapper.AddCallback(IncrementalPipeline::NEXT_IMAGE_REG_CALLBACK,
+                     [&] { ++later_images; });
+  mapper.Run();
+  ASSERT_EQ(manager->Size(), 1);
+  ASSERT_GT(later_images, 0);
+  const auto& reconstruction = *manager->Get(0);
+  EXPECT_EQ(reconstruction.NumRegImages(), truth.NumImages());
+  size_t colored = 0;
+  for (const auto& [id, point] : reconstruction.Points3D()) {
+    if (point.color != decltype(point.color)::Zero()) {
+      ++colored;
+      EXPECT_EQ(point.color, decltype(point.color)::Constant(73));
+    }
+  }
+  if (mode == ColorReadMode::kFailure) {
+    EXPECT_EQ(colored, 0);
+  } else {
+    EXPECT_GT(colored, 0);
+    if (!overlap || mode == ColorReadMode::kTransient) {
+      EXPECT_GT(serial_successes.load(), 0);
+    }
+  }
+  if (overlap && mode == ColorReadMode::kTransient) {
+    EXPECT_GT(injected_prefetch_failures.load(), 0);
+  }
+}
+
+TEST(IncrementalPipeline, ColorReadStableSuccess) {
+  for (const bool overlap : {false, true}) {
+    SCOPED_TRACE(overlap);
+    CheckMapperColorReads(ColorReadMode::kSuccess, overlap);
+  }
+}
+
+TEST(IncrementalPipeline, ColorReadTransientPrefetchFailure) {
+  for (const bool overlap : {false, true}) {
+    SCOPED_TRACE(overlap);
+    CheckMapperColorReads(ColorReadMode::kTransient, overlap);
+  }
+}
+
+TEST(IncrementalPipeline, ColorReadStableFailure) {
+  for (const bool overlap : {false, true}) {
+    SCOPED_TRACE(overlap);
+    CheckMapperColorReads(ColorReadMode::kFailure, overlap);
+  }
+}
 
 TEST(IncrementalPipeline, WithoutNoise) {
   const auto database_path = CreateTestDir() / "database.db";
