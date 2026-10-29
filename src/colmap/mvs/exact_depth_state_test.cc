@@ -383,7 +383,12 @@ void VerifyPositiveMaskAccountingAndRefusal(const fs::path& root) {
   size_t cases = 0;
   for (int rounding : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
     Require(std::fesetround(rounding) == 0, "cannot set test rounding mode");
-    for (unsigned flush = 0; flush < 4; ++flush) {
+#if defined(__SSE__)
+    constexpr unsigned kFlushStates = 4;
+#else
+    constexpr unsigned kFlushStates = 1;
+#endif
+    for (unsigned flush = 0; flush < kFlushStates; ++flush) {
 #if defined(__SSE__)
       _mm_setcsr((_mm_getcsr() & ~((1u << 15) | (1u << 6))) |
                  ((flush & 1) ? 1u << 15 : 0) | ((flush & 2) ? 1u << 6 : 0));
@@ -466,6 +471,7 @@ void VerifyPositiveMaskAccountingAndRefusal(const fs::path& root) {
       }
     }
   }
+  const size_t mask_cases = cases;
   // A nonfinite last sample must fail even though earlier positive bits exist.
   for (float invalid : {std::numeric_limits<float>::infinity(),
                         -std::numeric_limits<float>::infinity(),
@@ -485,8 +491,8 @@ void VerifyPositiveMaskAccountingAndRefusal(const fs::path& root) {
     Require(ws.GetCacheStats().reserved_bytes == 0,
             "failed mask load leaked reservation");
   }
-  std::cout << "positive_mask_rounding_ftzdaz_boundary_cases=64 "
-               "full_scan_nonfinite_cases=3"
+  std::cout << "positive_mask_rounding_ftzdaz_boundary_cases=" << mask_cases
+            << " full_scan_nonfinite_cases=3"
             << " tail_bits=zero ordinary_fp32=unchanged decoded_mask=refused\n";
 }
 void VerifyDepthLeaseLifetime(const fs::path& root) {
