@@ -380,6 +380,44 @@ TEST(OptionManager, ParseEmptyArguments) {
   EXPECT_TRUE(options.Parse(argv.size(), argv.data()));
 }
 
+#if defined(COLMAP_MVS_ENABLED)
+TEST(OptionManager, PatchMatchNccCostUnorm16RoundTripAndRestrictions) {
+  const auto path = CreateTestDir() / "ncc-cost-unorm16.ini";
+  OptionManager writer;
+  writer.AddPatchMatchStereoOptions();
+  auto& options = *writer.patch_match_stereo;
+  EXPECT_FALSE(options.ncc_cost_unorm16);
+  EXPECT_FALSE(options.probability_unorm16);
+  options.ncc_cost_unorm16 = true;
+  options.checkpoint_hmm = false;
+  EXPECT_FALSE(options.Check());
+  options.checkpoint_hmm = true;
+  options.window_radius = 4;
+  EXPECT_FALSE(options.Check());
+  options.window_radius = 5;
+  options.window_step = 2;
+  EXPECT_FALSE(options.Check());
+  options.window_step = 1;
+#if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
+  EXPECT_TRUE(options.Check());
+  options.probability_unorm16 = true;
+  EXPECT_TRUE(options.Check());
+  writer.Write(path);
+  OptionManager reader;
+  reader.AddPatchMatchStereoOptions();
+  ASSERT_TRUE(reader.Read(path));
+  EXPECT_TRUE(reader.patch_match_stereo->ncc_cost_unorm16);
+  EXPECT_TRUE(reader.patch_match_stereo->probability_unorm16);
+  reader.ResetOptions(/*reset_paths=*/false);
+  EXPECT_FALSE(reader.patch_match_stereo->ncc_cost_unorm16);
+  EXPECT_FALSE(reader.patch_match_stereo->probability_unorm16);
+#else
+  EXPECT_FALSE(options.Check());
+#endif
+}
+
+#endif
+
 TEST(OptionManager, ParseUnknownArgumentsFails) {
   const auto test_dir = CreateTestDir();
 

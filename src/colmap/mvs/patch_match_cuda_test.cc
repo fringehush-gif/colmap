@@ -2,6 +2,7 @@
 
 #include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/packed_consistency_mask.h"
+#include "colmap/mvs/packed_ncc_cost_map.h"
 #include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/patch_match_hmm_checkpoint.h"
 #include "colmap/mvs/patch_match_rng_perimeter.h"
@@ -570,7 +571,8 @@ void ExpectReferenceBatchOutputs(const size_t count,
                                  const bool geometry,
                                  const bool reuse,
                                  const bool checkpoint = false,
-                                 const bool unorm16 = false) {
+                                 const bool unorm16 = false,
+                                 const bool packed_cost = false) {
   const auto make_problem = [](Inputs& images) {
     PatchMatch::Problem problem;
     problem.ref_image_idx = 0;
@@ -588,18 +590,20 @@ void ExpectReferenceBatchOutputs(const size_t count,
   options.num_samples = defaults.num_samples;
   options.num_iterations = defaults.num_iterations;
   options.sigma_spatial = options.window_radius;
-  if (unorm16) {
+  if (unorm16 || packed_cost) {
     options.checkpoint_hmm = true;
-    options.probability_unorm16 = true;
+    options.probability_unorm16 = unorm16;
+    options.ncc_cost_unorm16 = packed_cost;
   }
+  const bool lossy_storage = unorm16 || packed_cost;
   std::vector<std::unique_ptr<Inputs> > inputs;
   std::vector<PatchMatch::Problem> problems;
   for (size_t i = 0; i < count; ++i) {
-    inputs.push_back(std::make_unique<Inputs>(
-        MakeInputs(unorm16 ? 0 : static_cast<int>(i % 2),
-                   9,
-                   unorm16 ? 25 : (checkpoint ? 129 : (i % 2 ? 153 : 149)),
-                   unorm16 ? 33 : (checkpoint ? 257 : 0))));
+    inputs.push_back(std::make_unique<Inputs>(MakeInputs(
+        lossy_storage ? 0 : static_cast<int>(i % 2),
+        9,
+        lossy_storage ? 25 : (checkpoint ? 129 : (i % 2 ? 153 : 149)),
+        lossy_storage ? 33 : (checkpoint ? 257 : 0))));
     problems.push_back(make_problem(*inputs.back()));
   }
   const auto construct = [&]() {
@@ -644,7 +648,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
   if (!checkpoint) incumbent.clear();
   options.checkpoint_hmm = checkpoint;
   auto batch = construct();
-  if (checkpoint && !unorm16) {
+  if (checkpoint && !unorm16 && !packed_cost) {
     for (size_t i = 0; i < count; ++i)
       EXPECT_LT(batch[i]->PairPeakBytes(), incumbent[i]->PairPeakBytes());
   }
@@ -1323,6 +1327,94 @@ TEST_P(PatchMatchCudaTest, SeparateCalibrationsMatchSerialOnSameDevice) {
       ExpectEquivalent(expected_b, actual_b);
     }
   }
+}
+
+TEST_F(CudaTest, NccCostUnorm16UsesActualOwnerBytes) {
+  Inputs inputs = MakeInputs(0, 4, 385, 513);
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  problem.src_image_idxs = {1, 2, 3, 4};
+  problem.images = &inputs.images;
+  problem.depth_maps = &inputs.depths;
+  problem.normal_maps = &inputs.normals;
+  const size_t width = inputs.images[0].GetWidth();
+  const size_t height = inputs.images[0].GetHeight();
+  PatchMatchStateMap float_cost(width, height, 4);
+  PackedNccCostMap packed_cost(width, height, 4);
+  ASSERT_GT(float_cost.GetCapacityBytes(), packed_cost.GetCapacityBytes());
+  for (const bool probability_unorm16 : {false, true}) {
+    auto options = MakeOptions(false, false, false);
+    options.window_radius = 5;
+    options.window_step = 1;
+    options.checkpoint_hmm = true;
+    options.probability_unorm16 = probability_unorm16;
+    EXPECT_FALSE(options.ncc_cost_unorm16);
+    PatchMatchCuda fp32(options, problem);
+    options.ncc_cost_unorm16 = true;
+    PatchMatchCuda packed(options, problem);
+    EXPECT_EQ(fp32.PairPeakBytes() - packed.PairPeakBytes(),
+              float_cost.GetCapacityBytes() - packed_cost.GetCapacityBytes());
+  }
+}
+
+TEST_F(CudaTest, NccCostUnorm16RepeatsAndPreservesRotationChoice) {
+  for (const bool geometry : {false, true}) {
+    for (const bool probability_unorm16 : {false, true}) {
+      for (const int sources : {1, 2, 3, 9}) {
+        SCOPED_TRACE(::testing::Message()
+                     << sources << " / UN2 " << probability_unorm16);
+        Inputs inputs = MakeInputs(0, sources, sources % 2 ? 129 : 35, 47);
+        auto options = MakeOptions(geometry, geometry, false);
+        options.window_radius = 5;
+        options.window_step = 1;
+        options.checkpoint_hmm = true;
+        options.probability_unorm16 = probability_unorm16;
+        options.ncc_cost_unorm16 = true;
+        const Result original = RunPatchMatch(&inputs, options);
+        ExpectNonempty(original, inputs, geometry);
+        ExpectEquivalent(original, RunPatchMatch(&inputs, options));
+        options.rotation_buffer_reuse = true;
+        ExpectEquivalent(original, RunPatchMatch(&inputs, options));
+      }
+    }
+  }
+}
+
+TEST_F(CudaTest, NccCostUnorm16BatchesMatchSameStorageIncumbents) {
+  for (const bool geometry : {false, true}) {
+    for (const bool probability_unorm16 : {false, true}) {
+      ExpectReferenceBatchOutputs(
+          3, geometry, false, true, probability_unorm16, true);
+      ExpectReferenceBatchOutputs(
+          5, geometry, true, true, probability_unorm16, true);
+    }
+  }
+}
+
+TEST_F(CudaTest, NccCostUnorm16RejectsUnsupportedSettings) {
+  Inputs inputs = MakeInputs(0);
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  for (size_t i = 1; i < inputs.images.size(); ++i)
+    problem.src_image_idxs.push_back(static_cast<int>(i));
+  problem.images = &inputs.images;
+  problem.depth_maps = &inputs.depths;
+  problem.normal_maps = &inputs.normals;
+  auto options = MakeOptions(false, false, false);
+  options.ncc_cost_unorm16 = true;
+  options.window_radius = 5;
+  options.window_step = 1;
+  options.checkpoint_hmm = false;
+  EXPECT_FALSE(options.Check());
+  EXPECT_ANY_THROW(PatchMatchCuda(options, problem));
+  options.checkpoint_hmm = true;
+  options.window_step = 2;
+  EXPECT_FALSE(options.Check());
+  EXPECT_ANY_THROW(PatchMatchCuda(options, problem));
+  options.window_step = 1;
+  options.window_radius = 4;
+  EXPECT_FALSE(options.Check());
+  EXPECT_ANY_THROW(PatchMatchCuda(options, problem));
 }
 
 INSTANTIATE_TEST_SUITE_P(PhotoAndGeometry,

@@ -1131,6 +1131,12 @@ void OptionManager::AddPatchMatchStereoOptions() {
       "each stripe and copies rotated planes; runtime depends on the "
       "workload.");
   AddDefaultOption(
+      "PatchMatchStereo.ncc_cost_unorm16",
+      &patch_match_stereo->ncc_cost_unorm16,
+      "Store persisted NCC costs in UNORM16 over [0,2]. Lossy; proposals and "
+      "solver math remain FP32. Requires CUDA, checkpoint_hmm, radius 5 and "
+      "step 1; unsupported settings are rejected.");
+  AddDefaultOption(
       "PatchMatchStereo.probability_unorm16",
       &patch_match_stereo->probability_unorm16,
       "Store previous selection probabilities as UNORM16 in checkpoint "

@@ -1,0 +1,691 @@
+{
+  "schema": "colmap.nccCostUnorm16Benchmark/v1",
+  "license": "BSD-3-Clause",
+  "date": "2026-10-29",
+  "source": {
+    "publicParent": "ebde795b475a51f819cda76722d6b8373539588a",
+    "cmakeBackportOrigin": "cbbed62a3b26693d4b626f6cc656de8baa4dc003",
+    "cmakeBackportFiles": 3,
+    "featureSourceFiles": 13,
+    "defaultCostStorage": "FP32",
+    "candidateCostStorage": "linear U16 [0,2] persistent NCC costs; FP32 proposals",
+    "option": "PatchMatchStereo.ncc_cost_unorm16",
+    "defaultEnabled": false
+  },
+  "protocol": {
+    "scene": "ETH3D Facade",
+    "platform": "Linux/WSL",
+    "cpuThreads": 12,
+    "warmupOrder": [
+      "FP32",
+      "U16"
+    ],
+    "timedOrder": [
+      "FP32",
+      "U16",
+      "U16",
+      "FP32"
+    ],
+    "timedRunsPerArmPerResolution": 2,
+    "windowRadius": 5,
+    "windowStep": 1,
+    "iterations": 5,
+    "samples": 15,
+    "checkpointHmm": true,
+    "probabilityUnorm16": false,
+    "rotationBufferReuse": false,
+    "timingScope": "Complete native stage including loading and writing; excludes staging, hashing, collector setup/teardown and scoring",
+    "processSampleIntervalSeconds": 0.5,
+    "nvmlSampleIntervalSeconds": 1,
+    "nvmlScope": "Sampled whole-device; not exact allocator or per-process peak",
+    "perfScope": "Native process attachment; launch gap is excluded from counted events; per-event running fractions retained",
+    "geoScope": "One filtered reference, same 84 frozen PHOTO files across both resolutions and arms",
+    "qualityScope": "One reference per resolution, regenerated same-arm source PHOTO closure, four laser scores; not full StereoFusion",
+    "qualityTolerancesMeters": [
+      0.01,
+      0.02,
+      0.05,
+      0.1,
+      0.2,
+      0.5
+    ],
+    "qualityMetricUnits": "fractions in [0,1]; C=FP32, T=U16"
+  },
+  "performance": [
+    {
+      "stage": "PHOTO",
+      "gpu": "RTX 3080 Ti",
+      "resolution": 1536,
+      "references": 5,
+      "sourcesPerReference": 20,
+      "fp32": {
+        "wallMeanSeconds": 7.855522865487728,
+        "cpuMeanSeconds": 8.344834500000001,
+        "wait4PeakRssMiB": 949.40625,
+        "sampledRssBytes": {
+          "mean": 788100736.0,
+          "peak": 884871168,
+          "samples": 32
+        },
+        "sampledWholeDeviceVramMiB": {
+          "mean": 2146.68212890625,
+          "peak": 2536.09765625,
+          "samples": 16
+        },
+        "cpuCounters": {
+          "instructions:u": {
+            "mean": 34714026640.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cycles:u": {
+            "mean": 29798615810.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-references:u": {
+            "mean": 217001859.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-misses:u": {
+            "mean": 34062749.5,
+            "runningPercentMinimum": 100.0
+          }
+        }
+      },
+      "unorm16": {
+        "wallMeanSeconds": 7.846050078980625,
+        "cpuMeanSeconds": 8.368431000000001,
+        "wait4PeakRssMiB": 949.2890625,
+        "sampledRssBytes": {
+          "mean": 787638272.0,
+          "peak": 868515840,
+          "samples": 32
+        },
+        "sampledWholeDeviceVramMiB": {
+          "mean": 1918.93212890625,
+          "peak": 2236.09765625,
+          "samples": 16
+        },
+        "cpuCounters": {
+          "instructions:u": {
+            "mean": 34490592388.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cycles:u": {
+            "mean": 29736766919.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-references:u": {
+            "mean": 226811862.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-misses:u": {
+            "mean": 34799745.5,
+            "runningPercentMinimum": 100.0
+          }
+        }
+      },
+      "wallChangePercent": -0.12058760020572379,
+      "sampledPeakVramSavedMiB": 300.0,
+      "sampledPeakVramSavedPercent": 11.829197478286183
+    },
+    {
+      "stage": "PHOTO",
+      "gpu": "RTX 3080 Ti",
+      "resolution": 3072,
+      "references": 5,
+      "sourcesPerReference": 20,
+      "fp32": {
+        "wallMeanSeconds": 26.122446939523797,
+        "cpuMeanSeconds": 28.5899075,
+        "wait4PeakRssMiB": 1675.46875,
+        "sampledRssBytes": {
+          "mean": 1493652080.152381,
+          "peak": 1745051648,
+          "samples": 105
+        },
+        "sampledWholeDeviceVramMiB": {
+          "mean": 6224.7890625,
+          "peak": 7038.09765625,
+          "samples": 55
+        },
+        "cpuCounters": {
+          "instructions:u": {
+            "mean": 121300371276.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cycles:u": {
+            "mean": 105410009605.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-references:u": {
+            "mean": 489937215.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-misses:u": {
+            "mean": 58783467.5,
+            "runningPercentMinimum": 100.0
+          }
+        }
+      },
+      "unorm16": {
+        "wallMeanSeconds": 25.760486942483112,
+        "cpuMeanSeconds": 28.372015,
+        "wait4PeakRssMiB": 1675.27734375,
+        "sampledRssBytes": {
+          "mean": 1503802880.0,
+          "peak": 1750822912,
+          "samples": 104
+        },
+        "sampledWholeDeviceVramMiB": {
+          "mean": 5391.777493990385,
+          "peak": 5772.09765625,
+          "samples": 52
+        },
+        "cpuCounters": {
+          "instructions:u": {
+            "mean": 120873471472.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cycles:u": {
+            "mean": 104830440684.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-references:u": {
+            "mean": 483330782.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-misses:u": {
+            "mean": 58300095.5,
+            "runningPercentMinimum": 100.0
+          }
+        }
+      },
+      "wallChangePercent": -1.3856282218838833,
+      "sampledPeakVramSavedMiB": 1266.0,
+      "sampledPeakVramSavedPercent": 17.98781519997469
+    },
+    {
+      "stage": "PHOTO",
+      "gpu": "RTX 3060",
+      "resolution": 1536,
+      "references": 5,
+      "sourcesPerReference": 20,
+      "fp32": {
+        "wallMeanSeconds": 16.573336073954124,
+        "cpuMeanSeconds": 17.025769000000004,
+        "wait4PeakRssMiB": 947.29296875,
+        "sampledRssBytes": {
+          "mean": 828545971.5820895,
+          "peak": 902696960,
+          "samples": 67
+        },
+        "sampledWholeDeviceVramMiB": {
+          "mean": 1609.5073529411766,
+          "peak": 1791.6640625,
+          "samples": 34
+        },
+        "cpuCounters": {
+          "instructions:u": {
+            "mean": 70011119479.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cycles:u": {
+            "mean": 65066335739.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-references:u": {
+            "mean": 226899135.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-misses:u": {
+            "mean": 34812866.0,
+            "runningPercentMinimum": 100.0
+          }
+        }
+      },
+      "unorm16": {
+        "wallMeanSeconds": 16.480489774490707,
+        "cpuMeanSeconds": 16.914016,
+        "wait4PeakRssMiB": 947.13671875,
+        "sampledRssBytes": {
+          "mean": 827834492.1212121,
+          "peak": 866308096,
+          "samples": 66
+        },
+        "sampledWholeDeviceVramMiB": {
+          "mean": 1358.0955882352941,
+          "peak": 1499.6640625,
+          "samples": 34
+        },
+        "cpuCounters": {
+          "instructions:u": {
+            "mean": 70567521854.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cycles:u": {
+            "mean": 65516061778.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-references:u": {
+            "mean": 280647056.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-misses:u": {
+            "mean": 34460697.0,
+            "runningPercentMinimum": 100.0
+          }
+        }
+      },
+      "wallChangePercent": -0.5602149081459284,
+      "sampledPeakVramSavedMiB": 292.0,
+      "sampledPeakVramSavedPercent": 16.29769810711934
+    },
+    {
+      "stage": "PHOTO",
+      "gpu": "RTX 3060",
+      "resolution": 3072,
+      "references": 5,
+      "sourcesPerReference": 20,
+      "fp32": {
+        "wallMeanSeconds": 63.028639293508604,
+        "cpuMeanSeconds": 65.6316705,
+        "wait4PeakRssMiB": 1673.1875,
+        "sampledRssBytes": {
+          "mean": 1534282930.7936509,
+          "peak": 1757519872,
+          "samples": 252
+        },
+        "sampledWholeDeviceVramMiB": {
+          "mean": 5969.868848425197,
+          "peak": 6229.6640625,
+          "samples": 127
+        },
+        "cpuCounters": {
+          "instructions:u": {
+            "mean": 274547866127.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cycles:u": {
+            "mean": 258034747803.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-references:u": {
+            "mean": 528384150.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-misses:u": {
+            "mean": 61796789.0,
+            "runningPercentMinimum": 100.0
+          }
+        }
+      },
+      "unorm16": {
+        "wallMeanSeconds": 62.78778231050819,
+        "cpuMeanSeconds": 65.513498,
+        "wait4PeakRssMiB": 1673.06640625,
+        "sampledRssBytes": {
+          "mean": 1533777428.48,
+          "peak": 1757683712,
+          "samples": 250
+        },
+        "sampledWholeDeviceVramMiB": {
+          "mean": 4856.590029761905,
+          "peak": 5021.6640625,
+          "samples": 126
+        },
+        "cpuCounters": {
+          "instructions:u": {
+            "mean": 273239017643.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cycles:u": {
+            "mean": 257029260197.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-references:u": {
+            "mean": 538112725.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-misses:u": {
+            "mean": 62363674.5,
+            "runningPercentMinimum": 100.0
+          }
+        }
+      },
+      "wallChangePercent": -0.38213895413290455,
+      "sampledPeakVramSavedMiB": 1208.0,
+      "sampledPeakVramSavedPercent": 19.39109377135856
+    },
+    {
+      "stage": "GEO",
+      "gpu": "RTX 3080 Ti",
+      "resolution": 1536,
+      "references": 1,
+      "sourcesPerReference": 20,
+      "fp32": {
+        "wallMeanSeconds": 3.023945892462507,
+        "cpuMeanSeconds": 3.3624495000000003,
+        "wait4PeakRssMiB": 903.2265625,
+        "sampledRssBytes": {
+          "mean": 633321472.0,
+          "peak": 949112832,
+          "samples": 12
+        },
+        "sampledWholeDeviceVramMiB": {
+          "mean": 1064.60107421875,
+          "peak": 1464.09765625,
+          "samples": 8
+        },
+        "cpuCounters": {
+          "instructions:u": {
+            "mean": 12696414116.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cycles:u": {
+            "mean": 9900567114.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-references:u": {
+            "mean": 149325615.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-misses:u": {
+            "mean": 22376688.5,
+            "runningPercentMinimum": 100.0
+          }
+        }
+      },
+      "unorm16": {
+        "wallMeanSeconds": 2.998654550523497,
+        "cpuMeanSeconds": 3.410226,
+        "wait4PeakRssMiB": 902.24609375,
+        "sampledRssBytes": {
+          "mean": 635271509.3333334,
+          "peak": 948776960,
+          "samples": 12
+        },
+        "sampledWholeDeviceVramMiB": {
+          "mean": 1055.5301339285713,
+          "peak": 1406.09765625,
+          "samples": 7
+        },
+        "cpuCounters": {
+          "instructions:u": {
+            "mean": 12811493263.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cycles:u": {
+            "mean": 10069302522.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-references:u": {
+            "mean": 151689682.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-misses:u": {
+            "mean": 21950971.0,
+            "runningPercentMinimum": 100.0
+          }
+        }
+      },
+      "wallChangePercent": -0.8363688650002254,
+      "sampledPeakVramSavedMiB": 58.0,
+      "sampledPeakVramSavedPercent": 3.9614843827122614
+    },
+    {
+      "stage": "GEO",
+      "gpu": "RTX 3080 Ti",
+      "resolution": 3072,
+      "references": 1,
+      "sourcesPerReference": 20,
+      "fp32": {
+        "wallMeanSeconds": 7.806416323001031,
+        "cpuMeanSeconds": 9.900389,
+        "wait4PeakRssMiB": 1962.1484375,
+        "sampledRssBytes": {
+          "mean": 1410168704.0,
+          "peak": 1934041088,
+          "samples": 32
+        },
+        "sampledWholeDeviceVramMiB": {
+          "mean": 2313.43212890625,
+          "peak": 2768.09765625,
+          "samples": 16
+        },
+        "cpuCounters": {
+          "instructions:u": {
+            "mean": 38228678735.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cycles:u": {
+            "mean": 30198528909.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-references:u": {
+            "mean": 316677830.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-misses:u": {
+            "mean": 36485493.5,
+            "runningPercentMinimum": 100.0
+          }
+        }
+      },
+      "unorm16": {
+        "wallMeanSeconds": 7.952547722496092,
+        "cpuMeanSeconds": 9.974143999999999,
+        "wait4PeakRssMiB": 1962.16015625,
+        "sampledRssBytes": {
+          "mean": 1394598400.0,
+          "peak": 2060304384,
+          "samples": 32
+        },
+        "sampledWholeDeviceVramMiB": {
+          "mean": 1997.6286764705883,
+          "peak": 2528.09765625,
+          "samples": 17
+        },
+        "cpuCounters": {
+          "instructions:u": {
+            "mean": 37995479194.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cycles:u": {
+            "mean": 30147412762.0,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-references:u": {
+            "mean": 319181508.5,
+            "runningPercentMinimum": 100.0
+          },
+          "cache-misses:u": {
+            "mean": 37253568.5,
+            "runningPercentMinimum": 100.0
+          }
+        }
+      },
+      "wallChangePercent": 1.8719396128604737,
+      "sampledPeakVramSavedMiB": 240.0,
+      "sampledPeakVramSavedPercent": 8.670214342261792
+    }
+  ],
+  "quality": [
+    {
+      "resolution": 1536,
+      "precision": {
+        "C": [
+          0.482645,
+          0.62513,
+          0.84138,
+          0.955936,
+          0.979437,
+          0.99215
+        ],
+        "T": [
+          0.482155,
+          0.624948,
+          0.841832,
+          0.957143,
+          0.980051,
+          0.991863
+        ],
+        "delta": [
+          -0.0004899999999999904,
+          -0.00018200000000001548,
+          0.00045200000000000795,
+          0.001206999999999958,
+          0.0006140000000000034,
+          -0.0002869999999999262
+        ]
+      },
+      "coverage": {
+        "C": [
+          0.0172834,
+          0.0603619,
+          0.164848,
+          0.214097,
+          0.237529,
+          0.269229
+        ],
+        "T": [
+          0.0172908,
+          0.0603104,
+          0.164506,
+          0.213771,
+          0.236805,
+          0.268022
+        ],
+        "delta": [
+          7.399999999997686E-06,
+          -5.150000000000293E-05,
+          -0.0003419999999999812,
+          -0.0003260000000000207,
+          -0.0007240000000000024,
+          -0.0012070000000000136
+        ]
+      },
+      "f1": {
+        "C": [
+          0.0333718,
+          0.110093,
+          0.275682,
+          0.349842,
+          0.382336,
+          0.42353
+        ],
+        "T": [
+          0.0333843,
+          0.110005,
+          0.275228,
+          0.349486,
+          0.381444,
+          0.422008
+        ],
+        "delta": [
+          1.2499999999998623E-05,
+          -8.799999999999086E-05,
+          -0.00045400000000000995,
+          -0.00035599999999996745,
+          -0.0008920000000000039,
+          -0.0015220000000000233
+        ]
+      }
+    },
+    {
+      "resolution": 3072,
+      "precision": {
+        "C": [
+          0.527382,
+          0.654656,
+          0.874375,
+          0.983002,
+          0.992743,
+          0.996605
+        ],
+        "T": [
+          0.528234,
+          0.655439,
+          0.87548,
+          0.983323,
+          0.993084,
+          0.996911
+        ],
+        "delta": [
+          0.0008519999999999639,
+          0.0007829999999999782,
+          0.0011050000000000226,
+          0.0003209999999999047,
+          0.0003409999999999247,
+          0.00030600000000002847
+        ]
+      },
+      "coverage": {
+        "C": [
+          0.0476797,
+          0.0929949,
+          0.183663,
+          0.214561,
+          0.235397,
+          0.268591
+        ],
+        "T": [
+          0.0478081,
+          0.0931456,
+          0.183995,
+          0.214788,
+          0.235918,
+          0.269971
+        ],
+        "delta": [
+          0.00012840000000000074,
+          0.00015069999999998973,
+          0.00033199999999999896,
+          0.00022700000000000498,
+          0.0005209999999999937,
+          0.0013799999999999923
+        ]
+      },
+      "f1": {
+        "C": [
+          0.0874529,
+          0.162856,
+          0.303562,
+          0.352239,
+          0.380557,
+          0.423142
+        ],
+        "T": [
+          0.0876805,
+          0.163111,
+          0.304083,
+          0.352565,
+          0.381262,
+          0.42488
+        ],
+        "delta": [
+          0.00022759999999999447,
+          0.0002550000000000052,
+          0.0005209999999999937,
+          0.00032599999999999296,
+          0.0007050000000000112,
+          0.0017379999999999618
+        ]
+      }
+    }
+  ],
+  "validation": {
+    "nativeTestsPassed": 67,
+    "pythonOptionBindingPassed": true,
+    "cudaDisabledConfigurationPassed": true,
+    "cudaDisabledOptionTestsPassed": 1,
+    "withinArmPhotoRepeatsExact": true,
+    "photoFiveReferenceBatchObservedBothGpus": true,
+    "sourceCountInvalidDomainRotationAndCombinedProbabilityTestsPassed": true
+  },
+  "limitations": [
+    "Lossy persistent costs can change depth and normal results.",
+    "N2 is limited evidence; timings are not kernel-isolated speed claims.",
+    "Laser results cover one reference at each resolution, not full-scene quality.",
+    "Native Windows runtime was not qualified by these measurements."
+  ]
+}

@@ -121,6 +121,11 @@ struct PatchMatchOptions {
   // This changes source sampling and may change depth and normals.
   bool probability_unorm16 = false;
 
+  // Store persisted NCC costs in linear UNORM16 over [0, 2]. Proposals and
+  // solver arithmetic remain FP32; rounded incumbents can change outputs.
+  // Requires CUDA, checkpoint HMM, window_radius=5 and window_step=1.
+  bool ncc_cost_unorm16 = false;
+
   void Print() const;
   bool Check() const;
 };
