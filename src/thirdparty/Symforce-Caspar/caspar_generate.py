@@ -1,5 +1,5 @@
 # Usage:
-#   python generate_caspar.py <out_dir> [f32|f64]
+#   python caspar_generate.py <out_dir> [f32|f64]
 
 import inspect
 import sys
@@ -341,7 +341,7 @@ caslib = CasparLibrary(name="caspar_lib", dtype=dtype)
 #     skipped with a warning because the merged focal_and_extra node
 #     cannot be split)
 #
-# sensor_from_rig is always present as a ConstantShared parameter. For single-
+# sensor_from_rig is always present as a ConstantSequential parameter. For single-
 # camera datasets the host passes identity, making it a no-op. For multi-camera
 # rigs it carries the per-sensor extrinsic calibration.
 
