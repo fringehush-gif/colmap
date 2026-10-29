@@ -213,7 +213,7 @@ if(ONNX_ENABLED)
             onnxruntime::onnxruntime
     )
     if(TESTS_ENABLED AND CUDA_ENABLED)
-        target_link_libraries(colmap_util_onnx_test PRIVATE colmap_util_cuda)
+        target_link_libraries(colmap_util_onnx_test colmap_util_cuda)
     endif()
 endif()
 COLMAP_ADD_TEST(
