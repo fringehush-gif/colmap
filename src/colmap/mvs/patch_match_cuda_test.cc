@@ -1251,6 +1251,25 @@ TEST_P(PatchMatchCudaTest, CheckpointHmmPreservesAlgorithmOutputs) {
   }
 }
 
+TEST_P(PatchMatchCudaTest, SharedSamplingRowsPreserveCheckpointOutputs) {
+  const auto [geometry, filter] = GetParam();
+  for (const int num_sources : {31, 32, 33}) {
+    SCOPED_TRACE(::testing::Message() << "sources=" << num_sources);
+    Inputs inputs = MakeInputs(0, num_sources);
+    PatchMatchOptions options = MakeOptions(geometry, filter, false);
+    options.window_radius = 5;
+    options.window_step = 1;
+    options.num_samples = 15;
+    options.checkpoint_hmm = false;
+    const Result original = RunPatchMatch(&inputs, options);
+    options.checkpoint_hmm = true;
+    const Result checkpointed = RunPatchMatch(&inputs, options);
+    ExpectNonempty(original, inputs, filter);
+    ExpectNonempty(checkpointed, inputs, filter);
+    ExpectEquivalent(original, checkpointed);
+  }
+}
+
 TEST_P(PatchMatchCudaTest, UnevenSourceGroupsPreserveOutputs) {
   const auto [geometry, filter] = GetParam();
   // Five sources exercise every cooperative group and a second source in one

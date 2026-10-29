@@ -1,0 +1,166 @@
+{
+  "candidate": "MVS-S32",
+  "parent": "6375c0ce96a9d9c9f09228881e03e559c7dda1ec",
+  "change": "Keep ordered row sampling probabilities in 1 KiB of shared memory for eligible compiled SM86 checkpoint kernels with at most 32 sources. Other configurations retain the global path.",
+  "dataset": "ETH3D facade",
+  "gpu": "RTX 3080 Ti",
+  "scope": "Five-reference PHOTO PatchMatch, 20 sources per reference; incremental over NCC U16 parent.",
+  "settings": {
+    "resolutions": [
+      1536,
+      3072
+    ],
+    "cpuThreads": 12,
+    "iterations": 5,
+    "samples": 15,
+    "windowRadius": 5,
+    "windowStep": 1,
+    "checkpointHmm": true,
+    "nccCostUnorm16": true,
+    "probabilityUnorm16": false,
+    "rotationBufferReuse": false,
+    "geometricConsistency": false,
+    "filter": false,
+    "referenceBatchSize": 5
+  },
+  "method": {
+    "order": [
+      "warm C",
+      "warm T",
+      "C",
+      "T",
+      "T",
+      "C"
+    ],
+    "timedRunsPerArmPerResolution": 2,
+    "cpuCounters": "User-mode perf counters attached after native launch; the initial launch-to-attachment gap is excluded. 100% reported event running time applies to the counted attachment.",
+    "sampledMemory": "RSS sampled at 0.5 s; whole-device VRAM at 1 s. Mean samples weighted by count; peaks are observed samples."
+  },
+  "measurements": {
+    "1536": {
+      "C": {
+        "n": 2,
+        "wallSeconds": [
+          7.896895681973547,
+          7.845878292922862
+        ],
+        "wallMeanSeconds": 7.871386987448204,
+        "cpuMeanSeconds": 8.338333,
+        "maximumRssMiB": 949.4921875,
+        "sampledRss": {
+          "samples": 32,
+          "mean": 786860928.0,
+          "peak": 869105664
+        },
+        "sampledWholeDeviceVramMiB": {
+          "samples": 16,
+          "mean": 1917.55712890625,
+          "peak": 2236.09765625
+        },
+        "countersMean": {
+          "instructions:u": 34481433767.5,
+          "cycles:u": 29652797392.0,
+          "cache-references:u": 217367625.5,
+          "cache-misses:u": 34157245.0
+        }
+      },
+      "T": {
+        "n": 2,
+        "wallSeconds": [
+          7.705066398018971,
+          7.690983153064735
+        ],
+        "wallMeanSeconds": 7.698024775541853,
+        "cpuMeanSeconds": 8.132849499999999,
+        "maximumRssMiB": 949.27734375,
+        "sampledRss": {
+          "samples": 32,
+          "mean": 791685248.0,
+          "peak": 905457664
+        },
+        "sampledWholeDeviceVramMiB": {
+          "samples": 16,
+          "mean": 1937.93212890625,
+          "peak": 2236.09765625
+        },
+        "countersMean": {
+          "instructions:u": 33970985373.5,
+          "cycles:u": 29050877658.5,
+          "cache-references:u": 214681300.0,
+          "cache-misses:u": 34349331.5
+        }
+      },
+      "wallChangePercent": -2.2024353799755536
+    },
+    "3072": {
+      "C": {
+        "n": 2,
+        "wallSeconds": [
+          25.810781750944443,
+          25.904300596099347
+        ],
+        "wallMeanSeconds": 25.857541173521895,
+        "cpuMeanSeconds": 28.6577335,
+        "maximumRssMiB": 1676.234375,
+        "sampledRss": {
+          "samples": 104,
+          "mean": 1506374695.3846154,
+          "peak": 1748881408
+        },
+        "sampledWholeDeviceVramMiB": {
+          "samples": 52,
+          "mean": 5392.123647836538,
+          "peak": 5790.09765625
+        },
+        "countersMean": {
+          "instructions:u": 121365849147.5,
+          "cycles:u": 105583388057.5,
+          "cache-references:u": 496779134.0,
+          "cache-misses:u": 58844995.5
+        }
+      },
+      "T": {
+        "n": 2,
+        "wallSeconds": [
+          25.2585806340212,
+          25.256752148037776
+        ],
+        "wallMeanSeconds": 25.25766639102949,
+        "cpuMeanSeconds": 27.963604,
+        "maximumRssMiB": 1675.4140625,
+        "sampledRss": {
+          "samples": 102,
+          "mean": 1503280670.1176472,
+          "peak": 1758089216
+        },
+        "sampledWholeDeviceVramMiB": {
+          "samples": 52,
+          "mean": 5395.815955528846,
+          "peak": 5838.09765625
+        },
+        "countersMean": {
+          "instructions:u": 119076252112.0,
+          "cycles:u": 103054500960.5,
+          "cache-references:u": 486815204.5,
+          "cache-misses:u": 57309266.5
+        }
+      },
+      "wallChangePercent": -2.3199219851061437
+    }
+  },
+  "validation": {
+    "mapFilesCompared": 120,
+    "mapsByteExact": true,
+    "correctnessCases": 7,
+    "correctnessIncludes": [
+      "PHOTO U16 31,32,33 sources",
+      "PHOTO FP32 1536,3072",
+      "GEO U16 1536,3072 with fixed source depth maps"
+    ],
+    "focusedGpuTests": 4,
+    "registersPerThread": 96,
+    "stackBytesPerThread": 112,
+    "extraSharedBytesPerBlock": 1024
+  },
+  "sourceSha256": "31dfcff285a8d7d5a95f93502bfcdd81eca3133b2aefc40eab38eec8faf4e1eb"
+}
