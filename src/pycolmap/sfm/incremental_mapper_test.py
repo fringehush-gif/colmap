@@ -104,6 +104,16 @@ def test_incremental_pipeline_options_init() -> None:
     assert options is not None
 
 
+def test_incremental_pipeline_options_overlap_color_decode() -> None:
+    options = pycolmap.IncrementalPipelineOptions()
+    assert options.overlap_color_decode is True
+    options.overlap_color_decode = False
+    assert options.overlap_color_decode is False
+    assert options.todict()["overlap_color_decode"] is False
+    options.overlap_color_decode = True
+    assert options.overlap_color_decode is True
+
+
 def test_incremental_pipeline_options_min_num_matches() -> None:
     options = pycolmap.IncrementalPipelineOptions()
     options.min_num_matches = 20
