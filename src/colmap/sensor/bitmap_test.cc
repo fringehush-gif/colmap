@@ -1120,7 +1120,7 @@ TEST(Bitmap, ReadWriteUnicodePath) {
   // as UTF-8. On Windows, path.string() would mangle these characters using
   // the system locale and the read/write would fail.
   const std::filesystem::path filename =
-      CreateTestDir() / std::filesystem::u8path(u8"éü中文-bitmap.png");
+      CreateTestDir() / std::filesystem::u8path(u8"Ã©Ã¼ä¸­æ–‡-bitmap.png");
 
   EXPECT_TRUE(bitmap.Write(filename));
 
@@ -2133,6 +2133,76 @@ TEST(BitmapReader, GrayFileRowsManagedFailureDoesNotReadDisk) {
   reader->Close();
   EXPECT_TRUE(target.Read(path, /*as_rgb=*/false));
   EXPECT_EQ(calls, 1);
+}
+
+TEST(Bitmap, GrayFileRowsFailurePreservesBitmap) {
+  // A unique test format selects the JPEG fast path without depending on how
+  // a particular JPEG decoder recovers from corrupt entropy data.
+  class FailingJpegInput : public OIIO::ImageInput {
+   public:
+    const char* format_name() const override { return "jpeg"; }
+    bool open(const std::string& name, OIIO::ImageSpec& spec) override {
+      if (std::filesystem::path(name).extension() != ".colmap_jpeg_failure") {
+        return false;
+      }
+      m_spec = OIIO::ImageSpec(128, 128, 3, OIIO::TypeDesc::UINT8);
+      spec = m_spec;
+      return true;
+    }
+    bool close() override { return true; }
+    bool read_native_scanline(int, int, int y, int, void* data) override {
+      if (y >= 64) {
+        errorfmt("Injected scanline failure");
+        return false;
+      }
+      auto* row = static_cast<uint8_t*>(data);
+      for (int i = 0; i < m_spec.width * m_spec.nchannels; ++i) {
+        row[i] = 17;
+      }
+      return true;
+    }
+  };
+  static const char* extensions[] = {"colmap_jpeg_failure", nullptr};
+  OIIO::declare_imageio_format(
+      "colmap_jpeg_failure",
+      []() -> OIIO::ImageInput* { return new FailingJpegInput; },
+      extensions,
+      nullptr,
+      nullptr,
+      "test");
+
+  const auto path = CreateTestDir() / "image.colmap_jpeg_failure";
+  std::ofstream(path).close();
+  auto input = OIIO::ImageInput::open(path.string());
+  ASSERT_NE(input, nullptr);
+  std::vector<uint8_t> rows(128 * 3 * 64);
+  ASSERT_TRUE(input->read_scanlines(
+      0, 0, 0, 64, 0, 0, 3, OIIO::TypeDesc::UINT8, rows.data()));
+  ASSERT_FALSE(input->read_scanlines(
+      0, 0, 64, 128, 0, 0, 3, OIIO::TypeDesc::UINT8, rows.data()));
+  input->geterror();
+  input->close();
+
+  const auto good = path.parent_path() / "gray-row-recovery.png";
+  Bitmap recovery(2, 3, false);
+  recovery.Fill(BitmapColor<uint8_t>(19));
+  ASSERT_TRUE(recovery.Write(good));
+  for (const bool populated : {false, true}) {
+    SCOPED_TRACE(populated);
+    Bitmap target;
+    if (populated) {
+      target = Bitmap(2, 3, true);
+      target.Fill(BitmapColor<uint8_t>(19, 23, 27));
+    }
+    const Bitmap before = target.Clone();
+    EXPECT_FALSE(target.Read(path, /*as_rgb=*/false));
+    EXPECT_EQ(target.Width(), before.Width());
+    EXPECT_EQ(target.Height(), before.Height());
+    EXPECT_EQ(target.Channels(), before.Channels());
+    EXPECT_EQ(target.RowMajorData(), before.RowMajorData());
+    ASSERT_TRUE(target.Read(good, /*as_rgb=*/false));
+    EXPECT_EQ(target.RowMajorData(), recovery.RowMajorData());
+  }
 }
 
 TEST(Bitmap, GrayFileRowsPreserveCorruptAndMissingReadFailure) {

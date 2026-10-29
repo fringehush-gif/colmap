@@ -885,18 +885,19 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
   }
 
   const OIIO::ImageSpec& image_spec = input->spec();
-  width_ = image_spec.width;
-  height_ = image_spec.height;
+  const int width = image_spec.width;
+  const int height = image_spec.height;
   const int file_channels = image_spec.nchannels;
+  int channels;
   // Handle images with alpha channel by dropping alpha:
   // - 4 channels (RGBA) -> 3 channels (RGB)
   // - 2 channels (grayscale + alpha) -> 1 channel (grayscale)
   if (file_channels == 4) {
-    channels_ = 3;
+    channels = 3;
   } else if (file_channels == 2) {
-    channels_ = 1;
+    channels = 1;
   } else if (file_channels == 1 || file_channels == 3) {
-    channels_ = file_channels;
+    channels = file_channels;
   } else {
     VLOG(3) << "Unsupported number of channels: " << file_channels;
     return false;
@@ -910,19 +911,19 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
   const std::string format = input->format_name();
   if (!as_rgb && !linearize_colorspace && format == "jpeg" &&
       image_spec.format == OIIO::TypeDesc::UINT8 &&
-      image_spec.channelformats.empty() && file_channels == 3 && width_ > 0 &&
-      height_ > 0 &&
-      width_ <= std::numeric_limits<int>::max() / (3 * kGrayBatchRows) &&
-      height_ <= std::numeric_limits<int>::max() / width_ &&
+      image_spec.channelformats.empty() && file_channels == 3 && width > 0 &&
+      height > 0 &&
+      width <= std::numeric_limits<int>::max() / (3 * kGrayBatchRows) &&
+      height <= std::numeric_limits<int>::max() / width &&
       image_spec.depth == 1 && image_spec.x == 0 && image_spec.y == 0 &&
       image_spec.z == 0 && image_spec.tile_width == 0 &&
       image_spec.tile_height == 0 && !image_spec.deep) {
-    const size_t width = static_cast<size_t>(width_);
-    std::vector<uint8_t> gray(width * static_cast<size_t>(height_));
+    const size_t row_width = static_cast<size_t>(width);
+    std::vector<uint8_t> gray(row_width * static_cast<size_t>(height));
     std::vector<uint8_t> rgb_rows(
-        width * 3 * static_cast<size_t>(std::min(kGrayBatchRows, height_)));
-    for (int begin = 0; begin < height_;) {
-      const int end = begin + std::min(kGrayBatchRows, height_ - begin);
+        row_width * 3 * static_cast<size_t>(std::min(kGrayBatchRows, height)));
+    for (int begin = 0; begin < height;) {
+      const int end = begin + std::min(kGrayBatchRows, height - begin);
       if (!input->read_scanlines(0,
                                  0,
                                  begin,
@@ -937,9 +938,10 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
         VLOG(3) << "Failed to read bitmap: " << error;
         return false;
       }
-      ConvertPackedRGB8ToGrey(rgb_rows.data(),
-                              width * static_cast<size_t>(end - begin),
-                              gray.data() + width * static_cast<size_t>(begin));
+      ConvertPackedRGB8ToGrey(
+          rgb_rows.data(),
+          row_width * static_cast<size_t>(end - begin),
+          gray.data() + row_width * static_cast<size_t>(begin));
       begin = end;
     }
     input->close();
@@ -950,11 +952,16 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
     meta_data->image_spec = image_spec;
     meta_data->image_spec.nchannels = 1;
     meta_data_ = std::move(meta_data);
-    channels_ = 1;
     data_ = std::move(gray);
+    width_ = width;
+    height_ = height;
+    channels_ = 1;
     return true;
   }
 
+  width_ = width;
+  height_ = height;
+  channels_ = channels;
   data_.resize(width_ * height_ * channels_);
   // Note that OIIO supports reading a subset of channels.
   if (!input->read_image(
