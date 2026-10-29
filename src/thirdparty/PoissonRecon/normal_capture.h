@@ -35,6 +35,23 @@ struct ThreadScope {
   ThreadScope& operator=(const ThreadScope&) = delete;
 };
 
+// The caller supplies new empty blocks and has admitted positive workers and
+// a bounded sample count. Prepare before sample callbacks or tree mutation. A
+// failed reservation declines capture and releases all partial reservations;
+// errors after preparation must propagate instead of restarting the sample
+// loop.
+template <class Blocks>
+bool Prepare(Blocks& blocks, std::size_t workers, std::size_t samples) {
+  try {
+    blocks.resize(workers);
+    for (auto& records : blocks) records.reserve(2 * (samples / workers + 1));
+  } catch (const std::bad_alloc&) {
+    Blocks().swap(blocks);
+    return false;
+  }
+  return true;
+}
+
 // Replay the already evaluated native splats. The caller supplies its real
 // tree index resolver and SparseNodeData insertion; no sample callback runs.
 template <class Records, class Resolve, class Add>
