@@ -920,14 +920,13 @@ SparseNodeData< OutData , UIntPack< DataSigs ... > > FEMTree< Dim , Real >::setI
     constexpr bool normal_shape=Dim==3 && std::is_same_v<Real,float> &&
         std::is_same_v<OutData,Point<Real,Dim>> && DensityDegree==2 &&
         DataDegrees::Min()==2 && DataDegrees::Max()==2;
-    const bool normal_gpu=normal_shape && density && ThreadPool::NumThreads()>0 &&
+    bool normal_gpu=normal_shape && density && ThreadPool::NumThreads()>0 &&
         ::PoissonNormalCapture::admitted &&
         samples.size()>=400000 && samples.size()<=4000000;
-    std::vector<std::vector<PoissonNormalGpu::Record>> normal_records(
-        normal_gpu ? ThreadPool::NumThreads() : 0);
+    std::vector<std::vector<PoissonNormalGpu::Record>> normal_records;
     if(normal_gpu)
-        for(auto& records:normal_records)
-            records.reserve(2*(samples.size()/normal_records.size()+1));
+        normal_gpu=::PoissonNormalCapture::Prepare(
+            normal_records,ThreadPool::NumThreads(),samples.size());
 #endif // POISSON_NORMAL_NATIVE_GPU
 	ThreadPool::ParallelFor( 0 , samples.size() , [&]( unsigned int thread , size_t i )
 		{
