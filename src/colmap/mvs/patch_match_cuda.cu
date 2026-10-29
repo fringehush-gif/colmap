@@ -1761,17 +1761,9 @@ __global__ void SweepFromTopToBottom(
         pcc_computer.depth = cooperative_job.best_depth[lane];
         pcc_computer.normal = winning_normal;
         float* source_forward_message = &global_workspace.GetPtr()[col];
-        for (int image_idx = threadIdx.y; image_idx < cost_map.GetDepth();
-             image_idx += blockDim.y) {
-          float cost;
-          if (winner == 0) {
-            cost = cost_map.Get(row, col, image_idx);
-          } else {
-            pcc_computer.src_image_idx = image_idx;
-            cost = pcc_computer.Compute();
-            cost_map.Set(row, col, image_idx, cost);
-          }
-
+        // Every source owns distinct cost/forward/probability entries. The
+        // existing end-row barrier still precedes any cross-source filtering.
+        const auto update_source = [&](const int image_idx, const float cost) {
           const float alpha = likelihood_computer.ComputeForwardMessage(
               cost, source_forward_message[image_idx * source_stride]);
           const float beta =
@@ -1789,6 +1781,99 @@ __global__ void SweepFromTopToBottom(
               alpha, beta, prev_prob, options.prev_sel_prob_weight);
           source_forward_message[image_idx * source_stride] = alpha;
           sel_prob_map.Set(row, col, image_idx, prob);
+        };
+        bool compacted_refresh = false;
+#ifndef COLMAP_HIP_ENABLED
+        if constexpr (kBlockWidth == 8) {
+          if (winner > 0 && cost_map.GetDepth() > 0 &&
+              cost_map.GetDepth() <= 32 && options.num_samples > 0) {
+            const int num_sources = static_cast<int>(cost_map.GetDepth());
+            uint32_t sampled_sources = 0;
+            for (int slot = 0; slot < kSampleWindowSize; ++slot) {
+              const int source = cooperative_job.source[slot][lane];
+              if (source < 0) break;
+              sampled_sources |= uint32_t{1} << source;
+            }
+            // Cached phase performs no PCC evaluations. Shared results remain
+            // raw FP32; encoding and forward math keep their original order.
+            for (int slot = threadIdx.y; slot < kSampleWindowSize;
+                 slot += blockDim.y) {
+              const int image_idx = cooperative_job.source[slot][lane];
+              if (image_idx < 0) continue;
+              pcc_computer.src_image_idx = image_idx;
+              const float cost =
+                  cooperative_job.results[slot][winner - 1][lane];
+              cost_map.Set(row, col, image_idx, cost);
+              update_source(image_idx, cost);
+            }
+            const uint32_t valid_sources =
+                num_sources == 32 ? ~uint32_t{0}
+                                  : (uint32_t{1} << num_sources) - 1;
+            uint32_t remaining = valid_sources & ~sampled_sources;
+            // Rank only missing sources across the existing worker groups.
+            for (int skip = 0;
+                 skip < static_cast<int>(threadIdx.y) && remaining;
+                 ++skip) {
+              remaining &= remaining - 1;
+            }
+            while (remaining) {
+              const int image_idx = __ffs(remaining) - 1;
+              pcc_computer.src_image_idx = image_idx;
+              const float cost = pcc_computer.Compute();
+              cost_map.Set(row, col, image_idx, cost);
+              update_source(image_idx, cost);
+              for (int skip = 0;
+                   skip < static_cast<int>(blockDim.y) && remaining;
+                   ++skip) {
+                remaining &= remaining - 1;
+              }
+            }
+            // Preserve the original worker's final mutable PCC source state,
+            // even though independent source jobs were reassigned/permuted.
+            if (threadIdx.y < num_sources) {
+              pcc_computer.src_image_idx =
+                  threadIdx.y +
+                  ((num_sources - 1 - threadIdx.y) / blockDim.y) * blockDim.y;
+            }
+            compacted_refresh = true;
+          }
+        }
+#endif
+        if (!compacted_refresh) {
+          for (int image_idx = threadIdx.y; image_idx < cost_map.GetDepth();
+               image_idx += blockDim.y) {
+            float cost;
+            if (winner == 0) {
+              cost = cost_map.Get(row, col, image_idx);
+            } else {
+              pcc_computer.src_image_idx = image_idx;
+              int cached_slot = -1;
+#ifndef COLMAP_HIP_ENABLED
+              if constexpr (kBlockWidth == 8) {
+                // Only the final sample window survives here. Its pure NCC
+                // results precede geometric regularization and cost encoding.
+                if (options.num_samples > 0) {
+                  for (int slot = 0; slot < kSampleWindowSize; ++slot) {
+                    const int source = cooperative_job.source[slot][lane];
+                    if (source == image_idx) {
+                      cached_slot = slot;
+                      break;
+                    }
+                    if (source < 0) break;
+                  }
+                }
+              }
+#endif
+              if (cached_slot >= 0) {
+                cost = cooperative_job.results[cached_slot][winner - 1][lane];
+              } else {
+                cost = pcc_computer.Compute();
+              }
+              cost_map.Set(row, col, image_idx, cost);
+            }
+
+            update_source(image_idx, cost);
+          }
         }
       }
       // Filtering consumes all updated source probabilities.
