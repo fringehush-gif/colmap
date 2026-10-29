@@ -7,11 +7,16 @@
 #include "colmap/math/math.h"
 #include "colmap/mvs/gpu_mat.h"
 #include "colmap/mvs/gpu_mat_prng.h"
+#include "colmap/mvs/packed_ncc_cost_map.h"
+#include "colmap/mvs/patch_match_hmm_checkpoint.h"
 #include "colmap/mvs/patch_match_state_map.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -332,6 +337,132 @@ TEST(PatchMatchStateMap, ThreeOwnerDeadRoleCycle) {
     std::swap(width, height);
   }
 }
+
+// Test persisted words, not a second implementation of the device quantizer.
+#ifndef COLMAP_HIP_ENABLED
+namespace {
+__global__ void RoundTripNccCodes(PackedNccCostView view) {
+  const size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= 65536) return;
+  const size_t row = i / 256, col = i % 256;
+  view.codes.Set(row, col, 0, static_cast<uint16_t>(i));
+  view.Set(row, col, 0, view.Get(row, col, 0));
+}
+__global__ void WriteNccCost(PackedNccCostView view, float value) {
+  view.Set(0, 0, 0, value);
+}
+__global__ void ReadNccCost(PackedNccCostView view, float* output) {
+  output[0] = view.Get(0, 0, 0);
+}
+std::vector<uint16_t> NccCodes(const PackedNccCostMap& map) {
+  const auto view = map.View().codes;
+  std::vector<uint16_t> result(view.width * view.height * view.depth);
+  CUDA_SAFE_CALL(cudaMemcpy2D(result.data(),
+                              view.width * sizeof(uint16_t),
+                              view.ptr,
+                              view.pitch,
+                              view.width * sizeof(uint16_t),
+                              view.height * view.depth,
+                              cudaMemcpyDeviceToHost));
+  return result;
+}
+}  // namespace
+
+TEST(PackedNccCostMap, ScalarErrorBoundAndExactEndpoints) {
+  PackedNccCostMap map(1, 1, 1);
+  GpuMat<float> output(1, 1);
+  for (const float cost : {0.0f, 2.0f, 0.5f, 1.0f, 1.5f, 0.1234567f}) {
+    WriteNccCost<<<1, 1>>>(map.View(), cost);
+    ReadNccCost<<<1, 1>>>(map.View(), output.GetPtr());
+    CUDA_SYNC_AND_CHECK();
+    EXPECT_NO_THROW(map.CheckDomain());
+    float actual = 0;
+    output.CopyToHost(&actual, sizeof(float));
+    if (cost == 0.0f || cost == 2.0f) {
+      EXPECT_EQ(actual, cost);
+    } else {
+      EXPECT_LE(std::abs(actual - cost), 1.54e-5f);
+    }
+  }
+}
+TEST(PackedNccCostMap, AllCodesRoundTripAndEndpoints) {
+  PackedNccCostMap map(256, 256, 1);
+  RoundTripNccCodes<<<256, 256>>>(map.View());
+  CUDA_SYNC_AND_CHECK();
+  EXPECT_NO_THROW(map.CheckDomain());
+  const auto codes = NccCodes(map);
+  for (size_t i = 0; i < codes.size(); ++i) ASSERT_EQ(codes[i], i) << i;
+}
+
+TEST(PackedNccCostMap, RejectsEachInvalidDomain) {
+  for (const float invalid : {-0.1f,
+                              2.1f,
+                              std::numeric_limits<float>::infinity(),
+                              -std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+    PackedNccCostMap map(1, 1, 1);
+    WriteNccCost<<<1, 1>>>(map.View(), invalid);
+    CUDA_SYNC_AND_CHECK();
+    EXPECT_ANY_THROW(map.CheckDomain());
+  }
+}
+
+TEST(PackedNccCostMap, RotatesOddPlanesWithBoundedScratch) {
+  for (const auto [width, height] :
+       {std::pair<size_t, size_t>{7, 5}, {257, 3}, {3, 257}}) {
+    for (const size_t kSources : {size_t{1}, size_t{2}, size_t{3}}) {
+      PackedNccCostMap map(width, height, kSources);
+      const size_t capacity = map.GetCapacityBytes();
+      std::vector<uint16_t> expected(width * height * kSources);
+      for (size_t i = 0; i < expected.size(); ++i)
+        expected[i] = static_cast<uint16_t>(i % 65536);
+      const auto view = map.View().codes;
+      CUDA_SAFE_CALL(cudaMemcpy2D(view.ptr,
+                                  view.pitch,
+                                  expected.data(),
+                                  width * sizeof(uint16_t),
+                                  width * sizeof(uint16_t),
+                                  height * kSources,
+                                  cudaMemcpyHostToDevice));
+      PatchMatchHmmCheckpoint scratch(width, height, kSources);
+      const size_t scratch_bytes = scratch.GetCapacityBytes();
+      const size_t next_plane =
+          ((height * sizeof(uint16_t) + 511) / 512 * 512) * width;
+      EXPECT_ANY_THROW(
+          map.RotateWithPlaneScratch(scratch.GetPtr(), next_plane - 1));
+      EXPECT_ANY_THROW(map.RotateWithPlaneScratch(view.ptr + 1, scratch_bytes));
+      EXPECT_EQ(map.GetWidth(), width);
+      EXPECT_EQ(map.GetHeight(), height);
+      size_t w = width, h = height;
+      for (size_t turn = 0; turn < 4; ++turn) {
+        std::vector<uint16_t> rotated(expected.size());
+        for (size_t source = 0; source < kSources; ++source)
+          for (size_t row = 0; row < h; ++row)
+            for (size_t col = 0; col < w; ++col)
+              rotated[(source * w + (w - 1 - col)) * h + row] =
+                  expected[(source * h + row) * w + col];
+        map.RotateWithPlaneScratch(scratch.GetPtr(), scratch_bytes);
+        std::swap(w, h);
+        expected.swap(rotated);
+        ASSERT_EQ(NccCodes(map), expected);
+        EXPECT_EQ(map.GetCapacityBytes(), capacity);
+        EXPECT_EQ(map.GetWidth(), w);
+        EXPECT_EQ(map.GetHeight(), h);
+      }
+      EXPECT_NO_THROW(map.CheckDomain());
+      EXPECT_ANY_THROW(map.Reorient(width + 1, height));
+    }
+  }
+}
+
+TEST(PackedNccCostMap, RejectsInvalidOrOverflowingDimensions) {
+  EXPECT_ANY_THROW(PackedNccCostMap(0, 1, 1));
+  EXPECT_ANY_THROW(PackedNccCostMap(1, 0, 1));
+  EXPECT_ANY_THROW(PackedNccCostMap(1, 1, 0));
+  EXPECT_ANY_THROW(PackedNccCostMap(std::numeric_limits<size_t>::max(), 1, 1));
+  EXPECT_ANY_THROW(PackedNccCostMap(1, 1, std::numeric_limits<size_t>::max()));
+}
+#endif
 
 }  // namespace mvs
 }  // namespace colmap

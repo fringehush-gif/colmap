@@ -130,6 +130,7 @@ if(CUDA_ENABLED)
             patch_match_cuda.h patch_match_cuda.cu
             patch_match_source_array.h patch_match_source_array.cc
             patch_match_state_map.h
+            packed_ncc_cost_map.h
             patch_match_hmm_checkpoint.h
             patch_match_rng_perimeter.h
             packed_consistency_mask.h
@@ -335,6 +336,7 @@ if(HIP_ENABLED)
             patch_match_cuda.h patch_match_cuda.cu
             patch_match_source_array.h patch_match_source_array.cc
             patch_match_state_map.h
+            packed_ncc_cost_map.h
             patch_match_hmm_checkpoint.h
             patch_match_rng_perimeter.h
             packed_consistency_mask.h

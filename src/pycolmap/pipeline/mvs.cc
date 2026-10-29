@@ -175,6 +175,11 @@ void BindMVS(py::module& m) {
               "Retain rotated GPU buffers between sweeps. CUDA only; "
               "uses additional GPU memory.")
           .def_readwrite(
+              "ncc_cost_unorm16",
+              &PMOpts::ncc_cost_unorm16,
+              "Lossy UNORM16 storage of persisted NCC costs in [0,2]; FP32 "
+              "proposal/math. Requires CUDA, checkpoint_hmm, radius 5, step 1.")
+          .def_readwrite(
               "checkpoint_hmm",
               &PMOpts::checkpoint_hmm,
               "Reduce GPU memory by replaying backward HMM messages from "
