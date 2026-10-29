@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026, COLMAP contributors.
 
-#include "MultiThreading.h"
-#include "SparseMatrix.h"
-
-#include <gtest/gtest.h>
-
+#include <array>
 #include <cstddef>
 #include <utility>
+
+#include "MultiThreading.h"
+#include "SparseMatrix.h"
+#include <gtest/gtest.h>
 
 namespace {
 
@@ -99,6 +99,141 @@ TEST(SparseMatrixMoveTest, SelfMovePreservesMatrix) {
   matrix.resize(7);
   Fill(matrix);
   ExpectFilled(matrix, 7);
+}
+
+constexpr std::array<size_t, 4> kCopyRowSizes{2, 0, 1, 3};
+using ConvertedMatrix = PoissonRecon::SparseMatrix<double, long long, 27>;
+
+template <typename MatrixType>
+void FillCopyFixture(MatrixType& matrix) {
+  ASSERT_EQ(matrix.rows(), kCopyRowSizes.size());
+  for (size_t row = 0; row < matrix.rows(); ++row) {
+    matrix.setRowSize(row, kCopyRowSizes[row]);
+    for (size_t entry = 0; entry < matrix.rowSize(row); ++entry) {
+      matrix[row][entry].N = static_cast<int>((row + entry) % matrix.rows());
+      matrix[row][entry].Value = static_cast<float>(10 * row + entry) + 0.25f;
+    }
+  }
+}
+
+template <typename MatrixType>
+void ExpectCopyFixture(const MatrixType& matrix) {
+  ASSERT_EQ(matrix.rows(), kCopyRowSizes.size());
+  for (size_t row = 0; row < matrix.rows(); ++row) {
+    ASSERT_EQ(matrix.rowSize(row), kCopyRowSizes[row]);
+    for (size_t entry = 0; entry < matrix.rowSize(row); ++entry) {
+      EXPECT_EQ(matrix[row][entry].N, (row + entry) % matrix.rows());
+      EXPECT_EQ(matrix[row][entry].Value, 10 * row + entry + 0.25);
+    }
+  }
+}
+
+template <typename MatrixType>
+void FillCopyDestination(MatrixType& matrix) {
+  for (size_t row = 0; row < matrix.rows(); ++row) {
+    matrix.setRowSize(row, 27);
+    for (size_t entry = 0; entry < matrix.rowSize(row); ++entry) {
+      matrix[row][entry].N = -1;
+      matrix[row][entry].Value = -99;
+    }
+  }
+}
+
+TEST(SparseMatrixCopyTest, ConstructorsPreserveRowsAndOwnStorage) {
+  Matrix source(4);
+  FillCopyFixture(source);
+  const Matrix copy(source);
+  const ConvertedMatrix converted(source);
+  source[0][0].N = 3;
+  source[0][0].Value = -7;
+  ExpectCopyFixture(copy);
+  ExpectCopyFixture(converted);
+}
+
+TEST(SparseMatrixCopyTest, AssignmentPreservesRowsAcrossCapacities) {
+  Matrix source(4);
+  FillCopyFixture(source);
+  for (const size_t rows : std::array<size_t, 3>{2, 4, 8}) {
+    Matrix copy(rows);
+    ConvertedMatrix converted(rows);
+    FillCopyDestination(copy);
+    FillCopyDestination(converted);
+    EXPECT_EQ(&(copy = source), &copy);
+    EXPECT_EQ(&(converted = source), &converted);
+    ExpectCopyFixture(copy);
+    ExpectCopyFixture(converted);
+    copy[0][0].Value = -7;
+    converted[0][0].Value = -8;
+    EXPECT_EQ(source[0][0].Value, 0.25f);
+  }
+}
+
+TEST(SparseMatrixCopyTest, SelfAssignmentPreservesRows) {
+  Matrix matrix(4);
+  FillCopyFixture(matrix);
+  const Matrix& alias = matrix;
+  matrix = alias;
+  ExpectCopyFixture(matrix);
+  EXPECT_EQ(&(matrix.template operator= <float, int>(alias)), &matrix);
+  ExpectCopyFixture(matrix);
+}
+
+TEST(SparseMatrixCopyTest, EmptyCopiesAndCopyAfterMove) {
+  Matrix source(4);
+  FillCopyFixture(source);
+  const Matrix moved(std::move(source));
+  Matrix copy(moved);
+  ConvertedMatrix converted(moved);
+  ExpectCopyFixture(copy);
+  ExpectCopyFixture(converted);
+  source.resize(4);
+  FillCopyFixture(source);
+  ExpectCopyFixture(source);
+  const Matrix empty;
+  const Matrix empty_copy(empty);
+  const ConvertedMatrix empty_converted(empty);
+  EXPECT_EQ(empty_copy.rows(), 0);
+  EXPECT_EQ(empty_converted.rows(), 0);
+  copy = empty;
+  converted = empty;
+  EXPECT_EQ(copy.rows(), 0);
+  EXPECT_EQ(converted.rows(), 0);
+}
+
+using UnboundedMatrix = PoissonRecon::SparseMatrix<float, int>;
+using ConvertedUnboundedMatrix = PoissonRecon::SparseMatrix<double, long long>;
+
+TEST(SparseMatrixCopyTest, UnboundedSelfCopiesPreserveRows) {
+  UnboundedMatrix matrix(4);
+  const UnboundedMatrix& alias = matrix;
+  FillCopyFixture(matrix);
+  matrix = alias;
+  ExpectCopyFixture(matrix);
+  FillCopyFixture(matrix);
+  EXPECT_EQ(&matrix.copy(alias), &matrix);
+  ExpectCopyFixture(matrix);
+  FillCopyFixture(matrix);
+  EXPECT_EQ(&(matrix.template operator= <float, int>(alias)), &matrix);
+  ExpectCopyFixture(matrix);
+}
+
+TEST(SparseMatrixCopyTest, UnboundedNonAliasingCopiesOwnStorage) {
+  UnboundedMatrix source(4);
+  FillCopyFixture(source);
+  const UnboundedMatrix copy(source);
+  const ConvertedUnboundedMatrix converted(source);
+  UnboundedMatrix assigned(2);
+  ConvertedUnboundedMatrix converted_assigned(8);
+  ConvertedUnboundedMatrix explicitly_copied;
+  assigned = source;
+  converted_assigned = source;
+  explicitly_copied.copy(source);
+  source[0][0].Value = -7;
+  ExpectCopyFixture(copy);
+  ExpectCopyFixture(converted);
+  ExpectCopyFixture(assigned);
+  ExpectCopyFixture(converted_assigned);
+  ExpectCopyFixture(explicitly_copied);
 }
 
 }  // namespace
