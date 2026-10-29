@@ -14,6 +14,7 @@
 #include "thirdparty/PoissonRecon/Geometry.h"
 #include "thirdparty/PoissonRecon/PolygonIndexChain.h"
 #include "thirdparty/PoissonRecon/RegularTree.h"
+#include "thirdparty/PoissonRecon/SurfaceTrimmer.h"
 #include "thirdparty/PoissonRecon/normal_capture.h"
 #include "thirdparty/PoissonRecon/trim_gpu_adapter.h"
 
@@ -39,6 +40,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -48,6 +50,7 @@
 #include <list>
 #include <locale>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -207,10 +210,133 @@ TEST(PoissonMeshing, WithTrimming) {
 
   EXPECT_TRUE(PoissonMeshing(options, input_path, output_path));
   EXPECT_TRUE(ExistsFile(output_path));
-  const std::vector<PlyPoint> mesh_vertices = ReadPly(output_path);
-  // With random data and trimming, we can't make strong assumptions about
-  // the number of vertices, but reading the file ensures valid PLY format.
-  EXPECT_GE(mesh_vertices.size(), 0);
+  // The trimmed random mesh may be empty; still verify it can be read.
+  EXPECT_NO_THROW(ReadPly(output_path));
+}
+
+bool WriteTrimFixture(const std::filesystem::path& path) {
+  std::ofstream output(path);
+  output << "ply\nformat ascii 1.0\nelement vertex 12\n"
+            "property float x\nproperty float y\nproperty float z\n"
+            "property float value\nelement face 4\n"
+            "property list uchar int vertex_indices\nend_header\n"
+            "0 0 0 0\n2 0 0 2\n0 2 0 2\n"
+            "10 0 0 2\n12 0 0 2\n10 2 0 2\n"
+            "20 0 0 0\n22 0 0 0\n20 2 0 0\n"
+            "30 0 0 2\n30.125 0 0 2\n30 0.125 0 2\n"
+            "3 0 1 2\n3 3 4 5\n3 6 7 8\n3 9 10 11\n";
+  output.close();
+  return output.good();
+}
+
+void CheckTrimSurface(const bool polygon_mesh, const bool remove_islands) {
+  const auto test_dir = CreateTestDir();
+  const auto input_path = test_dir / "trim-input.ply";
+  const auto output_path = test_dir / "trim-output.ply";
+  ASSERT_TRUE(WriteTrimFixture(input_path));
+  const std::string old_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(([&]() {
+                PoissonRecon::ThreadPool::ParallelizationType =
+                    PoissonRecon::ThreadPool::NONE;
+                PoissonRecon::ThreadPool::SetNumThreads(1);
+                std::vector<std::string> args = {"SurfaceTrimmer",
+                                                 "--in",
+                                                 input_path.string(),
+                                                 "--out",
+                                                 output_path.string(),
+                                                 "--trim",
+                                                 "1",
+                                                 "--aRatio",
+                                                 "0.01",
+                                                 "--ascii"};
+                if (polygon_mesh) args.emplace_back("--polygonMesh");
+                if (remove_islands) args.emplace_back("--removeIslands");
+                std::vector<char*> argv;
+                for (std::string& arg : args) argv.push_back(arg.data());
+                std::_Exit(RunSurfaceTrimmer(static_cast<int>(argv.size()),
+                                             argv.data()));
+              }()),
+              ::testing::ExitedWithCode(0),
+              "");
+  GTEST_FLAG_SET(death_test_style, old_style);
+  ASSERT_TRUE(ExistsFile(output_path));
+  if (polygon_mesh) {
+    const auto vertices = ReadPly(output_path);
+    EXPECT_EQ(vertices.size(), 10);
+    std::ifstream input(output_path);
+    ASSERT_TRUE(input.is_open());
+    std::string line;
+    bool found_face_count = false;
+    while (std::getline(input, line) && line != "end_header") {
+      if (line == "element face 3") found_face_count = true;
+    }
+    ASSERT_TRUE(found_face_count);
+    ASSERT_EQ(line, "end_header");
+    for (size_t i = 0; i < vertices.size(); ++i) {
+      ASSERT_TRUE(static_cast<bool>(std::getline(input, line)));
+    }
+    size_t quads = 0;
+    double area = 0;
+    for (int face = 0; face < 3; ++face) {
+      ASSERT_TRUE(static_cast<bool>(std::getline(input, line)));
+      std::istringstream row(line);
+      size_t count = 0;
+      ASSERT_TRUE(static_cast<bool>(row >> count));
+      ASSERT_TRUE(count == 3 || count == 4);
+      quads += count == 4;
+      std::vector<size_t> indices(count);
+      for (size_t& index : indices) {
+        ASSERT_TRUE(static_cast<bool>(row >> index));
+        ASSERT_LT(index, vertices.size());
+      }
+      const auto& a = vertices[indices[0]];
+      for (size_t i = 1; i + 1 < count; ++i) {
+        const auto& b = vertices[indices[i]];
+        const auto& c = vertices[indices[i + 1]];
+        area += 0.5 *
+                std::abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+      }
+    }
+    EXPECT_EQ(quads, 1);
+    EXPECT_DOUBLE_EQ(area, 3.5078125);
+    return;
+  }
+  const auto mesh = ReadPlyMesh(output_path).mesh;
+  EXPECT_EQ(mesh.vertices.size(), remove_islands ? 7 : 10);
+  EXPECT_EQ(mesh.faces.size(), remove_islands ? 3 : 4);
+  bool cut_x = false;
+  bool cut_y = false;
+  for (const auto& vertex : mesh.vertices) {
+    EXPECT_TRUE(std::isfinite(vertex.x));
+    EXPECT_TRUE(std::isfinite(vertex.y));
+    EXPECT_FLOAT_EQ(vertex.z, 0.0f);
+    EXPECT_FALSE(vertex.x >= 20.0f && vertex.x < 30.0f);
+    cut_x |= vertex.x == 1.0f && vertex.y == 0.0f;
+    cut_y |= vertex.x == 0.0f && vertex.y == 1.0f;
+  }
+  EXPECT_TRUE(cut_x);
+  EXPECT_TRUE(cut_y);
+  double area = 0;
+  for (const auto& face : mesh.faces) {
+    ASSERT_LT(face.vertex_idx1, mesh.vertices.size());
+    ASSERT_LT(face.vertex_idx2, mesh.vertices.size());
+    ASSERT_LT(face.vertex_idx3, mesh.vertices.size());
+    const auto& a = mesh.vertices[face.vertex_idx1];
+    const auto& b = mesh.vertices[face.vertex_idx2];
+    const auto& c = mesh.vertices[face.vertex_idx3];
+    area +=
+        0.5 * std::abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+  }
+  EXPECT_DOUBLE_EQ(area, remove_islands ? 3.5 : 3.5078125);
+}
+
+TEST(PoissonMeshing, TrimSurfaceTriangles) { CheckTrimSurface(false, false); }
+
+TEST(PoissonMeshing, TrimSurfacePolygons) { CheckTrimSurface(true, false); }
+
+TEST(PoissonMeshing, TrimSurfaceRemoveIslands) {
+  CheckTrimSurface(false, true);
 }
 
 template <unsigned int Depth>
