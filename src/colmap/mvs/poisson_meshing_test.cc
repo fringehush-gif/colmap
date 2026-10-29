@@ -19,6 +19,15 @@
 // NestedVector requires stream declarations supplied by RegularTree.
 #include "thirdparty/PoissonRecon/NestedVector.h"
 
+// Exercise the host-only auxiliary scale diagnostic seam without a GPU.
+#ifndef POISSON_AUX_NATIVE_GPU
+#define POISSON_AUX_NATIVE_GPU
+#define POISSON_AUX_NATIVE_DECL
+#include "thirdparty/PoissonRecon/native_aux.h.inc"
+#undef POISSON_AUX_NATIVE_DECL
+#undef POISSON_AUX_NATIVE_GPU
+#endif
+
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
 #include "thirdparty/PoissonRecon/aux_gpu.h"
 #include "thirdparty/PoissonRecon/normal_capture.h"
@@ -50,6 +59,46 @@
 namespace colmap {
 namespace mvs {
 namespace {
+
+struct AuxDiagnosticNode {};
+struct AuxDiagnosticTree {
+  AuxDiagnosticNode node;
+  AuxDiagnosticTree& tree() { return *this; }
+  template <typename Fn>
+  void processNodes(Fn fn) {
+    fn(&node);
+  }
+};
+
+TEST(PoissonMeshing, AuxiliaryScaleDiagnosticsRequireVerify) {
+  for (const bool verify : {false, true}) {
+    AuxDiagnosticTree tree;
+    AuxNativeScale::Scope scope(&tree, true);
+    scope.nodes_.push_back(&tree.node);
+    scope.ready_ = true;
+    scope.verify_ = verify;
+    int visits = 0;
+    auto field = [](const AuxDiagnosticNode*) { return true; };
+    auto apply = [&visits](const AuxDiagnosticNode*) { ++visits; };
+    testing::internal::CaptureStderr();
+    bool applied;
+    try {
+      applied = scope.Apply<AuxDiagnosticNode>(tree, field, apply);
+    } catch (...) {
+      testing::internal::GetCapturedStderr();
+      throw;
+    }
+    const std::string output = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(applied);
+    EXPECT_EQ(visits, 1);
+    if (verify) {
+      EXPECT_NE(output.find("# AuxScaleVerify"), std::string::npos);
+      EXPECT_NE(output.find("# AuxScaleTraversal"), std::string::npos);
+    } else {
+      EXPECT_TRUE(output.empty());
+    }
+  }
+}
 
 void WriteRandomPlyPoints(const std::filesystem::path& path,
                           int num_points = 100) {
