@@ -1155,6 +1155,22 @@ __global__ void SweepFromTopToBottom(
                                          options.incident_angle_sigma);
 
   const int source_stride = global_workspace.GetWidth();
+  // Keep the per-row source distribution beside its cooperating source workers.
+  // Larger source sets retain the existing workspace and arithmetic order.
+  constexpr int kSharedSamplingSources = 32;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 860 && \
+    !defined(COLMAP_HIP_ENABLED)
+  constexpr bool kSharedSampling = kCooperative && kBlockWidth == 8 &&
+                                   kWindowSize == 11 && kWindowStep == 1 &&
+                                   kSourceJobGroups == 4 && kCheckpointHmm;
+#else
+  constexpr bool kSharedSampling = false;
+#endif
+  __shared__ float
+      shared_sampling_probs[kSharedSampling ? kSharedSamplingSources : 1]
+                           [kSharedSampling ? kBlockWidth : 1];
+  const bool use_shared_sampling =
+      kSharedSampling && cost_map.GetDepth() <= kSharedSamplingSources;
   float* forward_message = nullptr;
   float* sampling_probs = nullptr;
   if (col < cost_map.GetWidth()) {
@@ -1432,8 +1448,12 @@ __global__ void SweepFromTopToBottom(
         const float res_prob =
             likelihood_computer.ComputeResolutionProb<kWindowSize>(H, row, col);
 
-        sampling_probs[image_idx * source_stride] =
-            sel_prob * tri_prob * inc_prob * res_prob;
+        const float sampling_prob = sel_prob * tri_prob * inc_prob * res_prob;
+        if (use_shared_sampling) {
+          shared_sampling_probs[image_idx][threadIdx.x] = sampling_prob;
+        } else {
+          sampling_probs[image_idx * source_stride] = sampling_prob;
+        }
       }
     }
     if constexpr (kCooperative) {
@@ -1441,7 +1461,13 @@ __global__ void SweepFromTopToBottom(
       __syncthreads();
     }
     if (owner && col < cost_map.GetWidth()) {
-      TransformPDFToCDF(sampling_probs, cost_map.GetDepth(), source_stride);
+      if (use_shared_sampling) {
+        TransformPDFToCDF(&shared_sampling_probs[0][threadIdx.x],
+                          cost_map.GetDepth(),
+                          kBlockWidth);
+      } else {
+        TransformPDFToCDF(sampling_probs, cost_map.GetDepth(), source_stride);
+      }
 
       // Compute matching cost using Monte Carlo sampling of source images.
       // Images with higher selection probability are more likely to be sampled.
@@ -1504,7 +1530,10 @@ __global__ void SweepFromTopToBottom(
             const float rand_prob = curand_uniform(&rand_state) - FLT_EPSILON;
             for (int image_idx = 0; image_idx < cost_map.GetDepth();
                  ++image_idx) {
-              const float prob = sampling_probs[image_idx * source_stride];
+              const float prob =
+                  use_shared_sampling
+                      ? shared_sampling_probs[image_idx][threadIdx.x]
+                      : sampling_probs[image_idx * source_stride];
               if (prob > rand_prob) {
                 pcc_computer.src_image_idx = image_idx;
                 break;
