@@ -8,8 +8,8 @@
 
 namespace colmap {
 
-// Prepared only by an explicitly requested native N16ROT caller. A non-null
-// original has passed its fixed checksum even if the native snapshot is absent.
+// Prepared only by an explicitly requested native N16ROT caller. Both model
+// snapshots are returned together after their fixed checksums pass.
 struct AlikedNativeModelData {
   std::shared_ptr<const std::vector<char>> original;
   std::shared_ptr<const std::vector<char>> native;

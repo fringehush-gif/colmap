@@ -2,6 +2,8 @@
 
 Pristine `8dd74ef6ca84a0950e5b181df26c6e78e56d73d6` versus custom `d4d5f2fdf74eb79ced79755afcbe638eb4942791`, measured 2026-10-25. These are cumulative build comparisons across seven fresh native stages. This report adds measurements and validation, not an algorithm change.
 
+Here, pristine means upstream COLMAP source. Both main-host arms used the same custom Ceres build; these speedups do not measure stock Ceres versus custom Ceres.
+
 ## Fountain — 1536 px
 
 | Hardware | Pristine s | Custom s | Speedup | Less time |
