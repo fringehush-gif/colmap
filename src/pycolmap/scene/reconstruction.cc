@@ -276,7 +276,8 @@ void BindReconstruction(py::module& m) {
            "Extract colors for all 3D points by computing the mean color of "
            "all images.",
            "path"_a,
-           "num_threads"_a = -1)
+           "num_threads"_a = -1,
+           py::call_guard<py::gil_scoped_release>())
       .def("create_image_dirs",
            &Reconstruction::CreateImageDirs,
            "path"_a,
