@@ -89,7 +89,7 @@ namespace PLY
 		std::vector< std::string > elist;
 		float version;
 
-		PlyFile *ply = PlyFile::Read( fileName , elist , fileType , version );
+		std::unique_ptr< PlyFile > ply( PlyFile::Read( fileName , elist , fileType , version ) );
 		if( !ply ) MK_THROW( "Could not open ply file for reading: " , fileName );
 
 		elems.resize( elist.size() );
@@ -102,7 +102,7 @@ namespace PLY
 		comments.resize( ply->comments.size() );
 		for( int i=0 ; i<ply->comments.size() ; i++ ) comments[i] = ply->comments[i];
 
-		return ply;
+		return ply.release();
 	}
 
 	inline PlyFile *WriteHeader( std::string fileName , int fileType , const std::vector< std::tuple< std::string , size_t , std::vector< PlyProperty > > > &elems , const std::vector< std::string > &comments )
@@ -147,7 +147,7 @@ namespace PLY
 		std::vector< std::string > elist;
 		float version;
 
-		PlyFile *ply = PlyFile::Read( fileName , elist , fileType , version );
+		std::unique_ptr< PlyFile > ply( PlyFile::Read( fileName , elist , fileType , version ) );
 		if( !ply ) MK_THROW( "could not create read ply file: " , fileName );
 
 		for( int i=0 ; i<(int)elist.size() ; i++ ) if( elist[i]=="vertex" ) for( unsigned int j=0 ; j<vFactory.plyReadNum() ; j++ )
@@ -158,7 +158,6 @@ namespace PLY
 			readFlags[j] = ( ply->get_property( elist[i] , &prop )!=0 );
 		}
 
-		delete ply;
 		return fileType;
 	}
 
@@ -169,7 +168,7 @@ namespace PLY
 		std::vector< std::string > elist;
 		float version;
 
-		PlyFile *ply = PlyFile::Read( fileName, elist, fileType, version );
+		std::unique_ptr< PlyFile > ply( PlyFile::Read( fileName, elist, fileType, version ) );
 		if( !ply ) MK_THROW( "Failed to open ply file for reading: " , fileName );
 
 		std::vector< PlyProperty > plist = ply->get_element_description( "vertex" , vNum );
@@ -188,7 +187,6 @@ namespace PLY
 			}
 			if( !found ) unprocessedProperties.push_back( plist[i] );
 		}
-		delete ply;
 		return fileType;
 	}
 	template< typename VertexFactory >
@@ -204,12 +202,11 @@ namespace PLY
 		std::vector< std::string > elist;
 		float version;
 
-		PlyFile *ply = PlyFile::Read( fileName, elist, fileType, version );
+		std::unique_ptr< PlyFile > ply( PlyFile::Read( fileName, elist, fileType, version ) );
 		if( !ply ) MK_THROW( "Failed to open ply file for reading: " , fileName );
 
 		std::vector< PlyProperty > plist = ply->get_element_description( "vertex" , vNum );
 		for( int i=0 ; i<plist.size() ; i++ ) properties.push_back( plist[i] );
-		delete ply;
 		return fileType;
 	}
 
@@ -225,7 +222,7 @@ namespace PLY
 		std::vector< std::string > elist;
 		float version;
 
-		PlyFile *ply = PlyFile::Read( fileName , elist , file_type , version );
+		std::unique_ptr< PlyFile > ply( PlyFile::Read( fileName , elist , file_type , version ) );
 		if( !ply ) MK_THROW( "Could not create ply file for reading: " , fileName );
 
 		comments.reserve( comments.size() + ply->comments.size() );
@@ -276,7 +273,6 @@ namespace PLY
 			else ply->get_other_element( elem_name , num_elems );
 		}  // for each type of element
 
-		delete ply;
 	}
 
 	template< typename VertexFactory , typename Index >
@@ -285,7 +281,7 @@ namespace PLY
 		std::vector< std::string > elist;
 		float version;
 
-		PlyFile *ply = PlyFile::Read( fileName , elist , file_type , version );
+		std::unique_ptr< PlyFile > ply( PlyFile::Read( fileName , elist , file_type , version ) );
 		if( !ply ) MK_THROW( "Could not create ply file for reading: " , fileName );
 
 		comments.reserve( comments.size() + ply->comments.size() );
@@ -336,7 +332,6 @@ namespace PLY
 			else ply->get_other_element( elem_name , num_elems );
 		}  // for each type of element
 
-		delete ply;
 	}
 
 	template< typename VertexFactory , typename Index , bool UseCharIndex >
