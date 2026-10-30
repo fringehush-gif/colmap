@@ -124,6 +124,51 @@ TEST(PlyReaderTest, RejectsInvalidHeadersAndReadsValidFile) {
   EXPECT_EQ(names, std::vector<std::string>{"vertex"});
 }
 
+TEST(PlyReaderTest, ClosesFileAfterTruncatedBinaryBody) {
+  const auto path = colmap::CreateTestDir() / "truncated.ply";
+  {
+    std::ofstream output(path, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "ply\nformat binary_little_endian 1.0\n"
+              "element vertex 1\nproperty float x\nproperty float y\n"
+              "property float z\nend_header\n";
+    ASSERT_TRUE(output.good());
+  }
+#if defined(__linux__)
+  const auto expected = std::filesystem::canonical(path);
+  const auto count_open = [&]() {
+    size_t count = 0;
+    for (const auto& fd :
+         std::filesystem::directory_iterator("/proc/self/fd")) {
+      std::error_code error;
+      const auto target = std::filesystem::canonical(fd.path(), error);
+      if (!error && target == expected) ++count;
+    }
+    return count;
+  };
+#endif
+  for (bool read_edges : {false, true}) {
+#if defined(__linux__)
+    const size_t before = count_open();
+#endif
+    std::vector<Vertex> vertices;
+    std::vector<std::vector<int>> polygons;
+    std::vector<std::pair<int, int>> edges;
+    std::vector<std::string> comments;
+    int type = 0;
+    if (read_edges) {
+      EXPECT_ANY_THROW((PoissonRecon::PLY::ReadEdges<VertexFactory, int>(
+          path.string(), VertexFactory{}, vertices, edges, type, comments)));
+    } else {
+      EXPECT_ANY_THROW((PoissonRecon::PLY::ReadPolygons<VertexFactory, int>(
+          path.string(), VertexFactory{}, vertices, polygons, type, comments)));
+    }
+#if defined(__linux__)
+    EXPECT_EQ(count_open(), before);
+#endif
+  }
+}
+
 #if defined(__linux__)
 TEST(PlyWriterTest, ReportsDeferredWriteError) {
   const auto path = colmap::CreateTestDir() / "full.ply";
