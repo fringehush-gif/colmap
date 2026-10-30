@@ -407,6 +407,20 @@ struct StereoFusionExactDepthTestPeer {
     ring.soft_tiles.resize(8);
     ring.soft_index.reserve(9);
   }
+  static void EnableIndexedRing(StereoFusion& fusion) {
+    auto& ring = fusion.normal_tile_rings_.front();
+    ring.indexed = true;
+    ring.index.reserve(ring.tiles.size());
+    ring.last_slot_by_image.assign(1, ring.tiles.size());
+  }
+  static void ClearRing(StereoFusion& fusion) { fusion.ClearNormalTileRings(); }
+  static size_t RetainedOwners(const StereoFusion& fusion) {
+    size_t count = 0;
+    for (const auto& slot : fusion.normal_tile_rings_.front().tiles) {
+      if (slot.retained) ++count;
+    }
+    return count;
+  }
   static BoundedWorkspace& Cache(StereoFusion& fusion) {
     return *fusion.bounded_workspace_;
   }
@@ -581,20 +595,77 @@ TEST(StereoFusion, SoftNormalTilesAvoidSharedHitsAndRejectStaleHandles) {
   EXPECT_EQ(after->normal_tile_loads, 3);
   EXPECT_EQ(after->normal_tile_hits, before->normal_tile_hits);
   EXPECT_EQ(after->resident_bytes, before->resident_bytes);
-  EXPECT_EQ(fusion.GetNormalTileRingStats().soft_hits, 2);
+  EXPECT_EQ(fusion.GetNormalTileRingStats().soft_hits, 1);
+  EXPECT_EQ(fusion.GetNormalTileRingStats().hits, 1);
   {
     auto depth = StereoFusionExactDepthTestPeer::Cache(fusion).AcquireComponent(
         0, BoundedWorkspace::Component::kDepth);
     EXPECT_EQ(depth->depth_map.Get(0, 0), 5.0f);
   }
-  // The metadata table still holds A's old generation. Reload must reject it.
-  EXPECT_EQ(read(0, 0), expected(0, 0));
+  // A is now retained; demoted B was evicted for the depth load.
+  // Its old metadata must reject the retired generation before reloading.
+  EXPECT_EQ(read(0, 8), expected(0, 8));
   EXPECT_EQ(fusion.GetNormalTileRingStats().soft_expired, 1);
   const auto final = fusion.GetBoundedCacheStats();
   ASSERT_TRUE(final);
   EXPECT_EQ(final->normal_tile_loads, 4);
   EXPECT_EQ(final->reserved_bytes, 0);
   EXPECT_LE(final->peak_charged_bytes, final->capacity_bytes);
+}
+
+TEST(StereoFusion, SoftPromotionCyclesOwnersAndPreservesHardHits) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  for (bool indexed : {false, true}) {
+    auto base = CreateNormalTileRingFixture(true);
+    base.cache_size = 2304.0 / (1ULL << 30);
+    StereoFusionOptions options;
+    options.num_threads = 1;
+    options.cache_size = base.cache_size;
+    options.bounded_cache = options.bounded_cache_components = true;
+    options.bounded_cache_normal_tile_size = 8;
+    options.bounded_cache_normal_tile_slots = 2;
+    options.bounded_cache_normal_mapped_bytes = 1 << 20;
+    options.bounded_cache_normal_mapped_files = 1;
+    StereoFusion fusion(
+        options, base.workspace_path, "COLMAP", "", "geometric");
+    StereoFusionExactDepthTestPeer::PrepareRing(fusion, base, 2, false);
+    StereoFusionExactDepthTestPeer::EnableSoftRing(fusion);
+    if (indexed) StereoFusionExactDepthTestPeer::EnableIndexedRing(fusion);
+    const auto read = [&](int col) {
+      auto tile = StereoFusionExactDepthTestPeer::Acquire(fusion, 0, col);
+      EXPECT_TRUE(tile);
+      if (tile) {
+        EXPECT_EQ(tile->GetNormal(0, col),
+                  Eigen::Vector3f(col + 0.25f, -col - 0.5f, 1.0f));
+      }
+    };
+    for (int col : {0, 8, 16}) read(col);
+    for (int repeat = 0; repeat < 4; ++repeat) {
+      for (int col : {0, 8, 16}) {
+        read(col);  // Borrow the demoted resident generation into the victim
+                    // slot.
+        const auto before = fusion.GetNormalTileRingStats();
+        read(col);  // The promoted owner must now take the cheap hard-hit path.
+        const auto after = fusion.GetNormalTileRingStats();
+        EXPECT_EQ(after.hits, before.hits + 1);
+        EXPECT_EQ(after.soft_hits, before.soft_hits);
+        EXPECT_LE(StereoFusionExactDepthTestPeer::RetainedOwners(fusion), 2);
+      }
+    }
+    EXPECT_EQ(StereoFusionExactDepthTestPeer::RetainedOwners(fusion), 2);
+    const auto stats = fusion.GetBoundedCacheStats();
+    ASSERT_TRUE(stats);
+    EXPECT_EQ(stats->normal_tile_loads, 3);
+    EXPECT_EQ(stats->normal_tile_hits, 0);
+    EXPECT_EQ(stats->reserved_bytes, 0);
+    EXPECT_LE(stats->peak_charged_bytes, stats->capacity_bytes);
+    StereoFusionExactDepthTestPeer::ClearRing(fusion);
+    EXPECT_EQ(StereoFusionExactDepthTestPeer::RetainedOwners(fusion), 0);
+    // Cleanup releases both kinds of owners before another waiting load.
+    auto depth = StereoFusionExactDepthTestPeer::Cache(fusion).AcquireComponent(
+        0, BoundedWorkspace::Component::kDepth);
+    EXPECT_EQ(depth->depth_map.Get(0, 0), 5.0f);
+  }
 }
 
 TEST(StereoFusionOptions, FullRamLoadThreadPolicy) {
