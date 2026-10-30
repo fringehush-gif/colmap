@@ -4,6 +4,8 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -57,8 +59,8 @@ TEST(PlyWriterTest, VectorRoundTripBinaryAndAscii) {
   const auto dir = colmap::CreateTestDir();
   const std::vector<Vertex> vertices = {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}};
   const std::vector<std::vector<int>> faces = {{0, 1, 2}};
-  for (const int type : {PLY_BINARY_NATIVE, PLY_ASCII}) {
-    const auto path = dir / (type == PLY_ASCII ? "ascii.ply" : "binary.ply");
+  for (const int type : {PLY_ASCII, PLY_BINARY_LE, PLY_BINARY_BE}) {
+    const auto path = dir / (std::to_string(type) + ".ply");
     PoissonRecon::PLY::WritePolygons<VertexFactory, int>(
         path.string(), VertexFactory{}, vertices, faces, type, {});
     std::vector<Vertex> decoded;
@@ -71,6 +73,7 @@ TEST(PlyWriterTest, VectorRoundTripBinaryAndAscii) {
                                                         decoded_faces,
                                                         read_type,
                                                         comments);
+    EXPECT_EQ(read_type, type);
     ASSERT_EQ(decoded.size(), vertices.size());
     EXPECT_EQ(decoded_faces, faces);
     for (size_t i = 0; i < vertices.size(); ++i) {
@@ -79,6 +82,46 @@ TEST(PlyWriterTest, VectorRoundTripBinaryAndAscii) {
       EXPECT_FLOAT_EQ(decoded[i].z, vertices[i].z);
     }
   }
+}
+
+TEST(PlyReaderTest, RejectsInvalidHeadersAndReadsValidFile) {
+  const auto dir = colmap::CreateTestDir();
+  const std::vector<std::string> headers = {
+      "not-ply\n", "ply\nformat unsupported 1.0\nend_header\n"};
+  for (size_t i = 0; i < headers.size(); ++i) {
+    const auto path = dir / ("invalid-" + std::to_string(i) + ".ply");
+    {
+      std::ofstream output(path, std::ios::binary);
+      ASSERT_TRUE(output.is_open());
+      output << headers[i];
+      ASSERT_TRUE(output.good());
+    }
+    int type = -7;
+    float version = -3;
+    std::vector<std::string> names;
+    std::unique_ptr<PoissonRecon::PlyFile> reader(
+        PoissonRecon::PlyFile::Read(path.string(), names, type, version));
+    EXPECT_EQ(reader, nullptr);
+    EXPECT_EQ(type, -7);
+    EXPECT_FLOAT_EQ(version, -3);
+  }
+
+  const auto valid = dir / "valid.ply";
+  {
+    std::ofstream output(valid, std::ios::binary);
+    ASSERT_TRUE(output.is_open());
+    output << "ply\nformat ascii 1.0\nelement vertex 0\nend_header\n";
+    ASSERT_TRUE(output.good());
+  }
+  int type = -7;
+  float version = -3;
+  std::vector<std::string> names;
+  std::unique_ptr<PoissonRecon::PlyFile> reader(
+      PoissonRecon::PlyFile::Read(valid.string(), names, type, version));
+  ASSERT_NE(reader, nullptr);
+  EXPECT_EQ(type, PLY_ASCII);
+  EXPECT_FLOAT_EQ(version, 1.0f);
+  EXPECT_EQ(names, std::vector<std::string>{"vertex"});
 }
 
 #if defined(__linux__)

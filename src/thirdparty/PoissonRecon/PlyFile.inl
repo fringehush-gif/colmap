@@ -532,16 +532,34 @@ returns a pointer to a PlyFile, used to refer to this file, or NULL if error
 
 PlyFile *PlyFile::_Read( FILE *fp , std::vector< std::string > &elem_names )
 {
+	return _ReadInternal( fp , elem_names , false );
+}
+
+PlyFile *PlyFile::_ReadInternal( FILE *fp , std::vector< std::string > &elem_names , bool filenameOwned )
+{
 	char *orig_line;
 	/* check for NULL file pointer */
 	if( fp==NULL ) return NULL;
+	std::unique_ptr< FILE , decltype(&fclose) > input( filenameOwned ? fp : NULL , &fclose );
 
 	if( native_binary_type==-1 ) get_native_binary_type();
 	if( !types_checked ) check_types();
 
 	/* create record for this object */
 	std::vector< std::string > words;
-	PlyFile *plyfile = new PlyFile( fp );
+	auto dispose = [filenameOwned]( PlyFile *reader )
+	{
+		if( reader && !filenameOwned ) reader->fp = NULL;
+		delete reader;
+	};
+	std::unique_ptr< PlyFile , decltype(dispose) > plyfile( new PlyFile( NULL ) , dispose );
+	plyfile->fp = filenameOwned ? input.release() : fp;
+	if( filenameOwned )
+	{
+		try { plyfile->_readBuffer.resize( 64 * 1024 ); }
+		catch( const std::bad_alloc & ) { /* Buffering is optional. */ }
+		if( !plyfile->_readBuffer.empty() ) setvbuf( plyfile->fp , plyfile->_readBuffer.data() , _IOFBF , plyfile->_readBuffer.size() );
+	}
 
 	/* read and parse the file's header */
 	words = get_words( plyfile->fp , &orig_line );
@@ -580,7 +598,7 @@ PlyFile *PlyFile::_Read( FILE *fp , std::vector< std::string > &elem_names )
 	for( int i=0 ; i<elem_names.size() ; i++ ) elem_names[i] = plyfile->elems[i].name;
 
 	/* return a pointer to the file's information */
-	return plyfile;
+	return plyfile.release();
 }
 
 
@@ -609,7 +627,8 @@ PlyFile *PlyFile::Read( const std::string &filename , std::vector< std::string >
 	if( fp==NULL ) return NULL;
 
 	/* create the PlyFile data structure */
-	PlyFile *plyfile = _Read( fp , elem_names );
+	PlyFile *plyfile = _ReadInternal( fp , elem_names , true );
+	if( !plyfile ) return NULL;
 
 	/* determine the file type and version */
 	file_type = plyfile->file_type;
