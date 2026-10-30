@@ -329,6 +329,8 @@ class StereoFusion : public BaseController {
     size_t misses = 0;
     size_t indexed_lookups = 0;
     size_t hint_checks = 0;
+    size_t soft_hits = 0;
+    size_t soft_expired = 0;
   };
   NormalTileRingStats GetNormalTileRingStats() const;
   std::optional<std::string> GetBoundedCacheDiagnosticRow() const;
@@ -346,10 +348,11 @@ class StereoFusion : public BaseController {
   bool PrepareDirectComponentPins();
   void ClearDirectComponentPins();
   void ClearNormalTileRings();
-  const BoundedWorkspace::ImageData* AcquireWorkerNormalTile(int thread_id,
-                                                             int image_idx,
-                                                             int row,
-                                                             int col);
+  struct NormalTileRead;
+  NormalTileRead AcquireWorkerNormalTile(int thread_id,
+                                         int image_idx,
+                                         int row,
+                                         int col);
   const ImmutableMapRegion* AcquireWorkerMappedNormal(int image_idx, int row);
   void ClearMappedNormalRing();
   void InitFusedPixelMask(int image_idx, size_t width, size_t height);
@@ -402,6 +405,15 @@ class StereoFusion : public BaseController {
   size_t direct_bitmap_borrows_ = 0;
   size_t max_bounded_prefill_lanes_scheduled_ = 0;
   using NormalTileKey = std::tuple<int, size_t, size_t>;
+  struct NormalTileRead {
+    const BoundedWorkspace::ImageData* data = nullptr;
+    BoundedWorkspace::TransientImageLease transient;
+    const BoundedWorkspace::ImageData* get() const noexcept { return data; }
+    const BoundedWorkspace::ImageData* operator->() const noexcept {
+      return data;
+    }
+    explicit operator bool() const noexcept { return data != nullptr; }
+  };
   struct NormalTileSlot {
     int image_idx = -1;
     NormalTileKey key{};
@@ -411,6 +423,14 @@ class StereoFusion : public BaseController {
     std::vector<NormalTileSlot> tiles;
     NodeHashMap<NormalTileKey, size_t, boost::hash<NormalTileKey>> index;
     std::vector<size_t> last_slot_by_image;
+    struct SoftSlot {
+      NormalTileKey key{};
+      BoundedWorkspace::ImageHandle handle;
+      bool valid = false;
+    };
+    std::vector<SoftSlot> soft_tiles;
+    NodeHashMap<NormalTileKey, size_t, boost::hash<NormalTileKey>> soft_index;
+    size_t soft_next = 0, soft_hits = 0, soft_expired = 0;
     bool indexed = false;
     size_t next = 0, hits = 0, misses = 0;
     size_t indexed_lookups = 0, hint_checks = 0;
