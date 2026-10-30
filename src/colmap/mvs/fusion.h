@@ -303,6 +303,18 @@ FusionPinIndices DepthPriorityFusionPins(
     const std::vector<size_t>& depth_bytes,
     const std::vector<size_t>& bitmap_bytes,
     size_t budget);
+// Decoded cache charges after excluding worker ring/demand headroom.
+struct FusionNormalWindowPins {
+  FusionPinIndices components;
+  std::vector<size_t> normal;
+  size_t largest_normal_extra = 0;
+};
+FusionNormalWindowPins NormalWindowFusionPins(
+    const std::vector<size_t>& depth_bytes,
+    const std::vector<size_t>& bitmap_bytes,
+    const std::vector<size_t>& normal_bytes,
+    const std::vector<size_t>& normal_reservations,
+    size_t budget);
 }  // namespace internal
 
 // Fuses per-view depth and normal maps into a consistent 3D point cloud.
@@ -348,6 +360,7 @@ class StereoFusion : public BaseController {
   bool PrepareDirectComponentPins();
   void ClearDirectComponentPins();
   void ClearNormalTileRings();
+  void ClearNormalPrefillWindow();
   struct NormalTileRead;
   NormalTileRead AcquireWorkerNormalTile(int thread_id,
                                          int image_idx,
@@ -377,6 +390,11 @@ class StereoFusion : public BaseController {
   BoundedWorkspace* bounded_workspace_ = nullptr;
   std::vector<const BoundedWorkspace::ImageData*> neighborhood_data_;
   std::vector<BoundedWorkspace::ImageLease> neighborhood_leases_;
+  // Published only after all selected full normals load. Rows borrow until the
+  // join; clear pointers before leases and before replacing the workspace.
+  std::vector<const BoundedWorkspace::ImageData*> normal_prefill_data_;
+  std::vector<BoundedWorkspace::ImageLease> normal_prefill_leases_;
+  size_t normal_prefill_admitted_views_ = 0;
   struct alignas(64) NeighborhoodReads {
     size_t pointer_reads = 0;
     size_t demand_acquires = 0;
@@ -446,6 +464,7 @@ class StereoFusion : public BaseController {
     bool indexed = false;
     size_t next = 0, hits = 0, misses = 0;
     size_t indexed_lookups = 0, hint_checks = 0;
+    size_t whole_normal_reads = 0;
   };
   std::vector<NormalTileRing> normal_tile_rings_;
   struct MappedNormalSlot {
