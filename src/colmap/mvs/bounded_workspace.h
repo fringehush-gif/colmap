@@ -82,6 +82,7 @@ class BoundedWorkspace : public Workspace {
 
    private:
     friend class ImageLease;
+    friend class TransientImageLease;
     friend struct BoundedWorkspaceTransientPinTestPeer;
     std::weak_ptr<const ImageData> ObservePayloadForTesting() const;
     ImageHandle(std::weak_ptr<CacheState> state,
@@ -90,8 +91,9 @@ class BoundedWorkspace : public Workspace {
     std::shared_ptr<CacheEntry> entry_;
   };
 
-  // Short-lived, move-only payload protection. Finish every read and reset
-  // before another potentially waiting cache or mapped-pool acquisition.
+  // Move-only payload protection. A bounded tile ring may retain one guard per
+  // admitted slot, releasing its victim before a potentially waiting acquire.
+  // Other callers must finish the read and reset before a waiting acquisition.
   class TransientImageLease {
    public:
     TransientImageLease() noexcept = default;
@@ -102,6 +104,7 @@ class BoundedWorkspace : public Workspace {
     ~TransientImageLease() {
       if (entry_) reset();
     }
+    ImageHandle GetHandle() const noexcept;
     const ImageData* get() const noexcept;
     const ImageData* operator->() const noexcept { return get(); }
     explicit operator bool() const noexcept { return get() != nullptr; }
