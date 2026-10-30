@@ -48,6 +48,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef PLY_INCLUDED
 #define PLY_INCLUDED
 
+#include <memory>
+#include <new>
 #include <vector>
 #include <string>
 #include <functional>

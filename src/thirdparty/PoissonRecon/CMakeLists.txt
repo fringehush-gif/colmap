@@ -39,3 +39,13 @@ if(TESTS_ENABLED AND OPENMP_FOUND)
     target_link_libraries(colmap_poisson_recon_sparse_matrix_test
         OpenMP::OpenMP_CXX)
 endif()
+
+# Exercise the private PLY writer independently of the Poisson executable.
+COLMAP_ADD_TEST(
+    NAME ply_writer_test
+    SRCS ply_writer_test.cc
+)
+if(TESTS_ENABLED AND OPENMP_FOUND)
+    target_link_libraries(colmap_poisson_recon_ply_writer_test
+        OpenMP::OpenMP_CXX)
+endif()
