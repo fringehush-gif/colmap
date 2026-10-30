@@ -20,6 +20,7 @@ COLMAP_ADD_LIBRARY(
         normal_map.h normal_map.cc
         patch_match_options.h patch_match_options.cc
         texture_mapping.h texture_mapping.cc
+        transient_pins.h
         workspace.h workspace.cc
     PUBLIC_LINK_LIBS
         colmap_util
