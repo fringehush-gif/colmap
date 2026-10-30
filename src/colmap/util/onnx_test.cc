@@ -11,9 +11,9 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <stdexcept>
 #include <vector>
 
-#include <glog/logging.h>
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -44,29 +44,6 @@ Ort::Value MakeTensor(std::vector<T>* data, const std::vector<int64_t>& shape) {
   return CreateONNXTensor(*data, shape);
 }
 
-class ErrorLogSink : public google::LogSink {
- public:
-  ErrorLogSink() { google::AddLogSink(this); }
-  ~ErrorLogSink() override { google::RemoveLogSink(this); }
-
-  void send(google::LogSeverity severity,
-            const char*,
-            const char*,
-            int,
-            const struct ::tm*,
-            const char*,
-            size_t) override {
-    if (severity >= google::GLOG_ERROR) {
-      ++num_error_logs_;
-    }
-  }
-
-  size_t NumErrorLogs() const { return num_error_logs_; }
-
- private:
-  size_t num_error_logs_ = 0;
-};
-
 TEST(ONNXExecutionProviderTest, Selection) {
   EXPECT_EQ(SelectONNXExecutionProvider(/*use_gpu=*/false),
             ONNXExecutionProvider::CPU);
@@ -80,6 +57,13 @@ TEST(ONNXExecutionProviderTest, Selection) {
   EXPECT_EQ(SelectONNXExecutionProvider(/*use_gpu=*/true),
             ONNXExecutionProvider::CPU);
 #endif
+}
+
+TEST(SelectONNXCudaDeviceTest, Nominal) {
+  EXPECT_EQ(SelectONNXCudaDevice("0"), 0);
+  EXPECT_EQ(SelectONNXCudaDevice("2"), 2);
+  EXPECT_EQ(SelectONNXCudaDevice("-1"), 0);
+  EXPECT_THROW(SelectONNXCudaDevice("0,1"), std::invalid_argument);
 }
 
 TEST(ONNXModelTest, MetadataAndInference) {
@@ -148,19 +132,18 @@ TEST(ONNXModelTest, InvalidInputTypeRethrows) {
   EXPECT_THROW(model.Run(inputs), Ort::Exception);
 }
 
-TEST(ONNXModelTest, CapabilityProbeRethrowsWithoutErrorLog) {
+TEST(ONNXModelTest, InvalidModelThrowsOrtException) {
+  // LoMa falls back to fp32 when initializing the bf16 models throws an
+  // Ort::Exception.
   const std::filesystem::path model_path = CreateTestDir() / "invalid.onnx";
   constexpr char kInvalidModel[] = "not an ONNX model";
   WriteBinaryBlob(model_path, {kInvalidModel, sizeof(kInvalidModel)});
 
-  ErrorLogSink log_sink;
   EXPECT_THROW(ONNXModel(model_path.string(),
                          /*num_threads=*/1,
                          /*use_gpu=*/false,
-                         /*gpu_index=*/"-1",
-                         /*is_capability_probe=*/true),
+                         /*gpu_index=*/"-1"),
                Ort::Exception);
-  EXPECT_EQ(log_sink.NumErrorLogs(), 0);
 }
 
 TEST(CreateONNXTensorTest, FloatVector) {
@@ -194,9 +177,9 @@ TEST(CreateONNXScalarTensorTest, Nominal) {
   EXPECT_EQ(*int_tensor.GetTensorData<int64_t>(), 7);
 }
 
-#if defined(COLMAP_CUDA_ENABLED) && ORT_API_VERSION >= 24
+#if defined(COLMAP_CUDA_ENABLED)
 
-std::filesystem::path WriteMixedProbeModel() {
+std::filesystem::path WriteMixedShapeModel() {
   // ONNX IR v8: float input X [N, 2] -> MatMul with identity initializer
   // W [2, 2] -> float output Y [N, 2]; Shape(X) -> int64 output S [2].
   // The identity weights make inference exact for any batch size.
@@ -221,30 +204,10 @@ std::filesystem::path WriteMixedProbeModel() {
   return path;
 }
 
-std::filesystem::path WriteCpuStringModel() {
-  // ONNX IR v8: string input X [1] -> StringNormalizer (locale "C") -> string
-  // output Y [N]. String computation has no CUDA kernel, so the probe must
-  // reject it as CPU compute rather than shape/index bookkeeping.
-  constexpr char kModel[] =
-      "\x08\x08\x3a\x6b\x0a\x34\x0a\x01\x58\x12\x01\x59"
-      "\x1a\x0a\x63\x70\x75\x5f\x73\x74\x72\x69\x6e\x67"
-      "\x22\x10\x53\x74\x72\x69\x6e\x67\x4e\x6f\x72\x6d"
-      "\x61\x6c\x69\x7a\x65\x72\x2a\x0e\x0a\x06\x6c\x6f"
-      "\x63\x61\x6c\x65\x22\x01\x43\xa0\x01\x03\x12\x10"
-      "\x63\x70\x75\x5f\x73\x74\x72\x69\x6e\x67\x5f\x67"
-      "\x72\x61\x70\x68\x5a\x0f\x0a\x01\x58\x12\x0a\x0a"
-      "\x08\x08\x08\x12\x04\x0a\x02\x08\x01\x62\x10\x0a"
-      "\x01\x59\x12\x0b\x0a\x09\x08\x08\x12\x05\x0a\x03"
-      "\x12\x01\x4e\x42\x02\x10\x0d";
-  const auto path = CreateTestDir() / "cpu-string.onnx";
-  WriteBinaryBlob(path, {kModel, sizeof(kModel) - 1});
-  return path;
-}
-
-TEST(ONNXModelTest, CudaCapabilityProbeAllowsShapeNodes) {
+TEST(ONNXModelTest, CudaSessionRunsShapeModel) {
   if (GetNumCudaDevices() == 0) GTEST_SKIP() << "CUDA device required";
-  // Dynamic X[batch,2]: MatMul stays on CUDA, Shape runs on CPU.
-  ONNXModel model(WriteMixedProbeModel().string(), 1, true, "0", true);
+  // Check inference outputs for dynamic X[batch,2] and its shape.
+  ONNXModel model(WriteMixedShapeModel().string(), 1, true, "0");
   EXPECT_EQ(model.execution_provider(), ONNXExecutionProvider::CUDA);
   std::vector<float> data{1.25f, -2.5f, 3.0f, 4.0f};
   std::vector<Ort::Value> inputs;
@@ -257,18 +220,6 @@ TEST(ONNXModelTest, CudaCapabilityProbeAllowsShapeNodes) {
   EXPECT_EQ(outputs[1].GetTensorData<int64_t>()[1], 2);
 }
 
-TEST(ONNXModelTest, CudaCapabilityProbeRejectsCpuCompute) {
-  if (GetNumCudaDevices() == 0) GTEST_SKIP() << "CUDA device required";
-  ErrorLogSink log_sink;
-  try {
-    ONNXModel model(WriteCpuStringModel().string(), 1, true, "0", true);
-    FAIL() << "Expected CPU compute fallback to be rejected";
-  } catch (const Ort::Exception& error) {
-    EXPECT_NE(std::string(error.what()).find("StringNormalizer"),
-              std::string::npos);
-  }
-  EXPECT_EQ(log_sink.NumErrorLogs(), 0);
-}
 #endif
 
 }  // namespace
