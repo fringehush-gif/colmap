@@ -8,6 +8,10 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/onnx.h"
 
+#ifdef COLMAP_CUDA_ENABLED
+#include "colmap/util/cuda.h"
+#endif
+
 #include <cstring>
 #include <memory>
 #include <string>
@@ -21,21 +25,26 @@ namespace {
 
 #ifdef COLMAP_ONNX_ENABLED
 
-#ifdef COLMAP_CUDA_ENABLED
-// Throws Ort::Exception when a BF16 model would run on a device without BF16
-// support, so the caller falls back to FP32. Session construction can
-// succeed on an older GPU even though the first matrix operation would fail,
-// and LoMa only falls back on construction failures -- so fail fast here.
-void ThrowIfLomaBf16Unsupported(const ONNXModel& model,
-                                const std::string& gpu_index) {
-  if (model.execution_provider() == ONNXExecutionProvider::CUDA &&
-      !CudaDeviceSupportsBf16(gpu_index)) {
-    throw Ort::Exception(
-        "LoMa BF16 requires CUDA compute capability 8.0 or newer",
-        ORT_NOT_IMPLEMENTED);
+// Whether to load the bf16 models instead of the fp32 models. They are only
+// faster on CUDA GPUs with native bf16 support. On older GPUs, creating the
+// session may succeed while inference fails, which the fp32 fallback on
+// initialization failures does not catch, so check the device up front.
+bool UseLomaBf16(bool use_bf16, bool use_gpu, const std::string& gpu_index) {
+  if (!use_bf16 ||
+      SelectONNXExecutionProvider(use_gpu) != ONNXExecutionProvider::CUDA) {
+    return false;
   }
-}
+#ifdef COLMAP_CUDA_ENABLED
+  const int device = SelectONNXCudaDevice(gpu_index);
+  if (CudaDeviceSupportsBf16(device)) {
+    return true;
+  }
+  LOG(WARNING) << "The bf16 LoMa models require a CUDA GPU with compute "
+                  "capability 8.0 or newer, which GPU "
+               << device << " is not; falling back to fp32";
 #endif
+  return false;
+}
 
 // Fast bilinear resample instead of Bitmap::Rescale()'s filtered resize --
 // see LomaExtractionOptions::use_fast_resize for the speed/accuracy tradeoff.
@@ -82,8 +91,7 @@ std::vector<float> ResizeToInputTensor(const Bitmap& bitmap,
 class LomaFeatureExtractor : public FeatureExtractor {
  public:
   LomaFeatureExtractor(const FeatureExtractionOptions& options,
-                       const std::string& descriptor_model_path,
-                       bool probe_descriptor_support = false)
+                       const std::string& descriptor_model_path)
       : options_(options),
         detector_(options.loma->detector_model_path,
                   options.num_threads,
@@ -92,13 +100,7 @@ class LomaFeatureExtractor : public FeatureExtractor {
         descriptor_(descriptor_model_path,
                     options.num_threads,
                     options.use_gpu,
-                    options.gpu_index,
-                    probe_descriptor_support) {
-#ifdef COLMAP_CUDA_ENABLED
-    if (probe_descriptor_support) {
-      ThrowIfLomaBf16Unsupported(descriptor_, options.gpu_index);
-    }
-#endif
+                    options.gpu_index) {
     THROW_CHECK(options.Check());
 
     // Detector: image [1, 3, H, W], num_keypoints [1] (int64, runtime input --
@@ -281,21 +283,14 @@ class LomaFeatureMatcher : public FeatureMatcher {
  public:
   LomaFeatureMatcher(const FeatureMatchingOptions& options,
                      const std::string& model_path,
-                     FeatureExtractorType expected_extractor_type,
-                     bool probe_model_support = false)
+                     FeatureExtractorType expected_extractor_type)
       : options_(options),
         loma_options_(*options.loma),
         expected_extractor_type_(expected_extractor_type),
         model_(model_path,
                options.num_threads,
                options.use_gpu,
-               options.gpu_index,
-               probe_model_support) {
-#ifdef COLMAP_CUDA_ENABLED
-    if (probe_model_support) {
-      ThrowIfLomaBf16Unsupported(model_, options.gpu_index);
-    }
-#endif
+               options.gpu_index) {
     THROW_CHECK(options.Check());
     THROW_CHECK_EQ(model_.input_shapes().size(), 4);
     THROW_CHECK_GE(model_.output_shapes().size(), 2);
@@ -435,12 +430,11 @@ std::unique_ptr<FeatureExtractor> CreateLomaFeatureExtractor(
 #ifdef COLMAP_ONNX_ENABLED
   switch (options.type) {
     case FeatureExtractorType::LOMA_B: {
-      if (options.loma->use_bf16) {
+      if (UseLomaBf16(
+              options.loma->use_bf16, options.use_gpu, options.gpu_index)) {
         try {
           return std::make_unique<LomaFeatureExtractor>(
-              options,
-              options.loma->descriptor_model_path_bf16,
-              /*probe_descriptor_support=*/true);
+              options, options.loma->descriptor_model_path_bf16);
         } catch (const Ort::Exception& e) {
           LOG(WARNING) << "Failed to initialize the bf16 LoMa descriptor ("
                        << e.what() << "); falling back to fp32";
@@ -473,12 +467,10 @@ std::unique_ptr<FeatureMatcher> CreateLomaVariantMatcher(
     const FeatureMatchingOptions& options,
     const LomaMatchingOptions::Variant& variant,
     FeatureExtractorType expected_extractor_type) {
-  if (options.loma->use_bf16) {
+  if (UseLomaBf16(options.loma->use_bf16, options.use_gpu, options.gpu_index)) {
     try {
-      return std::make_unique<LomaFeatureMatcher>(options,
-                                                  variant.model_path_bf16,
-                                                  expected_extractor_type,
-                                                  /*probe_model_support=*/true);
+      return std::make_unique<LomaFeatureMatcher>(
+          options, variant.model_path_bf16, expected_extractor_type);
     } catch (const Ort::Exception& e) {
       LOG(WARNING) << "Failed to initialize the bf16 LoMa matcher (" << e.what()
                    << "); falling back to fp32";

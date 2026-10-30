@@ -21,6 +21,11 @@ enum class ONNXExecutionProvider {
 // Resolve the execution provider requested by `use_gpu` for this build.
 ONNXExecutionProvider SelectONNXExecutionProvider(bool use_gpu);
 
+// Resolve the CUDA device on which an ONNXModel with the given `gpu_index`
+// runs. A negative index selects device 0. Throws if more than one GPU is
+// selected.
+int SelectONNXCudaDevice(const std::string& gpu_index);
+
 // Format tensor shape as a string for logging/error messages.
 std::string FormatONNXTensorShape(const std::vector<int64_t>& shape);
 
@@ -68,16 +73,10 @@ void ThrowCheckONNXElementType(std::string_view name,
 // Handles model loading, input/output shape parsing, and inference.
 class ONNXModel {
  public:
-  // A capability probe propagates initialization failures without logging an
-  // error. CUDA probes permit CPU shape/index operators but require CUDA work
-  // and reject CPU arithmetic fallback. The probe inspects assigned operator
-  // types only, not input dtypes. Other accelerators and ONNX Runtime
-  // versions before 1.24 require the complete graph on the selected provider.
   ONNXModel(std::string model_path,
             int num_threads,
             bool use_gpu,
-            const std::string& gpu_index,
-            bool is_capability_probe = false);
+            const std::string& gpu_index);
 
   std::vector<Ort::Value> Run(
       const std::vector<Ort::Value>& input_tensors) const;
@@ -104,18 +103,13 @@ class ONNXModel {
   void InitializeSession(const std::string& model_path,
                          int num_threads,
                          bool use_gpu,
-                         const std::string& gpu_index,
-                         bool is_capability_probe);
+                         const std::string& gpu_index);
 
   // Apply the common, provider-independent session options (threading,
   // execution mode, graph optimization). Resets any previously appended
   // execution providers, so it can be reused to rebuild session_options_ for a
   // CPU-only fallback.
   void ConfigureSessionOptions(int num_threads);
-
-#if ORT_API_VERSION >= 24
-  void CheckCudaCapabilityProbeAssignments() const;
-#endif
 
   Ort::Env env_;
   Ort::AllocatorWithDefaultOptions allocator_;

@@ -126,23 +126,21 @@ void SetCudaDevicesBlockingSync(const std::vector<int>& gpu_indices) {
 #endif
 }
 
-bool CudaDeviceSupportsBf16(const std::string& gpu_index) {
-  std::vector<int> indices;
-  try {
-    indices = CSVToVector<int>(gpu_index);
-  } catch (const std::exception&) {
+bool CudaDeviceSupportsBf16(const int gpu_index) {
+#ifdef COLMAP_HIP_ENABLED
+  // The major version of HIP devices is the GFX version, not a compute
+  // capability.
+  return false;
+#else
+  cudaDeviceProp properties;
+  if (cudaGetDeviceProperties(&properties, gpu_index) != cudaSuccess) {
+    // Reset the error for an invalid device so that later CUDA_CHECK() calls
+    // do not report it. Initialization errors (e.g., no device) are sticky.
+    cudaGetLastError();
     return false;
   }
-  if (indices.size() != 1) {
-    return false;
-  }
-  cudaDeviceProp properties{};
-  if (cudaGetDeviceProperties(&properties, std::max(0, indices.front())) !=
-      cudaSuccess) {
-    return false;
-  }
-  // BF16 matrix kernels require Ampere (compute capability 8.0) or newer.
   return properties.major >= 8;
+#endif
 }
 
 }  // namespace colmap
