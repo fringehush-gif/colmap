@@ -418,6 +418,18 @@ class StereoFusion : public BaseController {
     int image_idx = -1;
     NormalTileKey key{};
     BoundedWorkspace::ImageLease lease;
+    BoundedWorkspace::TransientImageLease retained;
+    const BoundedWorkspace::ImageData* data = nullptr;
+    const BoundedWorkspace::ImageData* get() const noexcept { return data; }
+    BoundedWorkspace::ImageHandle GetHandle() const noexcept {
+      return lease ? lease.GetHandle() : retained.GetHandle();
+    }
+    void reset() noexcept {
+      data = nullptr;
+      lease.reset();
+      retained.reset();
+      image_idx = -1;
+    }
   };
   struct alignas(64) NormalTileRing {
     std::vector<NormalTileSlot> tiles;

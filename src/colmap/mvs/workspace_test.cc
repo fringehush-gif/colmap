@@ -222,6 +222,32 @@ TEST_F(WorkspaceTests, SoftBorrowMoveOnlyGuardReleasesOnException) {
   EXPECT_EQ(workspace.GetCacheStats().reserved_bytes, 0);
 }
 
+TEST_F(WorkspaceTests, RetainedTransientHandleDoesNotPinAfterReset) {
+  auto options = GetOptions();
+  options.image_as_rgb = true;
+  options.cache_size = 201.0 / (1ULL << 30);
+  BoundedWorkspace workspace(options);
+  BoundedWorkspace::TransientImageLease empty;
+  EXPECT_FALSE(empty.GetHandle().TryBorrow());
+  auto ordinary =
+      workspace.AcquireComponent(0, BoundedWorkspace::Component::kDepth);
+  auto retained = ordinary.GetHandle().TryBorrow();
+  ASSERT_TRUE(retained);
+  auto handle = retained.GetHandle();
+  auto payload = BoundedWorkspaceTransientPinTestPeer::Payload(handle);
+  ordinary.reset();
+  retained.reset();
+  // A leaked retained pin fails immediately instead of hanging this fixture.
+  BoundedWorkspaceTransientPinTestPeer::BeforeArm(
+      workspace, [] { throw std::runtime_error("retained reset left a pin"); });
+  auto bitmap =
+      workspace.AcquireComponent(0, BoundedWorkspace::Component::kBitmap);
+  EXPECT_TRUE(bitmap);
+  EXPECT_TRUE(payload.expired());
+  EXPECT_FALSE(handle.TryBorrow());
+  EXPECT_EQ(workspace.GetCacheStats().reserved_bytes, 0);
+}
+
 TEST_F(WorkspaceTests, SoftHandlesDoNotKeepWorkspacePayloadAlive) {
   auto workspace = std::make_unique<BoundedWorkspace>(GetOptions());
   auto ordinary =

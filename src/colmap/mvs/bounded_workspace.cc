@@ -374,6 +374,11 @@ const BoundedWorkspace::ImageData* BoundedWorkspace::TransientImageLease::get()
   return entry_ ? entry_->image.get() : nullptr;
 }
 
+BoundedWorkspace::ImageHandle BoundedWorkspace::TransientImageLease::GetHandle()
+    const noexcept {
+  return entry_ ? ImageHandle(state_, entry_) : ImageHandle();
+}
+
 void BoundedWorkspace::TransientImageLease::reset() noexcept {
   auto state = std::move(state_);
   auto entry = std::move(entry_);

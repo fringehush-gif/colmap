@@ -1016,8 +1016,7 @@ void StereoFusion::ClearNormalTileRings() {
               ring.tiles.size());
     ring.index.clear();
     for (auto& slot : ring.tiles) {
-      slot.lease.reset();
-      slot.image_idx = -1;
+      slot.reset();
     }
     ring.soft_index.clear();
     for (auto& slot : ring.soft_tiles) {
@@ -1100,9 +1099,9 @@ StereoFusion::NormalTileRead StereoFusion::AcquireWorkerNormalTile(
     const size_t hinted = ring.last_slot_by_image.at(image_idx);
     if (hinted < ring.tiles.size()) {
       const auto& slot = ring.tiles[hinted];
-      if (slot.image_idx == image_idx && contains(slot.lease.get())) {
+      if (slot.image_idx == image_idx && contains(slot.get())) {
         ++ring.hits;
-        return {slot.lease.get(), {}};
+        return {slot.get(), {}};
       }
     }
   }
@@ -1118,34 +1117,22 @@ StereoFusion::NormalTileRead StereoFusion::AcquireWorkerNormalTile(
       ++ring.hits;
       if (!ring.last_slot_by_image.empty())
         ring.last_slot_by_image[image_idx] = found->second;
-      return {ring.tiles[found->second].lease.get(), {}};
+      return {ring.tiles[found->second].get(), {}};
     }
   } else {
     for (const auto& slot : ring.tiles) {
-      if (slot.image_idx == image_idx && contains(slot.lease.get())) {
+      if (slot.image_idx == image_idx && contains(slot.get())) {
         ++ring.hits;
-        return {slot.lease.get(), {}};
+        return {slot.get(), {}};
       }
     }
   }
   ++ring.misses;
-  if (!ring.soft_tiles.empty()) {
-    if (!ring.indexed) {
-      const size_t size = options_.bounded_cache_normal_tile_size;
-      key = {image_idx,
-             static_cast<size_t>(col) / size,
-             static_cast<size_t>(row) / size};
-    }
-    const auto found = ring.soft_index.find(key);
-    if (found != ring.soft_index.end()) {
-      auto borrowed = ring.soft_tiles[found->second].handle.TryBorrow();
-      if (borrowed) {
-        ++ring.soft_hits;
-        const auto* data = borrowed.get();
-        return {data, std::move(borrowed)};
-      }
-      ++ring.soft_expired;
-    }
+  if (!ring.indexed) {
+    const size_t size = options_.bounded_cache_normal_tile_size;
+    key = {image_idx,
+           static_cast<size_t>(col) / size,
+           static_cast<size_t>(row) / size};
   }
   const size_t slot_index = ring.next;
   ring.next = (ring.next + 1) % ring.tiles.size();
@@ -1154,8 +1141,8 @@ StereoFusion::NormalTileRead StereoFusion::AcquireWorkerNormalTile(
       ring.last_slot_by_image[slot.image_idx] == slot_index) {
     ring.last_slot_by_image[slot.image_idx] = ring.tiles.size();
   }
-  if (slot.lease && !ring.soft_tiles.empty()) {
-    auto handle = slot.lease.GetHandle();
+  if (slot.get() && !ring.soft_tiles.empty()) {
+    auto handle = slot.GetHandle();
     const auto found = ring.soft_index.find(slot.key);
     if (found != ring.soft_index.end()) {
       ring.soft_tiles[found->second].handle = std::move(handle);
@@ -1173,25 +1160,41 @@ StereoFusion::NormalTileRead StereoFusion::AcquireWorkerNormalTile(
       ring.soft_next = (ring.soft_next + 1) % ring.soft_tiles.size();
     }
   }
-  if (ring.indexed && slot.lease) ring.index.erase(slot.key);
-  slot.lease.reset();  // Never wait for capacity while holding this slot's pin.
-  slot.image_idx = -1;
-  slot.lease = bounded_workspace_->AcquireNormalTile(
-      image_idx, row, col, options_.bounded_cache_normal_tile_size);
+  if (ring.indexed && slot.get()) ring.index.erase(slot.key);
+  // Every miss rotates the baseline ring. Release its old pin before borrowing
+  // or waiting; the new ordinary OR transient owner consumes this same slot.
+  slot.reset();
+  if (!ring.soft_tiles.empty()) {
+    const auto found = ring.soft_index.find(key);
+    if (found != ring.soft_index.end()) {
+      slot.retained = ring.soft_tiles[found->second].handle.TryBorrow();
+      if (slot.retained) {
+        ++ring.soft_hits;
+      } else {
+        ++ring.soft_expired;
+      }
+    }
+  }
+  if (slot.retained) {
+    slot.data = slot.retained.get();
+  } else {
+    slot.lease = bounded_workspace_->AcquireNormalTile(
+        image_idx, row, col, options_.bounded_cache_normal_tile_size);
+    slot.data = slot.lease.get();
+  }
   slot.image_idx = image_idx;
   slot.key = key;
   if (ring.indexed) {
     try {
       ring.index.emplace(key, slot_index);
     } catch (...) {
-      slot.lease.reset();
-      slot.image_idx = -1;
+      slot.reset();
       throw;
     }
   }
   if (!ring.last_slot_by_image.empty())
     ring.last_slot_by_image[image_idx] = slot_index;
-  return {slot.lease.get(), {}};
+  return {slot.get(), {}};
 }
 
 const BoundedWorkspace::ImageData* StereoFusion::AcquireNeighborhoodBitmap(
