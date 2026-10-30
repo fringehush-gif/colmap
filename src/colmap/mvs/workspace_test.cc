@@ -18,16 +18,34 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <limits>
+#include <memory>
 #include <new>
+#include <stdexcept>
 #include <thread>
+#include <type_traits>
+#include <utility>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace mvs {
+struct BoundedWorkspaceTransientPinTestPeer {
+  static std::weak_ptr<const BoundedWorkspace::ImageData> Payload(
+      const BoundedWorkspace::ImageHandle& handle) {
+    return handle.ObservePayloadForTesting();
+  }
+  static void BeforeArm(BoundedWorkspace& workspace,
+                        std::function<void()> hook) {
+    workspace.BeforeCapacityArmForTesting(std::move(hook));
+  }
+  static void Wake(BoundedWorkspace& workspace) {
+    workspace.WakeCapacityForTesting();
+  }
+};
 namespace {
 
 class WorkspaceTests : public ::testing::Test {
@@ -78,6 +96,187 @@ class WorkspaceTests : public ::testing::Test {
   std::filesystem::path temp_dir_;
   std::string image_name_;
 };
+
+TEST_F(WorkspaceTests, SoftBorrowExcludesEvictionAndRejectsStaleGeneration) {
+  auto options = GetOptions();
+  options.image_as_rgb = true;
+  options.cache_size = 201.0 / (1ULL << 30);
+  BoundedWorkspace workspace(options);
+  using Component = BoundedWorkspace::Component;
+  auto ordinary = workspace.AcquireComponent(0, Component::kDepth);
+  auto handle = ordinary.GetHandle();
+  auto copied_handle = handle;
+  auto payload = BoundedWorkspaceTransientPinTestPeer::Payload(handle);
+  ordinary.reset();
+  auto first = handle.TryBorrow();
+  auto second = copied_handle.TryBorrow();
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(second);
+  EXPECT_EQ(first->GetDepth(0, 0), 1.0f);
+  auto waiting = std::async(std::launch::async, [&] {
+    return workspace.AcquireComponent(0, Component::kBitmap);
+  });
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (workspace.GetCacheStats().waits == 0 &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  EXPECT_GT(workspace.GetCacheStats().waits, 0);
+  EXPECT_FALSE(payload.expired());
+  first.reset();
+  EXPECT_EQ(waiting.wait_for(std::chrono::seconds(0)),
+            std::future_status::timeout);
+  second.reset();  // Last reader must wake an armed capacity waiter.
+  const auto status = waiting.wait_for(std::chrono::seconds(5));
+  EXPECT_EQ(status, std::future_status::ready);
+  if (status != std::future_status::ready) {
+    BoundedWorkspaceTransientPinTestPeer::Wake(workspace);
+  }
+  auto bitmap = waiting.get();
+  ASSERT_TRUE(bitmap);
+  EXPECT_TRUE(payload.expired());  // Shared entry metadata retains no pixels.
+  EXPECT_FALSE(handle.TryBorrow());
+  EXPECT_FALSE(copied_handle.TryBorrow());
+  bitmap.reset();
+  auto replacement = workspace.AcquireComponent(0, Component::kDepth);
+  EXPECT_TRUE(replacement.GetHandle().TryBorrow());
+  EXPECT_FALSE(handle.TryBorrow());  // Same key, permanently closed generation.
+  EXPECT_EQ(workspace.GetCacheStats().reserved_bytes, 0);
+  EXPECT_LE(workspace.GetCacheStats().peak_charged_bytes, 201);
+}
+
+TEST_F(WorkspaceTests, SoftBorrowCapacityRecheckCatchesReleaseBeforeArm) {
+  auto options = GetOptions();
+  options.image_as_rgb = true;
+  options.cache_size = 201.0 / (1ULL << 30);
+  BoundedWorkspace workspace(options);
+  using Component = BoundedWorkspace::Component;
+  auto ordinary = workspace.AcquireComponent(0, Component::kDepth);
+  auto handle = ordinary.GetHandle();
+  auto payload = BoundedWorkspaceTransientPinTestPeer::Payload(handle);
+  ordinary.reset();
+  auto borrowed = handle.TryBorrow();
+  ASSERT_TRUE(borrowed);
+  bool hook_called = false;
+  // No other waiter is present. Reset here must not reacquire the held mutex.
+  BoundedWorkspaceTransientPinTestPeer::BeforeArm(workspace, [&] {
+    hook_called = true;
+    borrowed.reset();
+  });
+  auto waiting = std::async(std::launch::async, [&] {
+    return workspace.AcquireComponent(0, Component::kBitmap);
+  });
+  const auto status = waiting.wait_for(std::chrono::seconds(5));
+  EXPECT_EQ(status, std::future_status::ready);
+  if (status != std::future_status::ready) {
+    // A failed recheck assertion still wakes/joins instead of leaking a thread.
+    BoundedWorkspaceTransientPinTestPeer::Wake(workspace);
+  }
+  auto bitmap = waiting.get();
+  ASSERT_TRUE(bitmap);
+  EXPECT_TRUE(hook_called);
+  EXPECT_EQ(workspace.GetCacheStats().waits, 0);
+  EXPECT_TRUE(payload.expired());
+  EXPECT_FALSE(handle.TryBorrow());
+}
+
+TEST_F(WorkspaceTests, SoftBorrowMoveOnlyGuardReleasesOnException) {
+  using Borrow = BoundedWorkspace::TransientImageLease;
+  static_assert(!std::is_copy_constructible_v<Borrow>);
+  static_assert(!std::is_copy_assignable_v<Borrow>);
+  static_assert(std::is_nothrow_move_constructible_v<Borrow>);
+  static_assert(std::is_nothrow_move_assignable_v<Borrow>);
+  static_assert(std::is_copy_constructible_v<BoundedWorkspace::ImageHandle>);
+  BoundedWorkspace::ImageLease empty;
+  EXPECT_FALSE(empty.GetHandle().TryBorrow());
+  auto options = GetOptions();
+  options.image_as_rgb = true;
+  options.cache_size = 201.0 / (1ULL << 30);
+  BoundedWorkspace workspace(options);
+  using Component = BoundedWorkspace::Component;
+  auto ordinary = workspace.AcquireComponent(0, Component::kDepth);
+  auto handle = ordinary.GetHandle();
+  auto payload = BoundedWorkspaceTransientPinTestPeer::Payload(handle);
+  ordinary.reset();
+  const auto fail = [&] {
+    auto first = handle.TryBorrow();
+    EXPECT_TRUE(first);
+    auto moved = std::move(first);
+    Borrow assigned;
+    assigned = std::move(moved);
+    EXPECT_FALSE(first);
+    EXPECT_FALSE(moved);
+    EXPECT_TRUE(assigned);
+    throw std::runtime_error("leave transient read scope");
+  };
+  EXPECT_THROW(fail(), std::runtime_error);
+  // A leaked transient pin must fail immediately rather than hang this case.
+  BoundedWorkspaceTransientPinTestPeer::BeforeArm(workspace, [] {
+    throw std::runtime_error("exception cleanup left a transient pin");
+  });
+  BoundedWorkspace::ImageLease bitmap;
+  EXPECT_NO_THROW(bitmap = workspace.AcquireComponent(0, Component::kBitmap));
+  ASSERT_TRUE(bitmap);
+  EXPECT_TRUE(payload.expired());
+  EXPECT_EQ(workspace.GetCacheStats().reserved_bytes, 0);
+}
+
+TEST_F(WorkspaceTests, SoftHandlesDoNotKeepWorkspacePayloadAlive) {
+  auto workspace = std::make_unique<BoundedWorkspace>(GetOptions());
+  auto ordinary =
+      workspace->AcquireComponent(0, BoundedWorkspace::Component::kDepth);
+  auto handle = ordinary.GetHandle();
+  auto copied = handle;
+  auto payload = BoundedWorkspaceTransientPinTestPeer::Payload(handle);
+  ordinary.reset();
+  EXPECT_FALSE(payload.expired());
+  workspace.reset();
+  EXPECT_TRUE(payload.expired());
+  EXPECT_FALSE(handle.TryBorrow());
+  EXPECT_FALSE(copied.TryBorrow());
+}
+
+TEST_F(WorkspaceTests, SoftBorrowKeepsPayloadAliveAfterWorkspaceDestruction) {
+  auto workspace = std::make_unique<BoundedWorkspace>(GetOptions());
+  auto ordinary =
+      workspace->AcquireComponent(0, BoundedWorkspace::Component::kDepth);
+  auto handle = ordinary.GetHandle();
+  auto payload = BoundedWorkspaceTransientPinTestPeer::Payload(handle);
+  auto borrowed = handle.TryBorrow();
+  ASSERT_TRUE(borrowed);
+  ordinary.reset();
+  workspace.reset();
+  EXPECT_FALSE(payload.expired());
+  EXPECT_EQ(borrowed->GetDepth(0, 0), 1.0f);
+  {
+    auto another = handle.TryBorrow();
+    EXPECT_TRUE(another);  // The first borrow still owns the live cache state.
+  }
+  borrowed.reset();
+  EXPECT_TRUE(payload.expired());
+  EXPECT_FALSE(handle.TryBorrow());
+}
+
+TEST_F(WorkspaceTests, SoftTileHandleRejectsRecycledDynamicSlot) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  auto options = GetOptions();
+  options.cache_size = 49.0 / (1ULL << 30);
+  options.mapped_normal_bytes_limit = 1 << 20;
+  options.mapped_normal_files_limit = 1;
+  BoundedWorkspace workspace(options);
+  auto first = workspace.AcquireNormalTile(0, 1, 1, 2);
+  auto old = first.GetHandle();
+  auto payload = BoundedWorkspaceTransientPinTestPeer::Payload(old);
+  first.reset();
+  auto second = workspace.AcquireNormalTile(0, 1, 3, 2);
+  EXPECT_TRUE(payload.expired());
+  EXPECT_FALSE(old.TryBorrow());
+  EXPECT_TRUE(second.GetHandle().TryBorrow());
+  EXPECT_LE(workspace.GetTileMetadataStats().slot_count, 1);
+  EXPECT_EQ(workspace.GetCacheStats().reserved_bytes, 0);
+  EXPECT_LE(workspace.GetCacheStats().peak_charged_bytes, 49);
+}
 
 class ParameterizedWorkspaceTests
     : public WorkspaceTests,

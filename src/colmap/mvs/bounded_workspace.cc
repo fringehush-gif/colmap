@@ -2,6 +2,7 @@
 
 #include "colmap/mvs/bounded_workspace.h"
 
+#include "colmap/mvs/transient_pins.h"
 #include "colmap/sensor/bitmap_reader.h"
 #include "colmap/util/file.h"
 #include "colmap/util/logging.h"
@@ -9,6 +10,8 @@
 #include "colmap/util/string.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -133,6 +136,8 @@ Eigen::Vector3f BoundedWorkspace::ImageData::GetNormal(const size_t row,
 
 struct BoundedWorkspace::CacheEntry {
   std::shared_ptr<ImageData> image;
+  internal::TransientPins transient;
+  std::atomic<bool> recent_soft{false};
   std::exception_ptr error;
   size_t pins = 0;
   uint64_t last_access = 0;
@@ -159,6 +164,21 @@ struct BoundedWorkspace::CacheState
   CacheStats stats;
   uint64_t clock = 0;
   bool fail_next_tile_key_publication_for_testing = false;
+  std::atomic<size_t> capacity_waiters{0};
+  std::function<void()> before_capacity_arm_for_testing;
+
+  ~CacheState() {
+    // Ordinary/transient leases own strong state; only weak soft handles can
+    // remain here. Detach data explicitly because those handles keep metadata.
+    for (auto& entry : entries) {
+      if (!entry) continue;
+      assert(entry->pins == 0 && !entry->loading);
+      const bool closed = entry->transient.TryClose();
+      if (!closed && !entry->transient.IsClosed()) std::terminate();
+      entry->image.reset();
+    }
+    stats.resident_bytes = 0;
+  }
 
   void PublishTileKey(const std::tuple<int, size_t, size_t, size_t>& tile_key,
                       const int key) {
@@ -171,6 +191,15 @@ struct BoundedWorkspace::CacheState
 
   void Retire(const int key) {
     const auto entry = entries.at(key);
+    // Failed loaders can still have coalesced ordinary waiters. They never
+    // published a payload/handle; ready payload retirement requires no pins.
+    assert(!entry->loading && (!entry->image || entry->pins == 0));
+    const bool closed =
+        entry->transient.IsClosed() || entry->transient.TryClose();
+    THROW_CHECK(closed);
+    const size_t resident = entry->image ? entry->image->NumBytes() : 0;
+    entry->image.reset();  // Soft metadata must never retain uncharged payload.
+    stats.resident_bytes -= resident;
     const size_t index = entry->active_index;
     const int last = active_keys.back();
     active_keys[index] = last;
@@ -181,6 +210,7 @@ struct BoundedWorkspace::CacheState
       free_tile_keys.push_back(key);
     }
     entries[key].reset();
+    changed.notify_all();
   }
 
   bool MakeRoom(const size_t requested) {
@@ -190,18 +220,49 @@ struct BoundedWorkspace::CacheState
       uint64_t oldest = std::numeric_limits<uint64_t>::max();
       for (const int key : active_keys) {
         const auto& entry = entries[key];
-        if (!entry->loading && entry->pins == 0 &&
-            entry->last_access < oldest) {
-          oldest = entry->last_access;
-          victim = key;
+        if (!entry->loading && entry->pins == 0 && entry->transient.IsIdle()) {
+          // A soft hit never takes the global clock/mutex. Refresh its age
+          // here, when the locked eviction scan next considers this entry.
+          if (entry->recent_soft.exchange(false, std::memory_order_relaxed)) {
+            entry->last_access = ++clock;
+          }
+          if (entry->last_access < oldest) {
+            oldest = entry->last_access;
+            victim = key;
+          }
         }
       }
       if (victim < 0) return false;
-      stats.resident_bytes -= entries[victim]->image->NumBytes();
+      // Close only the chosen victim; closing scan candidates is permanent.
+      // A racing new soft reader can win after the idle hint.
+      if (!entries[victim]->transient.TryClose()) return false;
       Retire(victim);
       ++stats.evictions;
     }
     return true;
+  }
+
+  bool MakeRoomOrWait(size_t requested, std::unique_lock<std::mutex>& lock) {
+    if (MakeRoom(requested)) return true;
+    if (before_capacity_arm_for_testing) {
+      // Test-only one-shot seam: callback may release a transient pin, but
+      // must neither acquire this mutex nor have another armed waiter.
+      THROW_CHECK_EQ(capacity_waiters.load(std::memory_order_seq_cst), 0);
+      auto hook = std::move(before_capacity_arm_for_testing);
+      before_capacity_arm_for_testing = {};
+      hook();
+    }
+    capacity_waiters.fetch_add(1, std::memory_order_seq_cst);
+    struct ArmedWaiter {
+      std::atomic<size_t>& count;
+      ~ArmedWaiter() { count.fetch_sub(1, std::memory_order_seq_cst); }
+    } armed{capacity_waiters};
+    // SC arm + SC count/close recheck pairs with last-reader release + flag
+    // load. Holding the mutex through cv.wait closes the final notify gap.
+    if (MakeRoom(requested)) return true;
+    ++stats.waits;
+    changed.wait(lock);
+    return false;  // The caller must re-resolve its cache key after waking.
   }
 
   ImageLease MakeLease(const std::shared_ptr<CacheEntry>& entry) {
@@ -262,6 +323,78 @@ void BoundedWorkspace::ImageLease::reset() noexcept {
     entry_.reset();
     if (unpinned) state->changed.notify_all();
   }
+}
+
+BoundedWorkspace::ImageHandle BoundedWorkspace::ImageLease::GetHandle()
+    const noexcept {
+  return entry_ ? ImageHandle(state_, entry_) : ImageHandle();
+}
+
+BoundedWorkspace::ImageHandle::ImageHandle(
+    std::weak_ptr<CacheState> state, std::shared_ptr<CacheEntry> entry) noexcept
+    : state_(std::move(state)), entry_(std::move(entry)) {}
+
+BoundedWorkspace::TransientImageLease BoundedWorkspace::ImageHandle::TryBorrow()
+    const noexcept {
+  if (!entry_) return {};
+  // Lock state first: its destructor may otherwise close/detach entries
+  // between taking a transient pin and establishing cache lifetime.
+  auto state = state_.lock();
+  if (!state || !entry_->transient.TryAcquire()) return {};
+  entry_->recent_soft.store(true, std::memory_order_relaxed);
+  return TransientImageLease(std::move(state), entry_);
+}
+
+std::weak_ptr<const BoundedWorkspace::ImageData>
+BoundedWorkspace::ImageHandle::ObservePayloadForTesting() const {
+  const auto state = state_.lock();
+  if (!state || !entry_) return {};
+  std::lock_guard<std::mutex> lock(state->mutex);
+  return entry_->image;
+}
+
+BoundedWorkspace::TransientImageLease::TransientImageLease(
+    std::shared_ptr<CacheState> state,
+    std::shared_ptr<CacheEntry> entry) noexcept
+    : state_(std::move(state)), entry_(std::move(entry)) {}
+
+BoundedWorkspace::TransientImageLease&
+BoundedWorkspace::TransientImageLease::operator=(
+    TransientImageLease&& other) noexcept {
+  if (this != &other) {
+    reset();
+    state_ = std::move(other.state_);
+    entry_ = std::move(other.entry_);
+  }
+  return *this;
+}
+
+const BoundedWorkspace::ImageData* BoundedWorkspace::TransientImageLease::get()
+    const noexcept {
+  return entry_ ? entry_->image.get() : nullptr;
+}
+
+void BoundedWorkspace::TransientImageLease::reset() noexcept {
+  auto state = std::move(state_);
+  auto entry = std::move(entry_);
+  if (!entry) return;
+  if (entry->transient.Release() &&
+      state->capacity_waiters.load(std::memory_order_seq_cst) != 0) {
+    // After the SC last-release/flag check, synchronize notify with the
+    // waiter's mutex-protected recheck and atomic cv.wait unlock.
+    std::lock_guard<std::mutex> lock(state->mutex);
+    state->changed.notify_all();
+  }
+}
+
+void BoundedWorkspace::BeforeCapacityArmForTesting(std::function<void()> hook) {
+  std::lock_guard<std::mutex> lock(cache_state_->mutex);
+  cache_state_->before_capacity_arm_for_testing = std::move(hook);
+}
+
+void BoundedWorkspace::WakeCapacityForTesting() {
+  std::lock_guard<std::mutex> lock(cache_state_->mutex);
+  cache_state_->changed.notify_all();
 }
 
 MappedNormalPool::Lease::Lease(std::shared_ptr<MappedNormalPool> pool,
@@ -1045,11 +1178,7 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
                                std::to_string(state->stats.capacity_bytes) +
                                ")");
     }
-    if (!state->MakeRoom(required_bytes)) {
-      ++state->stats.waits;
-      state->changed.wait(lock);
-      continue;
-    }
+    if (!state->MakeRoomOrWait(required_bytes, lock)) continue;
     entry = std::make_shared<CacheEntry>();
     entry->tile_key = tile_key;
     // All reserves can fail before logical mutation. Retire may later return

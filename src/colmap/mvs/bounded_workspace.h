@@ -48,6 +48,9 @@ class BoundedWorkspace : public Workspace {
     Eigen::Vector3f GetNormal(size_t row, size_t col) const;
   };
 
+  class ImageHandle;
+  class TransientImageLease;
+
   // Copies pin the same entry. The state outlives the workspace while leased.
   class ImageLease {
    public:
@@ -61,11 +64,53 @@ class BoundedWorkspace : public Workspace {
     const ImageData* operator->() const noexcept { return get(); }
     explicit operator bool() const noexcept { return get() != nullptr; }
     void reset() noexcept;
+    ImageHandle GetHandle() const noexcept;
 
    private:
     friend struct CacheState;
     ImageLease(std::shared_ptr<CacheState> state,
                std::shared_ptr<CacheEntry> entry) noexcept;
+    std::shared_ptr<CacheState> state_;
+    std::shared_ptr<CacheEntry> entry_;
+  };
+
+  // Metadata only: a handle neither pins data nor keeps the cache alive.
+  class ImageHandle {
+   public:
+    ImageHandle() noexcept = default;
+    TransientImageLease TryBorrow() const noexcept;
+
+   private:
+    friend class ImageLease;
+    friend struct BoundedWorkspaceTransientPinTestPeer;
+    std::weak_ptr<const ImageData> ObservePayloadForTesting() const;
+    ImageHandle(std::weak_ptr<CacheState> state,
+                std::shared_ptr<CacheEntry> entry) noexcept;
+    std::weak_ptr<CacheState> state_;
+    std::shared_ptr<CacheEntry> entry_;
+  };
+
+  // Short-lived, move-only payload protection. Finish every read and reset
+  // before another potentially waiting cache or mapped-pool acquisition.
+  class TransientImageLease {
+   public:
+    TransientImageLease() noexcept = default;
+    TransientImageLease(const TransientImageLease&) = delete;
+    TransientImageLease& operator=(const TransientImageLease&) = delete;
+    TransientImageLease(TransientImageLease&& other) noexcept = default;
+    TransientImageLease& operator=(TransientImageLease&& other) noexcept;
+    ~TransientImageLease() {
+      if (entry_) reset();
+    }
+    const ImageData* get() const noexcept;
+    const ImageData* operator->() const noexcept { return get(); }
+    explicit operator bool() const noexcept { return get() != nullptr; }
+    void reset() noexcept;
+
+   private:
+    friend class ImageHandle;
+    TransientImageLease(std::shared_ptr<CacheState> state,
+                        std::shared_ptr<CacheEntry> entry) noexcept;
     std::shared_ptr<CacheState> state_;
     std::shared_ptr<CacheEntry> entry_;
   };
@@ -150,6 +195,9 @@ class BoundedWorkspace : public Workspace {
   const NormalMap& GetNormalMap(int image_idx) override;
 
  private:
+  friend struct BoundedWorkspaceTransientPinTestPeer;
+  void BeforeCapacityArmForTesting(std::function<void()> hook);
+  void WakeCapacityForTesting();
   friend struct BoundedWorkspaceExactDepthPinTestPeer;
   struct NormalRegion {
     size_t x, y, width, height, tile_size;

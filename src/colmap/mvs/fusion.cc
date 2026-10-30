@@ -356,6 +356,8 @@ StereoFusion::NormalTileRingStats StereoFusion::GetNormalTileRingStats() const {
     stats.misses += ring.misses;
     stats.indexed_lookups += ring.indexed_lookups;
     stats.hint_checks += ring.hint_checks;
+    stats.soft_hits += ring.soft_hits;
+    stats.soft_expired += ring.soft_expired;
   }
   return stats;
 }
@@ -437,6 +439,8 @@ std::optional<std::string> StereoFusion::GetBoundedCacheDiagnosticRow() const {
       row << " ring_hits=" << ring.hits << " ring_misses=" << ring.misses
           << " ring_indexed_lookups=" << ring.indexed_lookups
           << " ring_hint_checks=" << ring.hint_checks
+          << " ring_soft_hits=" << ring.soft_hits
+          << " ring_soft_expired=" << ring.soft_expired
           << " ring_hint_hits=unavailable";
     }
   } else {
@@ -707,11 +711,15 @@ void StereoFusion::Run() {
     THROW_CHECK_LE(largest_tile, (per_worker - largest_component) / slots)
         << "Normal tile rings need retained pins and component headroom";
     normal_tile_worker_headroom_ = largest_component + slots * largest_tile;
+    const size_t soft_slots =
+        slots >= 1024 ? 4096 : std::max(size_t{1024}, slots * 4);
     normal_tile_rings_.resize(num_threads);
     for (auto& ring : normal_tile_rings_) {
       ring.tiles.resize(slots);
       ring.indexed = slots > 4;
       if (ring.indexed) ring.index.reserve(slots);
+      ring.soft_tiles.resize(soft_slots);
+      ring.soft_index.reserve(soft_slots + 1);
       if (ring.indexed && options_.bounded_cache_normal_tile_hints) {
         ring.last_slot_by_image.assign(model.images.size(), slots);
       }
@@ -1011,6 +1019,12 @@ void StereoFusion::ClearNormalTileRings() {
       slot.lease.reset();
       slot.image_idx = -1;
     }
+    ring.soft_index.clear();
+    for (auto& slot : ring.soft_tiles) {
+      slot.handle = {};
+      slot.valid = false;
+    }
+    ring.soft_next = 0;
   }
 }
 
@@ -1070,7 +1084,7 @@ const ImmutableMapRegion* StereoFusion::AcquireWorkerMappedNormal(
   return slot.lease.get();
 }
 
-const BoundedWorkspace::ImageData* StereoFusion::AcquireWorkerNormalTile(
+StereoFusion::NormalTileRead StereoFusion::AcquireWorkerNormalTile(
     const int thread_id, const int image_idx, const int row, const int col) {
   auto& ring = normal_tile_rings_.at(thread_id);
   const auto contains = [row, col](const BoundedWorkspace::ImageData* data) {
@@ -1088,7 +1102,7 @@ const BoundedWorkspace::ImageData* StereoFusion::AcquireWorkerNormalTile(
       const auto& slot = ring.tiles[hinted];
       if (slot.image_idx == image_idx && contains(slot.lease.get())) {
         ++ring.hits;
-        return slot.lease.get();
+        return {slot.lease.get(), {}};
       }
     }
   }
@@ -1104,23 +1118,60 @@ const BoundedWorkspace::ImageData* StereoFusion::AcquireWorkerNormalTile(
       ++ring.hits;
       if (!ring.last_slot_by_image.empty())
         ring.last_slot_by_image[image_idx] = found->second;
-      return ring.tiles[found->second].lease.get();
+      return {ring.tiles[found->second].lease.get(), {}};
     }
   } else {
     for (const auto& slot : ring.tiles) {
       if (slot.image_idx == image_idx && contains(slot.lease.get())) {
         ++ring.hits;
-        return slot.lease.get();
+        return {slot.lease.get(), {}};
       }
     }
   }
   ++ring.misses;
+  if (!ring.soft_tiles.empty()) {
+    if (!ring.indexed) {
+      const size_t size = options_.bounded_cache_normal_tile_size;
+      key = {image_idx,
+             static_cast<size_t>(col) / size,
+             static_cast<size_t>(row) / size};
+    }
+    const auto found = ring.soft_index.find(key);
+    if (found != ring.soft_index.end()) {
+      auto borrowed = ring.soft_tiles[found->second].handle.TryBorrow();
+      if (borrowed) {
+        ++ring.soft_hits;
+        const auto* data = borrowed.get();
+        return {data, std::move(borrowed)};
+      }
+      ++ring.soft_expired;
+    }
+  }
   const size_t slot_index = ring.next;
   ring.next = (ring.next + 1) % ring.tiles.size();
   auto& slot = ring.tiles[slot_index];
   if (!ring.last_slot_by_image.empty() && slot.image_idx >= 0 &&
       ring.last_slot_by_image[slot.image_idx] == slot_index) {
     ring.last_slot_by_image[slot.image_idx] = ring.tiles.size();
+  }
+  if (slot.lease && !ring.soft_tiles.empty()) {
+    auto handle = slot.lease.GetHandle();
+    const auto found = ring.soft_index.find(slot.key);
+    if (found != ring.soft_index.end()) {
+      ring.soft_tiles[found->second].handle = std::move(handle);
+    } else {
+      auto& victim = ring.soft_tiles[ring.soft_next];
+      // Insert before replacing the old slot, so allocation failure preserves
+      // its metadata. The original hard lease remains pinned until below.
+      const auto [_, inserted] =
+          ring.soft_index.emplace(slot.key, ring.soft_next);
+      THROW_CHECK(inserted);
+      if (victim.valid) ring.soft_index.erase(victim.key);
+      victim.key = slot.key;
+      victim.handle = std::move(handle);
+      victim.valid = true;
+      ring.soft_next = (ring.soft_next + 1) % ring.soft_tiles.size();
+    }
   }
   if (ring.indexed && slot.lease) ring.index.erase(slot.key);
   slot.lease.reset();  // Never wait for capacity while holding this slot's pin.
@@ -1140,7 +1191,7 @@ const BoundedWorkspace::ImageData* StereoFusion::AcquireWorkerNormalTile(
   }
   if (!ring.last_slot_by_image.empty())
     ring.last_slot_by_image[image_idx] = slot_index;
-  return slot.lease.get();
+  return {slot.lease.get(), {}};
 }
 
 const BoundedWorkspace::ImageData* StereoFusion::AcquireNeighborhoodBitmap(
@@ -1556,10 +1607,11 @@ void StereoFusion::Fuse(const int thread_id,
                                        resident->normal.Get(row, col, 1),
                                        resident->normal.Get(row, col, 2));
       } else {
-        const auto* tile_image =
+        auto tile_read =
             options_.bounded_cache_normal_tile_size > 0
                 ? AcquireWorkerNormalTile(thread_id, image_idx, row, col)
-                : nullptr;
+                : NormalTileRead{};
+        const auto* tile_image = tile_read.get();
         const auto* mapped_normal =
             direct_mapped_normals_ ? AcquireWorkerMappedNormal(image_idx, row)
                                    : nullptr;

@@ -399,18 +399,22 @@ struct StereoFusionExactDepthTestPeer {
     if (ring.indexed) ring.index.reserve(slots);
     if (ring.indexed && hints) ring.last_slot_by_image.assign(1, slots);
   }
-  static const BoundedWorkspace::ImageData* Acquire(StereoFusion& fusion,
-                                                    int row,
-                                                    int col) {
+  static auto Acquire(StereoFusion& fusion, int row, int col) {
     return fusion.AcquireWorkerNormalTile(0, 0, row, col);
+  }
+  static void EnableSoftRing(StereoFusion& fusion) {
+    auto& ring = fusion.normal_tile_rings_.front();
+    ring.soft_tiles.resize(8);
+    ring.soft_index.reserve(9);
+  }
+  static BoundedWorkspace& Cache(StereoFusion& fusion) {
+    return *fusion.bounded_workspace_;
   }
 };
 
 namespace {
 
-TEST(StereoFusion, NormalTileRingReusesFp32CroppedTiles) {
-  if (!ImmutableMapRegion::Supported())
-    GTEST_SKIP() << "Immutable FP32 map owners are unsupported on this host";
+Workspace::Options CreateNormalTileRingFixture(const bool varied = false) {
   const auto root = CreateTestDir();
   for (const auto& sub : {"sparse",
                           "images",
@@ -442,12 +446,26 @@ TEST(StereoFusion, NormalTileRingReusesFp32CroppedTiles) {
   Mat<float> normal(17, 11, 3);
   normal.Fill(0.0f);
   for (int row = 0; row < 11; ++row) {
-    for (int col = 0; col < 17; ++col) normal.Set(row, col, 2, 1.0f);
+    for (int col = 0; col < 17; ++col) {
+      if (varied) {
+        normal.Set(row, col, 0, row * 17.0f + col + 0.25f);
+        normal.Set(row, col, 1, -col - 0.5f);
+      }
+      normal.Set(row, col, 2, 1.0f);
+    }
   }
   normal.Write(descriptor.GetNormalMapPath(0));
   Bitmap bitmap(17, 11, true);
   bitmap.Fill(BitmapColor<uint8_t>(0, 64, 128));
-  ASSERT_TRUE(bitmap.Write(descriptor.GetBitmapPath(0)));
+  THROW_CHECK(bitmap.Write(descriptor.GetBitmapPath(0)));
+  return base;
+}
+
+TEST(StereoFusion, NormalTileRingReusesFp32CroppedTiles) {
+  if (!ImmutableMapRegion::Supported())
+    GTEST_SKIP() << "Immutable FP32 map owners are unsupported on this host";
+  const auto base = CreateNormalTileRingFixture();
+  const auto& root = base.workspace_path;
   // A/B alternate while resident; C and D cross both interior boundaries and
   // the cropped right/bottom edges. A is revisited after ring replacement.
   const std::vector<std::pair<int, int>> samples = {{0, 0},
@@ -483,9 +501,8 @@ TEST(StereoFusion, NormalTileRingReusesFp32CroppedTiles) {
       StereoFusionExactDepthTestPeer::PrepareRing(
           fusion, workspace_options, slots, hints);
       for (const auto& [row, col] : samples) {
-        const auto* tile =
-            StereoFusionExactDepthTestPeer::Acquire(fusion, row, col);
-        ASSERT_NE(tile, nullptr);
+        auto tile = StereoFusionExactDepthTestPeer::Acquire(fusion, row, col);
+        ASSERT_TRUE(tile);
         const size_t x = static_cast<size_t>(col) / 8 * 8;
         const size_t y = static_cast<size_t>(row) / 8 * 8;
         EXPECT_EQ(tile->normal_origin_x, x);
@@ -527,6 +544,57 @@ TEST(StereoFusion, NormalTileRingReusesFp32CroppedTiles) {
                 << " hint_checks=" << ring.hint_checks << '\n';
     }
   }
+}
+
+TEST(StereoFusion, SoftNormalTilesAvoidSharedHitsAndRejectStaleHandles) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  auto base = CreateNormalTileRingFixture(true);
+  // Two hard tiles plus one largest transient component fit admission.
+  // A/B/C initially fit, but adding a depth component must evict soft A.
+  base.cache_size = 2304.0 / (1ULL << 30);
+  StereoFusionOptions options;
+  options.num_threads = 1;
+  options.cache_size = base.cache_size;
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_normal_tile_size = 8;
+  options.bounded_cache_normal_tile_slots = 2;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 1;
+  StereoFusion fusion(options, base.workspace_path, "COLMAP", "", "geometric");
+  StereoFusionExactDepthTestPeer::PrepareRing(fusion, base, 2, false);
+  StereoFusionExactDepthTestPeer::EnableSoftRing(fusion);
+  const auto read = [&](const int row, const int col) -> Eigen::Vector3f {
+    auto tile = StereoFusionExactDepthTestPeer::Acquire(fusion, row, col);
+    EXPECT_TRUE(tile);
+    return tile ? tile->GetNormal(row, col) : Eigen::Vector3f::Zero().eval();
+  };
+  const auto expected = [](const int row, const int col) {
+    return Eigen::Vector3f(row * 17.0f + col + 0.25f, -col - 0.5f, 1.0f);
+  };
+  for (const int col : {0, 8, 16}) EXPECT_EQ(read(0, col), expected(0, col));
+  const auto before = fusion.GetBoundedCacheStats();
+  ASSERT_TRUE(before);
+  for (int repeat = 0; repeat < 2; ++repeat)
+    EXPECT_EQ(read(0, 0), expected(0, 0));
+  const auto after = fusion.GetBoundedCacheStats();
+  ASSERT_TRUE(after);
+  EXPECT_EQ(after->normal_tile_loads, 3);
+  EXPECT_EQ(after->normal_tile_hits, before->normal_tile_hits);
+  EXPECT_EQ(after->resident_bytes, before->resident_bytes);
+  EXPECT_EQ(fusion.GetNormalTileRingStats().soft_hits, 2);
+  {
+    auto depth = StereoFusionExactDepthTestPeer::Cache(fusion).AcquireComponent(
+        0, BoundedWorkspace::Component::kDepth);
+    EXPECT_EQ(depth->depth_map.Get(0, 0), 5.0f);
+  }
+  // The metadata table still holds A's old generation. Reload must reject it.
+  EXPECT_EQ(read(0, 0), expected(0, 0));
+  EXPECT_EQ(fusion.GetNormalTileRingStats().soft_expired, 1);
+  const auto final = fusion.GetBoundedCacheStats();
+  ASSERT_TRUE(final);
+  EXPECT_EQ(final->normal_tile_loads, 4);
+  EXPECT_EQ(final->reserved_bytes, 0);
+  EXPECT_LE(final->peak_charged_bytes, final->capacity_bytes);
 }
 
 TEST(StereoFusionOptions, FullRamLoadThreadPolicy) {
