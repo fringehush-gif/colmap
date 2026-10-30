@@ -11,8 +11,10 @@
 #include "colmap/util/endian.h"
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
+#include "colmap/util/threading.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cfenv>
 #include <cmath>
@@ -424,11 +426,65 @@ struct StereoFusionExactDepthTestPeer {
   static BoundedWorkspace& Cache(StereoFusion& fusion) {
     return *fusion.bounded_workspace_;
   }
+  static void PrepareNormalWindow(StereoFusion& fusion, size_t root = 0) {
+    auto& cache = *fusion.bounded_workspace_;
+    const size_t count = cache.GetModel().images.size();
+    fusion.used_images_.assign(count, true);
+    fusion.fused_images_.assign(count, false);
+    for (size_t index = 0; index < root; ++index)
+      fusion.fused_images_[index] = true;
+    fusion.overlapping_images_.assign(count, {});
+    for (size_t index = 0; index < count; ++index) {
+      for (size_t other = 0; other < count; ++other) {
+        if (index != other)
+          fusion.overlapping_images_[index].push_back(static_cast<int>(other));
+      }
+    }
+    fusion.neighborhood_data_.assign(count, nullptr);
+    fusion.task_neighborhood_reads_.resize(1);
+    const size_t tile = cache.GetNormalTileResidentBytes(0, 7);
+    const size_t largest = std::max(
+        {cache.GetNormalTileReservationBytes(0, 7),
+         cache.GetLoadReservationBytes(0, BoundedWorkspace::Component::kDepth),
+         cache.GetLoadReservationBytes(0,
+                                       BoundedWorkspace::Component::kBitmap)});
+    fusion.normal_tile_worker_headroom_ = largest + 2 * tile;
+    ThreadPool pool(fusion.options_.bounded_cache_prefill_threads == -1
+                        ? 1
+                        : fusion.options_.bounded_cache_prefill_threads);
+    fusion.PrepareBoundedNeighborhood(static_cast<int>(root), 1, pool);
+  }
+  static auto AcquireBitmap(StereoFusion& fusion, int view) {
+    return fusion.AcquireNeighborhoodBitmap(0, view);
+  }
+  static size_t CarriedBitmaps(const StereoFusion& fusion) {
+    return fusion.neighborhood_bitmap_carried_views_;
+  }
+  static auto AcquireView(StereoFusion& fusion, int view, int row, int col) {
+    return fusion.AcquireWorkerNormalTile(0, view, row, col);
+  }
+  static size_t NormalWindowOwners(const StereoFusion& fusion) {
+    return fusion.normal_prefill_leases_.size();
+  }
+  static size_t NormalWindowPointers(const StereoFusion& fusion) {
+    return std::count_if(fusion.normal_prefill_data_.begin(),
+                         fusion.normal_prefill_data_.end(),
+                         [](const auto* data) { return data != nullptr; });
+  }
+  static void ClearNormalWindow(StereoFusion& fusion) {
+    fusion.ClearNormalPrefillWindow();
+    std::fill(fusion.neighborhood_data_.begin(),
+              fusion.neighborhood_data_.end(),
+              nullptr);
+    fusion.neighborhood_leases_.clear();
+    fusion.neighborhood_bitmap_pins_.reset();
+  }
 };
 
 namespace {
 
-Workspace::Options CreateNormalTileRingFixture(const bool varied = false) {
+Workspace::Options CreateNormalTileRingFixture(const bool varied = false,
+                                               const size_t views = 1) {
   const auto root = CreateTestDir();
   for (const auto& sub : {"sparse",
                           "images",
@@ -440,7 +496,7 @@ Workspace::Options CreateNormalTileRingFixture(const bool varied = false) {
   SyntheticDatasetOptions dataset;
   dataset.num_rigs = 1;
   dataset.num_cameras_per_rig = 1;
-  dataset.num_frames_per_rig = 1;
+  dataset.num_frames_per_rig = views;
   dataset.camera_width = 17;
   dataset.camera_height = 11;
   Reconstruction reconstruction;
@@ -456,7 +512,7 @@ Workspace::Options CreateNormalTileRingFixture(const bool varied = false) {
   Workspace descriptor(base);
   Mat<float> depth(17, 11, 1);
   depth.Fill(5.0f);
-  depth.Write(descriptor.GetDepthMapPath(0));
+
   Mat<float> normal(17, 11, 3);
   normal.Fill(0.0f);
   for (int row = 0; row < 11; ++row) {
@@ -468,11 +524,327 @@ Workspace::Options CreateNormalTileRingFixture(const bool varied = false) {
       normal.Set(row, col, 2, 1.0f);
     }
   }
-  normal.Write(descriptor.GetNormalMapPath(0));
+
   Bitmap bitmap(17, 11, true);
   bitmap.Fill(BitmapColor<uint8_t>(0, 64, 128));
-  THROW_CHECK(bitmap.Write(descriptor.GetBitmapPath(0)));
+  for (size_t view = 0; view < views; ++view) {
+    depth.Write(descriptor.GetDepthMapPath(static_cast<int>(view)));
+    normal.Write(descriptor.GetNormalMapPath(static_cast<int>(view)));
+    THROW_CHECK(bitmap.Write(descriptor.GetBitmapPath(static_cast<int>(view))));
+  }
   return base;
+}
+
+TEST(StereoFusion, NormalWindowUsesExactWholeOwnerThenTiledFallback) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  auto base = CreateNormalTileRingFixture(true, 4);
+  base.cache_size = 12000.0 / (1024.0 * 1024.0 * 1024.0);
+  Workspace descriptor(base);
+  NormalMap expected;
+  expected.Read(descriptor.GetNormalMapPath(0));
+  const uint32_t special[] = {0x80000000u, 0x7fc12345u, 0xbf800000u};
+  for (size_t i = 0; i < 3; ++i)
+    std::memcpy(expected.GetPtr() + i, &special[i], sizeof(float));
+  expected.Write(descriptor.GetNormalMapPath(0));
+  StereoFusionOptions options;
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = 2;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 1;
+  options.num_threads = 1;
+  StereoFusion fusion(options, base.workspace_path, "COLMAP", "", "geometric");
+  StereoFusionExactDepthTestPeer::PrepareRing(fusion, base, 2, false);
+  StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 1);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 1);
+  const auto before = fusion.GetBoundedCacheStats();
+  ASSERT_TRUE(before);
+  EXPECT_EQ(before->normal_tile_loads, 0);
+  const auto whole = StereoFusionExactDepthTestPeer::Acquire(fusion, 10, 16);
+  ASSERT_TRUE(whole);
+  EXPECT_EQ(whole->normal_map.GetWidth(), 17);
+  ASSERT_EQ(whole->normal_map.GetData().size(), expected.GetData().size());
+  EXPECT_EQ(std::memcmp(whole->normal_map.GetData().data(),
+                        expected.GetData().data(),
+                        expected.GetData().size() * sizeof(float)),
+            0);
+  EXPECT_FLOAT_EQ(whole->GetNormal(10, 16)(0), 186.25f);
+  EXPECT_FLOAT_EQ(whole->GetNormal(10, 16)(1), -16.5f);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->hits, before->hits);
+  EXPECT_EQ(fusion.GetNormalTileRingStats().misses, 0);
+  // View1 is outside the hot window but its original depth remains admitted.
+  // Exercise its exact tile while the whole-normal owner is still pinned.
+  auto tile = StereoFusionExactDepthTestPeer::AcquireView(fusion, 1, 10, 16);
+  ASSERT_TRUE(tile);
+  EXPECT_LT(tile->normal_map.GetWidth(), 17);
+  EXPECT_FLOAT_EQ(tile->GetNormal(10, 16)(0), 186.25f);
+  const auto after = fusion.GetBoundedCacheStats();
+  ASSERT_TRUE(after);
+  EXPECT_EQ(after->normal_tile_loads, 1);
+  EXPECT_EQ(after->reserved_bytes, 0);
+  EXPECT_LE(after->peak_charged_bytes, after->capacity_bytes);
+  StereoFusionExactDepthTestPeer::ClearRing(fusion);
+  StereoFusionExactDepthTestPeer::ClearNormalWindow(fusion);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 0);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 0);
+  // No caller reads the borrowed wrappers after the joined owners clear.
+}
+
+TEST(StereoFusion, NormalWindowCarriesPartialNeighborhoodBitmap) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  auto base = CreateNormalTileRingFixture(false, 4);
+  base.cache_size = 7000.0 / (1024.0 * 1024.0 * 1024.0);
+  StereoFusionOptions options;
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = 2;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 1;
+  options.num_threads = 1;
+  StereoFusion fusion(options, base.workspace_path, "COLMAP", "", "geometric");
+  StereoFusionExactDepthTestPeer::PrepareRing(fusion, base, 2, false);
+  StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion, 0);
+  const auto* bitmap = StereoFusionExactDepthTestPeer::AcquireBitmap(fusion, 1);
+  ASSERT_NE(bitmap, nullptr);
+  const auto color = bitmap->bitmap.GetPixel(0, 0);
+  ASSERT_TRUE(color);
+  EXPECT_EQ(color->r, 0);
+  EXPECT_EQ(color->g, 64);
+  EXPECT_EQ(color->b, 128);
+  // No readers remain when the next root reuses the warmed owner.
+  StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion, 1);
+  EXPECT_GT(StereoFusionExactDepthTestPeer::CarriedBitmaps(fusion), 0);
+  const auto* carried =
+      StereoFusionExactDepthTestPeer::AcquireBitmap(fusion, 1);
+  ASSERT_EQ(carried, bitmap);
+  const auto carried_color = carried->bitmap.GetPixel(0, 0);
+  ASSERT_TRUE(carried_color);
+  EXPECT_EQ(carried_color->r, 0);
+  EXPECT_EQ(carried_color->g, 64);
+  EXPECT_EQ(carried_color->b, 128);
+  const auto stats = fusion.GetBoundedCacheStats();
+  ASSERT_TRUE(stats);
+  EXPECT_EQ(stats->component_loads[static_cast<size_t>(
+                BoundedWorkspace::Component::kImage)],
+            0);
+  EXPECT_EQ(stats->reserved_bytes, 0);
+  EXPECT_LE(stats->peak_charged_bytes, stats->capacity_bytes);
+  StereoFusionExactDepthTestPeer::ClearNormalWindow(fusion);
+}
+
+TEST(StereoFusion, NormalWindowStopAndLoadFailurePublishNothing) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  auto base = CreateNormalTileRingFixture(true, 6);
+  base.cache_size = 20000.0 / (1024.0 * 1024.0 * 1024.0);
+  StereoFusionOptions options;
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = 2;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 1;
+  options.num_threads = 1;
+  options.bounded_cache_prefill_threads = 4;
+  StereoFusion fusion(options, base.workspace_path, "COLMAP", "", "geometric");
+  StereoFusionExactDepthTestPeer::PrepareRing(fusion, base, 2, false);
+  bool stopped = false;
+  fusion.SetCheckIfStoppedFunc([&] {
+    const auto stats = fusion.GetBoundedCacheStats();
+    stopped =
+        stopped || (stats && stats->component_loads[static_cast<size_t>(
+                                 BoundedWorkspace::Component::kDepth)] > 0);
+    return stopped;
+  });
+  StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 0);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 0);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  fusion.SetCheckIfStoppedFunc([] { return false; });
+  Workspace paths(base);
+  const auto normal_path = paths.GetNormalMapPath(0);
+  std::ifstream original(normal_path, std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(original)),
+                          std::istreambuf_iterator<char>());
+  original.close();
+  const auto header_end =
+      bytes.find('&', bytes.find('&', bytes.find('&') + 1) + 1);
+  ASSERT_NE(header_end, std::string::npos);
+  // A fresh cache ensures planning sees the valid original header/body first.
+  // This main-thread stop callback runs after the depth tasks join, immediately
+  // before the selected normal load. Inject failure there without a race.
+  StereoFusionExactDepthTestPeer::ClearNormalWindow(fusion);
+  StereoFusionExactDepthTestPeer::PrepareRing(fusion, base, 2, false);
+  bool truncated = false;
+  fusion.SetCheckIfStoppedFunc([&] {
+    const auto stats = fusion.GetBoundedCacheStats();
+    if (!truncated && stats &&
+        stats->component_loads[static_cast<size_t>(
+            BoundedWorkspace::Component::kDepth)] > 0) {
+      std::ofstream broken(normal_path, std::ios::binary | std::ios::trunc);
+      broken.write(bytes.data(), header_end + 1);
+      truncated = true;
+    }
+    return false;
+  });
+  EXPECT_THROW(StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion),
+               std::exception);
+  EXPECT_TRUE(truncated);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 0);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 0);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  fusion.SetCheckIfStoppedFunc([] { return false; });
+  {
+    std::ofstream restored(normal_path, std::ios::binary | std::ios::trunc);
+    restored.write(bytes.data(), bytes.size());
+  }
+  StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 2);
+  StereoFusionExactDepthTestPeer::ClearNormalWindow(fusion);
+}
+TEST(StereoFusion, CompleteTileNeighborhoodAliasesWholeImageOwners) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  auto base = CreateNormalTileRingFixture(true, 2);
+  base.cache_size = 12000.0 / (1024.0 * 1024.0 * 1024.0);
+  Workspace paths(base);
+  NormalMap expected;
+  expected.Read(paths.GetNormalMapPath(0));
+  const uint32_t special[] = {0x80000000u, 0x7fc12345u, 0xbf800000u};
+  for (size_t i = 0; i < 3; ++i)
+    std::memcpy(expected.GetPtr() + i, &special[i], sizeof(float));
+  expected.Write(paths.GetNormalMapPath(0));
+  StereoFusionOptions options;
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = 2;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 1;
+  options.num_threads = 1;
+  options.bounded_cache_prefill_threads = 4;
+  StereoFusion fusion(options, base.workspace_path, "COLMAP", "", "geometric");
+  StereoFusionExactDepthTestPeer::PrepareRing(fusion, base, 2, false);
+  StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion);
+  const auto stats = fusion.GetBoundedCacheStats();
+  ASSERT_TRUE(stats);
+  EXPECT_EQ(stats->component_loads[static_cast<size_t>(
+                BoundedWorkspace::Component::kImage)],
+            2);
+  EXPECT_EQ(stats->component_loads[static_cast<size_t>(
+                BoundedWorkspace::Component::kNormal)],
+            0);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 0);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 2);
+  const auto whole = StereoFusionExactDepthTestPeer::Acquire(fusion, 10, 16);
+  ASSERT_TRUE(whole);
+  ASSERT_EQ(whole->normal_map.GetData().size(), expected.GetData().size());
+  EXPECT_EQ(std::memcmp(whole->normal_map.GetData().data(),
+                        expected.GetData().data(),
+                        expected.GetData().size() * sizeof(float)),
+            0);
+  const auto second =
+      StereoFusionExactDepthTestPeer::AcquireView(fusion, 1, 10, 16);
+  ASSERT_TRUE(second);
+  EXPECT_EQ(second->normal_map.GetWidth(), 17);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->normal_tile_loads, 0);
+  EXPECT_LE(stats->peak_charged_bytes, stats->capacity_bytes);
+  StereoFusionExactDepthTestPeer::ClearNormalWindow(fusion);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 0);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+}
+
+TEST(StereoFusion, CompleteTileNeighborhoodStopFailureAndRetry) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  auto base = CreateNormalTileRingFixture(true, 2);
+  base.cache_size = 12000.0 / (1024.0 * 1024.0 * 1024.0);
+  StereoFusionOptions options;
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = 2;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 1;
+  options.num_threads = 1;
+  options.bounded_cache_prefill_threads = 4;
+  StereoFusion fusion(options, base.workspace_path, "COLMAP", "", "geometric");
+  StereoFusionExactDepthTestPeer::PrepareRing(fusion, base, 2, false);
+  fusion.SetCheckIfStoppedFunc([&] {
+    const auto stats = fusion.GetBoundedCacheStats();
+    return stats && stats->component_loads[static_cast<size_t>(
+                        BoundedWorkspace::Component::kImage)] > 0;
+  });
+  StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 0);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  fusion.SetCheckIfStoppedFunc([] { return false; });
+  StereoFusionExactDepthTestPeer::PrepareRing(fusion, base, 2, false);
+  Workspace paths(base);
+  std::atomic<int> attempts{0};
+  auto failed = ScopedBitmapReader::Create(
+      {paths.GetBitmapPath(0)},
+      [&attempts](const std::filesystem::path&, bool, bool, Bitmap*) {
+        ++attempts;
+        return false;
+      },
+      {{17, 11}});
+  EXPECT_THROW(StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion),
+               std::exception);
+  EXPECT_GT(attempts.load(), 0);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 0);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  failed->Close();
+  StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 2);
+  StereoFusionExactDepthTestPeer::ClearNormalWindow(fusion);
+}
+
+TEST(StereoFusion, NormalWindowPinsPreserveDepthAndBudgetLoaderExtra) {
+  using internal::NormalWindowFusionPins;
+  const std::vector<size_t> depth(4, 10), bitmap(4, 8), normal(4, 16);
+  const auto pins =
+      NormalWindowFusionPins(depth, bitmap, normal, {20, 20, 20, 20}, 100);
+  EXPECT_EQ(pins.components.depth,
+            internal::DepthPriorityFusionPins(depth, bitmap, 100).depth);
+  EXPECT_EQ(pins.normal, (std::vector<size_t>{0}));
+  EXPECT_EQ(pins.components.bitmap, (std::vector<size_t>{0, 1, 2, 3}));
+  EXPECT_EQ(pins.largest_normal_extra, 4);
+  size_t charge = pins.largest_normal_extra;
+  for (auto i : pins.components.depth) charge += depth[i];
+  for (auto i : pins.components.bitmap) charge += bitmap[i];
+  for (auto i : pins.normal) charge += normal[i];
+  EXPECT_LE(charge, 100);
+  // A large loader extra cannot displace an admitted depth or root RGB.
+  const auto scratch =
+      NormalWindowFusionPins(depth, bitmap, normal, {80, 80, 80, 80}, 100);
+  EXPECT_TRUE(scratch.normal.empty());
+  EXPECT_EQ(scratch.components.depth, pins.components.depth);
+  EXPECT_EQ(scratch.components.bitmap, pins.components.bitmap);
+}
+
+TEST(StereoFusion, NormalWindowPinsPriorityCapAndTinyFallback) {
+  using internal::NormalWindowFusionPins;
+  EXPECT_TRUE(NormalWindowFusionPins({}, {}, {}, {}, 0).normal.empty());
+  const auto tiny = NormalWindowFusionPins({10}, {8}, {16}, {16}, 17);
+  EXPECT_TRUE(tiny.components.depth.empty());
+  EXPECT_TRUE(tiny.normal.empty());
+  const auto cap = NormalWindowFusionPins(std::vector<size_t>(12, 1),
+                                          std::vector<size_t>(12, 1),
+                                          std::vector<size_t>(12, 1),
+                                          std::vector<size_t>(12, 1),
+                                          100);
+  EXPECT_EQ(cap.normal, (std::vector<size_t>{0, 1, 2, 3, 4, 5, 6, 7}));
+  EXPECT_EQ(cap.components.depth.size(), 12);
+  // Normals may replace only nonroot bitmap pins, never the baseline depths.
+  const auto mixed = NormalWindowFusionPins(
+      {10, 10, 10}, {20, 20, 20}, {20, 20, 20}, {20, 20, 20}, 100);
+  EXPECT_EQ(mixed.normal, (std::vector<size_t>{0}));
+  EXPECT_EQ(mixed.components.depth, (std::vector<size_t>{0, 1, 2}));
+  EXPECT_EQ(mixed.components.bitmap, (std::vector<size_t>{0, 1}));
+  EXPECT_ANY_THROW(NormalWindowFusionPins({1}, {1}, {2}, {1}, 16));
+  const size_t max = std::numeric_limits<size_t>::max();
+  EXPECT_TRUE(NormalWindowFusionPins({max}, {1}, {1}, {1}, max).normal.empty());
 }
 
 TEST(StereoFusion, NormalTileRingReusesFp32CroppedTiles) {
@@ -1274,12 +1646,62 @@ TEST(StereoFusion, Integration) {
                       indexed_tiles.GetNormalTileRingStats().indexed_lookups)),
               std::string::npos);
     options.bounded_cache_neighborhood = true;
-    options.cache_size = 1.0 / 1024.0;
+    // Keep this cohort on the partial tile path: two whole images do not fit.
+    options.bounded_cache_normal_tile_slots = 2;
+    options.cache_size = 20000.0 / (1024.0 * 1024.0 * 1024.0);
     ASSERT_TRUE(options.Check());
     StereoFusion tile_neighborhood(
         options, temp_dir, "COLMAP", "", "geometric");
     tile_neighborhood.Run();
     expect_same_fusion(tile_neighborhood, "tile_neighborhood");
+    for (const int prefill_threads : {1, 4}) {
+      SCOPED_TRACE(prefill_threads);
+      auto hybrid_options = options;
+      hybrid_options.bounded_cache_normal_tile_slots = 2;
+      hybrid_options.bounded_cache_prefill_threads = prefill_threads;
+      hybrid_options.cache_size = 80000.0 / (1024.0 * 1024.0 * 1024.0);
+      StereoFusion hybrid(hybrid_options, temp_dir, "COLMAP", "", "geometric");
+      for (int repeat = 0; repeat < 2; ++repeat) {
+        hybrid.Run();
+        expect_same_fusion(hybrid, "hybrid-normal-window");
+        ASSERT_EQ(hybrid.GetFusedPoints().size(), first_points.size());
+        EXPECT_EQ(hybrid.GetFusedPointsVisibility(), first_visibility);
+        for (size_t index = 0; index < first_points.size(); ++index) {
+          const auto& a = first_points[index];
+          const auto& b = hybrid.GetFusedPoints()[index];
+          const float expected_values[] = {a.x, a.y, a.z, a.nx, a.ny, a.nz};
+          const float actual_values[] = {b.x, b.y, b.z, b.nx, b.ny, b.nz};
+          std::array<uint32_t, 6> expected_bits, actual_bits;
+          static_assert(sizeof(expected_bits) == sizeof(expected_values));
+          static_assert(sizeof(actual_bits) == sizeof(actual_values));
+          std::memcpy(
+              expected_bits.data(), expected_values, sizeof(expected_bits));
+          std::memcpy(actual_bits.data(), actual_values, sizeof(actual_bits));
+          EXPECT_EQ(expected_bits, actual_bits);
+          EXPECT_EQ(a.r, b.r);
+          EXPECT_EQ(a.g, b.g);
+          EXPECT_EQ(a.b, b.b);
+        }
+        const auto stats = hybrid.GetBoundedCacheStats();
+        ASSERT_TRUE(stats);
+        EXPECT_GE(stats->component_loads[static_cast<size_t>(
+                      BoundedWorkspace::Component::kImage)],
+                  2);
+        EXPECT_EQ(stats->component_loads[static_cast<size_t>(
+                      BoundedWorkspace::Component::kNormal)],
+                  0);
+        EXPECT_EQ(stats->normal_tile_loads, 0);
+        EXPECT_EQ(stats->reserved_bytes, 0);
+        EXPECT_LE(stats->peak_charged_bytes, stats->capacity_bytes);
+        EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(hybrid),
+                  0);
+        EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(hybrid),
+                  0);
+        const auto row = hybrid.GetBoundedCacheDiagnosticRow();
+        ASSERT_TRUE(row);
+        EXPECT_NE(row->find("normal_prefill_admitted="), std::string::npos);
+      }
+    }
     const auto neighborhood_row =
         tile_neighborhood.GetBoundedCacheDiagnosticRow();
     ASSERT_TRUE(neighborhood_row);
@@ -1294,8 +1716,10 @@ TEST(StereoFusion, Integration) {
     };
     EXPECT_GE(
         diagnostic_count(*neighborhood_row, "neighborhood_bitmap_admitted"), 2);
-    EXPECT_GT(
-        diagnostic_count(*neighborhood_row, "neighborhood_bitmap_carried"), 0);
+    EXPECT_GT(tile_neighborhood.GetBoundedCacheStats()
+                  ->component_loads[static_cast<size_t>(
+                      BoundedWorkspace::Component::kImage)],
+              0);
     EXPECT_GT(
         diagnostic_count(*neighborhood_row, "neighborhood_bitmap_borrows"), 0);
     EXPECT_GT(diagnostic_count(*neighborhood_row, "neighborhood_bitmap_init"),

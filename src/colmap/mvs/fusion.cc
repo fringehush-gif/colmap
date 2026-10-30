@@ -181,6 +181,51 @@ FusionPinIndices DepthPriorityFusionPins(
   return admitted;
 }
 
+FusionNormalWindowPins NormalWindowFusionPins(
+    const std::vector<size_t>& depth_bytes,
+    const std::vector<size_t>& bitmap_bytes,
+    const std::vector<size_t>& normal_bytes,
+    const std::vector<size_t>& normal_reservations,
+    const size_t budget) {
+  THROW_CHECK_EQ(depth_bytes.size(), normal_bytes.size());
+  THROW_CHECK_EQ(depth_bytes.size(), normal_reservations.size());
+  FusionNormalWindowPins pins;
+  const auto baseline =
+      DepthPriorityFusionPins(depth_bytes, bitmap_bytes, budget);
+  pins.components.depth = baseline.depth;
+  if (baseline.depth.empty()) return pins;
+  pins.components.bitmap.push_back(0);
+  size_t remaining = budget - bitmap_bytes[0];
+  for (const size_t index : baseline.depth) remaining -= depth_bytes[index];
+  // Keep at most eight root/BFS-priority normals within one quarter of the
+  // joint pin budget. Preserve admitted depths and root RGB before nonroot RGB.
+  const size_t normal_budget = budget / 4;
+  size_t normal_total = 0;
+  for (const size_t index : baseline.depth) {
+    THROW_CHECK_GE(normal_reservations[index], normal_bytes[index]);
+    const size_t resident = normal_bytes[index];
+    const size_t extra = std::max(pins.largest_normal_extra,
+                                  normal_reservations[index] - resident);
+    if (pins.normal.size() == 8) break;
+    if (resident == 0 || resident > normal_budget - normal_total ||
+        resident > remaining || extra > remaining - resident)
+      continue;
+    remaining -= resident;
+    normal_total += resident;
+    pins.largest_normal_extra = extra;
+    pins.normal.push_back(index);
+  }
+  // Whole normals load serially after the depth join, so reserve their maximum
+  // loader extra once. The separate worker demand/ring reserve is untouched.
+  remaining -= pins.largest_normal_extra;
+  for (size_t index = 1; index < bitmap_bytes.size(); ++index) {
+    if (bitmap_bytes[index] > remaining) continue;
+    pins.components.bitmap.push_back(index);
+    remaining -= bitmap_bytes[index];
+  }
+  return pins;
+}
+
 // Use the sparse model to find most connected image that has not yet been
 // fused. This is used as a heuristic to ensure that the workspace cache reuses
 // already cached images as efficient as possible.
@@ -394,6 +439,11 @@ std::optional<std::string> StereoFusion::GetBoundedCacheDiagnosticRow() const {
         << " neighborhood_bitmap_borrows=" << bitmap_reads
         << " neighborhood_bitmap_demand=" << bitmap_misses
         << " neighborhood_bitmap_init=" << bitmap_initializations;
+    size_t normal_reads = 0;
+    for (const auto& ring : normal_tile_rings_)
+      normal_reads += ring.whole_normal_reads;
+    row << " normal_prefill_admitted=" << normal_prefill_admitted_views_
+        << " normal_prefill_borrows=" << normal_reads;
   }
   const auto cache = GetBoundedCacheStats();
   if (cache) {
@@ -401,8 +451,10 @@ std::optional<std::string> StereoFusion::GetBoundedCacheDiagnosticRow() const {
         << " decoded_peak_charged_bytes=" << cache->peak_charged_bytes
         << " decoded_resident_bytes=" << cache->resident_bytes
         << " decoded_reserved_bytes=" << cache->reserved_bytes
-        << " decoded_loads=" << cache->loads << " decoded_hits=" << cache->hits
-        << " decoded_waits=" << cache->waits
+        << " decoded_loads=" << cache->loads << " decoded_whole_image_loads="
+        << cache->component_loads[static_cast<size_t>(
+               BoundedWorkspace::Component::kImage)]
+        << " decoded_hits=" << cache->hits << " decoded_waits=" << cache->waits
         << " decoded_evictions=" << cache->evictions
         << " decoded_normal_tile_loads=" << cache->normal_tile_loads
         << " decoded_normal_tile_hits=" << cache->normal_tile_hits;
@@ -454,6 +506,8 @@ void StereoFusion::Run() {
   run_timer.Start();
 
   full_ram_inputs_.clear();
+  ClearNormalPrefillWindow();
+  normal_prefill_admitted_views_ = 0;
   ClearDirectComponentPins();
   direct_component_pins_admitted_ = false;
   direct_depth_borrows_ = 0;
@@ -845,6 +899,7 @@ void StereoFusion::Run() {
         depth_pin_exit.workspace->ReleaseOriginalDepthNeighborhood();
       }
       ClearNormalTileRings();
+      ClearNormalPrefillWindow();
       ClearMappedNormalRing();
 
       num_fused_images += 1;
@@ -874,6 +929,7 @@ void StereoFusion::Run() {
       depth_pin_exit.workspace->ReleaseOriginalDepthNeighborhood();
     }
     std::fill(neighborhood_data_.begin(), neighborhood_data_.end(), nullptr);
+    ClearNormalPrefillWindow();
     neighborhood_leases_.clear();
 
     fused_points_.reserve(total_fused_points);
@@ -932,6 +988,7 @@ void StereoFusion::Run() {
     } catch (...) {
     }
     std::fill(neighborhood_data_.begin(), neighborhood_data_.end(), nullptr);
+    ClearNormalPrefillWindow();
     neighborhood_leases_.clear();
     neighborhood_bitmap_pins_.reset();
     try {
@@ -1006,6 +1063,11 @@ void StereoFusion::ClearDirectComponentPins() {
   direct_bitmap_data_.clear();
   direct_depth_leases_.clear();
   direct_bitmap_leases_.clear();
+}
+
+void StereoFusion::ClearNormalPrefillWindow() {
+  normal_prefill_data_.clear();
+  normal_prefill_leases_.clear();
 }
 
 void StereoFusion::ClearNormalTileRings() {
@@ -1086,6 +1148,12 @@ const ImmutableMapRegion* StereoFusion::AcquireWorkerMappedNormal(
 StereoFusion::NormalTileRead StereoFusion::AcquireWorkerNormalTile(
     const int thread_id, const int image_idx, const int row, const int col) {
   auto& ring = normal_tile_rings_.at(thread_id);
+  if (!normal_prefill_data_.empty()) {
+    if (const auto* data = normal_prefill_data_.at(image_idx)) {
+      ++ring.whole_normal_reads;
+      return {data, {}};
+    }
+  }
   const auto contains = [row, col](const BoundedWorkspace::ImageData* data) {
     return data && static_cast<size_t>(col) >= data->normal_origin_x &&
            static_cast<size_t>(row) >= data->normal_origin_y &&
@@ -1222,6 +1290,7 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
   // The preceding root has joined. Clear borrowed pointers before releasing
   // their owners, and release all old pins before a new load may need room.
   std::fill(neighborhood_data_.begin(), neighborhood_data_.end(), nullptr);
+  ClearNormalPrefillWindow();
   neighborhood_leases_.clear();
   auto previous_bitmap_pins = std::move(neighborhood_bitmap_pins_);
   if (CheckIfStopped()) return;
@@ -1246,8 +1315,10 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
   // A complete pinned whole-view set already contains every reachable
   // depth, normal and bitmap. Reserve loader scratch, not another whole view
   // per worker. Partial neighborhoods still need component demand headroom.
-  if (options_.bounded_cache_components &&
-      options_.bounded_cache_normal_tile_size == 0) {
+  bool whole_group_admitted = false;
+  bool allow_whole_group = options_.bounded_cache_normal_tile_size == 0;
+  allow_whole_group = allow_whole_group || !options_.bounded_cache_exact_depth;
+  if (options_.bounded_cache_components && allow_whole_group) {
     size_t whole_total = 0, whole_extra = 0;
     bool whole_fits = true;
     for (const int view : views) {
@@ -1265,6 +1336,7 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
     }
     if (whole_fits && whole_extra <= capacity - whole_total) {
       component = Component::kImage;
+      whole_group_admitted = true;
     }
   }
 
@@ -1305,7 +1377,10 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
           ? capacity
           : (largest <= capacity / workers ? capacity - largest * workers : 0);
   std::vector<int> prefill_views;
-  if (options_.bounded_cache_normal_tile_size > 0) {
+  std::vector<int> normal_prefill_views;
+  bool normal_prefill_stopped = false;
+  bool parallel_normal_loads = false;
+  if (options_.bounded_cache_normal_tile_size > 0 && !whole_group_admitted) {
     // The checked Run admission already establishes workers * headroom <= cap.
     // Pin root depth + eventual RGB, then favor other depths; an excluded RGB
     // stays demand-loaded after the geometry checks.
@@ -1317,8 +1392,26 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
       bitmap_sizes.push_back(bounded_workspace_->GetResidentBytesEstimate(
           view, Component::kBitmap));
     }
-    const auto admitted = internal::DepthPriorityFusionPins(
+    auto admitted = internal::DepthPriorityFusionPins(
         resident_sizes, bitmap_sizes, joint_budget);
+    std::vector<size_t> normal_sizes, normal_reservations;
+    normal_sizes.reserve(views.size());
+    normal_reservations.reserve(views.size());
+    for (const int view : views) {
+      normal_sizes.push_back(bounded_workspace_->GetResidentBytesEstimate(
+          view, Component::kNormal));
+      normal_reservations.push_back(bounded_workspace_->GetLoadReservationBytes(
+          view, Component::kNormal));
+    }
+    const auto window = internal::NormalWindowFusionPins(resident_sizes,
+                                                         bitmap_sizes,
+                                                         normal_sizes,
+                                                         normal_reservations,
+                                                         joint_budget);
+    admitted = window.components;
+    parallel_normal_loads = window.largest_normal_extra == 0;
+    for (const size_t index : window.normal)
+      normal_prefill_views.push_back(views[index]);
     for (const size_t index : admitted.depth) {
       prefill_views.push_back(views[index]);
     }
@@ -1374,20 +1467,77 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
       });
     }
     thread_pool.Wait();
+    // Unchanged-grid normal loads need only their final resident charge.
+    // Reuse the joined prefill pool without increasing the pin budget. Loads
+    // requiring transient resize storage retain the serial reservation policy.
+    normal_prefill_leases_.resize(normal_prefill_views.size());
+    if (parallel_normal_loads && !normal_prefill_views.empty()) {
+      if (CheckIfStopped()) {
+        normal_prefill_stopped = true;
+      } else {
+        const size_t normal_lanes =
+            std::min({size_t{4}, prefill_threads, normal_prefill_views.size()});
+        for (size_t lane = 0; lane < normal_lanes; ++lane) {
+          thread_pool.AddTask(
+              [this, lane, normal_lanes, &normal_prefill_views]() {
+                for (size_t index = lane; index < normal_prefill_views.size();
+                     index += normal_lanes) {
+                  normal_prefill_leases_[index] =
+                      bounded_workspace_->AcquireComponent(
+                          normal_prefill_views[index], Component::kNormal);
+                }
+              });
+        }
+        thread_pool.Wait();
+      }
+    } else {
+      for (size_t index = 0; index < normal_prefill_views.size(); ++index) {
+        if (CheckIfStopped()) {
+          normal_prefill_stopped = true;
+          break;
+        }
+        normal_prefill_leases_[index] = bounded_workspace_->AcquireComponent(
+            normal_prefill_views[index], Component::kNormal);
+      }
+    }
   } catch (...) {
     // AddTask can fail after earlier lanes were queued. Join them before
     // releasing their member-owned leases or closing a resident reader scope.
     const auto failure = std::current_exception();
     try {
       thread_pool.Wait();
-    } catch (...) {
+    } catch (...) {  // NOLINT(bugprone-empty-catch)
+      // Preserve the original failure after draining the remaining tasks.
     }
+    ClearNormalPrefillWindow();
     neighborhood_leases_.clear();
     std::rethrow_exception(failure);
   }
-  if (CheckIfStopped()) {
+  if (normal_prefill_stopped || CheckIfStopped()) {
+    ClearNormalPrefillWindow();
     neighborhood_leases_.clear();
     return;
+  }
+  if (!normal_prefill_views.empty()) {
+    normal_prefill_data_.assign(used_images_.size(), nullptr);
+    for (size_t index = 0; index < normal_prefill_views.size(); ++index) {
+      THROW_CHECK(normal_prefill_leases_[index]);
+      normal_prefill_data_[normal_prefill_views[index]] =
+          normal_prefill_leases_[index].get();
+    }
+    normal_prefill_admitted_views_ += normal_prefill_views.size();
+  }
+  if (whole_group_admitted && options_.bounded_cache_normal_tile_size > 0) {
+    // Whole owners already contain every reachable normal and bitmap. Alias
+    // them only after the load join; the neighborhood leases own their
+    // lifetime.
+    normal_prefill_data_.assign(used_images_.size(), nullptr);
+    for (size_t index = 0; index < prefill_views.size(); ++index) {
+      const auto* data = neighborhood_leases_[index].get();
+      THROW_CHECK_GT(data->normal_map.GetWidth(), 0);
+      normal_prefill_data_[prefill_views[index]] = data;
+    }
+    normal_prefill_admitted_views_ += prefill_views.size();
   }
   for (size_t index = 0; index < prefill_views.size(); ++index) {
     neighborhood_data_[prefill_views[index]] =
