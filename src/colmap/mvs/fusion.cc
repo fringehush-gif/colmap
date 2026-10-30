@@ -931,6 +931,8 @@ void StereoFusion::Run() {
     std::fill(neighborhood_data_.begin(), neighborhood_data_.end(), nullptr);
     ClearNormalPrefillWindow();
     neighborhood_leases_.clear();
+    if (independent_prefill_pool) independent_prefill_pool->Stop();
+    thread_pool.Stop();
 
     fused_points_.reserve(total_fused_points);
     fused_points_visibility_.reserve(total_fused_points);
