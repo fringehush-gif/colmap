@@ -6,6 +6,7 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
 
+#include <algorithm>
 #include <iostream>
 #include <iterator>
 #include <mutex>
@@ -23,8 +24,6 @@ namespace colmap {
 #ifdef COLMAP_ONNX_ENABLED
 
 namespace {
-constexpr char kDisableCpuEpFallback[] = "session.disable_cpu_ep_fallback";
-
 [[noreturn]] void RethrowONNXException() {
   try {
     std::rethrow_exception(std::current_exception());
@@ -76,6 +75,12 @@ ONNXExecutionProvider SelectONNXExecutionProvider(bool use_gpu) {
 #endif
 }
 
+int SelectONNXCudaDevice(const std::string& gpu_index) {
+  const std::vector<int> gpu_indices = CSVToVector<int>(gpu_index);
+  THROW_CHECK_EQ(gpu_indices.size(), 1) << "ONNX model can only run on one GPU";
+  return std::max(0, gpu_indices[0]);
+}
+
 std::string FormatONNXTensorShape(const std::vector<int64_t>& shape) {
   std::ostringstream oss;
   oss << "[";
@@ -120,8 +125,7 @@ void ThrowCheckONNXElementType(const std::string_view name,
 ONNXModel::ONNXModel(std::string model_path,
                      int num_threads,
                      bool use_gpu,
-                     const std::string& gpu_index,
-                     bool is_capability_probe) {
+                     const std::string& gpu_index) {
   {
     static std::mutex download_mutex;
     const std::lock_guard<std::mutex> lock(download_mutex);
@@ -131,12 +135,8 @@ ONNXModel::ONNXModel(std::string model_path,
   const int num_eff_threads = GetEffectiveNumThreads(num_threads);
 
   try {
-    InitializeSession(
-        model_path, num_eff_threads, use_gpu, gpu_index, is_capability_probe);
+    InitializeSession(model_path, num_eff_threads, use_gpu, gpu_index);
   } catch (...) {
-    if (is_capability_probe) {
-      throw;
-    }
     RethrowONNXException();
   }
 }
@@ -162,35 +162,14 @@ void ONNXModel::ConfigureSessionOptions(int num_threads) {
 void ONNXModel::InitializeSession(const std::string& model_path,
                                   int num_threads,
                                   bool use_gpu,
-                                  const std::string& gpu_index,
-                                  bool is_capability_probe) {
+                                  const std::string& gpu_index) {
   ConfigureSessionOptions(num_threads);
   execution_provider_ = SelectONNXExecutionProvider(use_gpu);
 
-  bool inspect_cuda_probe = false;
-#if ORT_API_VERSION >= 24
-  inspect_cuda_probe =
-      is_capability_probe && execution_provider_ == ONNXExecutionProvider::CUDA;
-  if (inspect_cuda_probe) {
-    session_options_.AddConfigEntry("session.record_ep_graph_assignment_info",
-                                    "1");
-  }
-#endif
-  if (is_capability_probe && !inspect_cuda_probe &&
-      execution_provider_ != ONNXExecutionProvider::CPU) {
-    // Fail if any node would fall back to CPU.
-    session_options_.AddConfigEntry(kDisableCpuEpFallback, "1");
-  }
-
 #ifdef COLMAP_CUDA_ENABLED
   if (execution_provider_ == ONNXExecutionProvider::CUDA) {
-    const std::vector<int> gpu_indices = CSVToVector<int>(gpu_index);
-    THROW_CHECK_EQ(gpu_indices.size(), 1)
-        << "ONNX model can only run on one GPU";
     OrtCUDAProviderOptions cuda_options{};
-    if (gpu_indices[0] >= 0) {
-      cuda_options.device_id = gpu_indices[0];
-    }
+    cuda_options.device_id = SelectONNXCudaDevice(gpu_index);
     session_options_.AppendExecutionProvider_CUDA(cuda_options);
   }
 #endif
@@ -228,7 +207,7 @@ void ONNXModel::InitializeSession(const std::string& model_path,
     session_ =
         std::make_unique<Ort::Session>(env_, model_path_cstr, session_options_);
   } catch (const Ort::Exception& e) {
-    if (!use_coreml || is_capability_probe) {
+    if (!use_coreml) {
       throw;
     }
     // Some models cannot be compiled by CoreML (e.g. unsupported dynamic
@@ -240,10 +219,6 @@ void ONNXModel::InitializeSession(const std::string& model_path,
     session_ =
         std::make_unique<Ort::Session>(env_, model_path_cstr, session_options_);
   }
-
-#if ORT_API_VERSION >= 24
-  if (inspect_cuda_probe) CheckCudaCapabilityProbeAssignments();
-#endif
 
   VLOG(2) << "Parsing the inputs";
   const int num_inputs = session_->GetInputCount();
@@ -279,48 +254,6 @@ void ONNXModel::InitializeSession(const std::string& model_path,
                                            .GetElementType());
   }
 }
-
-#if ORT_API_VERSION >= 24
-void ONNXModel::CheckCudaCapabilityProbeAssignments() const {
-  bool has_cuda_nodes = false;
-  for (const auto& subgraph : session_->GetEpGraphAssignmentInfo()) {
-    const std::string provider = subgraph.GetEpName();
-    if (provider == "CUDAExecutionProvider") {
-      has_cuda_nodes |= !subgraph.GetNodes().empty();
-      continue;
-    }
-    for (const auto& node : subgraph.GetNodes()) {
-      const std::string domain = node.GetDomain();
-      const std::string op = node.GetOperatorType();
-      // ORT deliberately places shape/index manipulation on CPU. Reject
-      // arithmetic fallback (in particular unsupported BF16 matrix kernels),
-      // while permitting this small set of data-movement/metadata operators.
-      // The assignment info reports operator types only, not input dtypes or
-      // shapes, so this check cannot prove an allowlisted Gather/Concat/Slice
-      // only moves index data rather than feature tensors -- it only bounds
-      // the fallback to operators ORT uses for shape/index bookkeeping in
-      // the LoMa BF16 graphs. Log allowed CPU nodes so a future ORT
-      // partitioning change is diagnosable from the probe output.
-      const bool shape_or_index =
-          (domain.empty() || domain == "ai.onnx") &&
-          (op == "Shape" || op == "Size" || op == "Gather" || op == "Squeeze" ||
-           op == "Unsqueeze" || op == "Concat" || op == "Slice");
-      if (provider != "CPUExecutionProvider" || !shape_or_index) {
-        const std::string message =
-            "CUDA capability probe requires CPU execution of node '" +
-            node.GetName() + "' (" + domain + ":" + op + ")";
-        throw Ort::Exception(message.c_str(), ORT_NOT_IMPLEMENTED);
-      }
-      VLOG(2) << "CUDA capability probe allows CPU node '" << node.GetName()
-              << "' (" << domain << ":" << op << ")";
-    }
-  }
-  if (!has_cuda_nodes) {
-    throw Ort::Exception("CUDA capability probe contains no CUDA kernels",
-                         ORT_NOT_IMPLEMENTED);
-  }
-}
-#endif
 
 std::vector<Ort::Value> ONNXModel::Run(
     const std::vector<Ort::Value>& input_tensors) const {

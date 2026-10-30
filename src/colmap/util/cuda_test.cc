@@ -116,21 +116,27 @@ TEST_F(CudaBlockingSync, AllVisibleDevicesAndCurrentDeviceRestoration) {
 }
 #endif  // CUDART_VERSION >= 12000
 
-TEST(CudaDeviceSupportsBf16Test, RejectsInvalidGpuIndex) {
-  // No GPU needed: invalid input fails closed without querying a device.
-  EXPECT_FALSE(CudaDeviceSupportsBf16(""));
-  EXPECT_FALSE(CudaDeviceSupportsBf16("abc"));
-  EXPECT_FALSE(CudaDeviceSupportsBf16("0,1"));
-  EXPECT_FALSE(CudaDeviceSupportsBf16("0;1"));
+TEST(CudaDeviceSupportsBf16, InvalidDevice) {
+  const int num_devices = GetNumCudaDevices();
+  EXPECT_FALSE(CudaDeviceSupportsBf16(-1));
+  EXPECT_FALSE(CudaDeviceSupportsBf16(num_devices));
+  if (num_devices == 0) {
+    // Without a device, the initialization error is sticky.
+    GTEST_SKIP() << "No CUDA device available";
+  }
+  // The failed queries must not leave an error for later CUDA_CHECK() calls.
+  EXPECT_EQ(cudaGetLastError(), cudaSuccess);
 }
 
-TEST(CudaDeviceSupportsBf16Test, MatchesDeviceProperties) {
+TEST(CudaDeviceSupportsBf16, MatchesDeviceProperties) {
   if (GetNumCudaDevices() == 0) GTEST_SKIP() << "CUDA device required";
+#ifdef COLMAP_HIP_ENABLED
+  EXPECT_FALSE(CudaDeviceSupportsBf16(0));
+#else
   cudaDeviceProp properties{};
   ASSERT_EQ(cudaGetDeviceProperties(&properties, 0), cudaSuccess);
-  EXPECT_EQ(CudaDeviceSupportsBf16("0"), properties.major >= 8);
-  // A negative index selects device 0, matching the ONNX provider behavior.
-  EXPECT_EQ(CudaDeviceSupportsBf16("-1"), properties.major >= 8);
+  EXPECT_EQ(CudaDeviceSupportsBf16(0), properties.major >= 8);
+#endif
 }
 
 }  // namespace

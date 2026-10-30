@@ -20,13 +20,10 @@ void SetBestCudaDevice(int gpu_index);
 // context.
 void SetCudaDevicesBlockingSync(const std::vector<int>& gpu_indices);
 
-// Returns whether the CUDA device selected by `gpu_index` supports BF16
-// matrix kernels, which require Ampere (compute capability 8.0) or newer.
-// `gpu_index` uses the single-device form parsed by CSVToVector (e.g. "0");
-// a negative index selects device 0, matching the ONNX provider behavior.
-// Returns false when `gpu_index` is invalid or the device cannot be queried,
-// so callers can safely fall back to FP32 whenever BF16 support is
-// unconfirmed.
-bool CudaDeviceSupportsBf16(const std::string& gpu_index);
+// Returns whether the CUDA device natively supports bf16 arithmetic, i.e., has
+// compute capability 8.0 (Ampere) or newer. Returns false if the device cannot
+// be queried, e.g., for an invalid index or a missing driver. Always returns
+// false for HIP builds.
+bool CudaDeviceSupportsBf16(int gpu_index);
 
 }  // namespace colmap
