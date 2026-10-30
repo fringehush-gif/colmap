@@ -48,6 +48,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef PLY_FILE_INCLUDED
 #define PLY_FILE_INCLUDED
 
+#include <memory>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -268,7 +270,11 @@ namespace PoissonRecon
 		inline void _ascii_get_element ( void * );
 		inline void _binary_get_element( void * );
 		static inline PlyFile *_Write( FILE * , const std::vector< std::string > & , int );
+		// The returned reader owns the stream; on failure the caller retains it.
 		static inline PlyFile *_Read ( FILE * ,       std::vector< std::string > & );
+	private:
+		static inline PlyFile *_ReadInternal( FILE * , std::vector< std::string > & , bool );
+		std::vector< char > _readBuffer;
 	};
 
 #include "PlyFile.inl"
