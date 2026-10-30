@@ -28,6 +28,26 @@ DAMAGE.
 
 namespace PLY
 {
+	// Own the buffer until after the file is closed, including on exceptions.
+	struct BufferedPlyWriter
+	{
+		std::vector< char > buffer;
+		std::unique_ptr< PlyFile > file;
+		explicit BufferedPlyWriter( PlyFile *ply ) : file(ply)
+		{
+			try { buffer.resize( 64 * 1024 ); }
+			catch( const std::bad_alloc & ) { /* Buffering is optional. */ }
+			if( !buffer.empty() ) setvbuf( file->fp , buffer.data() , _IOFBF , buffer.size() );
+		}
+		void close( const std::string &fileName )
+		{
+			FILE *fp = file->fp;
+			const bool failed = ferror( fp )!=0;
+			file->fp = NULL;
+			const int result = fclose( fp );
+			if( failed || result!=0 ) MK_THROW( "Failed to finish writing ply file: " , fileName );
+		}
+	};
 	inline int DefaultFileType( void ){ return PLY_ASCII; }
 
 	template<> inline int Type<          int  >( void ){ return PLY_INT   ; }
@@ -328,6 +348,7 @@ namespace PLY
 		std::vector< std::string > elem_names = { std::string( "vertex" ) , std::string( "face" ) };
 		PlyFile *ply = PlyFile::Write( fileName , elem_names , file_type , version );
 		if( !ply ) MK_THROW( "Could not create ply file for writing: " , fileName );
+		BufferedPlyWriter writer( ply );
 
 		//
 		// describe vertex and face properties
@@ -383,7 +404,7 @@ namespace PLY
 		}
 
 		delete[] ply_face.vertices;
-		delete ply;
+		writer.close( fileName );
 	}
 
 	template< typename VertexFactory , typename Index , class Real , int Dim , typename OutputIndex , bool UseCharIndex >
@@ -399,6 +420,7 @@ namespace PLY
 		std::vector< std::string > elem_names = { std::string( "vertex" ) , std::string( "face" ) };
 		PlyFile *ply = PlyFile::Write( fileName , elem_names , file_type , version );
 		if( !ply ) MK_THROW( "Could not create ply file for writing: " , fileName );
+		BufferedPlyWriter writer( ply );
 
 		vertexStream.reset();
 		polygonStream.reset();
@@ -463,7 +485,7 @@ namespace PLY
 		}  // for, write faces
 
 
-		delete ply;
+		writer.close( fileName );
 	}
 
 	template< typename VertexFactory , typename Index , class Real , int Dim , typename OutputIndex >
@@ -479,6 +501,7 @@ namespace PLY
 		std::vector< std::string > elem_names = { std::string( "vertex" ) , std::string( "edge" ) };
 		PlyFile *ply = PlyFile::Write( fileName , elem_names , file_type , version );
 		if( !ply ) MK_THROW( "Could not create ply file for writing: " , fileName );
+		BufferedPlyWriter writer( ply );
 
 		vertexStream.reset();
 		edgeStream.reset();
@@ -541,6 +564,6 @@ namespace PLY
 			ply->put_element( (void *)&ply_edge );
 		}  // for, write edges
 
-		delete ply;
+		writer.close( fileName );
 	}
 }
