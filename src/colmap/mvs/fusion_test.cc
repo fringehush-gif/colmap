@@ -1771,6 +1771,52 @@ std::filesystem::path CreateTwoViewNormalDecisionFixture() {
   return root;
 }
 
+TEST(StereoFusion, CompleteViewSetDoesNotReserveWorkerCopies) {
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  Workspace::Options workspace_options;
+  workspace_options.workspace_path = root;
+  workspace_options.workspace_format = "COLMAP";
+  workspace_options.input_type = "geometric";
+  workspace_options.image_as_rgb = true;
+  workspace_options.cache_size = 1.0;
+  BoundedWorkspace estimates(workspace_options);
+  using Component = BoundedWorkspace::Component;
+  size_t resident_total = 0, loader_extra = 0;
+  for (const int view : {0, 1}) {
+    const size_t resident =
+        estimates.GetResidentBytesEstimate(view, Component::kImage);
+    const size_t reserved =
+        estimates.GetLoadReservationBytes(view, Component::kImage);
+    ASSERT_GE(reserved, resident);
+    resident_total += resident;
+    loader_extra = std::max(loader_extra, reserved - resident);
+  }
+  for (const int workers : {1, 4, 12, 24}) {
+    SCOPED_TRACE(workers);
+    StereoFusionOptions options;
+    options.num_threads = workers;
+    options.min_num_pixels = options.max_num_pixels = 2;
+    options.bounded_cache = true;
+    options.bounded_cache_components = true;
+    options.bounded_cache_neighborhood = true;
+    options.cache_size =
+        static_cast<double>(resident_total + loader_extra + 64) / (1ULL << 30);
+    StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+    fusion.Run();
+    ASSERT_FALSE(fusion.GetFusedPoints().empty());
+    const auto stats = fusion.GetBoundedCacheStats();
+    ASSERT_TRUE(stats);
+    EXPECT_EQ(stats->component_loads[static_cast<size_t>(Component::kImage)],
+              2);
+    for (const auto part :
+         {Component::kDepth, Component::kNormal, Component::kBitmap}) {
+      EXPECT_EQ(stats->component_loads[static_cast<size_t>(part)], 0);
+    }
+    EXPECT_LE(stats->peak_charged_bytes, stats->capacity_bytes);
+    EXPECT_EQ(stats->reserved_bytes, 0);
+  }
+}
+
 TEST(StereoFusion, RetiredEagerInputsSurviveInterruptionAndRepeat) {
   const auto root = CreateTwoViewNormalDecisionFixture();
   StereoFusionOptions options;

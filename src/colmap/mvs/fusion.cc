@@ -1189,12 +1189,12 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
   auto component =
       options_.bounded_cache_components ? Component::kDepth : Component::kImage;
 
-  // If a complete whole-view set and its loader/worker headroom fit, borrow
-  // those original arrays. Otherwise component mode pins depth first and
-  // acquires normal/RGB only after the geometric checks need them.
+  // A complete pinned whole-view set already contains every reachable
+  // depth, normal and bitmap. Reserve loader scratch, not another whole view
+  // per worker. Partial neighborhoods still need component demand headroom.
   if (options_.bounded_cache_components &&
       options_.bounded_cache_normal_tile_size == 0) {
-    size_t whole_total = 0, whole_extra = 0, whole_largest = 0;
+    size_t whole_total = 0, whole_extra = 0;
     bool whole_fits = true;
     for (const int view : views) {
       const size_t resident =
@@ -1203,21 +1203,13 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
           bounded_workspace_->GetLoadReservationBytes(view, Component::kImage);
       THROW_CHECK_GE(reserved, resident);
       whole_extra = std::max(whole_extra, reserved - resident);
-      whole_largest = std::max(whole_largest, reserved);
-      whole_largest = std::max(whole_largest,
-                               bounded_workspace_->GetLoadReservationBytes(
-                                   view, Component::kNormal));
-      whole_largest = std::max(whole_largest,
-                               bounded_workspace_->GetLoadReservationBytes(
-                                   view, Component::kBitmap));
       if (resident > capacity - whole_total) {
         whole_fits = false;
         break;
       }
       whole_total += resident;
     }
-    if (whole_fits && whole_extra <= capacity - whole_total &&
-        whole_largest <= (capacity - whole_total) / workers) {
+    if (whole_fits && whole_extra <= capacity - whole_total) {
       component = Component::kImage;
     }
   }
@@ -1235,7 +1227,7 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
     resident_sizes.push_back(resident);
     largest = std::max(largest, reserved);
     largest_extra = std::max(largest_extra, reserved - resident);
-    if (options_.bounded_cache_components) {
+    if (options_.bounded_cache_components && component != Component::kImage) {
       largest = std::max(largest,
                          bounded_workspace_->GetLoadReservationBytes(
                              view, Component::kNormal));
@@ -1251,7 +1243,7 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
     }
   }
   complete_fits = complete_fits && largest_extra <= capacity - total;
-  if (options_.bounded_cache_components) {
+  if (options_.bounded_cache_components && component != Component::kImage) {
     complete_fits = complete_fits && largest <= (capacity - total) / workers;
   }
   const size_t budget =
