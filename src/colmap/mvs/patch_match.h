@@ -44,7 +44,8 @@ class PatchMatch {
     // bitmap. Callers must not mutate a retained payload through another alias
     // until all consumers and the source bank have finished. A lease must pin
     // the actual payload storage, not alias it from an unrelated lifetime
-    // token.
+    // token. Some workspaces return non-owning aliases, so non-null alone does
+    // not establish that the lease keeps the payload alive.
     std::vector<std::shared_ptr<const Bitmap>>* source_bitmap_leases = nullptr;
 
     const Bitmap& InputBitmap(const int image_idx) const {
@@ -54,8 +55,8 @@ class PatchMatch {
           static_cast<size_t>(image_idx) < source_bitmap_leases->size()) {
         const auto& lease = source_bitmap_leases->at(image_idx);
         if (lease != nullptr && lease.use_count() > 0 && lease->IsGrey() &&
-            lease->Width() == image.GetWidth() &&
-            lease->Height() == image.GetHeight())
+            static_cast<size_t>(lease->Width()) == image.GetWidth() &&
+            static_cast<size_t>(lease->Height()) == image.GetHeight())
           return *lease;
       }
       return image.GetBitmap();
@@ -186,12 +187,18 @@ class PatchMatchController : public BaseController {
                       size_t problem_idx,
                       PreparedProblem* prepared,
                       bool retain_sparse_sources = false);
+  static void WriteOutput(const PreparedProblem& prepared,
+                          const PatchMatch& patch_match);
+#ifndef COLMAP_HIP_ENABLED
+  static void WriteOutput(const PreparedProblem& prepared,
+                          const PatchMatchCuda& patch_match);
+#endif
   void ProcessProblem(const PatchMatchOptions& options, size_t problem_idx);
   void ProcessProblemPair(const PatchMatchOptions& options,
                           size_t first_problem_idx,
                           size_t second_problem_idx);
   void ProcessProblemBatch(const PatchMatchOptions& options,
-                           std::vector<size_t> problem_indices);
+                           const std::vector<size_t>& problem_indices);
 
   const PatchMatchOptions options_;
   const std::filesystem::path workspace_path_;
