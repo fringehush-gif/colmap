@@ -22,8 +22,6 @@
 #include <tuple>
 #include <utility>
 
-#define PrintOption(option) LOG(INFO) << #option ": " << option << std::endl
-
 namespace colmap {
 namespace mvs {
 
@@ -625,8 +623,10 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
           if (retain_sparse_sources && options.sparse_source_sharing &&
               image_idx != problem.ref_image_idx &&
               bitmap_lease.use_count() > 0 && bitmap_lease->IsGrey() &&
-              bitmap_lease->Width() == images.at(image_idx).GetWidth() &&
-              bitmap_lease->Height() == images.at(image_idx).GetHeight()) {
+              static_cast<size_t>(bitmap_lease->Width()) ==
+                  images.at(image_idx).GetWidth() &&
+              static_cast<size_t>(bitmap_lease->Height()) ==
+                  images.at(image_idx).GetHeight()) {
             prepared->source_bitmap_leases.at(image_idx) = bitmap_lease;
           }
           if (options.geom_consistency) {
@@ -668,6 +668,30 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
   return true;
 }
 
+void PatchMatchController::WriteOutput(const PreparedProblem& prepared,
+                                       const PatchMatch& patch_match) {
+  patch_match.GetDepthMap().Write(prepared.depth_path);
+  patch_match.GetNormalMap().Write(prepared.normal_path);
+  if (prepared.options.write_consistency_graph) {
+    patch_match.GetConsistencyGraph().Write(prepared.consistency_path);
+  }
+}
+
+#ifndef COLMAP_HIP_ENABLED
+void PatchMatchController::WriteOutput(const PreparedProblem& prepared,
+                                       const PatchMatchCuda& patch_match) {
+  patch_match.GetDepthMap().Write(prepared.depth_path);
+  patch_match.GetNormalMap().Write(prepared.normal_path);
+  if (prepared.options.write_consistency_graph) {
+    const auto& ref =
+        prepared.problem.images->at(prepared.problem.ref_image_idx);
+    ConsistencyGraph(
+        ref.GetWidth(), ref.GetHeight(), patch_match.GetConsistentImageIdxs())
+        .Write(prepared.consistency_path);
+  }
+}
+#endif
+
 void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
                                           const size_t problem_idx) {
   PreparedProblem prepared;
@@ -675,7 +699,7 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
   PatchMatch patch_match(prepared.options, prepared.problem);
   patch_match.Run();
 
-  LOG(INFO) << std::endl
+  LOG(INFO) << '\n'
             << StringPrintf(
                    "Writing %s output for %s",
                    options.geom_consistency ? "geometric" : "photometric",
@@ -683,11 +707,7 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
                        .GetImageName(prepared.problem.ref_image_idx)
                        .c_str());
 
-  patch_match.GetDepthMap().Write(prepared.depth_path);
-  patch_match.GetNormalMap().Write(prepared.normal_path);
-  if (options.write_consistency_graph) {
-    patch_match.GetConsistencyGraph().Write(prepared.consistency_path);
-  }
+  WriteOutput(prepared, patch_match);
 }
 
 void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
@@ -697,25 +717,10 @@ void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
   ProcessProblem(options, first_problem_idx);
   ProcessProblem(options, second_problem_idx);
 #else
-  const auto write_cuda = [](const PreparedProblem& input,
-                             const PatchMatchCuda& cuda) {
-    cuda.GetDepthMap().Write(input.depth_path);
-    cuda.GetNormalMap().Write(input.normal_path);
-    if (input.options.write_consistency_graph) {
-      const auto& ref = input.problem.images->at(input.problem.ref_image_idx);
-      ConsistencyGraph(
-          ref.GetWidth(), ref.GetHeight(), cuda.GetConsistentImageIdxs())
-          .Write(input.consistency_path);
-    }
-  };
   const auto run_native = [](const PreparedProblem& input) {
     PatchMatch solver(input.options, input.problem);
     solver.Run();
-    solver.GetDepthMap().Write(input.depth_path);
-    solver.GetNormalMap().Write(input.normal_path);
-    if (input.options.write_consistency_graph) {
-      solver.GetConsistencyGraph().Write(input.consistency_path);
-    }
+    WriteOutput(input, solver);
   };
 
   PreparedProblem first, second;
@@ -760,7 +765,7 @@ void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
       free_after_first >= owned_peak + kExternalMargin;
   const auto finish_first_native = [&]() {
     first_cuda->Run();
-    write_cuda(first, *first_cuda);
+    WriteOutput(first, *first_cuda);
     first_cuda.reset();
     run_native(second);
   };
@@ -788,13 +793,14 @@ void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
             << " and " << second_problem_idx;
   PairStreams streams;
   RunPatchMatchPair(*first_cuda, *second_cuda, streams.first, streams.second);
-  write_cuda(first, *first_cuda);
-  write_cuda(second, *second_cuda);
+  WriteOutput(first, *first_cuda);
+  WriteOutput(second, *second_cuda);
 #endif
 }
 
 void PatchMatchController::ProcessProblemBatch(
-    const PatchMatchOptions& options, std::vector<size_t> problem_indices) {
+    const PatchMatchOptions& options,
+    const std::vector<size_t>& problem_indices) {
 #ifdef COLMAP_HIP_ENABLED
   for (const size_t index : problem_indices) ProcessProblem(options, index);
 #else
@@ -837,24 +843,14 @@ void PatchMatchController::ProcessProblemBatch(
   };
   const auto write_cuda = [&](const PreparedProblem& p,
                               const PatchMatchCuda& cuda) {
-    cuda.GetDepthMap().Write(p.depth_path);
-    cuda.GetNormalMap().Write(p.normal_path);
-    if (p.options.write_consistency_graph) {
-      const auto& ref = p.problem.images->at(p.problem.ref_image_idx);
-      ConsistencyGraph(
-          ref.GetWidth(), ref.GetHeight(), cuda.GetConsistentImageIdxs())
-          .Write(p.consistency_path);
-    }
+    WriteOutput(p, cuda);
     if (sparse_test_hooks_)
       sparse_test_hooks_->written_references.push_back(p.problem.ref_image_idx);
   };
   const auto run_native = [&](const PreparedProblem& p) {
     PatchMatch solver(p.options, p.problem);
     solver.Run();
-    solver.GetDepthMap().Write(p.depth_path);
-    solver.GetNormalMap().Write(p.normal_path);
-    if (p.options.write_consistency_graph)
-      solver.GetConsistencyGraph().Write(p.consistency_path);
+    WriteOutput(p, solver);
     if (sparse_test_hooks_)
       sparse_test_hooks_->written_references.push_back(p.problem.ref_image_idx);
   };
@@ -957,6 +953,7 @@ void PatchMatchController::ProcessProblemBatch(
   const size_t first_peak = owners[0]->PairPeakBytes();
   bool shared_geometry = owners[0]->CanShareGeometryRotation();
   std::vector<const PatchMatch::Problem*> source_problems;
+  source_problems.reserve(input.size());
   for (const auto& prepared : input)
     source_problems.push_back(&prepared->problem);
   std::shared_ptr<const PatchMatchSparseSources> shared;
@@ -1085,6 +1082,7 @@ void PatchMatchController::ProcessProblemBatch(
     return;
   }
   std::vector<PatchMatchCuda*> views;
+  views.reserve(owners.size());
   for (auto& owner : owners) views.push_back(owner.get());
   struct BatchStreams {
     std::vector<cudaStream_t> values;
