@@ -91,8 +91,7 @@ struct ColorSamples {
 
 // nullopt defers managed paths and speculative read failures to the mapping
 // thread, where the ordinary color read can retry at the barrier.
-using PrefetchedColorImage =
-    std::future<std::optional<std::unique_ptr<ColorSamples>>>;
+using PrefetchedColorImage = std::future<std::optional<ColorSamples>>;
 
 PrefetchedColorImage PrefetchColorImage(const std::filesystem::path& image_path,
                                         const Image& image) {
@@ -120,7 +119,7 @@ PrefetchedColorImage PrefetchColorImage(const std::filesystem::path& image_path,
     return std::async(
         std::launch::async,
         [path, coordinates = std::move(coordinates)]() mutable
-            -> std::optional<std::unique_ptr<ColorSamples>> {
+            -> std::optional<ColorSamples> {
           try {
             std::vector<std::array<double, 2>> sample_coordinates;
             sample_coordinates.reserve(coordinates.size());
@@ -139,20 +138,20 @@ PrefetchedColorImage PrefetchColorImage(const std::filesystem::path& image_path,
             if (!*read) {
               return std::nullopt;
             }
-            auto samples = std::make_unique<ColorSamples>();
-            samples->coordinates = std::move(coordinates);
-            samples->colors.reserve(samples->coordinates.size());
+            ColorSamples samples;
+            samples.coordinates = std::move(coordinates);
+            samples.colors.reserve(samples.coordinates.size());
             for (const auto& color : colors) {
               if (color.has_value()) {
-                samples->colors.emplace_back(
+                samples.colors.emplace_back(
                     Eigen::Vector3ub(color->r, color->g, color->b));
               } else {
-                samples->colors.emplace_back(std::nullopt);
+                samples.colors.emplace_back(std::nullopt);
               }
             }
             // Release the full raster before the future becomes ready. Only
             // copied coordinates and sampled colors survive refinement.
-            return std::move(samples);
+            return samples;
           } catch (const std::bad_alloc&) {
             // Earlier residency may refuse an allocation that succeeds after
             // refinement. Defer that attempt to the original color barrier.
@@ -170,18 +169,16 @@ void ExtractColors(const std::filesystem::path& image_path,
                    const image_t image_id,
                    Reconstruction& reconstruction,
                    PrefetchedColorImage* prefetched_image = nullptr) {
-  std::optional<std::unique_ptr<ColorSamples>> decoded;
+  std::optional<ColorSamples> decoded;
   if (prefetched_image != nullptr && prefetched_image->valid()) {
     decoded = prefetched_image->get();
   }
   if (decoded.has_value()) {
-    if (*decoded != nullptr) {
-      const auto& samples = **decoded;
-      if (reconstruction.ExtractColorsForImageFromSamples(
-              image_id, samples.coordinates, samples.colors) ||
-          reconstruction.ExtractColorsForImage(image_id, image_path)) {
-        return;
-      }
+    const auto& samples = *decoded;
+    if (reconstruction.ExtractColorsForImageFromSamples(
+            image_id, samples.coordinates, samples.colors) ||
+        reconstruction.ExtractColorsForImage(image_id, image_path)) {
+      return;
     }
   } else if (reconstruction.ExtractColorsForImage(image_id, image_path)) {
     return;
