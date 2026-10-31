@@ -54,40 +54,49 @@ using namespace PoissonRecon;
 
 namespace {
 
-CmdLineParameter< char* >
-	In( "in" ) ,
-	Out( "out" );
-CmdLineParameter< float >
-	Trim( "trim" ) ,
-	IslandAreaRatio( "aRatio" , 0.001f );
-CmdLineReadable
-	PolygonMesh( "polygonMesh" ) ,
-	Long( "long" ) ,
-	ASCII( "ascii" ) ,
-	RemoveIslands( "removeIslands" ) ,
-	Debug( "debug" ) ,
-	Verbose( "verbose" );
-
-
-CmdLineReadable* params[] =
+// Command-line options belong to one synchronous invocation.
+struct Parameters
 {
-	&In , &Out , &Trim , &PolygonMesh , &IslandAreaRatio , &Verbose , &Long , &ASCII , &RemoveIslands , &Debug ,
-	NULL
+	Parameters( void ) = default;
+	Parameters( const Parameters& ) = delete;
+	Parameters& operator=( const Parameters& ) = delete;
+
+	CmdLineParameter< char* >
+		In{ "in" } ,
+		Out{ "out" };
+	CmdLineParameter< float >
+		Trim{ "trim" } ,
+		IslandAreaRatio{ "aRatio" , 0.001f };
+	CmdLineReadable
+		PolygonMesh{ "polygonMesh" } ,
+		Long{ "long" } ,
+		ASCII{ "ascii" } ,
+		RemoveIslands{ "removeIslands" } ,
+		Debug{ "debug" } ,
+		Verbose{ "verbose" };
+
+
+	std::vector< CmdLineReadable* > params =
+	{
+		&In , &Out , &Trim , &PolygonMesh , &IslandAreaRatio , &Verbose , &Long , &ASCII , &RemoveIslands , &Debug ,
+		NULL
+	};
+
 };
 
-void ShowUsage( char* ex )
+void ShowUsage( const Parameters &options , char* ex )
 {
 	printf( "Usage: %s\n" , ex );
-	printf( "\t --%s <input polygon mesh>\n" , In.name );
-	printf( "\t --%s <trimming value>\n" , Trim.name );
-	printf( "\t[--%s <ouput polygon mesh>]\n" , Out.name );
-	printf( "\t[--%s <relative area of islands>=%f]\n" , IslandAreaRatio.name , IslandAreaRatio.value );
-	printf( "\t[--%s]\n" , RemoveIslands.name );
-	printf( "\t[--%s]\n" , Debug.name );
-	printf( "\t[--%s]\n" , PolygonMesh.name );
-	printf( "\t[--%s]\n" , Long.name );
-	printf( "\t[--%s]\n" , ASCII.name );
-	printf( "\t[--%s]\n" , Verbose.name );
+	printf( "\t --%s <input polygon mesh>\n" , options.In.name );
+	printf( "\t --%s <trimming value>\n" , options.Trim.name );
+	printf( "\t[--%s <ouput polygon mesh>]\n" , options.Out.name );
+	printf( "\t[--%s <relative area of islands>=%f]\n" , options.IslandAreaRatio.name , options.IslandAreaRatio.value );
+	printf( "\t[--%s]\n" , options.RemoveIslands.name );
+	printf( "\t[--%s]\n" , options.Debug.name );
+	printf( "\t[--%s]\n" , options.PolygonMesh.name );
+	printf( "\t[--%s]\n" , options.Long.name );
+	printf( "\t[--%s]\n" , options.ASCII.name );
+	printf( "\t[--%s]\n" , options.Verbose.name );
 }
 
 template< typename Index >
@@ -401,7 +410,7 @@ void NativeSetConnectedComponents( const std::vector< std::vector< Index > >& po
 }
 
 template< typename Index >
-void SetConnectedComponents( const std::vector< std::vector< Index > >& polygons , std::vector< std::vector< Index > >& components )
+void SetConnectedComponents( const std::vector< std::vector< Index > >& polygons , std::vector< std::vector< Index > >& components , [[maybe_unused]] bool verbose )
 {
 #if defined(POISSON_TRIM_NATIVE_GPU) && !defined(__HIPCC__)
     PoissonTrimGpu::Stats stats;
@@ -413,7 +422,7 @@ void SetConnectedComponents( const std::vector< std::vector< Index > >& polygons
             NativeSetConnectedComponents( polygons , reference );
             if( components!=reference ) MK_THROW( "GPU trim component order differs from native" );
         }
-        if( Verbose.set || PoissonTrimGpu::Verify() ) std::cout << "# TrimNativeGPU components polygons=" << polygons.size() << " deviceBytes=" << stats.device_bytes << std::endl;
+        if( verbose || PoissonTrimGpu::Verify() ) std::cout << "# TrimNativeGPU components polygons=" << polygons.size() << " deviceBytes=" << stats.device_bytes << std::endl;
         return;
     }
 #endif
@@ -421,7 +430,7 @@ void SetConnectedComponents( const std::vector< std::vector< Index > >& polygons
 }
 
 template< typename Real , unsigned int Dim , typename Index , typename ... AuxDataFactories >
-int Execute( AuxDataFactories ... auxDataFactories )
+int Execute( const Parameters &options , AuxDataFactories ... auxDataFactories )
 {
 	typedef VertexFactory::Factory< Real , typename VertexFactory::PositionFactory< Real , Dim > , typename VertexFactory::ValueFactory< Real > , AuxDataFactories ... > Factory;
 	typedef typename Factory::VertexType Vertex;
@@ -435,14 +444,14 @@ int Execute( AuxDataFactories ... auxDataFactories )
 
 	int ft;
 	std::vector< std::string > comments;
-	PLY::ReadPolygons< Factory , Index >( In.value , factory , vertices , polygons , ft , comments );
+	PLY::ReadPolygons< Factory , Index >( options.In.value , factory , vertices , polygons , ft , comments );
 
 	min = max = vertices[0].template get<1>();
 	for( size_t i=0 ; i<vertices.size() ; i++ ) min = std::min< Real >( min , vertices[i].template get<1>() ) , max = std::max< Real >( max , vertices[i].template get<1>() );
 
 	std::vector< std::vector< Index > > ltPolygons , gtPolygons;
 
-	if( Verbose.set )
+	if( options.Verbose.set )
 	{
 		std::cout << "*********************************************" << std::endl;
 		std::cout << "*********************************************" << std::endl;
@@ -451,17 +460,17 @@ int Execute( AuxDataFactories ... auxDataFactories )
 		std::cout << "*********************************************" << std::endl;
 	}
 	char str[1024];
-	for( int i=0 ; params[i] ; i++ )
-		if( params[i]->set )
+	for( int i=0 ; options.params[i] ; i++ )
+		if( options.params[i]->set )
 		{
-			params[i]->writeValue( str );
-			if( Verbose.set )
+			options.params[i]->writeValue( str );
+			if( options.Verbose.set )
 			{
-				if( strlen( str ) ) std::cout << "\t--" << params[i]->name << " " << str << std::endl;
-				else                std::cout << "\t--" << params[i]->name << std::endl;
+				if( strlen( str ) ) std::cout << "\t--" << options.params[i]->name << " " << str << std::endl;
+				else                std::cout << "\t--" << options.params[i]->name << std::endl;
 			}
 		}
-	if( Verbose.set ) printf( "Value Range: [%f,%f]\n" , min , max );
+	if( options.Verbose.set ) printf( "Value Range: [%f,%f]\n" , min , max );
 
 	double t=Time();
 	{
@@ -470,21 +479,21 @@ int Execute( AuxDataFactories ... auxDataFactories )
 		std::vector< bool > ltFlags , gtFlags;
 		for( size_t i=0 ; i<polygons.size() ; i++ )
 		{
-			SplitPolygon( polygons[i] , vertices , &ltPolygons , &gtPolygons , &ltFlags , &gtFlags , vertexTable , Trim.value );
+			SplitPolygon( polygons[i] , vertices , &ltPolygons , &gtPolygons , &ltFlags , &gtFlags , vertexTable , options.Trim.value );
 			// Retire each consumed input face before allocating later split faces.
 			std::vector< Index >().swap( polygons[i] );
 		}
 	}
 	std::vector< std::vector< Index > >().swap( polygons );
 
-	if( IslandAreaRatio.value>0 )
+	if( options.IslandAreaRatio.value>0 )
 	{
 		std::vector< std::vector< Index > > _polygons , _components;
 		size_t gtComponentStart;
 		{
 			std::vector< std::vector< Index > > ltComponents , gtComponents;
-			SetConnectedComponents( ltPolygons , ltComponents );
-			SetConnectedComponents( gtPolygons , gtComponents );
+			SetConnectedComponents( ltPolygons , ltComponents , options.Verbose.set );
+			SetConnectedComponents( gtPolygons , gtComponents , options.Verbose.set );
 			gtComponentStart = ltComponents.size();
 			for( unsigned int i=0 ; i<gtComponents.size() ; i++ ) for( unsigned int j=0 ; j<gtComponents[i].size() ; j++ ) gtComponents[i][j] += (Index)ltPolygons.size();
 
@@ -568,7 +577,7 @@ int Execute( AuxDataFactories ... auxDataFactories )
 			nodes[ iter->key1 ].neighbors.push_back( &nodes[ iter->key2 ] );
 			nodes[ iter->key2 ].neighbors.push_back( &nodes[ iter->key1 ] );
 		}
-		if( Debug.set ) ComponentGraph< Index >::SanityCheck( nodes.size() , [&]( size_t i ){ return &nodes[i]; } );
+		if( options.Debug.set ) ComponentGraph< Index >::SanityCheck( nodes.size() , [&]( size_t i ){ return &nodes[i]; } );
 
 		auto ComponentCount = [&]( void )
 		{
@@ -584,7 +593,7 @@ int Execute( AuxDataFactories ... auxDataFactories )
         if( gpuBoundary )
         {
             std::size_t completedMerges = 0;
-            const bool orderIndependent = PoissonTrimGpu::HasOrderIndependentMerges( nodes , area*IslandAreaRatio.value , completedMerges );
+            const bool orderIndependent = PoissonTrimGpu::HasOrderIndependentMerges( nodes , area*options.IslandAreaRatio.value , completedMerges );
             if( !orderIndependent )
             {
                 ComponentEdges nativeEdges;
@@ -596,9 +605,9 @@ int Execute( AuxDataFactories ... auxDataFactories )
                     nodes[edge.key1].neighbors.push_back( &nodes[edge.key2] );
                     nodes[edge.key2].neighbors.push_back( &nodes[edge.key1] );
                 }
-                if( Debug.set ) ComponentGraph< Index >::SanityCheck( nodes.size() , [&]( size_t i ){ return &nodes[i]; } );
+                if( options.Debug.set ) ComponentGraph< Index >::SanityCheck( nodes.size() , [&]( size_t i ){ return &nodes[i]; } );
             }
-            if( Verbose.set || PoissonTrimGpu::Verify() ) std::cout << "# TrimNativeGPU boundary polygons=" << _polygons.size() << " deviceBytes=" << boundaryStats.device_bytes << " nativeOrderFallback=" << (!orderIndependent) << " replayedUniqueMerges=" << completedMerges << std::endl;
+            if( options.Verbose.set || PoissonTrimGpu::Verify() ) std::cout << "# TrimNativeGPU boundary polygons=" << _polygons.size() << " deviceBytes=" << boundaryStats.device_bytes << " nativeOrderFallback=" << (!orderIndependent) << " replayedUniqueMerges=" << completedMerges << std::endl;
         }
 #endif
 
@@ -608,23 +617,23 @@ int Execute( AuxDataFactories ... auxDataFactories )
 			done = true;
 			unsigned int idx = -1;
 			for( unsigned int i=0 ; i<nodes.size() ; i++ ) if( nodes[i].polygonIndices.size() && nodes[i].neighbors.size() ) if( idx==-1 || nodes[i].area<nodes[idx].area ) idx = i;
-			if( idx!=-1 && nodes[idx].area<area*IslandAreaRatio.value )
+			if( idx!=-1 && nodes[idx].area<area*options.IslandAreaRatio.value )
 			{
 				nodes[idx].merge();
 				done = false;
-				if( Debug.set ) ComponentGraph< Index >::SanityCheck( nodes.size() , [&]( size_t i ){ return &nodes[i]; } );
+				if( options.Debug.set ) ComponentGraph< Index >::SanityCheck( nodes.size() , [&]( size_t i ){ return &nodes[i]; } );
 			}
 		}
 
 		gtPolygons.clear();
 
 		for( unsigned int i=(unsigned int)gtComponentStart ; i<nodes.size() ; i++ )
-			if( !nodes[i].neighbors.size() && nodes[i].area<area*IslandAreaRatio.value && RemoveIslands.set ) ; // small island
+			if( !nodes[i].neighbors.size() && nodes[i].area<area*options.IslandAreaRatio.value && options.RemoveIslands.set ) ; // small island
 			else for( auto iter=nodes[i].polygonIndices.begin() ; iter!=nodes[i].polygonIndices.end() ; iter++ ) gtPolygons.push_back( std::move( _polygons[ *iter ] ) );
 	}
 	else std::vector< std::vector< Index > >().swap( ltPolygons );
 
-	if( !PolygonMesh.set )
+	if( !options.PolygonMesh.set )
 	{
 		{
 			std::vector< std::vector< Index > > polys;
@@ -636,7 +645,7 @@ int Execute( AuxDataFactories ... auxDataFactories )
 	RemoveHangingVertices( vertices , gtPolygons );
 	char comment[1024];
 	sprintf( comment , "#Trimmed In: %9.1f (s)" , Time()-t );
-	if( Out.set ) PLY::WritePolygons( Out.value , factory , vertices , gtPolygons , ASCII.set ? PLY_ASCII : ft , comments );
+	if( options.Out.set ) PLY::WritePolygons( options.Out.value , factory , vertices , gtPolygons , options.ASCII.set ? PLY_ASCII : ft , comments );
 
 	return EXIT_SUCCESS;
 }
@@ -645,11 +654,12 @@ int Execute( AuxDataFactories ... auxDataFactories )
 
 int RunSurfaceTrimmer( int argc , char* argv[] )
 {
-	CmdLineParse( argc-1 , &argv[1] , params );
+	Parameters options;
+	CmdLineParse( argc-1 , &argv[1] , options.params.data() );
 
-	if( !In.set || !Trim.set )
+	if( !options.In.set || !options.Trim.set )
 	{
-		ShowUsage( argv[0] );
+		ShowUsage( options , argv[0] );
 		return EXIT_FAILURE;
 	}
 	typedef float Real;
@@ -659,11 +669,11 @@ int RunSurfaceTrimmer( int argc , char* argv[] )
 	bool *readFlags = new bool[ factory.plyReadNum() ];
 	std::vector< PlyProperty > unprocessedProperties;
 	size_t vNum;
-	PLY::ReadVertexHeader( In.value , factory , readFlags , unprocessedProperties , vNum );
+	PLY::ReadVertexHeader( options.In.value , factory , readFlags , unprocessedProperties , vNum );
 	if( vNum>std::numeric_limits< int >::max() )
 	{
-		if( !Long.set ) MK_WARN( "Number of vertices not supported by 32-bit indexing. Switching to 64-bit indexing" );
-		Long.set = true;
+		if( !options.Long.set ) MK_WARN( "Number of vertices not supported by 32-bit indexing. Switching to 64-bit indexing" );
+		options.Long.set = true;
 	}
 	if( !factory.template plyValidReadProperties<0>( readFlags ) ) MK_THROW( "Ply file does not contain positions" );
 	if( !factory.template plyValidReadProperties<1>( readFlags ) ) MK_THROW( "Ply file does not contain values" );
@@ -677,10 +687,10 @@ int RunSurfaceTrimmer( int argc , char* argv[] )
         !unprocessedProperties[0].is_list && !unprocessedProperties[1].is_list && !unprocessedProperties[2].is_list;
     if( fixedRgb )
     {
-        if( Long.set ) return Execute< Real , Dim , long long >( VertexFactory::RGBColorFactory< Real >() );
-        else           return Execute< Real , Dim , int       >( VertexFactory::RGBColorFactory< Real >() );
+        if( options.Long.set ) return Execute< Real , Dim , long long >( options , VertexFactory::RGBColorFactory< Real >() );
+        else           return Execute< Real , Dim , int       >( options , VertexFactory::RGBColorFactory< Real >() );
     }
-	if( Long.set ) return Execute< Real , Dim , long long >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
-	else           return Execute< Real , Dim , int       >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
+	if( options.Long.set ) return Execute< Real , Dim , long long >( options , VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
+	else           return Execute< Real , Dim , int       >( options , VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
 
 }

@@ -48,152 +48,164 @@ using namespace PoissonRecon;
 
 namespace {
 
-CmdLineParameter< char* >
-	In( "in" ) ,
-	Out( "out" ) ,
-	TempDir( "tempDir" ) ,
-	Grid( "grid" ) ,
-	Tree( "tree" ) ,
-	Envelope( "envelope" ) ,
-	Transform( "xForm" );
+const int DefaultSchedule = (int)ThreadPool::Schedule;
+const int DefaultChunkSize = (int)ThreadPool::ChunkSize;
 
-CmdLineReadable
-	Performance( "performance" ) ,
-	ShowResidual( "showResidual" ) ,
-	PolygonMesh( "polygonMesh" ) ,
-	NonManifold( "nonManifold" ) ,
-	ASCII( "ascii" ) ,
-	Density( "density" ) ,
-	LinearFit( "linearFit" ) ,
-	PrimalGrid( "primalGrid" ) ,
-	ExactInterpolation( "exact" ) ,
-	Colors( "colors" ) ,
-	InCore( "inCore" ) ,
-	NoDirichletErode( "noErode" ) ,
-	Gradients( "gradients" ) ,
-	GridCoordinates( "gridCoordinates" ) ,
-	Confidence( "confidence" ) ,
-	Verbose( "verbose" );
-
-CmdLineParameter< int >
-#ifndef FAST_COMPILE
-	Degree( "degree" , Reconstructor::Poisson::DefaultFEMDegree ) ,
-#endif // !FAST_COMPILE
-	Depth( "depth" , 8 ) ,
-	KernelDepth( "kernelDepth" , -1 ) ,
-	SolveDepth( "solveDepth" , -1 ) ,
-	EnvelopeDepth( "envelopeDepth" , -1 ) ,
-	FullDepth( "fullDepth" , 5 ) ,
-	BaseDepth( "baseDepth" , -1 ) ,
-	Iters( "iters" , 8 ) ,
-	BaseVCycles( "baseVCycles" , 1 ) ,
-#ifndef FAST_COMPILE
-	BType( "bType" , Reconstructor::Poisson::DefaultFEMBoundary+1 ) ,
-#endif // !FAST_COMPILE
-	MaxMemoryGB( "maxMemory" , 0 ) ,
-	ParallelType( "parallel" , 0 ) ,
-	AlignmentDir( "alignDir" , DEFAULT_DIMENSION-1 ) ,
-	ScheduleType( "schedule" , (int)ThreadPool::Schedule ) ,
-	ThreadChunkSize( "chunkSize" , (int)ThreadPool::ChunkSize );
-
-CmdLineParameter< float >
-	DataX( "data" , 32.f ) ,
-	SamplesPerNode( "samplesPerNode" , 1.5f ) ,
-	Scale( "scale" , 1.1f ) ,
-	Width( "width" , 0.f ) ,
-	CGSolverAccuracy( "cgAccuracy" , 1e-3f ) ,
-	LowDepthCutOff( "lowDepthCutOff" , 0.f ) ,
-	PointWeight( "pointWeight" );
-
-CmdLineReadable* params[] =
+// Command-line options belong to one synchronous invocation.
+struct Parameters
 {
+	Parameters( void ) = default;
+	Parameters( const Parameters& ) = delete;
+	Parameters& operator=( const Parameters& ) = delete;
+
+	CmdLineParameter< char* >
+		In{ "in" } ,
+		Out{ "out" } ,
+		TempDir{ "tempDir" } ,
+		Grid{ "grid" } ,
+		Tree{ "tree" } ,
+		Envelope{ "envelope" } ,
+		Transform{ "xForm" };
+
+	CmdLineReadable
+		Performance{ "performance" } ,
+		ShowResidual{ "showResidual" } ,
+		PolygonMesh{ "polygonMesh" } ,
+		NonManifold{ "nonManifold" } ,
+		ASCII{ "ascii" } ,
+		Density{ "density" } ,
+		LinearFit{ "linearFit" } ,
+		PrimalGrid{ "primalGrid" } ,
+		ExactInterpolation{ "exact" } ,
+		Colors{ "colors" } ,
+		InCore{ "inCore" } ,
+		NoDirichletErode{ "noErode" } ,
+		Gradients{ "gradients" } ,
+		GridCoordinates{ "gridCoordinates" } ,
+		Confidence{ "confidence" } ,
+		Verbose{ "verbose" };
+
+	CmdLineParameter< int >
 #ifndef FAST_COMPILE
-	&Degree , &BType ,
+		Degree{ "degree" , Reconstructor::Poisson::DefaultFEMDegree } ,
 #endif // !FAST_COMPILE
-	&In , &Depth , &Out , &Transform ,
-	&SolveDepth ,
-	&Envelope ,
-	&Width ,
-	&Scale , &Verbose , &CGSolverAccuracy ,
-	&KernelDepth , &SamplesPerNode , &Confidence , &NonManifold , &PolygonMesh , &ASCII , &ShowResidual ,
-	&EnvelopeDepth ,
-	&NoDirichletErode ,
-	&BaseDepth , &BaseVCycles ,
-	&PointWeight ,
-	&Grid ,
-	&Tree ,
-	&Density ,
-	&FullDepth ,
-	&Iters ,
-	&DataX ,
-	&Colors ,
-	&Gradients ,
-	&LinearFit ,
-	&PrimalGrid ,
-	&TempDir ,
-	&ExactInterpolation ,
-	&Performance ,
-	&MaxMemoryGB ,
-	&InCore ,
-	&ParallelType ,
-	&ScheduleType ,
-	&ThreadChunkSize ,
-	&LowDepthCutOff ,
-	&AlignmentDir ,
-	&GridCoordinates ,
-	NULL
+		Depth{ "depth" , 8 } ,
+		KernelDepth{ "kernelDepth" , -1 } ,
+		SolveDepth{ "solveDepth" , -1 } ,
+		EnvelopeDepth{ "envelopeDepth" , -1 } ,
+		FullDepth{ "fullDepth" , 5 } ,
+		BaseDepth{ "baseDepth" , -1 } ,
+		Iters{ "iters" , 8 } ,
+		BaseVCycles{ "baseVCycles" , 1 } ,
+#ifndef FAST_COMPILE
+		BType{ "bType" , Reconstructor::Poisson::DefaultFEMBoundary+1 } ,
+#endif // !FAST_COMPILE
+		MaxMemoryGB{ "maxMemory" , 0 } ,
+		ParallelType{ "parallel" , 0 } ,
+		AlignmentDir{ "alignDir" , DEFAULT_DIMENSION-1 } ,
+		ScheduleType{ "schedule" , DefaultSchedule } ,
+		ThreadChunkSize{ "chunkSize" , DefaultChunkSize };
+
+	CmdLineParameter< float >
+		DataX{ "data" , 32.f } ,
+		SamplesPerNode{ "samplesPerNode" , 1.5f } ,
+		Scale{ "scale" , 1.1f } ,
+		Width{ "width" , 0.f } ,
+		CGSolverAccuracy{ "cgAccuracy" , 1e-3f } ,
+		LowDepthCutOff{ "lowDepthCutOff" , 0.f } ,
+		PointWeight{ "pointWeight" };
+
+	std::vector< CmdLineReadable* > params =
+	{
+#ifndef FAST_COMPILE
+		&Degree , &BType ,
+#endif // !FAST_COMPILE
+		&In , &Depth , &Out , &Transform ,
+		&SolveDepth ,
+		&Envelope ,
+		&Width ,
+		&Scale , &Verbose , &CGSolverAccuracy ,
+		&KernelDepth , &SamplesPerNode , &Confidence , &NonManifold , &PolygonMesh , &ASCII , &ShowResidual ,
+		&EnvelopeDepth ,
+		&NoDirichletErode ,
+		&BaseDepth , &BaseVCycles ,
+		&PointWeight ,
+		&Grid ,
+		&Tree ,
+		&Density ,
+		&FullDepth ,
+		&Iters ,
+		&DataX ,
+		&Colors ,
+		&Gradients ,
+		&LinearFit ,
+		&PrimalGrid ,
+		&TempDir ,
+		&ExactInterpolation ,
+		&Performance ,
+		&MaxMemoryGB ,
+		&InCore ,
+		&ParallelType ,
+		&ScheduleType ,
+		&ThreadChunkSize ,
+		&LowDepthCutOff ,
+		&AlignmentDir ,
+		&GridCoordinates ,
+		NULL
+	};
+
 };
 
-void ShowUsage(char* ex)
+void ShowUsage( const Parameters &options , char* ex )
 {
 	printf( "Usage: %s\n" , ex );
-	printf( "\t --%s <input points>\n" , In.name );
-	printf( "\t[--%s <input envelope>\n" , Envelope.name );
-	printf( "\t[--%s <ouput triangle mesh>]\n" , Out.name );
-	printf( "\t[--%s <ouput grid>]\n" , Grid.name );
-	printf( "\t[--%s <ouput fem tree>]\n" , Tree.name );
+	printf( "\t --%s <input points>\n" , options.In.name );
+	printf( "\t[--%s <input envelope>\n" , options.Envelope.name );
+	printf( "\t[--%s <ouput triangle mesh>]\n" , options.Out.name );
+	printf( "\t[--%s <ouput grid>]\n" , options.Grid.name );
+	printf( "\t[--%s <ouput fem tree>]\n" , options.Tree.name );
 #ifndef FAST_COMPILE
-	printf( "\t[--%s <b-spline degree>=%d]\n" , Degree.name , Degree.value );
-	printf( "\t[--%s <boundary type>=%d]\n" , BType.name , BType.value );
+	printf( "\t[--%s <b-spline degree>=%d]\n" , options.Degree.name , options.Degree.value );
+	printf( "\t[--%s <boundary type>=%d]\n" , options.BType.name , options.BType.value );
 	for( int i=0 ; i<BOUNDARY_COUNT ; i++ ) printf( "\t\t%d] %s\n" , i+1 , BoundaryNames[i] );
 #endif // !FAST_COMPILE
-	printf( "\t[--%s <maximum reconstruction depth>=%d]\n" , Depth.name , Depth.value );
-	printf( "\t[--%s <maximum solution depth>=%d]\n" , SolveDepth.name , SolveDepth.value );
-	printf( "\t[--%s <grid width>]\n" , Width.name );
-	printf( "\t[--%s <full depth>=%d]\n" , FullDepth.name , FullDepth.value );
-	printf( "\t[--%s <envelope depth>=%d]\n" , EnvelopeDepth.name , EnvelopeDepth.value );
-	printf( "\t[--%s <coarse MG solver depth>]\n" , BaseDepth.name );
-	printf( "\t[--%s <coarse MG solver v-cycles>=%d]\n" , BaseVCycles.name , BaseVCycles.value );
-	printf( "\t[--%s <scale factor>=%f]\n" , Scale.name , Scale.value );
-	printf( "\t[--%s <minimum number of samples per node>=%f]\n" , SamplesPerNode.name, SamplesPerNode.value );
-	printf( "\t[--%s <interpolation weight>=%.3e * <b-spline degree>]\n" , PointWeight.name , Reconstructor::Poisson::WeightMultiplier * Reconstructor::Poisson::DefaultFEMDegree );
-	printf( "\t[--%s <iterations>=%d]\n" , Iters.name , Iters.value );
-	printf( "\t[--%s]\n" , ExactInterpolation.name );
-	printf( "\t[--%s <pull factor>=%f]\n" , DataX.name , DataX.value );
-	printf( "\t[--%s]\n" , Colors.name );
-	printf( "\t[--%s]\n" , Gradients.name );
-	printf( "\t[--%s <parallel type>=%d]\n" , ParallelType.name , ParallelType.value );
+	printf( "\t[--%s <maximum reconstruction depth>=%d]\n" , options.Depth.name , options.Depth.value );
+	printf( "\t[--%s <maximum solution depth>=%d]\n" , options.SolveDepth.name , options.SolveDepth.value );
+	printf( "\t[--%s <grid width>]\n" , options.Width.name );
+	printf( "\t[--%s <full depth>=%d]\n" , options.FullDepth.name , options.FullDepth.value );
+	printf( "\t[--%s <envelope depth>=%d]\n" , options.EnvelopeDepth.name , options.EnvelopeDepth.value );
+	printf( "\t[--%s <coarse MG solver depth>]\n" , options.BaseDepth.name );
+	printf( "\t[--%s <coarse MG solver v-cycles>=%d]\n" , options.BaseVCycles.name , options.BaseVCycles.value );
+	printf( "\t[--%s <scale factor>=%f]\n" , options.Scale.name , options.Scale.value );
+	printf( "\t[--%s <minimum number of samples per node>=%f]\n" , options.SamplesPerNode.name, options.SamplesPerNode.value );
+	printf( "\t[--%s <interpolation weight>=%.3e * <b-spline degree>]\n" , options.PointWeight.name , Reconstructor::Poisson::WeightMultiplier * Reconstructor::Poisson::DefaultFEMDegree );
+	printf( "\t[--%s <iterations>=%d]\n" , options.Iters.name , options.Iters.value );
+	printf( "\t[--%s]\n" , options.ExactInterpolation.name );
+	printf( "\t[--%s <pull factor>=%f]\n" , options.DataX.name , options.DataX.value );
+	printf( "\t[--%s]\n" , options.Colors.name );
+	printf( "\t[--%s]\n" , options.Gradients.name );
+	printf( "\t[--%s <parallel type>=%d]\n" , options.ParallelType.name , options.ParallelType.value );
 	for( size_t i=0 ; i<ThreadPool::ParallelNames.size() ; i++ ) printf( "\t\t%d] %s\n" , (int)i , ThreadPool::ParallelNames[i].c_str() );
-	printf( "\t[--%s <schedue type>=%d]\n" , ScheduleType.name , ScheduleType.value );
+	printf( "\t[--%s <schedue type>=%d]\n" , options.ScheduleType.name , options.ScheduleType.value );
 	for( size_t i=0 ; i<ThreadPool::ScheduleNames.size() ; i++ ) printf( "\t\t%d] %s\n" , (int)i , ThreadPool::ScheduleNames[i].c_str() );
-	printf( "\t[--%s <thread chunk size>=%d]\n" , ThreadChunkSize.name , ThreadChunkSize.value );
-	printf( "\t[--%s <low depth cut-off>=%f]\n" , LowDepthCutOff.name , LowDepthCutOff.value );
-	printf( "\t[--%s <alignment direction>=%d]\n" , AlignmentDir.name , AlignmentDir.value );
-	printf( "\t[--%s]\n" , Confidence.name );
-	printf( "\t[--%s]\n" , NonManifold.name );
-	printf( "\t[--%s]\n" , PolygonMesh.name );
-	printf( "\t[--%s <cg solver accuracy>=%g]\n" , CGSolverAccuracy.name , CGSolverAccuracy.value );
-	printf( "\t[--%s <maximum memory (in GB)>=%d]\n" , MaxMemoryGB.name , MaxMemoryGB.value );
-	printf( "\t[--%s]\n" , NoDirichletErode.name );
-	printf( "\t[--%s]\n" , GridCoordinates.name );
-	printf( "\t[--%s]\n" , Performance.name );
-	printf( "\t[--%s]\n" , Density.name );
-	printf( "\t[--%s]\n" , LinearFit.name );
-	printf( "\t[--%s]\n" , PrimalGrid.name );
-	printf( "\t[--%s]\n" , ASCII.name );
-	printf( "\t[--%s]\n" , TempDir.name );
-	printf( "\t[--%s]\n" , InCore.name );
-	printf( "\t[--%s]\n" , Verbose.name );
+	printf( "\t[--%s <thread chunk size>=%d]\n" , options.ThreadChunkSize.name , options.ThreadChunkSize.value );
+	printf( "\t[--%s <low depth cut-off>=%f]\n" , options.LowDepthCutOff.name , options.LowDepthCutOff.value );
+	printf( "\t[--%s <alignment direction>=%d]\n" , options.AlignmentDir.name , options.AlignmentDir.value );
+	printf( "\t[--%s]\n" , options.Confidence.name );
+	printf( "\t[--%s]\n" , options.NonManifold.name );
+	printf( "\t[--%s]\n" , options.PolygonMesh.name );
+	printf( "\t[--%s <cg solver accuracy>=%g]\n" , options.CGSolverAccuracy.name , options.CGSolverAccuracy.value );
+	printf( "\t[--%s <maximum memory (in GB)>=%d]\n" , options.MaxMemoryGB.name , options.MaxMemoryGB.value );
+	printf( "\t[--%s]\n" , options.NoDirichletErode.name );
+	printf( "\t[--%s]\n" , options.GridCoordinates.name );
+	printf( "\t[--%s]\n" , options.Performance.name );
+	printf( "\t[--%s]\n" , options.Density.name );
+	printf( "\t[--%s]\n" , options.LinearFit.name );
+	printf( "\t[--%s]\n" , options.PrimalGrid.name );
+	printf( "\t[--%s]\n" , options.ASCII.name );
+	printf( "\t[--%s]\n" , options.TempDir.name );
+	printf( "\t[--%s]\n" , options.InCore.name );
+	printf( "\t[--%s]\n" , options.Verbose.name );
 }
 
 template< typename Real , unsigned int Dim , unsigned int FEMSig , bool HasGradients , bool HasDensity , bool InCore , typename ... AuxDataFactories >
@@ -270,7 +282,7 @@ void WriteMesh
 }
 
 template< class Real , unsigned int Dim , unsigned int FEMSig , typename AuxDataFactory >
-void Execute( const AuxDataFactory &auxDataFactory )
+void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 {
 	static const bool HasAuxData = !std::is_same< AuxDataFactory , VertexFactory::EmptyFactory< Real > >::value;
 
@@ -292,7 +304,7 @@ void Execute( const AuxDataFactory &auxDataFactory )
 	// <-- Types //
 	///////////////
 
-	if( Verbose.set )
+	if( options.Verbose.set )
 	{
 		std::cout << "*************************************************************" << std::endl;
 		std::cout << "*************************************************************" << std::endl;
@@ -301,11 +313,11 @@ void Execute( const AuxDataFactory &auxDataFactory )
 		std::cout << "*************************************************************" << std::endl;
 
 		char str[1024];
-		for( int i=0 ; params[i] ; i++ ) if( params[i]->set )
+		for( int i=0 ; options.params[i] ; i++ ) if( options.params[i]->set )
 		{
-			params[i]->writeValue( str );
-			if( strlen( str ) ) std::cout << "\t--" << params[i]->name << " " << str << std::endl;
-			else                std::cout << "\t--" << params[i]->name << std::endl;
+			options.params[i]->writeValue( str );
+			if( strlen( str ) ) std::cout << "\t--" << options.params[i]->name << " " << str << std::endl;
+			else                std::cout << "\t--" << options.params[i]->name << std::endl;
 		}
 	}
 
@@ -314,35 +326,35 @@ void Execute( const AuxDataFactory &auxDataFactory )
 	typename Reconstructor::Poisson::SolutionParameters< Real > sParams;
 	Reconstructor::LevelSetExtractionParameters meParams;
 
-	sParams.verbose = Verbose.set;
-	sParams.dirichletErode = !NoDirichletErode.set;
-	sParams.exactInterpolation = ExactInterpolation.set;
-	sParams.showResidual = ShowResidual.set;
-	sParams.confidence = Confidence.set;
-	sParams.scale = (Real)Scale.value;
-	sParams.lowDepthCutOff = (Real)LowDepthCutOff.value;
-	sParams.width = (Real)Width.value;
-	sParams.pointWeight = (Real)PointWeight.value;
-	sParams.samplesPerNode = (Real)SamplesPerNode.value;
-	sParams.cgSolverAccuracy = (Real)CGSolverAccuracy.value;
-	sParams.perLevelDataScaleFactor = (Real)DataX.value;
-	sParams.depth = (unsigned int)Depth.value;
-	sParams.baseDepth = (unsigned int)BaseDepth.value;
-	sParams.solveDepth = (unsigned int)SolveDepth.value;
-	sParams.fullDepth = (unsigned int)FullDepth.value;
-	sParams.kernelDepth = (unsigned int)KernelDepth.value;
-	sParams.envelopeDepth = (unsigned int)EnvelopeDepth.value;
-	sParams.baseVCycles = (unsigned int)BaseVCycles.value;
-	sParams.iters = (unsigned int)Iters.value;
-	sParams.alignDir = (unsigned int)AlignmentDir.value;
+	sParams.verbose = options.Verbose.set;
+	sParams.dirichletErode = !options.NoDirichletErode.set;
+	sParams.exactInterpolation = options.ExactInterpolation.set;
+	sParams.showResidual = options.ShowResidual.set;
+	sParams.confidence = options.Confidence.set;
+	sParams.scale = (Real)options.Scale.value;
+	sParams.lowDepthCutOff = (Real)options.LowDepthCutOff.value;
+	sParams.width = (Real)options.Width.value;
+	sParams.pointWeight = (Real)options.PointWeight.value;
+	sParams.samplesPerNode = (Real)options.SamplesPerNode.value;
+	sParams.cgSolverAccuracy = (Real)options.CGSolverAccuracy.value;
+	sParams.perLevelDataScaleFactor = (Real)options.DataX.value;
+	sParams.depth = (unsigned int)options.Depth.value;
+	sParams.baseDepth = (unsigned int)options.BaseDepth.value;
+	sParams.solveDepth = (unsigned int)options.SolveDepth.value;
+	sParams.fullDepth = (unsigned int)options.FullDepth.value;
+	sParams.kernelDepth = (unsigned int)options.KernelDepth.value;
+	sParams.envelopeDepth = (unsigned int)options.EnvelopeDepth.value;
+	sParams.baseVCycles = (unsigned int)options.BaseVCycles.value;
+	sParams.iters = (unsigned int)options.Iters.value;
+	sParams.alignDir = (unsigned int)options.AlignmentDir.value;
 
-	meParams.linearFit = LinearFit.set;
-	meParams.outputGradients = Gradients.set;
-	meParams.forceManifold = !NonManifold.set;
-	meParams.polygonMesh = PolygonMesh.set;
-	meParams.gridCoordinates = GridCoordinates.set;
-	meParams.outputDensity = Density.set;
-	meParams.verbose = Verbose.set;
+	meParams.linearFit = options.LinearFit.set;
+	meParams.outputGradients = options.Gradients.set;
+	meParams.forceManifold = !options.NonManifold.set;
+	meParams.polygonMesh = options.PolygonMesh.set;
+	meParams.gridCoordinates = options.GridCoordinates.set;
+	meParams.outputDensity = options.Density.set;
+	meParams.verbose = options.Verbose.set;
 
 	double startTime = Time();
 
@@ -353,10 +365,10 @@ void Execute( const AuxDataFactory &auxDataFactory )
 	XForm< Real , Dim+1 > toModel = XForm< Real , Dim+1 >::Identity();
 
 	// Read in the transform, if we want to apply one to the points before processing
-	if( Transform.set )
+	if( options.Transform.set )
 	{
-		FILE* fp = fopen( Transform.value , "r" );
-		if( !fp ) MK_WARN( "Could not read x-form from: " , Transform.value );
+		FILE* fp = fopen( options.Transform.value , "r" );
+		if( !fp ) MK_WARN( "Could not read x-form from: " , options.Transform.value );
 		else
 		{
 			for( int i=0 ; i<Dim+1 ; i++ ) for( int j=0 ; j<Dim+1 ; j++ )
@@ -374,14 +386,14 @@ void Execute( const AuxDataFactory &auxDataFactory )
 	// Get the point stream
 	{
 		profiler.reset();
-		char *ext = GetFileExtension( In.value );
+		char *ext = GetFileExtension( options.In.value );
 
-		if( InCore.set )
+		if( options.InCore.set )
 		{
 			InputPointStream *_pointStream;
-			if     ( !strcasecmp( ext , "bnpts" ) ) _pointStream = new BinaryInputDataStream< InputSampleFactory >( In.value , inputSampleFactory );
-			else if( !strcasecmp( ext , "ply"   ) ) _pointStream = new    PLYInputDataStream< InputSampleFactory >( In.value , inputSampleFactory );
-			else                                    _pointStream = new  ASCIIInputDataStream< InputSampleFactory >( In.value , inputSampleFactory );
+			if     ( !strcasecmp( ext , "bnpts" ) ) _pointStream = new BinaryInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory );
+			else if( !strcasecmp( ext , "ply"   ) ) _pointStream = new    PLYInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory );
+			else                                    _pointStream = new  ASCIIInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory );
 			typename InputSampleFactory::VertexType p = inputSampleFactory();
 			while( _pointStream->read( p ) ) inCorePoints.push_back( p );
 			delete _pointStream;
@@ -390,22 +402,22 @@ void Execute( const AuxDataFactory &auxDataFactory )
 		}
 		else
 		{
-			if     ( !strcasecmp( ext , "bnpts" ) ) pointStream = new BinaryInputDataStream< InputSampleFactory >( In.value , inputSampleFactory );
-			else if( !strcasecmp( ext , "ply"   ) ) pointStream = new    PLYInputDataStream< InputSampleFactory >( In.value , inputSampleFactory );
-			else                                    pointStream = new  ASCIIInputDataStream< InputSampleFactory >( In.value , inputSampleFactory );
+			if     ( !strcasecmp( ext , "bnpts" ) ) pointStream = new BinaryInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory );
+			else if( !strcasecmp( ext , "ply"   ) ) pointStream = new    PLYInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory );
+			else                                    pointStream = new  ASCIIInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory );
 		}
 		delete[] ext;
 	}
 
 	typename Reconstructor::Poisson::EnvelopeMesh< Real , Dim > *envelopeMesh = NULL;
-	if( Envelope.set )
+	if( options.Envelope.set )
 	{
 		envelopeMesh = new typename Reconstructor::Poisson::EnvelopeMesh< Real , Dim >();
 		{
 			std::vector< std::vector< int > > polygons;
 			std::vector< std::string > comments;
 			int file_type;
-			PLY::ReadPolygons( Envelope.value , PositionFactory< Real , Dim >() , envelopeMesh->vertices , polygons , file_type , comments );
+			PLY::ReadPolygons( options.Envelope.value , PositionFactory< Real , Dim >() , envelopeMesh->vertices , polygons , file_type , comments );
 			envelopeMesh->simplices.resize( polygons.size() );
 			for( int i=0 ; i<polygons.size() ; i++ )
 				if( polygons[i].size()!=Dim ) MK_THROW( "Not a simplex" );
@@ -473,12 +485,12 @@ void Execute( const AuxDataFactory &auxDataFactory )
 		}
 	};
 
-	if( Transform.set && envelopeMesh ) for( unsigned int i=0 ; i<envelopeMesh->vertices.size() ; i++ ) envelopeMesh->vertices[i] = toModel * envelopeMesh->vertices[i];
+	if( options.Transform.set && envelopeMesh ) for( unsigned int i=0 ; i<envelopeMesh->vertices.size() ; i++ ) envelopeMesh->vertices[i] = toModel * envelopeMesh->vertices[i];
 	if constexpr( HasAuxData )
 	{
 		_InputOrientedSampleWithDataStream sampleStream( *pointStream , auxDataFactory() );
 
-		if( Transform.set )
+		if( options.Transform.set )
 		{
 			Reconstructor::TransformedInputOrientedSampleStream< Real , Dim , typename AuxDataFactory::VertexType > _sampleStream( toModel , sampleStream );
 			implicit = Solver::Solve( _sampleStream , sParams , auxDataFactory() , envelopeMesh );
@@ -490,7 +502,7 @@ void Execute( const AuxDataFactory &auxDataFactory )
 	{
 		_InputOrientedSampleStream sampleStream( *pointStream );
 
-		if( Transform.set )
+		if( options.Transform.set )
 		{
 			Reconstructor::TransformedInputOrientedSampleStream< Real , Dim > _sampleStream( toModel , sampleStream );
 			implicit = Solver::Solve( _sampleStream , sParams , envelopeMesh );
@@ -503,10 +515,10 @@ void Execute( const AuxDataFactory &auxDataFactory )
 	delete _inputSampleFactory;
 	delete envelopeMesh;
 
-	if( Tree.set )
+	if( options.Tree.set )
 	{
-		FILE* fp = fopen( Tree.value , "wb" );
-		if( !fp ) MK_THROW( "Failed to open file for writing: " , Tree.value );
+		FILE* fp = fopen( options.Tree.value , "wb" );
+		if( !fp ) MK_THROW( "Failed to open file for writing: " , options.Tree.value );
 		FileStream fs(fp);
 		FEMTree< Dim , Real >::WriteParameter( fs );
 		DenseNodeData< Real , Sigs >::WriteSignatures( fs );
@@ -516,25 +528,25 @@ void Execute( const AuxDataFactory &auxDataFactory )
 		fclose( fp );
 	}
 
-	if( Grid.set )
+	if( options.Grid.set )
 	{
 		int res = 0;
 		profiler.reset();
-		Pointer( Real ) values = implicit->tree.template regularGridEvaluate< true >( implicit->solution , res , -1 , PrimalGrid.set );
-		if( Verbose.set ) std::cout << "Got grid: " << profiler << std::endl;
+		Pointer( Real ) values = implicit->tree.template regularGridEvaluate< true >( implicit->solution , res , -1 , options.PrimalGrid.set );
+		if( options.Verbose.set ) std::cout << "Got grid: " << profiler << std::endl;
 		XForm< Real , Dim+1 > voxelToUnitCube = XForm< Real , Dim+1 >::Identity();
-		if( PrimalGrid.set ) for( int d=0 ; d<Dim ; d++ ) voxelToUnitCube( d , d ) = (Real)( 1. / (res-1) );
+		if( options.PrimalGrid.set ) for( int d=0 ; d<Dim ; d++ ) voxelToUnitCube( d , d ) = (Real)( 1. / (res-1) );
 		else                 for( int d=0 ; d<Dim ; d++ ) voxelToUnitCube( d , d ) = (Real)( 1. / res ) , voxelToUnitCube( Dim , d ) = (Real)( 0.5 / res );
 
 		unsigned int _res[Dim];
 		for( int d=0 ; d<Dim ; d++ ) _res[d] = res;
-		RegularGrid< Real , Dim >::Write( Grid.value , _res , values , implicit->unitCubeToModel * voxelToUnitCube );
+		RegularGrid< Real , Dim >::Write( options.Grid.value , _res , values , implicit->unitCubeToModel * voxelToUnitCube );
 
 		DeletePointer( values );
 	}
 
 
-	if( Out.set )
+	if( options.Out.set )
 		if( Dim==2 || Dim==3 )
 		{
 			// Create the output mesh
@@ -542,7 +554,7 @@ void Execute( const AuxDataFactory &auxDataFactory )
 			{
 				char tempPath[1024];
 				tempPath[0] = 0;
-				if( TempDir.set ) strcpy( tempPath , TempDir.value );
+				if( options.TempDir.set ) strcpy( tempPath , options.TempDir.value );
 				else SetTempDirectory( tempPath , sizeof(tempPath) );
 				if( strlen(tempPath)==0 ) sprintf( tempPath , ".%c" , FileSeparator );
 				if( tempPath[ strlen( tempPath )-1 ]==FileSeparator ) sprintf( tempHeader , "%sPR_" , tempPath );
@@ -552,38 +564,38 @@ void Execute( const AuxDataFactory &auxDataFactory )
 			XForm< Real , Dim+1 > pXForm = implicit->unitCubeToModel;
 			XForm< Real , Dim > nXForm = XForm< Real , Dim >( pXForm ).inverse().transpose();
 
-			if constexpr( HasAuxData ) WriteMesh< Real , Dim , FEMSig >( Gradients.set , Density.set , InCore.set , *implicit , meParams , Out.value , ASCII.set , auxDataFactory );
-			else                       WriteMesh< Real , Dim , FEMSig >( Gradients.set , Density.set , InCore.set , *implicit , meParams , Out.value , ASCII.set );
+			if constexpr( HasAuxData ) WriteMesh< Real , Dim , FEMSig >( options.Gradients.set , options.Density.set , options.InCore.set , *implicit , meParams , options.Out.value , options.ASCII.set , auxDataFactory );
+			else                       WriteMesh< Real , Dim , FEMSig >( options.Gradients.set , options.Density.set , options.InCore.set , *implicit , meParams , options.Out.value , options.ASCII.set );
 		}
 		else MK_WARN( "Mesh extraction is only supported in dimensions 2 and 3" );
 
-	if( Verbose.set ) std::cout << "#          Total Solve: " << Time()-startTime << " (s), " << MemoryInfo::PeakMemoryUsageMB() << " (MB)" << std::endl;
+	if( options.Verbose.set ) std::cout << "#          Total Solve: " << Time()-startTime << " (s), " << MemoryInfo::PeakMemoryUsageMB() << " (MB)" << std::endl;
 	delete implicit;
 }
 
 #ifndef FAST_COMPILE
 template< unsigned int Dim , class Real , BoundaryType BType , typename AuxDataFactory >
-void Execute( const AuxDataFactory &auxDataFactory )
+void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 {
-	switch( Degree.value )
+	switch( options.Degree.value )
 	{
-		case 1: return Execute< Real , Dim , FEMDegreeAndBType< 1 , BType >::Signature >( auxDataFactory );
-		case 2: return Execute< Real , Dim , FEMDegreeAndBType< 2 , BType >::Signature >( auxDataFactory );
-//		case 3: return Execute< Real , Dim , FEMDegreeAndBType< 3 , BType >::Signature >( auxDataFactory );
-//		case 4: return Execute< Real , Dim , FEMDegreeAndBType< 4 , BType >::Signature >( auxDataFactory );
+		case 1: return Execute< Real , Dim , FEMDegreeAndBType< 1 , BType >::Signature >( options , auxDataFactory );
+		case 2: return Execute< Real , Dim , FEMDegreeAndBType< 2 , BType >::Signature >( options , auxDataFactory );
+//		case 3: return Execute< Real , Dim , FEMDegreeAndBType< 3 , BType >::Signature >( options , auxDataFactory );
+//		case 4: return Execute< Real , Dim , FEMDegreeAndBType< 4 , BType >::Signature >( options , auxDataFactory );
 		default: MK_THROW( "Only B-Splines of degree 1 - 2 are supported" );
 	}
 }
 
 template< unsigned int Dim , class Real , typename AuxDataFactory >
-void Execute( const AuxDataFactory &auxDataFactory )
+void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 {
-	switch( BType.value )
+	switch( options.BType.value )
 	{
-		case BOUNDARY_FREE+1:      return Execute< Dim , Real , BOUNDARY_FREE      >( auxDataFactory );
-		case BOUNDARY_NEUMANN+1:   return Execute< Dim , Real , BOUNDARY_NEUMANN   >( auxDataFactory );
-		case BOUNDARY_DIRICHLET+1: return Execute< Dim , Real , BOUNDARY_DIRICHLET >( auxDataFactory );
-		default: MK_THROW( "Not a valid boundary type: " , BType.value );
+		case BOUNDARY_FREE+1:      return Execute< Dim , Real , BOUNDARY_FREE      >( options , auxDataFactory );
+		case BOUNDARY_NEUMANN+1:   return Execute< Dim , Real , BOUNDARY_NEUMANN   >( options , auxDataFactory );
+		case BOUNDARY_DIRICHLET+1: return Execute< Dim , Real , BOUNDARY_DIRICHLET >( options , auxDataFactory );
+		default: MK_THROW( "Not a valid boundary type: " , options.BType.value );
 	}
 }
 #endif // !FAST_COMPILE
@@ -596,15 +608,16 @@ int RunPoissonRecon( int argc , char* argv[] )
 #ifdef ARRAY_DEBUG
 	MK_WARN( "Array debugging enabled" );
 #endif // ARRAY_DEBUG
-	CmdLineParse( argc-1 , &argv[1] , params );
-	if( MaxMemoryGB.value>0 ) SetPeakMemoryMB( MaxMemoryGB.value<<10 );
-	ThreadPool::ChunkSize = ThreadChunkSize.value;
-	ThreadPool::Schedule = (ThreadPool::ScheduleType)ScheduleType.value;
-	ThreadPool::ParallelizationType= (ThreadPool::ParallelType)ParallelType.value;
+	Parameters options;
+	CmdLineParse( argc-1 , &argv[1] , options.params.data() );
+	if( options.MaxMemoryGB.value>0 ) SetPeakMemoryMB( options.MaxMemoryGB.value<<10 );
+	ThreadPool::ChunkSize = options.ThreadChunkSize.value;
+	ThreadPool::Schedule = (ThreadPool::ScheduleType)options.ScheduleType.value;
+	ThreadPool::ParallelizationType= (ThreadPool::ParallelType)options.ParallelType.value;
 
-	if( !In.set )
+	if( !options.In.set )
 	{
-		ShowUsage( argv[0] );
+		ShowUsage( options , argv[0] );
 		return 0;
 	}
 
@@ -620,15 +633,15 @@ int RunPoissonRecon( int argc , char* argv[] )
 	static const unsigned int Dim = DEFAULT_DIMENSION;
 	static const unsigned int FEMSig = FEMDegreeAndBType< Degree , BType >::Signature;
 	MK_WARN( "Compiled for degree-" , Degree , ", boundary-" , BoundaryNames[ BType ] , ", " , sizeof(Real)==4 ? "single" : "double" , "-precision _only_" );
-	if( !PointWeight.set ) PointWeight.value = Reconstructor::Poisson::WeightMultiplier*Degree;
-	char *ext = GetFileExtension( In.value );
+	if( !options.PointWeight.set ) options.PointWeight.value = Reconstructor::Poisson::WeightMultiplier*Degree;
+	char *ext = GetFileExtension( options.In.value );
 	if( !strcasecmp( ext , "ply" ) )
 	{
 		typedef VertexFactory::Factory< Real , typename VertexFactory::PositionFactory< Real , DEFAULT_DIMENSION > , typename VertexFactory::NormalFactory< Real , DEFAULT_DIMENSION > > Factory;
 		Factory factory;
 		bool *readFlags = new bool[ factory.plyReadNum() ];
 		std::vector< PlyProperty > unprocessedProperties;
-		PLY::ReadVertexHeader( In.value , factory , readFlags , unprocessedProperties );
+		PLY::ReadVertexHeader( options.In.value , factory , readFlags , unprocessedProperties );
 		if( !factory.template plyValidReadProperties<0>( readFlags ) ) MK_THROW( "Ply file does not contain positions" );
 		if( !factory.template plyValidReadProperties<1>( readFlags ) ) MK_THROW( "Ply file does not contain normals" );
 		delete[] readFlags;
@@ -647,28 +660,28 @@ int RunPoissonRecon( int argc , char* argv[] )
 #endif
 
 #if defined(POISSON_AUX_NATIVE_GPU)
-		if( standard_rgb ) Execute< Real , Dim , FEMSig >( VertexFactory::RGBColorFactory< Real >() );
+		if( standard_rgb ) Execute< Real , Dim , FEMSig >( options , VertexFactory::RGBColorFactory< Real >() );
 		else
 #endif
-		if( unprocessedProperties.size() ) Execute< Real , Dim , FEMSig >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
-		else                               Execute< Real , Dim , FEMSig >( VertexFactory::EmptyFactory< Real >() );
+		if( unprocessedProperties.size() ) Execute< Real , Dim , FEMSig >( options , VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
+		else                               Execute< Real , Dim , FEMSig >( options , VertexFactory::EmptyFactory< Real >() );
 	}
 	else
 	{
-		if( Colors.set ) Execute< Real , Dim , FEMSig >( VertexFactory::RGBColorFactory< Real >() );
-		else             Execute< Real , Dim , FEMSig >( VertexFactory::EmptyFactory< Real >() );
+		if( options.Colors.set ) Execute< Real , Dim , FEMSig >( options , VertexFactory::RGBColorFactory< Real >() );
+		else             Execute< Real , Dim , FEMSig >( options , VertexFactory::EmptyFactory< Real >() );
 	}
 	delete[] ext;
 #else // !FAST_COMPILE
-	if( !PointWeight.set ) PointWeight.value = Reconstructor::Poisson::WeightMultiplier * Degree.value;
-	char *ext = GetFileExtension( In.value );
+	if( !options.PointWeight.set ) options.PointWeight.value = Reconstructor::Poisson::WeightMultiplier * options.Degree.value;
+	char *ext = GetFileExtension( options.In.value );
 	if( !strcasecmp( ext , "ply" ) )
 	{
 		typedef VertexFactory::Factory< Real , typename VertexFactory::PositionFactory< Real , DEFAULT_DIMENSION > , typename VertexFactory::NormalFactory< Real , DEFAULT_DIMENSION > > Factory;
 		Factory factory;
 		bool *readFlags = new bool[ factory.plyReadNum() ];
 		std::vector< PlyProperty > unprocessedProperties;
-		PLY::ReadVertexHeader( In.value , factory , readFlags , unprocessedProperties );
+		PLY::ReadVertexHeader( options.In.value , factory , readFlags , unprocessedProperties );
 		if( !factory.template plyValidReadProperties<0>( readFlags ) ) MK_THROW( "Ply file does not contain positions" );
 		if( !factory.template plyValidReadProperties<1>( readFlags ) ) MK_THROW( "Ply file does not contain normals" );
 		delete[] readFlags;
@@ -687,20 +700,20 @@ int RunPoissonRecon( int argc , char* argv[] )
 #endif
 
 #if defined(POISSON_AUX_NATIVE_GPU)
-		if( standard_rgb ) Execute< DEFAULT_DIMENSION , Real >( VertexFactory::RGBColorFactory< Real >() );
+		if( standard_rgb ) Execute< DEFAULT_DIMENSION , Real >( options , VertexFactory::RGBColorFactory< Real >() );
 		else
 #endif
-		if( unprocessedProperties.size() ) Execute< DEFAULT_DIMENSION , Real >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
-		else                               Execute< DEFAULT_DIMENSION , Real >( VertexFactory::EmptyFactory< Real >() );
+		if( unprocessedProperties.size() ) Execute< DEFAULT_DIMENSION , Real >( options , VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
+		else                               Execute< DEFAULT_DIMENSION , Real >( options , VertexFactory::EmptyFactory< Real >() );
 	}
 	else
 	{
-		if( Colors.set ) Execute< DEFAULT_DIMENSION , Real >( VertexFactory::RGBColorFactory< Real >() );
-		else             Execute< DEFAULT_DIMENSION , Real >( VertexFactory::EmptyFactory< Real >() );
+		if( options.Colors.set ) Execute< DEFAULT_DIMENSION , Real >( options , VertexFactory::RGBColorFactory< Real >() );
+		else             Execute< DEFAULT_DIMENSION , Real >( options , VertexFactory::EmptyFactory< Real >() );
 	}
 	delete[] ext;
 #endif // FAST_COMPILE
-	if( Performance.set )
+	if( options.Performance.set )
 	{
 		printf( "Time (Wall/CPU): %.2f / %.2f\n" , timer.wallTime() , timer.cpuTime() );
 		printf( "Peak Memory (MB): %d\n" , MemoryInfo::PeakMemoryUsageMB() );
