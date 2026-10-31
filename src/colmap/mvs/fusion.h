@@ -361,11 +361,12 @@ class StereoFusion : public BaseController {
   void ClearDirectComponentPins();
   void ClearNormalTileRings();
   void ClearNormalPrefillWindow();
-  struct NormalTileRead;
-  NormalTileRead AcquireWorkerNormalTile(int thread_id,
-                                         int image_idx,
-                                         int row,
-                                         int col);
+  // Borrowed from a joined-window prefill or the worker's current ring slot.
+  // A ring read must finish before that worker acquires another tile.
+  const BoundedWorkspace::ImageData* AcquireWorkerNormalTile(int thread_id,
+                                                             int image_idx,
+                                                             int row,
+                                                             int col);
   const ImmutableMapRegion* AcquireWorkerMappedNormal(int image_idx, int row);
   void ClearMappedNormalRing();
   void InitFusedPixelMask(int image_idx, size_t width, size_t height);
@@ -423,15 +424,6 @@ class StereoFusion : public BaseController {
   size_t direct_bitmap_borrows_ = 0;
   size_t max_bounded_prefill_lanes_scheduled_ = 0;
   using NormalTileKey = std::tuple<int, size_t, size_t>;
-  struct NormalTileRead {
-    const BoundedWorkspace::ImageData* data = nullptr;
-    BoundedWorkspace::TransientImageLease transient;
-    const BoundedWorkspace::ImageData* get() const noexcept { return data; }
-    const BoundedWorkspace::ImageData* operator->() const noexcept {
-      return data;
-    }
-    explicit operator bool() const noexcept { return data != nullptr; }
-  };
   struct NormalTileSlot {
     int image_idx = -1;
     NormalTileKey key{};
