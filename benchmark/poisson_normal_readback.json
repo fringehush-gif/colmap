@@ -24,16 +24,13 @@
   },
   "inputIdentities": {
     "Fountain P11 1536": {
-      "bytes": 11704815,
-      "xxh3_128": "ca6b80f40ef658d6c3544b78a18cb789"
+      "bytes": 11704815
     },
     "Fountain P11 3072": {
-      "bytes": 45267382,
-      "xxh3_128": "9f7557445a39d6d290f9582dd80ce5bb"
+      "bytes": 45267382
     },
     "ETH3D Facade1536": {
-      "bytes": 56222740,
-      "xxh3_128": "908a3f2e78d28205a722af6a53da4295"
+      "bytes": 56222740
     }
   },
   "metricColumns": ["wall_s", "CPU_s", "peak_RSS_MiB", "sampled_mean_RSS_MiB", "instructions_G", "cache_misses_G", "user_cycles_G", "cache_references_G", "page_faults", "context_switches", "CPU_migrations"],

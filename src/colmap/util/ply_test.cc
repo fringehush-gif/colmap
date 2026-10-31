@@ -542,6 +542,48 @@ TEST(Ply, ReadMeshVerticesAsPoints) {
   }
 }
 
+TEST(Ply, ReadRejectsNonemptyElementsBeforeVertices) {
+  for (const std::string format :
+       {"ascii", "binary_little_endian", "binary_big_endian"}) {
+    SCOPED_TRACE(format);
+    const auto path = CreateTestDir() / "preceding.ply";
+    std::ofstream file(path, std::ios::binary);
+    file << "ply\nformat " << format
+         << " 1.0\n"
+            "element junk 1\nproperty float a\nproperty float b\nproperty "
+            "float c\n"
+            "element vertex 1\nproperty float x\nproperty float y\nproperty "
+            "float z\nend_header\n";
+    if (format == "ascii") {
+      file << "99 98 97\n1 2 3\n";
+    } else {
+      for (const float value : {99.0f, 98.0f, 97.0f, 1.0f, 2.0f, 3.0f}) {
+        if (format == "binary_little_endian")
+          WriteBinaryLittleEndian<float>(&file, value);
+        else {
+          const float encoded = NativeToBigEndian(value);
+          file.write(reinterpret_cast<const char*>(&encoded), sizeof(encoded));
+        }
+      }
+    }
+    file.close();
+    EXPECT_THROW(ReadPly(path), std::exception);
+  }
+}
+
+TEST(Ply, ReadAllowsEmptyElementsBeforeVertices) {
+  const auto path = CreateTestDir() / "preceding-empty.ply";
+  std::ofstream file(path);
+  file << "ply\nformat ascii 1.0\nelement junk 0\nproperty float value\n"
+          "element vertex 1\nproperty float x\nproperty float y\nproperty "
+          "float z\n"
+          "end_header\n1 2 3\n";
+  file.close();
+  const auto points = ReadPly(path);
+  ASSERT_EQ(points.size(), 1);
+  ExpectPositionEq(points.front(), 1.0f, 2.0f, 3.0f);
+}
+
 TEST(Ply, ReadTextZeroVerticesIgnoresFollowingElements) {
   const auto test_file = CreateTestDir() / "empty.ply";
   std::ofstream file(test_file);

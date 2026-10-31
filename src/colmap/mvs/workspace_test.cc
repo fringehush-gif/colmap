@@ -395,6 +395,115 @@ TEST_F(WorkspaceTests, EagerLoadDeduplicatesPerCall) {
   }
 }
 
+TEST_F(WorkspaceTests, CachedLeasesSurviveConcurrentClear) {
+  CachedWorkspace workspace(GetOptions());
+  const auto held = workspace.GetDepthMapLease(0);
+  std::thread clearer([&] {
+    for (int i = 0; i < 32; ++i) workspace.ClearCache();
+  });
+  for (int i = 0; i < 32; ++i) {
+    const auto current = workspace.GetDepthMapLease(0);
+    EXPECT_FLOAT_EQ(current->Get(0, 0), 1.0f);
+  }
+  clearer.join();
+  EXPECT_FLOAT_EQ(held->Get(0, 0), 1.0f);
+}
+
+TEST_F(WorkspaceTests, OldBitmapLoadDoesNotReplaceNewCacheEntry) {
+  CachedWorkspace workspace(GetOptions());
+  std::atomic<int> reads{0};
+  std::promise<void> started, release;
+  auto first_started = started.get_future();
+  auto release_first = release.get_future().share();
+  auto reader = ScopedBitmapReader::Create(
+      {workspace.GetBitmapPath(0)},
+      [&](const auto&, bool, bool, Bitmap* target) {
+        if (reads.fetch_add(1) == 0) {
+          started.set_value();
+          if (release_first.wait_for(std::chrono::seconds(5)) !=
+              std::future_status::ready) {
+            return false;
+          }
+        }
+        *target = Bitmap(10, 5, true);
+        target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+        return true;
+      },
+      {{10, 5}});
+  auto loading = std::async(std::launch::async,
+                            [&] { return workspace.GetBitmapLease(0); });
+  ASSERT_EQ(first_started.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  workspace.ClearCache();
+  const auto replacement = workspace.GetBitmapLease(0);
+  release.set_value();
+  const auto old = loading.get();
+  EXPECT_NE(old.get(), replacement.get());
+  EXPECT_FALSE(old->IsEmpty());
+  EXPECT_EQ(workspace.GetBitmapLease(0).get(), replacement.get());
+  EXPECT_EQ(reads.load(), 2);
+  reader->Close();
+}
+
+TEST_F(WorkspaceTests, CachedDepthReadFailureCanBeRetried) {
+  CachedWorkspace workspace(GetOptions());
+  const auto path = workspace.GetDepthMapPath(0);
+  {
+    std::ofstream file(path, std::ios::binary);
+    file << "10&5&1&";
+  }
+  EXPECT_THROW(workspace.GetDepthMapLease(0), std::exception);
+  Mat<float> restored(10, 5, 1);
+  restored.Fill(2.0f);
+  restored.Write(path);
+  const auto lease = workspace.GetDepthMapLease(0);
+  ASSERT_EQ(lease->GetWidth(), 10);
+  ASSERT_EQ(lease->GetHeight(), 5);
+  EXPECT_FLOAT_EQ(lease->Get(0, 0), 2.0f);
+}
+
+TEST_F(WorkspaceTests, CachedNormalReadFailureCanBeRetried) {
+  CachedWorkspace workspace(GetOptions());
+  const auto depth = workspace.GetDepthMapLease(0);
+  const auto path = workspace.GetNormalMapPath(0);
+  {
+    std::ofstream file(path, std::ios::binary);
+    file << "10&5&3&";
+  }
+  EXPECT_THROW(workspace.GetNormalMapLease(0), std::exception);
+  Mat<float> restored(10, 5, 3);
+  restored.Fill(2.0f);
+  restored.Write(path);
+  const auto lease = workspace.GetNormalMapLease(0);
+  ASSERT_EQ(lease->GetWidth(), 10);
+  ASSERT_EQ(lease->GetHeight(), 5);
+  ASSERT_EQ(lease->GetDepth(), 3);
+  EXPECT_FLOAT_EQ(lease->Get(0, 0, 2), 2.0f);
+  EXPECT_EQ(workspace.GetDepthMapLease(0).get(), depth.get());
+  EXPECT_FLOAT_EQ(depth->Get(0, 0), 1.0f);
+}
+
+TEST_F(WorkspaceTests, CachedBitmapReadFailureCanBeRetried) {
+  CachedWorkspace workspace(GetOptions());
+  int reads = 0;
+  auto reader =
+      ScopedBitmapReader::Create({workspace.GetBitmapPath(0)},
+                                 [&](const auto&, bool, bool, Bitmap* target) {
+                                   if (++reads == 1) return false;
+                                   *target = Bitmap(10, 5, true);
+                                   target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+                                   return true;
+                                 },
+                                 {{10, 5}});
+  EXPECT_THROW(workspace.GetBitmapLease(0), std::exception);
+  const auto lease = workspace.GetBitmapLease(0);
+  EXPECT_EQ(reads, 2);
+  EXPECT_FALSE(lease->IsEmpty());
+  EXPECT_EQ(workspace.GetBitmapLease(0).get(), lease.get());
+  EXPECT_EQ(reads, 2);
+  reader->Close();
+}
+
 TEST_F(WorkspaceTests, EagerLoadMissingInputCanBeRestored) {
   auto options = GetOptions();
   options.num_threads = 1;

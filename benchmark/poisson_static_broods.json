@@ -4,12 +4,10 @@
   "method": "Complete fixed 11-image FountainP11 fused inputs. Default Poisson meshing including trimming; 12 workers. Initial AB and reversed BA, N=2 per arm at each resolution. No warmup observations. Supplementary 3072/24 N=1 per arm in separate isolated windows; interrupted candidate excluded.",
   "hardware": "Ryzen 9 3900X / RTX 3080 Ti; WSL2, GCC 12.4, CUDA 13.2. CPU meshing change.",
   "controlBinary": {
-    "bytes": 85421033,
-    "xxh3_128": "aa9ac6ba57fe946e28d1a17a1c5b9ae7"
+    "bytes": 85421033
   },
   "candidateBinary": {
-    "bytes": 85437417,
-    "xxh3_128": "6e9aa8f43e4f92c5fe886090352b5428"
+    "bytes": 85437417
   },
   "observations": [
     {

@@ -135,6 +135,8 @@ void CheckMapperColorReads(const ColorReadMode mode, const bool overlap) {
     EXPECT_GT(colored, 0);
     if (!overlap || mode == ColorReadMode::kTransient) {
       EXPECT_GT(serial_successes.load(), 0);
+    } else {
+      EXPECT_EQ(serial_successes.load(), 0);
     }
   }
   if (overlap && mode == ColorReadMode::kTransient) {

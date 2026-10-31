@@ -655,13 +655,13 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
     });
 
     shared_problem.src_image_idxs = src_image_idxs;
-    problem.src_image_idxs = src_image_idxs;
+    problem.src_image_idxs = std::move(src_image_idxs);
   }
 
   problem.Print();
   patch_match_options.Print();
 
-  prepared->options = patch_match_options;
+  prepared->options = std::move(patch_match_options);
   prepared->depth_path = depth_map_path;
   prepared->normal_path = normal_map_path;
   prepared->consistency_path = consistency_graph_path;
