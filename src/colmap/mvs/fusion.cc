@@ -2016,7 +2016,6 @@ std::vector<std::vector<int>> ReadPointsVisibility(
     if (!native_little_endian) {
       num_visible = LittleEndianToNative(num_visible);
     }
-    visibility[i].resize(num_visible);
     // Read only this list's payload, including when the path is a pipe.
     for (size_t offset = 0; offset < num_visible;) {
       const size_t count =
@@ -2025,6 +2024,8 @@ std::vector<std::vector<int>> ReadPointsVisibility(
                 count * sizeof(uint32_t));
       THROW_CHECK(file.good())
           << "Unexpected end of visibility file at point " << i;
+      // Allocate only for payload that was successfully read.
+      visibility[i].resize(offset + count);
       for (size_t j = 0; j < count; ++j) {
         const uint32_t value =
             native_little_endian ? buffer[j] : LittleEndianToNative(buffer[j]);
