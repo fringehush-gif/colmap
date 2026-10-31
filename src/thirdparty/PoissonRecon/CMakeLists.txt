@@ -40,6 +40,15 @@ if(TESTS_ENABLED AND OPENMP_FOUND)
         OpenMP::OpenMP_CXX)
 endif()
 
+COLMAP_ADD_TEST(
+    NAME template_return_test
+    SRCS template_return_test.cc
+)
+if(TESTS_ENABLED AND OPENMP_FOUND)
+    target_link_libraries(colmap_poisson_recon_template_return_test
+        OpenMP::OpenMP_CXX)
+endif()
+
 # Exercise the private PLY writer independently of the Poisson executable.
 COLMAP_ADD_TEST(
     NAME ply_writer_test

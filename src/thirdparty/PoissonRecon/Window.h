@@ -225,7 +225,7 @@ namespace Window
 		std::conditional_t< sizeof...(Ress)==0 , const Data & , ConstSlice< Data , Ress... > > operator[]( int idx ) const
 		{
 			if constexpr( sizeof...(Ress)==0 ) return data[idx];
-			else                               ConstSlice< Data , Ress... >( ( ConstPointer( Data ) )( data + Window::Size< Ress... >() * idx ) );
+			else                               return ConstSlice< Data , Ress... >( ( ConstPointer( Data ) )( data + Window::Size< Ress... >() * idx ) );
 		}
 
 		Slice< Data , Res , Ress... > operator()( void ){ return Slice< Data , Res , Ress... >( data ); }
