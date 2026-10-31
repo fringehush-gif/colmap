@@ -34,6 +34,15 @@ struct MappedFloatShape {
   size_t width, height, depth, bytes, payload_start;
 };
 
+std::istream& ReadUnsignedDimension(std::istream& stream, size_t& value) {
+  stream >> std::ws;
+  // Unsigned extraction otherwise accepts a minus and can wrap to a small size.
+  if (stream.peek() == '-') {
+    stream.setstate(std::ios::failbit);
+  }
+  return stream >> value;
+}
+
 MappedFloatShape ReadMappedFloatShape(std::ifstream& file,
                                       const std::filesystem::path& path) {
   std::string header;
@@ -51,7 +60,9 @@ MappedFloatShape ReadMappedFloatShape(std::ifstream& file,
   SetFullPrecTextStream(stream);
   size_t width = 0, height = 0, depth = 0;
   char sx = 0, sy = 0, sz = 0;
-  stream >> width >> sx >> height >> sy >> depth >> sz;
+  ReadUnsignedDimension(stream, width) >> sx;
+  ReadUnsignedDimension(stream, height) >> sy;
+  ReadUnsignedDimension(stream, depth) >> sz;
   THROW_CHECK(stream && sx == '&' && sy == '&' && sz == '&') << path;
   THROW_CHECK_EQ(stream.peek(), std::char_traits<char>::eof()) << path;
   THROW_CHECK_GT(width, 0) << path;
@@ -417,7 +428,9 @@ void Mat<float>::Read(const std::filesystem::path& path) {
   std::istringstream header_stream(header);
   size_t width = 0, height = 0, depth = 0;
   char sx = 0, sy = 0, sz = 0;
-  header_stream >> width >> sx >> height >> sy >> depth >> sz;
+  ReadUnsignedDimension(header_stream, width) >> sx;
+  ReadUnsignedDimension(header_stream, height) >> sy;
+  ReadUnsignedDimension(header_stream, depth) >> sz;
   THROW_CHECK(header_stream && sx == '&' && sy == '&' && sz == '&') << path;
   THROW_CHECK_EQ(header_stream.peek(), std::char_traits<char>::eof()) << path;
   THROW_CHECK_GT(width, 0) << path;
