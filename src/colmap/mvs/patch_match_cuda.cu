@@ -1118,14 +1118,6 @@ __global__ void SweepFromTopToBottom(
       cooperative_geometric_costs[kSampleWindowSize]
                                  [kCooperative && kGeomConsistencyTerm ? 3 : 1]
                                  [kBlockWidth];
-#ifndef COLMAP_HIP_ENABLED
-  // The probability pass already loads current cost for each source. The
-  // default CUDA tile can reuse that exact float during the ordered draw fold.
-  __shared__ float
-      source_current_cost[kCooperative && kBlockWidth == 8 ? kSampleWindowSize
-                                                           : 1]
-                         [kCooperative && kBlockWidth == 8 ? kBlockWidth : 1];
-#endif
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 610 && !defined(__HIPCC__)
   // Checkpoint construction bounds both orientations by INT_MAX. Keep
@@ -1375,13 +1367,6 @@ __global__ void SweepFromTopToBottom(
       for (int image_idx = first_source; image_idx < cost_map.GetDepth();
            image_idx += source_step) {
         const float cost = cost_map.Get(row, col, image_idx);
-#ifndef COLMAP_HIP_ENABLED
-        if constexpr (kCooperative && kBlockWidth == 8) {
-          if (image_idx < kSampleWindowSize) {
-            source_current_cost[image_idx][threadIdx.x] = cost;
-          }
-        }
-#endif
         const float alpha = likelihood_computer.ComputeForwardMessage(
             cost, forward_message[image_idx * source_stride]);
         const float beta =
@@ -1633,16 +1618,7 @@ __global__ void SweepFromTopToBottom(
             if (source < 0) continue;
             // Reuse identical evaluations, but retain every original sample
             // add.
-#ifndef COLMAP_HIP_ENABLED
-            if constexpr (kBlockWidth == 8) {
-              costs[0] += source < kSampleWindowSize
-                              ? source_current_cost[source][threadIdx.x]
-                              : cost_map.Get(row, col, source);
-            } else
-#endif
-            {
-              costs[0] += cost_map.Get(row, col, source);
-            }
+            costs[0] += cost_map.Get(row, col, source);
             if constexpr (kGeomConsistencyTerm) {
               for (int i = 0; i < 3; ++i) {
                 geometric_costs[i] =
