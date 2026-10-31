@@ -49,6 +49,19 @@ if(TESTS_ENABLED AND OPENMP_FOUND)
         OpenMP::OpenMP_CXX)
 endif()
 
+COLMAP_ADD_TEST(
+    NAME fem_tree_test
+    SRCS fem_tree_test.cc
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_poisson_recon_fem_tree_test
+        PRIVATE _GLIBCXX_ASSERTIONS)
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_poisson_recon_fem_tree_test
+            OpenMP::OpenMP_CXX)
+    endif()
+endif()
+
 # Exercise the private PLY writer independently of the Poisson executable.
 COLMAP_ADD_TEST(
     NAME ply_writer_test
