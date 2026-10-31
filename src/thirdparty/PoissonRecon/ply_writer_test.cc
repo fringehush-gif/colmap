@@ -87,7 +87,10 @@ TEST(PlyWriterTest, VectorRoundTripBinaryAndAscii) {
 TEST(PlyReaderTest, RejectsInvalidHeadersAndReadsValidFile) {
   const auto dir = colmap::CreateTestDir();
   const std::vector<std::string> headers = {
-      "not-ply\n", "ply\nformat unsupported 1.0\nend_header\n"};
+      "not-ply\n",
+      "ply\nformat unsupported 1.0\nend_header\n",
+      "ply\nelement vertex 0\nend_header\n",
+      "ply\nformat ascii 1.0\nelement vertex 0\n"};
   for (size_t i = 0; i < headers.size(); ++i) {
     const auto path = dir / ("invalid-" + std::to_string(i) + ".ply");
     {
