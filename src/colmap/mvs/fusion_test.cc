@@ -2123,6 +2123,23 @@ TEST(ReadPointsVisibility, TruncatedHeaderCountAndPayloadAreRejected) {
   }
 }
 
+TEST(ReadPointsVisibility, ExtremeTruncatedListDoesNotAllocateDeclaredCount) {
+  const auto path = CreateTestDir() / "extreme-count.vis";
+  for (const size_t payload_words : {size_t{0}, size_t{8193}}) {
+    SCOPED_TRACE(payload_words);
+    {
+      std::ofstream file(path, std::ios::binary);
+      WriteBinaryLittleEndian<uint64_t>(&file, 1);
+      WriteBinaryLittleEndian<uint32_t>(&file,
+                                        std::numeric_limits<uint32_t>::max());
+      for (size_t i = 0; i < payload_words; ++i) {
+        WriteBinaryLittleEndian<uint32_t>(&file, 7);
+      }
+    }
+    EXPECT_THROW(ReadPointsVisibility(path, 1), std::invalid_argument);
+  }
+}
+
 TEST(ReadPointsVisibility, RoundTrip) {
   const auto test_dir = CreateTestDir();
   const auto vis_path = test_dir / "test.vis";
