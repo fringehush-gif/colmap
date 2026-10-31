@@ -78,7 +78,17 @@ RasterShape ReadMapShape(const std::filesystem::path& path,
   SetFullPrecTextStream(shape);
   size_t width = 0, height = 0, channels = 0;
   char sep1 = 0, sep2 = 0, sep3 = 0;
-  shape >> width >> sep1 >> height >> sep2 >> channels >> sep3;
+  const auto read_dimension = [&](size_t& value) {
+    shape >> std::ws;
+    THROW_CHECK_NE(shape.peek(), '-') << path;
+    shape >> value;
+  };
+  read_dimension(width);
+  shape >> sep1;
+  read_dimension(height);
+  shape >> sep2;
+  read_dimension(channels);
+  shape >> sep3;
   THROW_CHECK(shape && sep1 == '&' && sep2 == '&' && sep3 == '&') << path;
   THROW_CHECK_EQ(shape.peek(), std::char_traits<char>::eof()) << path;
   THROW_CHECK_EQ(channels, expected_channels) << path;

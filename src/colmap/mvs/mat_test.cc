@@ -249,6 +249,41 @@ TEST_F(MatFileTest, ReadRejectsDimensionOverflowBeforePayloadAllocation) {
   EXPECT_THROW(mat.Read(path_), std::exception);
 }
 
+TEST_F(MatFileTest, ReadRejectsNegativeDimensionsWithCompletePayload) {
+  Mat<float> mat(2, 1, 1);
+  mat.Fill(42.0f);
+  for (int dimension = 0; dimension < 3; ++dimension) {
+    SCOPED_TRACE(dimension);
+    std::array<std::string, 3> shape = {"1", "1", "1"};
+    shape[dimension] = "-" + std::to_string(std::numeric_limits<size_t>::max());
+    WriteMatFile(path_,
+                 shape[0] + "&" + shape[1] + "&" + shape[2] + "&" +
+                     LittleEndianFloats({0x3f800000}));
+    EXPECT_THROW(mat.Read(path_), std::exception);
+    EXPECT_EQ(mat.GetWidth(), 2);
+    EXPECT_EQ(mat.GetHeight(), 1);
+    EXPECT_EQ(mat.GetDepth(), 1);
+    EXPECT_EQ(mat.GetData(), (std::vector<float>{42.0f, 42.0f}));
+    if (ImmutableMapRegion::Supported()) {
+      EXPECT_THROW({ ImmutableMapSource source(path_); }, std::exception);
+    }
+  }
+}
+
+TEST_F(MatFileTest, ReadAcceptsPositiveSignsAndWhitespace) {
+  for (const char* header : {"1&1&1&", "+1& +1& +1&", " 1 & 1 & 1 &"}) {
+    SCOPED_TRACE(header);
+    WriteMatFile(path_, std::string(header) + LittleEndianFloats({0x3f800000}));
+    Mat<float> mat;
+    mat.Read(path_);
+    EXPECT_EQ(mat.GetData(), (std::vector<float>{1.0f}));
+    if (ImmutableMapRegion::Supported()) {
+      ImmutableMapSource source(path_);
+      EXPECT_EQ(source.GetShape(), (std::array<size_t, 3>{1, 1, 1}));
+    }
+  }
+}
+
 TEST_F(MatFileTest, MappedNormalRegionKeepsPlanarBitsAtOddEdge) {
   if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
   const std::vector<uint32_t> bits = {0x3f800001,
