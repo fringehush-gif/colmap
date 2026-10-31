@@ -1070,6 +1070,24 @@ TEST(BoundedWorkspaceBase, NormalTileGridValidationRetriesAndCoalesces) {
     EXPECT_EQ(rejected.GetMappedNormalStats().loads, 0);
   }
 
+  for (size_t dimension = 0; dimension < 3; ++dimension) {
+    SCOPED_TRACE(dimension);
+    const std::array<size_t, 3> shape = {10, 5, 3};
+    std::ofstream malformed(normal_path, std::ios::binary);
+    for (size_t index = 0; index < shape.size(); ++index) {
+      malformed << (index == dimension
+                        ? "-" + std::to_string(size_t{0} - shape[index])
+                        : std::to_string(shape[index]))
+                << '&';
+    }
+    malformed << std::string(10 * 5 * 3 * sizeof(float), '\0');
+    malformed.close();
+    BoundedWorkspace rejected(options);
+    EXPECT_THROW(
+        rejected.GetNormalTileGrid(rejected.GetModel().GetImageIdx(name)),
+        std::exception);
+  }
+
   NormalMap normal(10, 5);
   normal.Fill(1.0f);
   normal.Write(normal_path);
