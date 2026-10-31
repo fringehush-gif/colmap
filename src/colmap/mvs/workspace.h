@@ -115,7 +115,10 @@ class CachedWorkspace : public Workspace {
 
   void Load(const std::vector<std::string>& image_names) override {}
 
-  inline void ClearCache() { cache_.Clear(); }
+  inline void ClearCache() {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    cache_.Clear();
+  }
 
   const Bitmap& GetBitmap(int image_idx) override;
   const DepthMap& GetDepthMap(int image_idx) override;
