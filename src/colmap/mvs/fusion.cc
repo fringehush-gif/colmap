@@ -258,6 +258,7 @@ void StereoFusionOptions::Print() const {
 #define PrintOption(option) LOG(INFO) << #option ": " << (option);
   LOG_HEADING2("StereoFusion::Options");
   PrintOption(mask_path);
+  PrintOption(num_threads);
   PrintOption(full_ram_load_threads);
   PrintOption(max_image_size);
   PrintOption(min_num_pixels);
@@ -1147,13 +1148,13 @@ const ImmutableMapRegion* StereoFusion::AcquireWorkerMappedNormal(
   return slot.lease.get();
 }
 
-StereoFusion::NormalTileRead StereoFusion::AcquireWorkerNormalTile(
+const BoundedWorkspace::ImageData* StereoFusion::AcquireWorkerNormalTile(
     const int thread_id, const int image_idx, const int row, const int col) {
   auto& ring = normal_tile_rings_.at(thread_id);
   if (!normal_prefill_data_.empty()) {
     if (const auto* data = normal_prefill_data_.at(image_idx)) {
       ++ring.whole_normal_reads;
-      return {data, {}};
+      return data;
     }
   }
   const auto contains = [row, col](const BoundedWorkspace::ImageData* data) {
@@ -1171,7 +1172,7 @@ StereoFusion::NormalTileRead StereoFusion::AcquireWorkerNormalTile(
       const auto& slot = ring.tiles[hinted];
       if (slot.image_idx == image_idx && contains(slot.get())) {
         ++ring.hits;
-        return {slot.get(), {}};
+        return slot.get();
       }
     }
   }
@@ -1187,13 +1188,13 @@ StereoFusion::NormalTileRead StereoFusion::AcquireWorkerNormalTile(
       ++ring.hits;
       if (!ring.last_slot_by_image.empty())
         ring.last_slot_by_image[image_idx] = found->second;
-      return {ring.tiles[found->second].get(), {}};
+      return ring.tiles[found->second].get();
     }
   } else {
     for (const auto& slot : ring.tiles) {
       if (slot.image_idx == image_idx && contains(slot.get())) {
         ++ring.hits;
-        return {slot.get(), {}};
+        return slot.get();
       }
     }
   }
@@ -1264,7 +1265,7 @@ StereoFusion::NormalTileRead StereoFusion::AcquireWorkerNormalTile(
   }
   if (!ring.last_slot_by_image.empty())
     ring.last_slot_by_image[image_idx] = slot_index;
-  return {slot.get(), {}};
+  return slot.get();
 }
 
 const BoundedWorkspace::ImageData* StereoFusion::AcquireNeighborhoodBitmap(
@@ -1318,9 +1319,7 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
   // depth, normal and bitmap. Reserve loader scratch, not another whole view
   // per worker. Partial neighborhoods still need component demand headroom.
   bool whole_group_admitted = false;
-  bool allow_whole_group = options_.bounded_cache_normal_tile_size == 0;
-  allow_whole_group = allow_whole_group || !options_.bounded_cache_exact_depth;
-  if (options_.bounded_cache_components && allow_whole_group) {
+  if (options_.bounded_cache_components) {
     size_t whole_total = 0, whole_extra = 0;
     bool whole_fits = true;
     for (const int view : views) {
@@ -1762,11 +1761,10 @@ void StereoFusion::Fuse(const int thread_id,
                                        resident->normal.Get(row, col, 1),
                                        resident->normal.Get(row, col, 2));
       } else {
-        auto tile_read =
+        const auto* tile_image =
             options_.bounded_cache_normal_tile_size > 0
                 ? AcquireWorkerNormalTile(thread_id, image_idx, row, col)
-                : NormalTileRead{};
-        const auto* tile_image = tile_read.get();
+                : nullptr;
         const auto* mapped_normal =
             direct_mapped_normals_ ? AcquireWorkerMappedNormal(image_idx, row)
                                    : nullptr;
