@@ -875,9 +875,6 @@ TEST_F(CudaTest, SparseSourceCapabilityAndUnavailableContract) {
     pointers.push_back(&problem);
   }
   const bool supported = PatchMatchSparseSources::IsSupported();
-#if CUDART_VERSION < 13020
-  EXPECT_FALSE(supported);
-#endif
   if (!supported) {
     EXPECT_EQ(PatchMatchSparseSources::Budget(pointers, true), 0);
     EXPECT_FALSE(PatchMatchSparseSources::Create(pointers, true));

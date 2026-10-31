@@ -18,10 +18,9 @@
 #include <new>
 #include <utility>
 
-#if !defined(COLMAP_HIP_ENABLED) && CUDART_VERSION >= 13020
+#ifdef COLMAP_SPARSE_SOURCE_RUNTIME
 #include <cuda.h>
 #include <cudaTypedefs.h>
-#define COLMAP_SPARSE_SOURCE_RUNTIME 1
 #endif
 
 namespace colmap {
