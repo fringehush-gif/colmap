@@ -564,6 +564,7 @@ PlyFile *PlyFile::_ReadInternal( FILE *fp , std::vector< std::string > &elem_nam
 	/* read and parse the file's header */
 	words = get_words( plyfile->fp , &orig_line );
 	if( !words.size() || words[0]!="ply" ) return NULL;
+	bool hasFormat = false , hasEndHeader = false;
 	while( words.size() )
 	{
 		/* parse words */
@@ -575,15 +576,17 @@ PlyFile *PlyFile::_ReadInternal( FILE *fp , std::vector< std::string > &elem_nam
 			else if( words[1]=="binary_little_endian" ) plyfile->file_type = PLY_BINARY_LE;
 			else return NULL;
 			plyfile->version = (float)atof( words[2].c_str() );
+			hasFormat = true;
 		}
 		else if( words[0]=="element"    ) plyfile->add_element ( words );
 		else if( words[0]=="property"   ) plyfile->add_property( words );
 		else if( words[0]=="comment"    ) plyfile->add_comment ( orig_line );
 		else if( words[0]=="obj_info"   ) plyfile->add_obj_info( orig_line );
-		else if( words[0]=="end_header" ) break;
+		else if( words[0]=="end_header" ) { hasEndHeader = true; break; }
 
 		words = get_words( plyfile->fp , &orig_line );
 	}
+	if( !hasFormat || !hasEndHeader ) return NULL;
 
 	/* create tags for each property of each element, to be used */
 	/* later to say whether or not to store each property for the user */
