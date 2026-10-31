@@ -347,6 +347,8 @@ bool ConnectedComponents(std::size_t polygons,
   if (!HasCapacity(stats.device_bytes, stats)) return reject(stats.reason);
 
   try {
+    // Readback storage must outlive stream cleanup on exceptions.
+    std::vector<std::uint32_t> result(polygons);
     Stream stream;
     Event begin, uploaded, sorted, joined, downloaded;
     Device<std::uint64_t> d_offsets(polygons + 1), keys_a(entries),
@@ -354,7 +356,6 @@ bool ConnectedComponents(std::size_t polygons,
     Device<std::uint32_t> d_vertices(entries), faces_a(entries),
         faces_b(entries), parents(polygons), d_roots(polygons);
     Device<unsigned char> scratch(sort_bytes);
-    std::vector<std::uint32_t> result(polygons);
 
     // From here, all CUDA failures are execution failures and remain visible.
     Check(cudaEventRecord(begin.value, stream.value));
@@ -484,6 +485,10 @@ bool BoundaryGraph(std::size_t polygons,
   if (!HasCapacity(stats.device_bytes, stats)) return reject(stats.reason);
 
   try {
+    // Readback storage must outlive stream cleanup on exceptions.
+    std::vector<std::uint64_t> result;
+    int count = 0;
+    std::uint32_t rejected = 0;
     Stream stream;
     Event start, uploaded, sorted, joined, downloaded;
     Device<std::uint64_t> d_offsets(polygons + 1), keys_a(entries),
@@ -543,8 +548,6 @@ bool BoundaryGraph(std::size_t polygons,
                                 ValidPair{},
                                 stream.value));
     Check(cudaEventRecord(joined.value, stream.value));
-    int count = 0;
-    std::uint32_t rejected = 0;
     Check(cudaMemcpyAsync(&count,
                           d_count.value,
                           sizeof(count),
@@ -558,7 +561,6 @@ bool BoundaryGraph(std::size_t polygons,
     Check(cudaStreamSynchronize(stream.value));
     if (count < 0 || std::size_t(count) > entries)
       throw std::runtime_error("GPU boundary selection count");
-    std::vector<std::uint64_t> result;
     if (!rejected) {
       result.resize(count);
       if (count)
