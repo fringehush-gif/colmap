@@ -199,7 +199,7 @@ SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator *
 	return *this;
 }
 template< class T , class IndexType >
-SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator /= ( T s ){ return (*this) * ( (T)1./s ); }
+SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator /= ( T s ){ return (*this) *= ( (T)1./s ); }
 template< class T , class IndexType >
 SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator *= ( const SparseMatrix< T , IndexType , 0 >& B )
 {
@@ -650,7 +650,7 @@ SparseMatrix< T , IndexType , MaxRowSize >& SparseMatrix< T , IndexType , MaxRow
 }
 
 template< class T , class IndexType , size_t MaxRowSize >
-SparseMatrix< T , IndexType , MaxRowSize >& SparseMatrix< T , IndexType , MaxRowSize >::operator /= ( T s ){ return (*this) * ( (T)1./s ); }
+SparseMatrix< T , IndexType , MaxRowSize >& SparseMatrix< T , IndexType , MaxRowSize >::operator /= ( T s ){ return (*this) *= ( (T)1./s ); }
 
 template< class T , class IndexType , size_t MaxRowSize >
 SparseMatrix< T , IndexType , MaxRowSize > SparseMatrix< T , IndexType , MaxRowSize >::operator * ( T s ) const
