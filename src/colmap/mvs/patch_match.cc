@@ -619,7 +619,6 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
       for (const auto image_idx : valid_image_idxs) {
         futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
           const auto bitmap_lease = workspace_->GetBitmapLease(image_idx);
-          images.at(image_idx).SetBitmap(*bitmap_lease);
           if (retain_sparse_sources && options.sparse_source_sharing &&
               image_idx != problem.ref_image_idx &&
               bitmap_lease.use_count() > 0 && bitmap_lease->IsGrey() &&
@@ -628,6 +627,8 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
               static_cast<size_t>(bitmap_lease->Height()) ==
                   images.at(image_idx).GetHeight()) {
             prepared->source_bitmap_leases.at(image_idx) = bitmap_lease;
+          } else {
+            images.at(image_idx).SetBitmap(*bitmap_lease);
           }
           if (options.geom_consistency) {
             const auto depth_lease = workspace_->GetDepthMapLease(image_idx);

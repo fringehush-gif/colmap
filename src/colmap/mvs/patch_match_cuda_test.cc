@@ -49,6 +49,40 @@ class PatchMatchControllerTestAccess {
     controller.Run();
     controller.sparse_test_hooks_ = nullptr;
   }
+#ifndef COLMAP_HIP_ENABLED
+  static std::array<size_t, 3> PreparedBitmapCounts(
+      PatchMatchController& controller, const bool retain_sources) {
+    controller.ReadWorkspace();
+    controller.ReadProblems();
+    controller.ReadGpuIndices();
+    controller.thread_pool_ = std::make_unique<ThreadPool>(1);
+    controller.io_thread_pool_ = std::make_unique<ThreadPool>(2);
+    return controller.thread_pool_
+        ->AddTask([&]() {
+          PatchMatchController::PreparedProblem prepared;
+          auto photo_options = controller.options_;
+          photo_options.geom_consistency = false;
+          photo_options.filter = false;
+          if (!controller.PrepareProblem(
+                  photo_options, 0, &prepared, retain_sources)) {
+            return std::array<size_t, 3>{0, 0, 0};
+          }
+          std::array<size_t, 3> counts{0, 0, 0};
+          counts[0] = !prepared.images.at(prepared.problem.ref_image_idx)
+                           .GetBitmap()
+                           .IsEmpty();
+          for (const int source : prepared.problem.src_image_idxs) {
+            if (!prepared.source_bitmap_leases.empty() &&
+                prepared.source_bitmap_leases.at(source)) {
+              ++counts[1];
+            }
+            if (prepared.images.at(source).GetBitmap().IsEmpty()) ++counts[2];
+          }
+          return counts;
+        })
+        .get();
+  }
+#endif
 };
 namespace {
 
@@ -1068,22 +1102,23 @@ TEST_F(CudaTest, SparseSourceCleanRefusalsReleasePartialSetup) {
 }
 
 TEST_F(CudaTest, ControllerReadmitsInitialLaterAndGeometryAttachmentRefusals) {
-  if (!PatchMatchSparseSources::IsSupported()) {
-    GTEST_SKIP() << "Sparse source arrays are unavailable on this CUDA "
-                 << "runtime/device";
-  }
-  size_t width = 0, height = 0;
-  for (const auto& shape : std::vector<std::pair<size_t, size_t> >{
-           {513, 257}, {1025, 513}, {1536, 1024}}) {
-    const std::vector<std::pair<size_t, size_t> > shapes(5, shape);
-    if (CanBatchPatchMatchViews(shapes, false, true) &&
-        CanBatchPatchMatchViews(shapes, true, true)) {
-      width = shape.first;
-      height = shape.second;
-      break;
+  const bool sparse_supported = PatchMatchSparseSources::IsSupported();
+  size_t width = sparse_supported ? 0 : 513;
+  size_t height = sparse_supported ? 0 : 257;
+  if (sparse_supported) {
+    for (const auto& shape : std::vector<std::pair<size_t, size_t> >{
+             {513, 257}, {1025, 513}, {1536, 1024}}) {
+      const std::vector<std::pair<size_t, size_t> > shapes(5, shape);
+      if (CanBatchPatchMatchViews(shapes, false, true) &&
+          CanBatchPatchMatchViews(shapes, true, true)) {
+        width = shape.first;
+        height = shape.second;
+        break;
+      }
     }
+    ASSERT_GT(width, 0)
+        << "Expected supported lane must admit a bounded fixture";
   }
-  ASSERT_GT(width, 0) << "Expected supported lane must admit a bounded fixture";
   SyntheticDatasetOptions dataset;
   dataset.num_rigs = 1;
   dataset.num_cameras_per_rig = 1;
@@ -1148,6 +1183,18 @@ TEST_F(CudaTest, ControllerReadmitsInitialLaterAndGeometryAttachmentRefusals) {
   options.num_threads = 12;
   options.rotation_buffer_reuse = true;
   options.sparse_source_sharing = false;
+  {
+    const auto root = workspace();
+    options.sparse_source_sharing = true;
+    PatchMatchController probe(options, root, "COLMAP", "");
+    EXPECT_EQ(PatchMatchControllerTestAccess::PreparedBitmapCounts(probe, true),
+              (std::array<size_t, 3>{1, 4, 4}));
+    options.sparse_source_sharing = false;
+    PatchMatchController disabled(options, root, "COLMAP", "");
+    EXPECT_EQ(
+        PatchMatchControllerTestAccess::PreparedBitmapCounts(disabled, true),
+        (std::array<size_t, 3>{1, 0, 0}));
+  }
   const auto control_root = workspace();
   PatchMatchControllerTestAccess::Hooks control_hooks;
   {
@@ -1162,6 +1209,15 @@ TEST_F(CudaTest, ControllerReadmitsInitialLaterAndGeometryAttachmentRefusals) {
   ASSERT_EQ(control_writes.size(), 5);
   for (const auto& item : control_writes) EXPECT_EQ(item.second, 2);
   options.sparse_source_sharing = true;
+  if (!sparse_supported) {
+    const auto root = workspace();
+    PatchMatchControllerTestAccess::Hooks hooks;
+    PatchMatchController controller(options, root, "COLMAP", "");
+    PatchMatchControllerTestAccess::Run(controller, hooks);
+    EXPECT_EQ(outputs(root), expected);
+    EXPECT_EQ(hooks.written_references, control_hooks.written_references);
+    return;
+  }
   struct Case {
     size_t texture;
     bool geometry;
