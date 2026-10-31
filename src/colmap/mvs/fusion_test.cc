@@ -2334,6 +2334,46 @@ std::filesystem::path CreateTwoViewNormalDecisionFixture() {
   return root;
 }
 
+TEST(StereoFusion, ZeroMinimumSkipsEmptySamples) {
+  for (const bool valid_sample : {false, true}) {
+    SCOPED_TRACE(valid_sample);
+    const auto root = CreateTwoViewNormalDecisionFixture();
+    const auto names = ReadTextFileLines(root / "stereo" / "fusion.cfg");
+    ASSERT_EQ(names.size(), 2);
+    for (size_t index = 0; index < names.size(); ++index) {
+      Mat<float> depth(30, 20, 1);
+      depth.Fill(0.0f);
+      if (valid_sample && index == 0) depth.Set(0, 0, 0, 5.0f);
+      depth.Write(root / "stereo" / "depth_maps" /
+                  (names[index] + ".geometric.bin"));
+    }
+
+    for (const int mode : {0, 1, 2}) {
+      SCOPED_TRACE(mode);
+      StereoFusionOptions options;
+      options.num_threads = 2;
+      options.min_num_pixels = 0;
+      options.use_cache = mode == 1;
+      options.bounded_cache = mode == 2;
+      options.cache_size = 1.0 / 1024.0;
+      ASSERT_TRUE(options.Check());
+      StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+      ASSERT_NO_THROW(fusion.Run());
+      const auto& points = fusion.GetFusedPoints();
+      const auto& visibility = fusion.GetFusedPointsVisibility();
+      ASSERT_EQ(points.size(), valid_sample ? 1 : 0);
+      ASSERT_EQ(visibility.size(), points.size());
+      if (valid_sample) {
+        EXPECT_FLOAT_EQ(points[0].z, 5.0f);
+        EXPECT_EQ(points[0].r, 0);
+        EXPECT_EQ(points[0].g, 64);
+        EXPECT_EQ(points[0].b, 128);
+        ASSERT_EQ(visibility[0].size(), 1);
+      }
+    }
+  }
+}
+
 TEST(StereoFusion, CompleteViewSetDoesNotReserveWorkerCopies) {
   const auto root = CreateTwoViewNormalDecisionFixture();
   Workspace::Options workspace_options;
