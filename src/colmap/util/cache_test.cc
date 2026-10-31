@@ -268,6 +268,34 @@ TEST(MemoryConstrainedLRUCache, Clear) {
   EXPECT_TRUE(cache.Exists(1));
 }
 
+TEST(MemoryConstrainedLRUCache, UpdateNumBytesRejectsReplacedOwner) {
+  struct ObservedSize {
+    size_t NumBytes() {
+      ++reads;
+      return bytes;
+    }
+    size_t bytes = 2;
+    int reads = 0;
+  };
+  MemoryConstrainedLRUCache<int, ObservedSize> cache(
+      10, [](int) { return std::make_shared<ObservedSize>(); });
+  const auto old = cache.Get(1);
+  ASSERT_TRUE(cache.Evict(1));
+  const auto current = cache.Get(1);
+  ASSERT_NE(current.get(), old.get());
+  current->bytes = 6;
+  const int reads = current->reads;
+  EXPECT_FALSE(cache.UpdateNumBytes(1, old));
+  EXPECT_EQ(current->reads, reads);
+  EXPECT_EQ(cache.NumBytes(), 2);
+  EXPECT_FALSE(cache.UpdateNumBytes(2, old));
+  EXPECT_EQ(cache.NumElems(), 1);
+  EXPECT_TRUE(cache.UpdateNumBytes(1, current));
+  EXPECT_EQ(current->reads, reads + 1);
+  EXPECT_EQ(cache.NumBytes(), 6);
+  EXPECT_EQ(cache.Get(1).get(), current.get());
+}
+
 TEST(MemoryConstrainedLRUCache, UpdateNumBytes) {
   MemoryConstrainedLRUCache<int, SizedElem> cache(
       50, [](const int key) { return std::make_shared<SizedElem>(key); });

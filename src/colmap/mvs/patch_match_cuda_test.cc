@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #ifndef COLMAP_HIP_ENABLED
+#include "colmap/mvs/cuda_texture.h"
 #include "colmap/mvs/patch_match_cuda.h"
 
 #include <algorithm>
@@ -106,6 +107,20 @@ TEST(PatchMatchCuda, PackedConsistencyMaskDepthCoversSourceTails) {
   }
   constexpr std::size_t kMax = std::numeric_limits<std::size_t>::max();
   EXPECT_EQ(PackedConsistencyMaskDepth(kMax), kMax / 8 + 1);
+}
+
+TEST(PatchMatchCuda, HostSlicesRejectInvalidDimensionsBeforeCuda) {
+  using Texture = CudaArrayLayeredTexture<float>;
+  const cudaTextureDesc desc = {};
+  const float value = 1.0f;
+  std::vector<Texture::HostSlice> slices{{&value, 1, 1, sizeof(float)}};
+  EXPECT_THROW(Texture::FromHostSlices(desc, 0, 1, slices), std::exception);
+  EXPECT_THROW(Texture::FromHostSlices(desc, 1, 0, slices), std::exception);
+  EXPECT_THROW(Texture::FromHostSlices(
+                   desc, std::numeric_limits<size_t>::max(), 1, slices),
+               std::exception);
+  slices[0].pitch_bytes = 0;
+  EXPECT_THROW(Texture::FromHostSlices(desc, 1, 1, slices), std::exception);
 }
 
 TEST(PatchMatchCuda, CheckpointHmmStripeRowsRoundsUpWithoutOverflow) {
@@ -642,6 +657,8 @@ void ExpectReferenceBatchOutputs(const size_t count,
   options.sigma_spatial = options.window_radius;
   std::vector<std::unique_ptr<Inputs> > inputs;
   std::vector<PatchMatch::Problem> problems;
+  inputs.reserve(count);
+  problems.reserve(count);
   for (size_t i = 0; i < count; ++i) {
     inputs.push_back(std::make_unique<Inputs>(
         MakeInputs(static_cast<int>(i % 2),
@@ -652,6 +669,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
   }
   const auto construct = [&]() {
     std::vector<std::unique_ptr<PatchMatchCuda> > owners;
+    owners.reserve(problems.size());
     for (const auto& problem : problems)
       owners.push_back(std::make_unique<PatchMatchCuda>(options, problem));
     return owners;
@@ -688,6 +706,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
   using Snapshot =
       std::tuple<DepthMap, NormalMap, Mat<float>, std::vector<int> >;
   std::vector<Snapshot> expected;
+  expected.reserve(incumbent.size());
   for (const auto& owner : incumbent) expected.push_back(read(*owner));
   if (!checkpoint) incumbent.clear();
   options.checkpoint_hmm = checkpoint;
@@ -697,6 +716,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
       EXPECT_LT(batch[i]->PairPeakBytes(), incumbent[i]->PairPeakBytes());
   }
   std::vector<PatchMatchCuda*> views;
+  views.reserve(batch.size());
   for (auto& owner : batch) views.push_back(owner.get());
   RunPatchMatchBatch(views, streams.values);
   for (size_t i = 0; i < count; ++i) {

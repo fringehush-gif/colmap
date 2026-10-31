@@ -122,6 +122,11 @@ class MemoryConstrainedLRUCache {
   size_t MaxNumBytes() const;
   void UpdateNumBytes(const key_t& key);
 
+  // Update only if this key still refers to the expected loaded value.
+  // Like the other cache operations, callers must synchronize access.
+  bool UpdateNumBytes(const key_t& key,
+                      const std::shared_ptr<value_t>& expected_value);
+
   // The number of elements in the cache.
   size_t NumElems() const;
   size_t MaxNumElems() const;
@@ -419,6 +424,17 @@ void MemoryConstrainedLRUCache<key_t, value_t>::UpdateNumBytes(
   while (num_bytes_ > max_num_bytes_ && elems_map_.size() > 1) {
     Pop();
   }
+}
+
+template <typename key_t, typename value_t>
+bool MemoryConstrainedLRUCache<key_t, value_t>::UpdateNumBytes(
+    const key_t& key, const std::shared_ptr<value_t>& expected_value) {
+  const auto it = elems_map_.find(key);
+  if (it == elems_map_.end() || it->second.first->second != expected_value) {
+    return false;
+  }
+  UpdateNumBytes(key);
+  return true;
 }
 
 template <typename key_t, typename value_t>
