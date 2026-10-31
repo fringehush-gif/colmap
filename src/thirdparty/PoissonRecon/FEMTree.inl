@@ -668,7 +668,7 @@ void FEMTree< Dim , Real >::processNeighbors( ProcessingNodeFunctor processingNo
 	std::vector< FEMTreeNode * > nodes;
 	nodes.reserve( _spaceRoot->nodes() );
 	_spaceRoot->processNodes( [&]( FEMTreeNode *node ){ if( processingNode(node) ) nodes.push_back( node ); } );
-	processNeighbors< LeftRadius , RightRadius , CreateNodes >( &nodes[0] , nodes.size() , data , initialize );
+	processNeighbors< LeftRadius , RightRadius , CreateNodes >( nodes.data() , nodes.size() , data , initialize );
 }
 
 template< unsigned int Dim , class Real >
@@ -701,7 +701,7 @@ void FEMTree< Dim , Real >::processNeighboringLeaves( IsProcessingNodeFunctor is
 	std::vector< FEMTreeNode * > nodes;
 	nodes.reserve( _spaceRoot->nodes() );
 	_spaceRoot->processNodes( [&]( FEMTreeNode *node ){ if( isProcessingNode(node) ) nodes.push_back( node ); } );
-	processNeighboringLeaves< LeftRadius , RightRadius >( &nodes[0] , nodes.size() , kernel , processSubTree );
+	processNeighboringLeaves< LeftRadius , RightRadius >( nodes.data() , nodes.size() , kernel , processSubTree );
 }
 
 template< unsigned int Dim , class Real >

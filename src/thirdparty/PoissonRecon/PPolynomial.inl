@@ -332,9 +332,9 @@ PPolynomial<Degree+1> PPolynomial<Degree>::integral(void) const{
 	return q;
 }
 template<int Degree>
-PPolynomial<Degree>& PPolynomial<Degree>::operator  += ( double s ) {polys[0].p+=s;}
+PPolynomial<Degree>& PPolynomial<Degree>::operator  += ( double s ) {polys[0].p+=s; return *this;}
 template<int Degree>
-PPolynomial<Degree>& PPolynomial<Degree>::operator  -= ( double s ) {polys[0].p-=s;}
+PPolynomial<Degree>& PPolynomial<Degree>::operator  -= ( double s ) {polys[0].p-=s; return *this;}
 template<int Degree>
 PPolynomial<Degree>& PPolynomial<Degree>::operator  *= ( double s )
 {
