@@ -257,5 +257,138 @@ TEST_F(TableWidgetButtonRowsTest, InstallsExposedControlsBeforePainting) {
             "6999");
 }
 
+TEST_F(TableWidgetButtonRowsTest, KeyboardActionsMatchEagerRows) {
+  auto exercise = [this](bool managed) {
+    QWidget window;
+    auto* layout = new QVBoxLayout(&window);
+    auto* table = new QTableWidget(100, 5);
+    layout->addWidget(new QLineEdit("Before"));
+    layout->addWidget(table);
+    layout->addWidget(new QPushButton("After"));
+    table->verticalHeader()->setDefaultSectionSize(25);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    QStringList activated;
+    auto factory = [&](int row, int col) -> QWidget* {
+      auto make_button = [&](QWidget* parent, const QString& action) {
+        auto* button = new QPushButton(action, parent);
+        button->setProperty("row", row);
+        button->setProperty("action", action);
+        button->setObjectName(action);
+        QObject::connect(button, &QPushButton::clicked, [&, row, action]() {
+          activated.append(QString::number(row) + ":" + action);
+        });
+        return button;
+      };
+      if (col == 1) return make_button(nullptr, "image");
+      auto* holder = new QWidget;
+      auto* grid = new QGridLayout(holder);
+      grid->setContentsMargins(0, 0, 0, 0);
+      const QString prefix = col == 2 ? "photo-" : "geo-";
+      auto* depth = make_button(holder, prefix + "depth");
+      auto* normal = make_button(holder, prefix + "normal");
+      depth->setEnabled(col != 3);
+      normal->setEnabled(col != 2);
+      grid->addWidget(depth, 0, 0);
+      grid->addWidget(normal, 0, 1);
+      return holder;
+    };
+    for (int row = 0; row < table->rowCount(); ++row) {
+      table->setItem(row, 0, new QTableWidgetItem(QString::number(row)));
+      table->setItem(row, 4, new QTableWidgetItem("sources"));
+    }
+    if (managed) {
+      (new TableWidgetButtonRows(table, 1, 4, factory))->Refresh();
+    } else {
+      for (int row = 0; row < table->rowCount(); ++row)
+        for (int col = 1; col < 4; ++col)
+          table->setCellWidget(row, col, factory(row, col));
+    }
+    window.resize(900, 400);
+    window.show();
+    window.activateWindow();
+    DrainEvents();
+    table->scrollToItem(table->item(40, 0), QAbstractItemView::PositionAtTop);
+    DrainEvents();
+    const int first = table->rowAt(0);
+    EXPECT_GE(first, 1);
+    auto* image = qobject_cast<QPushButton*>(table->cellWidget(first, 1));
+    EXPECT_NE(image, nullptr);
+    if (image == nullptr) return QStringList{"missing image"};
+    auto* photo = table->cellWidget(first, 2);
+    auto* geo = table->cellWidget(first, 3);
+    EXPECT_NE(photo, nullptr);
+    EXPECT_NE(geo, nullptr);
+    if (photo == nullptr || geo == nullptr) return QStringList{"missing pair"};
+    auto* photo_depth = photo->findChild<QPushButton*>("photo-depth");
+    auto* photo_normal = photo->findChild<QPushButton*>("photo-normal");
+    auto* geo_depth = geo->findChild<QPushButton*>("geo-depth");
+    auto* geo_normal = geo->findChild<QPushButton*>("geo-normal");
+    EXPECT_TRUE(photo_depth && photo_depth->isEnabled());
+    EXPECT_TRUE(photo_normal && !photo_normal->isEnabled());
+    EXPECT_TRUE(geo_depth && !geo_depth->isEnabled());
+    EXPECT_TRUE(geo_normal && geo_normal->isEnabled());
+    if (!photo_depth || !photo_normal || !geo_depth || !geo_normal)
+      return QStringList{"missing button"};
+    auto key = [&](int code, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+      QPointer<QWidget> focus = QApplication::focusWidget();
+      EXPECT_NE(focus, nullptr);
+      if (!focus) return;
+      QKeyEvent press(QEvent::KeyPress, code, modifiers);
+      QCoreApplication::sendEvent(focus, &press);
+      if (focus) {
+        QKeyEvent release(QEvent::KeyRelease, code, modifiers);
+        QCoreApplication::sendEvent(focus, &release);
+      }
+      DrainEvents();
+    };
+    for (auto* button : {image, photo_depth, geo_normal}) {
+      button->setFocus();
+      DrainEvents();
+      EXPECT_EQ(QApplication::focusWidget(), button);
+      key(Qt::Key_Space);
+    }
+    EXPECT_EQ(activated,
+              (QStringList{QString::number(first) + ":image",
+                           QString::number(first) + ":photo-depth",
+                           QString::number(first) + ":geo-normal"}));
+    image->setFocus();
+    DrainEvents();
+    QStringList trace;
+    auto record_focus = [&]() {
+      QWidget* focus = QApplication::focusWidget();
+      trace.append(focus ? QString("%1:%2:%3:%4")
+                               .arg(focus->metaObject()->className())
+                               .arg(focus->property("row").toInt())
+                               .arg(focus->property("action").toString())
+                               .arg(table->verticalScrollBar()->value())
+                         : "null");
+    };
+    for (int i = 0; i < 24; ++i) {
+      key(i < 12 ? Qt::Key_Backtab : Qt::Key_Tab,
+          i < 12 ? Qt::ShiftModifier : Qt::NoModifier);
+      record_focus();
+    }
+    table->scrollToItem(table->item(40, 0), QAbstractItemView::PositionAtTop);
+    DrainEvents();
+    const int last = table->rowAt(table->viewport()->height() - 1);
+    EXPECT_GE(last, 0);
+    QWidget* last_geo = last >= 0 ? table->cellWidget(last, 3) : nullptr;
+    auto* last_button =
+        last_geo ? last_geo->findChild<QPushButton*>("geo-normal") : nullptr;
+    EXPECT_NE(last_button, nullptr);
+    if (!last_button) return QStringList{"missing last button"};
+    last_button->setFocus();
+    DrainEvents();
+    for (int i = 0; i < 12; ++i) {
+      key(Qt::Key_Tab);
+      record_focus();
+    }
+    return trace;
+  };
+  const auto eager = exercise(false);
+  const auto managed = exercise(true);
+  EXPECT_EQ(managed, eager);
+}
+
 }  // namespace
 }  // namespace colmap
