@@ -54,6 +54,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -1619,6 +1620,91 @@ TEST(PoissonMeshing, NeighborKeyCopyAssignmentOwnsCachedWindows) {
   CheckNeighborKeyCopyAssignment<1, true>();
   CheckNeighborKeyCopyAssignment<2, true>();
   CheckNeighborKeyCopyAssignment<3, true>();
+}
+
+TEST(PoissonMeshing, SequentialCallsUseFreshOptions) {
+  const auto test_dir = CreateTestDir();
+  const auto input_path = test_dir / "points.ply";
+  const auto reference_path = test_dir / "fresh.ply";
+  const auto warmup_path = test_dir / "trimmed.ply";
+  const auto output_path = test_dir / "subsequent.ply";
+  WriteBinaryPlyPoints(
+      input_path, MakeDeterministicColoredCubePoints(), true, true);
+
+  PoissonMeshingOptions options;
+  options.point_weight = 1.0;
+  options.depth = 6;
+  options.trim = 0.0;
+  options.color = true;
+  options.num_threads = 1;
+
+  // A fresh process gives an independent reference for omitted options.
+  const std::string old_style = GTEST_FLAG_GET(death_test_style);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      std::_Exit(PoissonMeshing(options, input_path, reference_path) ? 0 : 1),
+      ::testing::ExitedWithCode(0),
+      "");
+  GTEST_FLAG_SET(death_test_style, old_style);
+  ASSERT_TRUE(ExistsFile(reference_path));
+
+  options.depth = 3;
+  options.trim = 0.1;
+  ASSERT_TRUE(PoissonMeshing(options, input_path, warmup_path));
+  options.depth = 6;
+  options.trim = 0.0;
+  ASSERT_TRUE(PoissonMeshing(options, input_path, output_path));
+
+  std::ifstream input(output_path);
+  ASSERT_TRUE(input.is_open());
+  std::string line;
+  bool density = false;
+  while (std::getline(input, line) && line != "end_header") {
+    density |=
+        line == "property float value" || line == "property double value";
+  }
+  ASSERT_EQ(line, "end_header");
+  EXPECT_FALSE(density);
+
+  const auto reference = ReadPlyMesh(reference_path).mesh;
+  const auto actual = ReadPlyMesh(output_path).mesh;
+  ASSERT_GE(reference.vertices.size(), 3);
+  ASSERT_FALSE(reference.faces.empty());
+  ASSERT_EQ(actual.vertices.size(), reference.vertices.size());
+  ASSERT_EQ(actual.faces.size(), reference.faces.size());
+  for (size_t i = 0; i < reference.vertices.size(); ++i) {
+    SCOPED_TRACE(i);
+    const auto& a = actual.vertices[i];
+    const auto& b = reference.vertices[i];
+    EXPECT_EQ(std::tie(a.x, a.y, a.z, a.r, a.g, a.b),
+              std::tie(b.x, b.y, b.z, b.r, b.g, b.b));
+  }
+  for (size_t i = 0; i < reference.faces.size(); ++i) {
+    SCOPED_TRACE(i);
+    const auto& a = actual.faces[i];
+    const auto& b = reference.faces[i];
+    EXPECT_EQ(std::tie(a.vertex_idx1, a.vertex_idx2, a.vertex_idx3),
+              std::tie(b.vertex_idx1, b.vertex_idx2, b.vertex_idx3));
+  }
+}
+
+TEST(PoissonMeshing, TrimmerDoesNotReusePreviousArguments) {
+  const auto test_dir = CreateTestDir();
+  const auto input_path = test_dir / "input.ply";
+  const auto output_path = test_dir / "output.ply";
+  ASSERT_TRUE(WriteTrimFixture(input_path));
+  std::vector<std::string> args = {"SurfaceTrimmer",
+                                   "--in",
+                                   input_path.string(),
+                                   "--out",
+                                   output_path.string(),
+                                   "--trim",
+                                   "1"};
+  std::vector<char*> argv;
+  for (auto& arg : args) argv.push_back(arg.data());
+  ASSERT_EQ(RunSurfaceTrimmer(static_cast<int>(argv.size()), argv.data()),
+            EXIT_SUCCESS);
+  EXPECT_EQ(RunSurfaceTrimmer(1, argv.data()), EXIT_FAILURE);
 }
 
 }  // namespace
