@@ -100,6 +100,7 @@ std::vector<PlyPoint> ReadPly(const std::filesystem::path& path) {
   bool NZ_double = false;
 
   bool in_vertex_section = false;
+  bool seen_vertex_section = false;
   bool is_binary = false;
   bool is_little_endian = false;
   size_t num_bytes_per_line = 0;
@@ -136,7 +137,10 @@ std::vector<PlyPoint> ReadPly(const std::filesystem::path& path) {
       if (line_elems[1] == "vertex") {
         num_vertices = std::stoll(line_elems[2]);
         in_vertex_section = true;
+        seen_vertex_section = true;
       } else if (std::stoll(line_elems[2]) > 0) {
+        THROW_CHECK(seen_vertex_section)
+            << "PLY import does not support nonempty elements before vertices";
         LOG(WARNING) << "Only vertex elements supported; ignoring "
                      << line_elems[1];
       }
