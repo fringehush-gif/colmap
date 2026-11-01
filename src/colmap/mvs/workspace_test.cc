@@ -1512,6 +1512,35 @@ TEST(BoundedWorkspaceBase, MappedNormalStripeKeysPinAcrossBands) {
       2.0f);
 }
 
+TEST(BoundedWorkspaceBase, NormalReadChecksShapeAndCroppedCoordinates) {
+  BoundedWorkspace::ImageData image;
+  image.normal_origin_x = 8;
+  image.normal_origin_y = 9;
+  image.normal_map = NormalMap(3, 2);
+  for (size_t row = 0; row < 2; ++row) {
+    for (size_t col = 0; col < 3; ++col) {
+      image.normal_map.Set(row, col, 0, row * 3 + col + 0.25f);
+      image.normal_map.Set(row, col, 1, -2.5f);
+      image.normal_map.Set(row, col, 2, 17.0f);
+      EXPECT_EQ(image.GetNormal(row + 9, col + 8),
+                Eigen::Vector3f(row * 3 + col + 0.25f, -2.5f, 17.0f));
+    }
+  }
+  EXPECT_THROW(image.GetNormal(8, 8), std::exception);
+  EXPECT_THROW(image.GetNormal(9, 7), std::exception);
+  EXPECT_THROW(image.GetNormal(11, 8), std::exception);
+  EXPECT_THROW(image.GetNormal(9, 11), std::exception);
+  const auto root = CreateTestDir();
+  for (size_t channels : {1, 2, 4}) {
+    Mat<float> malformed(3, 2, channels);
+    malformed.Fill(1.0f);
+    const auto path = root / (std::to_string(channels) + ".bin");
+    malformed.Write(path);
+    image.normal_map.Read(path);
+    EXPECT_THROW(image.GetNormal(9, 8), std::exception);
+  }
+}
+
 }  // namespace
 }  // namespace mvs
 }  // namespace colmap
