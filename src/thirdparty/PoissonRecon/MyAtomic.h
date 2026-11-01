@@ -37,10 +37,25 @@ DAMAGE.
 #include <sys/time.h> 
 #include <sys/resource.h> 
 #endif // _WIN32 || _WIN64
+#include <atomic>
 #include <mutex>
 
 namespace PoissonRecon
 {
+	// Acquire a published object pointer without writing to its storage.
+	template< typename Value >
+	Value* ReadAtomicAcquire( Value* const volatile &value )
+	{
+#if defined( _WIN32 ) || defined( _WIN64 )
+		auto source = reinterpret_cast< const volatile void* const volatile* >( &value );
+		Value* result = static_cast< Value* >( ReadPointerAcquire( const_cast< void* const volatile* >( source ) ) );
+		// Retain acquire ordering with either MSVC volatile interpretation.
+		std::atomic_thread_fence( std::memory_order_acquire );
+		return result;
+#else // !_WIN32 && !_WIN64
+		return __atomic_load_n( &value , __ATOMIC_ACQUIRE );
+#endif // _WIN32 || _WIN64
+	}
 	template< typename Value > Value ReadAtomic8_( const volatile Value * value );
 	template< typename Value > Value ReadAtomic32_( const volatile Value * value );
 	template< typename Value > Value ReadAtomic64_( const volatile Value * value );

@@ -122,6 +122,23 @@ namespace PoissonRecon
 		{
 			return ThreadSafe ? _initChildren_s( nodeAllocator , initializer ) : _initChildren( nodeAllocator , initializer );
 		}
+		template< bool ThreadSafe >
+		RegularTreeNode* getChildren( void ) const
+		{
+			if constexpr( ThreadSafe ) return ReadAtomicAcquire( children );
+			else return children;
+		}
+		template< bool ThreadSafe , typename Initializer >
+		RegularTreeNode* getOrInitChildren( Allocator< RegularTreeNode >* nodeAllocator , Initializer &initializer )
+		{
+			RegularTreeNode* childNodes = getChildren< ThreadSafe >();
+			if( !childNodes )
+			{
+				initChildren< ThreadSafe >( nodeAllocator , initializer );
+				childNodes = getChildren< ThreadSafe >();
+			}
+			return childNodes;
+		}
 		void cleanChildren( bool deleteChildren );
 		static void ResetDepthAndOffset( RegularTreeNode* root , int d , int off[Dim] );
 		~RegularTreeNode( void );
