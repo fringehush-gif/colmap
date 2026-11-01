@@ -127,6 +127,36 @@ TEST(PlyReaderTest, RejectsInvalidHeadersAndReadsValidFile) {
   EXPECT_EQ(names, std::vector<std::string>{"vertex"});
 }
 
+TEST(PlyReaderTest, RejectsScalarFacePropertyBeforeListDuplicate) {
+  const auto dir = colmap::CreateTestDir();
+  for (const std::string name : {"vertex_indices", "vertex_index"}) {
+    const auto path = dir / (name + ".ply");
+    {
+      std::ofstream output(path);
+      ASSERT_TRUE(output.is_open());
+      output << "ply\nformat ascii 1.0\n"
+                "element vertex 0\nproperty float x\nproperty float y\n"
+                "property float z\nelement face 1\nproperty int "
+             << name << "\nproperty list uchar int " << name
+             << "\nend_header\n";
+      ASSERT_TRUE(output.good());
+    }
+    std::vector<Vertex> vertices;
+    std::vector<std::vector<int>> polygons;
+    std::vector<std::string> comments;
+    int type = 0;
+    try {
+      PoissonRecon::PLY::ReadPolygons<VertexFactory, int>(
+          path.string(), VertexFactory{}, vertices, polygons, type, comments);
+      FAIL() << "Expected a face-list validation error";
+    } catch (const std::exception& error) {
+      EXPECT_NE(
+          std::string(error.what()).find("Could not read face vertex indices"),
+          std::string::npos);
+    }
+  }
+}
+
 TEST(PlyReaderTest, ClosesFileAfterTruncatedBinaryBody) {
   const auto path = colmap::CreateTestDir() / "truncated.ply";
   {
