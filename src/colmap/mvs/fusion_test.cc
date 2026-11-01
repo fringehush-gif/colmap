@@ -654,6 +654,7 @@ TEST(StereoFusion, NormalWindowUsesExactWholeOwnerThenTiledFallback) {
   StereoFusionOptions options;
   options.bounded_cache = options.bounded_cache_components = true;
   options.bounded_cache_neighborhood = true;
+  options.bounded_cache_diagnostics = true;
   options.bounded_cache_normal_tile_size = 7;
   options.bounded_cache_normal_tile_slots = 2;
   options.bounded_cache_normal_mapped_bytes = 1 << 20;
@@ -679,6 +680,9 @@ TEST(StereoFusion, NormalWindowUsesExactWholeOwnerThenTiledFallback) {
   EXPECT_FLOAT_EQ(whole->GetNormal(10, 16)(1), -16.5f);
   EXPECT_EQ(fusion.GetBoundedCacheStats()->hits, before->hits);
   EXPECT_EQ(fusion.GetNormalTileRingStats().misses, 0);
+  const auto diagnostic = fusion.GetBoundedCacheDiagnosticRow();
+  ASSERT_TRUE(diagnostic);
+  EXPECT_NE(diagnostic->find("normal_prefill_borrows=1 "), std::string::npos);
   // View2 is outside the hot window but its original depth remains admitted.
   // Exercise its exact tile while the whole-normal owner is still pinned.
   auto tile = StereoFusionExactDepthTestPeer::AcquireView(fusion, 2, 10, 16);
