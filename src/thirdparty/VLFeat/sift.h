@@ -86,6 +86,8 @@ typedef struct _VlSiftFilt
   vl_sift_pix *grad ;   /**< GSS gradient data. */
   int grad_o ;          /**< GSS gradient data octave. */
 
+  double expn_tab [257] ; /**< exp(-x) table; construction-time rounding. */
+
 } VlSiftFilt ;
 
 /** @name Create and destroy
