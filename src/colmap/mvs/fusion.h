@@ -427,7 +427,7 @@ class StereoFusion : public BaseController {
     internal::FusionFloatMapView normal;
     const Bitmap* bitmap = nullptr;
   };
-  // Borrowed only from the eager FP32 workspace, which outlives joined rows.
+  // Borrowed from eager or fully pinned neighborhood inputs until rows join.
   std::vector<FullRamInput> full_ram_inputs_;
   BoundedWorkspace* bounded_workspace_ = nullptr;
   std::vector<const BoundedWorkspace::ImageData*> neighborhood_data_;
@@ -484,7 +484,7 @@ class StereoFusion : public BaseController {
   };
   struct alignas(64) NormalTileRing {
     std::vector<NormalTileSlot> tiles;
-    NodeHashMap<NormalTileKey, size_t, boost::hash<NormalTileKey>> index;
+    FlatHashMap<NormalTileKey, size_t, boost::hash<NormalTileKey>> index;
     std::vector<size_t> last_slot_by_image;
     struct SoftSlot {
       NormalTileKey key{};
@@ -492,7 +492,7 @@ class StereoFusion : public BaseController {
       bool valid = false;
     };
     std::vector<SoftSlot> soft_tiles;
-    NodeHashMap<NormalTileKey, size_t, boost::hash<NormalTileKey>> soft_index;
+    FlatHashMap<NormalTileKey, size_t, boost::hash<NormalTileKey>> soft_index;
     size_t soft_next = 0, soft_hits = 0, soft_expired = 0;
     bool indexed = false;
     size_t next = 0, hits = 0, misses = 0;
