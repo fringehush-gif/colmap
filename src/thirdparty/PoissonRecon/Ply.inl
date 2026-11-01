@@ -481,6 +481,7 @@ namespace PLY
 
 		// write faces
 		std::vector< Index > polygon;
+		std::vector< OutputIndex > outputPolygon;
 		ply->put_element_setup( "face" );
 		for( size_t i=0 ; i<polygonNum ; i++ )
 		{
@@ -490,10 +491,10 @@ namespace PLY
 			Face< OutputIndex > ply_face;
 			if( !polygonStream.read( polygon ) ) MK_THROW( "Failed to read polygon " , i , " / " , polygonNum ); 
 			ply_face.nr_vertices = int( polygon.size() );
-			ply_face.vertices = new OutputIndex[ polygon.size() ];
+			outputPolygon.resize( polygon.size() );
+			ply_face.vertices = outputPolygon.data();
 			for( int j=0 ; j<int(polygon.size()) ; j++ ) ply_face.vertices[j] = (OutputIndex)polygon[j];
 			ply->put_element( (void *)&ply_face );
-			delete[] ply_face.vertices;
 		}  // for, write faces
 
 
