@@ -408,6 +408,8 @@ class StereoFusion : public BaseController {
                                                              int image_idx,
                                                              int row,
                                                              int col);
+  const BoundedWorkspace::ImageData* AcquireWorkerNormalTileFromRing(
+      int thread_id, int image_idx, int row, int col);
   const ImmutableMapRegion* AcquireWorkerMappedNormal(int image_idx, int row);
   void ClearMappedNormalRing();
   void InitFusedPixelMask(int image_idx, size_t width, size_t height);
