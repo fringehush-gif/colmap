@@ -1530,6 +1530,12 @@ TEST(BoundedWorkspaceBase, NormalReadChecksShapeAndCroppedCoordinates) {
   EXPECT_THROW(image.GetNormal(9, 7), std::exception);
   EXPECT_THROW(image.GetNormal(11, 8), std::exception);
   EXPECT_THROW(image.GetNormal(9, 11), std::exception);
+  EXPECT_THROW(image.GetNormal(std::numeric_limits<size_t>::max(), 8),
+               std::exception);
+  EXPECT_THROW(image.GetNormal(9, std::numeric_limits<size_t>::max()),
+               std::exception);
+  image.normal_map = NormalMap();
+  EXPECT_THROW(image.GetNormal(9, 8), std::exception);
   const auto root = CreateTestDir();
   for (size_t channels : {1, 2, 4}) {
     Mat<float> malformed(3, 2, channels);
