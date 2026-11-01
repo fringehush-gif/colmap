@@ -8,6 +8,12 @@ from itertools import combinations
 from pathlib import Path
 from typing import Annotated, Any, get_type_hints
 
+from caspar_solver_template import (
+    patch_solver_header_template,
+    patch_solver_template,
+)
+from jinja2 import ChoiceLoader, DictLoader
+
 # Must be set before importing symforce.symbolic
 precision = sys.argv[2] if len(sys.argv) > 2 else "f32"
 
@@ -23,6 +29,7 @@ import symforce.symbolic as sf  # noqa: E402
 from symforce import typing as T  # noqa: E402
 from symforce.caspar import CasparLibrary  # noqa: E402
 from symforce.caspar import memory as mem  # noqa: E402
+from symforce.caspar.source.templates import env as template_env  # noqa: E402
 
 
 # Point and ConstPoint are shared across camera models so that different
@@ -341,9 +348,9 @@ caslib = CasparLibrary(name="caspar_lib", dtype=dtype)
 #     skipped with a warning because the merged focal_and_extra node
 #     cannot be split)
 #
-# sensor_from_rig is always present as a ConstantSequential parameter. For single-
-# camera datasets the host passes identity, making it a no-op. For multi-camera
-# rigs it carries the per-sensor extrinsic calibration.
+# sensor_from_rig is always present as a ConstantSequential parameter. For
+# single-camera datasets the host passes identity, making it a no-op. For
+# multi-camera rigs it carries the per-sensor extrinsic calibration.
 
 FIXABLE_SIMPLE_RADIAL = {
     "pose": ConstSimpleRadialPose,
@@ -400,4 +407,23 @@ register_camera_model(
 
 out_dir = Path(f"{sys.argv[1]}")
 print(f"Generating Caspar kernels with precision {precision}: {out_dir}")
-caslib.generate(out_dir, use_symlinks=False, python_bindings=False)
+original_loader = template_env.loader
+if original_loader is None:
+    raise RuntimeError("Caspar template loader is unavailable")
+source, _, _ = original_loader.get_source(template_env, "solver.cc.jinja")
+header, _, _ = original_loader.get_source(template_env, "solver.h.jinja")
+template_env.loader = ChoiceLoader(
+    [
+        DictLoader(
+            {
+                "solver.cc.jinja": patch_solver_template(source),
+                "solver.h.jinja": patch_solver_header_template(header),
+            }
+        ),
+        original_loader,
+    ]
+)
+try:
+    caslib.generate(out_dir, use_symlinks=False, python_bindings=False)
+finally:
+    template_env.loader = original_loader
