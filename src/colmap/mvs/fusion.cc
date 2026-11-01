@@ -1177,6 +1177,15 @@ const BoundedWorkspace::ImageData* StereoFusion::AcquireWorkerNormalTile(
       return data;
     }
   }
+  return AcquireWorkerNormalTileFromRing(thread_id, image_idx, row, col);
+}
+
+const BoundedWorkspace::ImageData*
+StereoFusion::AcquireWorkerNormalTileFromRing(const int thread_id,
+                                              const int image_idx,
+                                              const int row,
+                                              const int col) {
+  auto& ring = normal_tile_rings_.at(thread_id);
   const auto contains = [row, col](const BoundedWorkspace::ImageData* data) {
     return data && static_cast<size_t>(col) >= data->normal_origin_x &&
            static_cast<size_t>(row) >= data->normal_origin_y &&
