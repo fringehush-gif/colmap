@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <future>
+#include <stdexcept>
 #include <tuple>
 #include <vector>
 
@@ -13,6 +16,65 @@
 #include <gtest/gtest.h>
 
 namespace {
+
+TEST(PoissonThreadPoolTest, AsyncExceptionsJoinOutstandingWorkers) {
+  using Pool = PoissonRecon::ThreadPool;
+  using namespace std::chrono_literals;
+  for (const bool throw_on_caller : {true, false}) {
+    SCOPED_TRACE(throw_on_caller);
+    std::promise<void> blocked;
+    std::promise<void> throwing;
+    std::promise<void> release;
+    auto blocked_future = blocked.get_future();
+    auto throwing_future = throwing.get_future();
+    auto release_future = release.get_future().share();
+    std::atomic<bool> worker_finished{false};
+    auto result = std::async(std::launch::async, [&] {
+      Pool::ParallelFor(
+          0,
+          3,
+          [&](unsigned int thread, size_t) {
+            if (thread == 2) {
+              blocked.set_value();
+              if (release_future.wait_for(5s) != std::future_status::ready) {
+                throw std::runtime_error("worker release timed out");
+              }
+              worker_finished = true;
+            } else if (thread == (throw_on_caller ? 0u : 1u)) {
+              if (blocked_future.wait_for(5s) != std::future_status::ready) {
+                throw std::runtime_error("worker did not start");
+              }
+              throwing.set_value();
+              throw std::runtime_error("injected worker failure");
+            }
+          },
+          3,
+          Pool::ASYNC,
+          Pool::STATIC,
+          1);
+    });
+    const auto started = throwing_future.wait_for(5s);
+    const bool returned_early =
+        started == std::future_status::ready &&
+        result.wait_for(100ms) == std::future_status::ready;
+    release.set_value();
+    EXPECT_EQ(started, std::future_status::ready);
+    EXPECT_FALSE(returned_early);
+    EXPECT_THROW(result.get(), std::runtime_error);
+    EXPECT_TRUE(worker_finished.load());
+
+    std::atomic<size_t> completed{0};
+    Pool::ParallelFor(
+        0,
+        3,
+        [&](unsigned int, size_t) { ++completed; },
+        3,
+        Pool::ASYNC,
+        Pool::STATIC,
+        1);
+    EXPECT_EQ(completed.load(), 3);
+  }
+}
 
 TEST(PoissonFEMTreeTest, NeighborSelectionCanBeEmpty) {
   PoissonRecon::FEMTree<3, float> tree(1024);

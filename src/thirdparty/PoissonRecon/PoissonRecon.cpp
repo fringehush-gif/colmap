@@ -29,6 +29,7 @@ DAMAGE.
 #include "PreProcessor.h"
 #include "Reconstructors.h"
 
+#include <memory>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -322,7 +323,7 @@ void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 	}
 
 	Profiler profiler(20);
-	Implicit *implicit = NULL;
+	std::unique_ptr< Implicit > implicit;
 	typename Reconstructor::Poisson::SolutionParameters< Real > sParams;
 	Reconstructor::LevelSetExtractionParameters meParams;
 
@@ -493,10 +494,10 @@ void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 		if( options.Transform.set )
 		{
 			Reconstructor::TransformedInputOrientedSampleStream< Real , Dim , typename AuxDataFactory::VertexType > _sampleStream( toModel , sampleStream );
-			implicit = Solver::Solve( _sampleStream , sParams , auxDataFactory() , envelopeMesh );
+			implicit.reset( Solver::Solve( _sampleStream , sParams , auxDataFactory() , envelopeMesh ) );
 			implicit->unitCubeToModel = toModel.inverse() * implicit->unitCubeToModel;
 		}
-		else implicit = Solver::Solve( sampleStream , sParams , auxDataFactory() , envelopeMesh );
+		else implicit.reset( Solver::Solve( sampleStream , sParams , auxDataFactory() , envelopeMesh ) );
 	}
 	else
 	{
@@ -505,10 +506,10 @@ void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 		if( options.Transform.set )
 		{
 			Reconstructor::TransformedInputOrientedSampleStream< Real , Dim > _sampleStream( toModel , sampleStream );
-			implicit = Solver::Solve( _sampleStream , sParams , envelopeMesh );
+			implicit.reset( Solver::Solve( _sampleStream , sParams , envelopeMesh ) );
 			implicit->unitCubeToModel = toModel.inverse() * implicit->unitCubeToModel;
 		}
-		else implicit = Solver::Solve( sampleStream , sParams , envelopeMesh );
+		else implicit.reset( Solver::Solve( sampleStream , sParams , envelopeMesh ) );
 	}
 
 	delete pointStream;
@@ -570,7 +571,6 @@ void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 		else MK_WARN( "Mesh extraction is only supported in dimensions 2 and 3" );
 
 	if( options.Verbose.set ) std::cout << "#          Total Solve: " << Time()-startTime << " (s), " << MemoryInfo::PeakMemoryUsageMB() << " (MB)" << std::endl;
-	delete implicit;
 }
 
 #ifndef FAST_COMPILE
