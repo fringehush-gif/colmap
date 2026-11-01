@@ -504,6 +504,29 @@ TEST_F(WorkspaceTests, CachedBitmapReadFailureCanBeRetried) {
   reader->Close();
 }
 
+TEST_F(WorkspaceTests, EagerBitmapReadFailureCanBeRetried) {
+  auto options = GetOptions();
+  options.num_threads = 1;
+  Workspace workspace(options);
+  std::atomic<int> reads{0};
+  auto reader =
+      ScopedBitmapReader::Create({workspace.GetBitmapPath(0)},
+                                 [&](const auto&, bool, bool, Bitmap* target) {
+                                   *target = Bitmap(10, 5, true);
+                                   target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+                                   return ++reads > 1;
+                                 },
+                                 {{10, 5}});
+  EXPECT_THROW(workspace.Load({image_name_}), std::exception);
+  EXPECT_EQ(reads.load(), 1);
+  EXPECT_THROW(workspace.GetBitmap(0), std::exception);
+
+  ASSERT_NO_THROW(workspace.Load({image_name_}));
+  EXPECT_EQ(reads.load(), 2);
+  ExpectLoadedWorkspaceData(workspace);
+  reader->Close();
+}
+
 TEST_F(WorkspaceTests, EagerLoadMissingInputCanBeRestored) {
   auto options = GetOptions();
   options.num_threads = 1;
