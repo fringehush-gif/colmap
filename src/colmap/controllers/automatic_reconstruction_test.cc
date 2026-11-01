@@ -8,6 +8,10 @@
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
+#include <exception>
+#include <fstream>
+#include <string>
+
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -60,6 +64,52 @@ TEST_P(ParameterizedAutomaticReconstructionTests, Nominal) {
                                  /*num_obs_tolerance=*/0.9,
                                  /*align=*/true));
 }
+
+#if defined(COLMAP_MVS_ENABLED) && \
+    (defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED))
+TEST(AutomaticReconstruction, DenseCompletionRequiresVisibility) {
+  for (const bool with_visibility : {true, false}) {
+    SCOPED_TRACE(with_visibility);
+    const auto dir =
+        CreateTestDir() / (with_visibility ? "complete" : "missing");
+    const auto dense = dir / "dense" / "0";
+    CreateDirIfNotExists(dense, true);
+    CreateDirIfNotExists(dir / "images");
+    // Sentinel files must be skipped without reading an absent MVS workspace.
+    std::ofstream(dense / "fused.ply") << "complete PLY sentinel";
+    std::ofstream(dense / "meshed-poisson.ply") << "mesh sentinel";
+    if (with_visibility) std::ofstream(dense / "fused.ply.vis") << "visibility";
+
+    AutomaticReconstructionController::Options options;
+    options.workspace_path = dir;
+    options.image_path = dir / "images";
+    options.extraction = false;
+    options.matching = false;
+    options.sparse = false;
+    options.dense = true;
+    options.use_gpu = false;
+    options.num_threads = 1;
+    auto manager = std::make_shared<ReconstructionManager>();
+    manager->Add();
+    AutomaticReconstructionController controller(options, manager);
+    controller.Setup();
+    controller.Start();
+    if (with_visibility) {
+      EXPECT_NO_THROW(controller.Wait());
+    } else {
+      // Missing VIS must resume rather than accept the sentinel pair. Reading
+      // the absent workspace fails before PatchMatch queries or uses a GPU.
+      try {
+        controller.Wait();
+        FAIL() << "Expected missing MVS workspace";
+      } catch (const std::exception& error) {
+        EXPECT_NE(std::string(error.what()).find("files do not exist at"),
+                  std::string::npos);
+      }
+    }
+  }
+}
+#endif
 
 // TODO: Add GLOBAL mapper test. Currently excluded because the test produces
 // fewer observations than expected. The global pipeline is tested separately

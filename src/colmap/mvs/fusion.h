@@ -525,6 +525,13 @@ void WritePointsVisibility(
     const std::filesystem::path& path,
     const std::vector<std::vector<int>>& points_visibility);
 
+// Publish a matching PLY and visibility pair. The PLY is published last so it
+// is absent if replacing the visibility file fails. Requires one writer.
+void WriteFusedPointCloud(
+    const std::filesystem::path& path,
+    const std::vector<PlyPoint>& points,
+    const std::vector<std::vector<int>>& points_visibility);
+
 // Read per-point visibility data from a binary .vis file produced by the
 // stereo fusion pipeline. Returns a vector of per-point image index lists.
 // The format matches WritePointsVisibility().

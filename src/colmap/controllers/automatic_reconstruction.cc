@@ -414,6 +414,9 @@ void AutomaticReconstructionController::RunDenseMapper() {
     const auto dense_path =
         options_.workspace_path / "dense" / std::to_string(i);
     const auto fused_path = dense_path / "fused.ply";
+    const auto visibility_path = AddFileExtension(fused_path, ".vis");
+    const bool fusion_complete =
+        ExistsFile(fused_path) && ExistsFile(visibility_path);
 
     std::filesystem::path meshing_path;
     if (options_.mesher == Mesher::POISSON) {
@@ -424,7 +427,7 @@ void AutomaticReconstructionController::RunDenseMapper() {
       meshing_path = dense_path / "meshed-advancing-front.ply";
     }
 
-    if (ExistsFile(fused_path) && ExistsFile(meshing_path)) {
+    if (fusion_complete && ExistsFile(meshing_path)) {
       LOG(INFO) << "Skipping dense reconstruction for model " << i
                 << " as it already exists.";
       continue;
@@ -475,7 +478,7 @@ void AutomaticReconstructionController::RunDenseMapper() {
 
     // Stereo fusion.
 
-    if (!ExistsFile(fused_path)) {
+    if (!fusion_complete) {
       auto fusion_options = *option_manager_.stereo_fusion;
       const int num_reg_images =
           reconstruction_manager_->Get(i)->NumRegImages();
@@ -490,11 +493,23 @@ void AutomaticReconstructionController::RunDenseMapper() {
                                                                : "photometric");
       fuser.SetCheckIfStoppedFunc([&]() { return IsStopped(); });
       fuser.Run();
+      if (IsStopped()) return;
 
+      // All meshes depend on this fusion result, even if another mesher is
+      // selected for this invocation. Invalidate them before publication.
+      for (const auto* name : {"meshed-poisson.ply",
+                               "meshed-delaunay.ply",
+                               "meshed-advancing-front.ply"}) {
+        const auto old_mesh = dense_path / name;
+        if (std::filesystem::exists(old_mesh)) {
+          THROW_CHECK(std::filesystem::is_regular_file(old_mesh))
+              << "Refusing to remove non-file mesh: " << old_mesh;
+          std::filesystem::remove(old_mesh);
+        }
+      }
       LOG(INFO) << "Writing output: " << fused_path;
-      WriteBinaryPlyPoints(fused_path, fuser.GetFusedPoints());
-      mvs::WritePointsVisibility(AddFileExtension(fused_path, ".vis"),
-                                 fuser.GetFusedPointsVisibility());
+      mvs::WriteFusedPointCloud(
+          fused_path, fuser.GetFusedPoints(), fuser.GetFusedPointsVisibility());
     }
 
     if (IsStopped()) {

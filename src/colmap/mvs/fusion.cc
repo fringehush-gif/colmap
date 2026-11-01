@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -1997,6 +1999,67 @@ void WritePointsVisibility(
     }
   }
   if (used != 0) flush();
+
+  file.close();
+  THROW_CHECK(file.good()) << "Failed to write visibility file: " << path;
+}
+
+namespace {
+// Remove only an existing regular result; a directory or symlink is not ours.
+void RemoveExistingRegularFile(const std::filesystem::path& path) {
+  std::error_code ec;
+  const auto status = std::filesystem::symlink_status(path, ec);
+  if (ec == std::errc::no_such_file_or_directory) return;
+  if (ec) throw std::filesystem::filesystem_error("stat output", path, ec);
+  if (status.type() == std::filesystem::file_type::not_found) return;
+  THROW_CHECK(std::filesystem::is_regular_file(status))
+      << "Refusing to replace non-regular output: " << path;
+  std::filesystem::remove(path);
+}
+}  // namespace
+
+void WriteFusedPointCloud(
+    const std::filesystem::path& path,
+    const std::vector<PlyPoint>& points,
+    const std::vector<std::vector<int>>& points_visibility) {
+  THROW_CHECK_EQ(points.size(), points_visibility.size());
+  const auto visibility_path = AddFileExtension(path, ".vis");
+
+  // An exclusive same-directory staging directory avoids touching stale or
+  // foreign temporary files. This is not a concurrent-writer protocol.
+  static std::atomic<uint64_t> sequence{0};
+  const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
+  std::filesystem::path stage;
+  for (int attempt = 0; attempt < 128; ++attempt) {
+    stage = path;
+    stage += ".fusion-stage-" + std::to_string(tick) + "-" +
+             std::to_string(sequence.fetch_add(1));
+    if (std::filesystem::create_directory(stage)) break;
+    stage.clear();
+  }
+  THROW_CHECK(!stage.empty()) << "Cannot create fusion staging directory";
+  const auto stage_ply = stage / "points.ply";
+  const auto stage_vis = stage / "points.vis";
+  try {
+    WriteBinaryPlyPoints(stage_ply, points);
+    WritePointsVisibility(stage_vis, points_visibility);
+
+    // The PLY is the completion name. Invalidate it before replacing VIS;
+    // never leave a new PLY next to an old or failed visibility output.
+    RemoveExistingRegularFile(path);
+    RemoveExistingRegularFile(visibility_path);
+    std::filesystem::rename(stage_vis, visibility_path);
+    std::filesystem::rename(stage_ply, path);
+  } catch (...) {
+    // Keep the original error even if best-effort temporary cleanup fails.
+    std::error_code ignored;
+    std::filesystem::remove(stage_ply, ignored);
+    std::filesystem::remove(stage_vis, ignored);
+    std::filesystem::remove(stage, ignored);
+    throw;
+  }
+  std::error_code ignored;
+  std::filesystem::remove(stage, ignored);
 }
 
 std::vector<std::vector<int>> ReadPointsVisibility(
