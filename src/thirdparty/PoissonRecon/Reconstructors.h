@@ -36,6 +36,8 @@ DAMAGE.
 #include "PointExtent.h"
 #include "Reconstructors.streams.h"
 
+#include <mutex>
+
 namespace PoissonRecon
 {
 
@@ -870,12 +872,14 @@ namespace PoissonRecon
 						// Make nodes in the support of the vector field @{ExactDepth} interior
 						if( params.dirichletErode )
 						{
+							std::mutex scratchMutex;
 							// What to do if we find a node in the support of the vector field
 							auto SetScratchFlag = [&]( FEMTreeNode *node )
 								{
 									if( node )
 									{
 										while( node->depth()>(int)params.baseDepth ) node = node->parent;
+										std::lock_guard< std::mutex > lock( scratchMutex );
 										node->nodeData.setScratchFlag( true );
 									}
 								};
@@ -887,7 +891,7 @@ namespace PoissonRecon
 								};
 
 							// Flags indicating if a node contains a non-zero vector field coefficient
-							std::vector< bool > isVectorFieldElement( implicit.tree.nodeCount() , false );
+							std::vector< unsigned char > isVectorFieldElement( implicit.tree.nodeCount() , false );
 
 							// Get the set of base nodes
 							std::vector< FEMTreeNode * > baseNodes;
@@ -936,7 +940,7 @@ namespace PoissonRecon
 #ifdef SHOW_WARNINGS
 #pragma message( "[WARNING] In principal, we should unlock finite elements whose support overlaps the vector field" )
 #endif // SHOW_WARNINGS
-							implicit.tree.template processNeighboringLeaves< -BSplineSupportSizes< Poisson::NormalDegree >::SupportStart , BSplineSupportSizes< Poisson::NormalDegree >::SupportEnd >( &vectorFieldElements[0] , vectorFieldElements.size() , SetScratchFlag , false );
+							implicit.tree.template processNeighboringLeaves< -BSplineSupportSizes< Poisson::NormalDegree >::SupportStart , BSplineSupportSizes< Poisson::NormalDegree >::SupportEnd >( vectorFieldElements.data() , vectorFieldElements.size() , SetScratchFlag , false );
 
 							// Set sub-trees rooted at interior nodes @ ExactDepth to interior
 							ThreadPool::ParallelFor( 0 , baseNodes.size() , [&]( unsigned int , size_t  i ){ if( baseNodes[i]->nodeData.getScratchFlag() ) PropagateToLeaves( baseNodes[i] ); } );
