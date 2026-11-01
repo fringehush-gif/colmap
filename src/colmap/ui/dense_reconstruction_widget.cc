@@ -421,14 +421,13 @@ void DenseReconstructionWidget::Fusion() {
       std::make_shared<mvs::StereoFusion>(
           *options_->stereo_fusion, workspace_path, "COLMAP", "", input_type));
   fuser->AddCallback(
-      Thread::FINISHED_CALLBACK, [this, fuser = fuser.get(), workspace_path]() {
+      Thread::SUCCEEDED_CALLBACK, [this, fuser = fuser.get(), workspace_path]() {
         auto fused_points = fuser->GetController()->GetFusedPoints();
         auto fused_points_visibility =
             fuser->GetController()->GetFusedPointsVisibility();
         const auto output_path = workspace_path / kFusedFileName;
-        WriteBinaryPlyPoints(output_path, fused_points);
-        mvs::WritePointsVisibility(AddFileExtension(output_path, ".vis"),
-                                   fused_points_visibility);
+        mvs::WriteFusedPointCloud(
+            output_path, fused_points, fused_points_visibility);
         main_window_->model_viewer_widget_->point_cloud =
             std::move(fused_points);
         write_fused_points_action_->trigger();

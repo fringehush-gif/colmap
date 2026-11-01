@@ -420,9 +420,8 @@ Reconstruction RunStereoFuserInternal(
   } else if (output_type == "txt") {
     reconstruction.WriteText(write_path);
   } else if (output_type == "ply") {
-    WriteBinaryPlyPoints(write_path, fuser.GetFusedPoints());
-    mvs::WritePointsVisibility(AddFileExtension(write_path, ".vis"),
-                               fuser.GetFusedPointsVisibility());
+    mvs::WriteFusedPointCloud(
+        write_path, fuser.GetFusedPoints(), fuser.GetFusedPointsVisibility());
   } else {
     LOG(FATAL_THROW) << "Invalid output_type: " << output_type;
   }

@@ -33,6 +33,12 @@
 
 #include <gtest/gtest.h>
 
+#ifdef __linux__
+#include <csignal>
+
+#include <sys/resource.h>
+#endif
+
 namespace colmap {
 namespace mvs {
 TEST(StereoFusion, ResidentNonpositiveDepthSeedsMaskWithoutChangingSpecials) {
@@ -2045,6 +2051,154 @@ TEST(StereoFusion, CompactResidentRgbMatchesDiskFusion) {
     EXPECT_FALSE(descriptor.HasBitmap(descriptor.GetModel().GetImageIdx(name)));
   }
 }
+
+#ifdef __linux__
+TEST(WritePointsVisibility, FailedOutputIsReported) {
+  EXPECT_THROW(WritePointsVisibility("/dev/full", {{1, 2}, {}, {3}}),
+               std::invalid_argument);
+}
+#endif  // __linux__
+
+namespace {
+std::string ReadFusionTestBytes(const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  THROW_CHECK(file.is_open()) << path;
+  return {std::istreambuf_iterator<char>(file),
+          std::istreambuf_iterator<char>()};
+}
+}  // namespace
+
+TEST(WriteFusedPointCloud, ReplacesPairAndRejectsCountMismatch) {
+  const auto dir = CreateTestDir();
+  const auto path = dir / "fused.ply";
+  const auto vis = AddFileExtension(path, ".vis");
+  PlyPoint point;
+  point.x = 1.25f;
+  point.g = 17;
+  const std::vector<PlyPoint> points{point};
+  const std::vector<std::vector<int>> visibility{{1, 3}};
+  WriteFusedPointCloud(path, points, visibility);
+  const auto old_ply = ReadFusionTestBytes(path);
+  const auto old_vis = ReadFusionTestBytes(vis);
+  EXPECT_THROW(WriteFusedPointCloud(path, points, {}), std::invalid_argument);
+  EXPECT_EQ(ReadFusionTestBytes(path), old_ply);
+  EXPECT_EQ(ReadFusionTestBytes(vis), old_vis);
+
+  point.x = 2.5f;
+  point.g = 31;
+  const std::vector<PlyPoint> replacement{point};
+  const std::vector<std::vector<int>> replacement_vis{{2}};
+  WriteFusedPointCloud(path, replacement, replacement_vis);
+  const auto actual = ReadPly(path);
+  ASSERT_EQ(actual.size(), 1);
+  EXPECT_FLOAT_EQ(actual[0].x, 2.5f);
+  EXPECT_EQ(actual[0].g, 31);
+  EXPECT_EQ(ReadPointsVisibility(vis, 1), replacement_vis);
+  const auto expected_ply = dir / "expected.ply";
+  const auto expected_vis = dir / "expected.vis";
+  WriteBinaryPlyPoints(expected_ply, replacement);
+  WritePointsVisibility(expected_vis, replacement_vis);
+  EXPECT_EQ(ReadFusionTestBytes(path), ReadFusionTestBytes(expected_ply));
+  EXPECT_EQ(ReadFusionTestBytes(vis), ReadFusionTestBytes(expected_vis));
+}
+
+TEST(WriteFusedPointCloud,
+     VisibilityPublishFailureRemovesCompletionAndRetries) {
+  const auto dir = CreateTestDir();
+  const auto path = dir / "fused.ply";
+  const auto vis = AddFileExtension(path, ".vis");
+  const std::vector<PlyPoint> points(1);
+  const std::vector<std::vector<int>> visibility{{1}};
+  WriteFusedPointCloud(path, points, visibility);
+  ASSERT_TRUE(std::filesystem::remove(vis));
+  ASSERT_TRUE(std::filesystem::create_directory(vis));
+  EXPECT_THROW(WriteFusedPointCloud(path, points, visibility), std::exception);
+  EXPECT_FALSE(std::filesystem::exists(path));
+  EXPECT_TRUE(std::filesystem::is_directory(vis));
+  ASSERT_TRUE(std::filesystem::remove(vis));
+  EXPECT_NO_THROW(WriteFusedPointCloud(path, points, visibility));
+  EXPECT_EQ(ReadPly(path).size(), 1);
+  EXPECT_EQ(ReadPointsVisibility(vis, 1), visibility);
+}
+
+#ifdef __linux__
+TEST(WriteFusedPointCloud, StagingWriteFailurePreservesExistingPair) {
+  const auto dir = CreateTestDir();
+  const auto path = dir / "fused.ply";
+  const auto vis = AddFileExtension(path, ".vis");
+  const std::vector<PlyPoint> points(1);
+  const std::vector<std::vector<int>> visibility{{1}};
+  WriteFusedPointCloud(path, points, visibility);
+  const auto old_ply = ReadFusionTestBytes(path);
+  const auto old_vis = ReadFusionTestBytes(vis);
+  struct LimitGuard {
+    struct rlimit old_limit;
+    using Handler = void (*)(int);
+    Handler old_handler;
+    explicit LimitGuard(rlim_t max_bytes) {
+      THROW_CHECK_EQ(getrlimit(RLIMIT_FSIZE, &old_limit), 0);
+      old_handler = std::signal(SIGXFSZ, SIG_IGN);
+      THROW_CHECK(old_handler != SIG_ERR);
+      struct rlimit limited = old_limit;
+      limited.rlim_cur = max_bytes;
+      if (setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+        std::signal(SIGXFSZ, old_handler);
+        throw std::runtime_error("Cannot set file size limit");
+      }
+    }
+    ~LimitGuard() {
+      setrlimit(RLIMIT_FSIZE, &old_limit);
+      std::signal(SIGXFSZ, old_handler);
+    }
+  };
+  // Verify the 1024-byte boundary reaches payload rather than header.
+  const std::vector<PlyPoint> large_points(512);
+  const std::vector<std::vector<int>> large_visibility(512, {1});
+  const auto sizing_ply = dir / "sizing.ply";
+  WriteBinaryPlyPoints(sizing_ply, large_points);
+  const auto sizing_bytes = ReadFusionTestBytes(sizing_ply);
+  const auto header_end = sizing_bytes.find("end_header\n");
+  ASSERT_NE(header_end, std::string::npos);
+  ASSERT_LT(header_end + std::string("end_header\n").size(), 1024);
+  ASSERT_GT(sizing_bytes.size(), 1024);
+  ASSERT_TRUE(std::filesystem::remove(sizing_ply));
+
+  // One-point PLY fits; a long visibility list forces its later stage to fail.
+  const std::vector<std::vector<int>> long_visibility(1,
+                                                      std::vector<int>(512, 1));
+  const auto small_ply = dir / "small.ply";
+  const auto large_vis = dir / "large.vis";
+  WriteBinaryPlyPoints(small_ply, points);
+  WritePointsVisibility(large_vis, long_visibility);
+  ASSERT_LT(std::filesystem::file_size(small_ply), 1024);
+  ASSERT_GT(std::filesystem::file_size(large_vis), 1024);
+  ASSERT_TRUE(std::filesystem::remove(small_ply));
+  ASSERT_TRUE(std::filesystem::remove(large_vis));
+
+  for (int mode = 0; mode < 3; ++mode) {
+    SCOPED_TRACE(mode);
+    std::string error;
+    {
+      LimitGuard guard(mode == 0 ? 0 : 1024);
+      try {
+        if (mode == 2) {
+          WriteFusedPointCloud(path, points, long_visibility);
+        } else {
+          WriteFusedPointCloud(path, large_points, large_visibility);
+        }
+      } catch (const std::exception& exception) {
+        error = exception.what();
+      }
+    }
+    EXPECT_NE(error.find(mode == 2 ? "Failed to write visibility file"
+                                   : "Failed to write PLY file"),
+              std::string::npos);
+    EXPECT_EQ(ReadFusionTestBytes(path), old_ply);
+    EXPECT_EQ(ReadFusionTestBytes(vis), old_vis);
+  }
+  EXPECT_NO_THROW(WriteFusedPointCloud(path, points, visibility));
+}
+#endif  // __linux__
 
 TEST(ReadPointsVisibility, BinaryWireBytes) {
   const auto test_file = CreateTestDir() / "wire.vis";
