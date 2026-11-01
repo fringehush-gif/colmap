@@ -824,24 +824,19 @@ void StereoFusion::Run() {
   // are too close to each other which may lead to duplicated work, since nearby
   // pixels are likely to get fused into the same point.
   const int kRowStride = 10;
+  using MaskSnapshot = internal::FusionPixelMask::PackedSnapshot;
   auto ProcessImageRows = [&, this](const int row_start,
-                                    const int height,
                                     const int width,
                                     const int image_idx,
-                                    const std::vector<char>& fused_pixel_mask) {
-    const int row_end = std::min(height, row_start + kRowStride);
-    // One row-band callback stays on its executing pool worker.
+                                    const MaskSnapshot& fused_pixel_mask) {
+    // One row-band callback stays on its executing pool worker. Offsets are
+    // visited in the same row-major order as the original scan.
     const int thread_id = thread_pool.GetThreadIndex();
-    for (int row = row_start; row < row_end; ++row) {
-      for (int col = 0; col < width; ++col) {
-        const size_t offset =
-            static_cast<size_t>(row - row_start) * width + col;
-        if (fused_pixel_mask.at(offset) > 0) {
-          continue;
-        }
-        Fuse(thread_id, image_idx, row, col);
-      }
-    }
+    fused_pixel_mask.ForEachUnset([&](const size_t offset) {
+      const int row = row_start + static_cast<int>(offset / width);
+      const int col = static_cast<int>(offset % width);
+      Fuse(thread_id, image_idx, row, col);
+    });
   };
 
   try {
@@ -895,13 +890,9 @@ void StereoFusion::Run() {
         const size_t last = static_cast<size_t>(row_end) * width;
         // A task reads only its own rows. Move that snapshot into the bound
         // task rather than copying the entire image mask for every band.
-        std::vector<char> row_mask = fused_pixel_mask.Snapshot(first, last);
-        thread_pool.AddTask(ProcessImageRows,
-                            row_start,
-                            height,
-                            width,
-                            image_idx,
-                            std::move(row_mask));
+        auto row_mask = fused_pixel_mask.Snapshot(first, last);
+        thread_pool.AddTask(
+            ProcessImageRows, row_start, width, image_idx, std::move(row_mask));
       }
       thread_pool.Wait();
       if (depth_pin_exit.workspace) {
@@ -996,7 +987,7 @@ void StereoFusion::Run() {
     // Join before releasing any component or mapped owner they can borrow.
     try {
       thread_pool.Wait();
-    } catch (...) {
+    } catch (...) {  // NOLINT(bugprone-empty-catch): keep first failure.
     }
     std::fill(neighborhood_data_.begin(), neighborhood_data_.end(), nullptr);
     ClearNormalPrefillWindow();
