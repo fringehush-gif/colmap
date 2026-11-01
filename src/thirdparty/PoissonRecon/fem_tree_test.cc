@@ -7,9 +7,12 @@
 #include <cstdint>
 #include <exception>
 #include <future>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <tuple>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 // FEMTree requires the configuration declarations before its headers.
@@ -21,6 +24,72 @@
 #include <gtest/gtest.h>
 
 namespace {
+
+struct GridValue {
+  inline static int alive = 0;
+  int value = 0;
+  GridValue() { ++alive; }
+  ~GridValue() { --alive; }
+  GridValue(const GridValue&) = delete;
+  GridValue& operator=(const GridValue&) = delete;
+};
+
+// The move contract guarantees an empty, reusable source.
+// NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+TEST(PoissonRegularGridTest, TransfersStorageAndReleasesPriorDestination) {
+  using Grid = PoissonRecon::RegularGrid<GridValue, 2>;
+  static_assert(!std::is_copy_constructible_v<Grid>);
+  static_assert(!std::is_copy_assignable_v<Grid>);
+  EXPECT_EQ(GridValue::alive, 0);
+  {
+    Grid source;
+    source.resize(2, 3);
+    source[5].value = 17;
+    Grid destination(std::move(source));
+    EXPECT_EQ(source.resolution(), 0);
+    EXPECT_FALSE(source());
+    EXPECT_EQ(destination.res(0), 2);
+    EXPECT_EQ(destination.res(1), 3);
+    EXPECT_EQ(destination[5].value, 17);
+    EXPECT_EQ(GridValue::alive, 6);
+    source.resize(1, 2);
+    EXPECT_EQ(GridValue::alive, 8);
+    source = std::move(destination);
+    EXPECT_EQ(GridValue::alive, 6);
+    EXPECT_EQ(source[5].value, 17);
+    EXPECT_EQ(destination.resolution(), 0);
+    EXPECT_FALSE(destination());
+    auto* const alias = &source;
+    source = std::move(*alias);
+    EXPECT_EQ(source[5].value, 17);
+    EXPECT_EQ(GridValue::alive, 6);
+    source = Grid();
+    EXPECT_EQ(source.resolution(), 0);
+    EXPECT_FALSE(source());
+    EXPECT_EQ(GridValue::alive, 0);
+  }
+  EXPECT_EQ(GridValue::alive, 0);
+}
+// NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+
+TEST(PoissonRegularGridTest, ReturnsAndRelocatesGridsWithoutCopyingElements) {
+  const auto make_grid = [] {
+    PoissonRecon::RegularGrid<int, 2> grid;
+    grid.resize(2, 3);
+    grid[5] = 17;
+    return grid;
+  };
+  const auto grid = make_grid();
+  EXPECT_EQ(grid.resolution(), 6);
+  EXPECT_EQ(grid[5], 17);
+  std::vector<PoissonRecon::RegularGrid<std::mutex, 2>> grids(1);
+  grids[0].resize(1, 2);
+  const auto* const first_mutex = &grids[0][0];
+  grids.resize(2);
+  EXPECT_EQ(&grids[0][0], first_mutex);
+  EXPECT_EQ(grids[0].resolution(), 2);
+  EXPECT_EQ(grids[1].resolution(), 0);
+}
 
 struct ChildPublicationData {
   std::uint64_t marker = 0;
