@@ -73,6 +73,8 @@ class Thread {
   enum {
     STARTED_CALLBACK = INT_MIN,
     FINISHED_CALLBACK,
+    // Run returned without error and no stop was observed before dispatch.
+    SUCCEEDED_CALLBACK,
   };
 
   Thread();
@@ -83,8 +85,8 @@ class Thread {
   virtual void Stop();
   virtual void Pause();
   virtual void Resume();
-  // Wait for the thread to finish. If the main run function threw an
-  // exception, it is rethrown here, in the calling thread, once.
+  // Wait for the worker and its lifecycle callbacks. Rethrow their first
+  // exception in the calling thread, once.
   virtual void Wait();
 
   // Check the state of the thread.
@@ -134,6 +136,8 @@ class Thread {
   void SignalInvalidSetup();
 
  private:
+  friend class Thread_StopDuringRestartIsNotLost_Test;
+
   // Wrapper around the main run function to set the finished flag and to
   // capture exceptions, which Wait rethrows.
   void RunFunc();
@@ -153,6 +157,8 @@ class Thread {
   bool finished_;
   bool setup_;
   bool setup_valid_;
+  bool starting_;
+  bool stop_pending_;
 
   NodeHashMap<int, std::list<std::function<void()>>> callbacks_;
 };
