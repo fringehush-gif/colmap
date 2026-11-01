@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <future>
 #include <stdexcept>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -17,6 +21,122 @@
 #include <gtest/gtest.h>
 
 namespace {
+
+struct ChildPublicationData {
+  std::uint64_t marker = 0;
+  std::uint64_t complement = 0;
+};
+using ChildPublicationNode =
+    PoissonRecon::RegularTreeNode<3, ChildPublicationData, int>;
+constexpr std::uint64_t kChildMarker = UINT64_C(0x7a39d4e12bcf5680);
+
+bool CheckPublishedChildren(const ChildPublicationNode* children,
+                            const ChildPublicationNode* parent) {
+  if (!children) return false;
+  for (int i = 0; i < 8; ++i) {
+    if (children[i].parent != parent || children[i].depth() != 1 ||
+        children[i].nodeData.marker != kChildMarker ||
+        children[i].nodeData.complement != ~kChildMarker) {
+      return false;
+    }
+  }
+  return true;
+}
+
+TEST(PoissonRegularTreeTest, SerialChildLookupDoesNotReinitialize) {
+  ChildPublicationNode root;
+  EXPECT_EQ(root.getChildren<false>(), nullptr);
+  EXPECT_EQ(root.getChildren<true>(), nullptr);
+  size_t initialized = 0;
+  auto initialize = [&](ChildPublicationNode& child) {
+    ++initialized;
+    child.nodeData.marker = kChildMarker;
+    child.nodeData.complement = ~kChildMarker;
+  };
+  auto* const first = root.getOrInitChildren<false>(nullptr, initialize);
+  auto* const second = root.getOrInitChildren<false>(nullptr, initialize);
+  EXPECT_NE(first, nullptr);
+  EXPECT_EQ(second, first);
+  EXPECT_EQ(root.getChildren<false>(), first);
+  EXPECT_EQ(root.getChildren<true>(), first);
+  EXPECT_EQ(initialized, 8);
+  EXPECT_TRUE(CheckPublishedChildren(first, &root));
+  root.cleanChildren(true);
+  EXPECT_EQ(root.getChildren<false>(), nullptr);
+  EXPECT_EQ(root.getChildren<true>(), nullptr);
+}
+
+TEST(PoissonRegularTreeTest, ConcurrentCreatorsObservePublishedBrood) {
+  using namespace std::chrono_literals;
+  constexpr size_t kWorkers = 4;
+  ChildPublicationNode root;
+  std::atomic<bool> start{false}, abort{false}, timed_out{false};
+  std::atomic<size_t> arrivals{0}, initialized{0};
+  std::array<ChildPublicationNode*, kWorkers> results{};
+  std::array<bool, kWorkers> valid{};
+  std::array<std::exception_ptr, kWorkers> errors{};
+  std::vector<std::thread> workers;
+  workers.reserve(kWorkers);
+  try {
+    for (size_t i = 0; i < kWorkers; ++i) {
+      workers.emplace_back([&, i] {
+        while (!start.load(std::memory_order_acquire))
+          std::this_thread::yield();
+        if (abort.load(std::memory_order_acquire)) return;
+        try {
+          bool first_child = true;
+          auto initialize = [&](ChildPublicationNode& child) {
+            if (first_child) {
+              first_child = false;
+              arrivals.fetch_add(1, std::memory_order_acq_rel);
+              const auto deadline = std::chrono::steady_clock::now() + 5s;
+              while (arrivals.load(std::memory_order_acquire) != kWorkers &&
+                     !abort.load(std::memory_order_acquire)) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                  timed_out.store(true, std::memory_order_relaxed);
+                  abort.store(true, std::memory_order_release);
+                  break;
+                }
+                std::this_thread::yield();
+              }
+            }
+            child.nodeData.marker = kChildMarker;
+            child.nodeData.complement = ~kChildMarker;
+            initialized.fetch_add(1, std::memory_order_relaxed);
+          };
+          results[i] = root.getOrInitChildren<true>(nullptr, initialize);
+          valid[i] = CheckPublishedChildren(results[i], &root);
+        } catch (...) {
+          errors[i] = std::current_exception();
+          abort.store(true, std::memory_order_release);
+        }
+      });
+    }
+  } catch (...) {
+    // Release and join workers even if only part of the team was created.
+    abort.store(true, std::memory_order_release);
+    start.store(true, std::memory_order_release);
+    for (auto& worker : workers) worker.join();
+    root.cleanChildren(true);
+    FAIL() << "Could not create all child-publication workers";
+  }
+  start.store(true, std::memory_order_release);
+  for (auto& worker : workers) worker.join();
+
+  EXPECT_FALSE(timed_out.load());
+  EXPECT_FALSE(abort.load());
+  EXPECT_EQ(arrivals.load(), kWorkers);
+  EXPECT_EQ(initialized.load(), kWorkers * 8);
+  for (size_t i = 0; i < kWorkers; ++i) {
+    EXPECT_EQ(errors[i], nullptr);
+    EXPECT_TRUE(valid[i]);
+    EXPECT_EQ(results[i], results[0]);
+  }
+  EXPECT_NE(results[0], nullptr);
+  EXPECT_EQ(root.getChildren<true>(), results[0]);
+  EXPECT_EQ(root.getChildren<false>(), results[0]);
+  root.cleanChildren(true);
+}
 
 TEST(PoissonThreadPoolTest, AsyncExceptionsJoinOutstandingWorkers) {
   using Pool = PoissonRecon::ThreadPool;
