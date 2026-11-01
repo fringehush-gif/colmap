@@ -8,10 +8,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Annotated, Any, get_type_hints
 
-from caspar_solver_template import (
-    patch_solver_header_template,
-    patch_solver_template,
-)
+from caspar_solver_template import patch_solver_templates
 from jinja2 import ChoiceLoader, DictLoader
 
 # Must be set before importing symforce.symbolic
@@ -412,12 +409,13 @@ if original_loader is None:
     raise RuntimeError("Caspar template loader is unavailable")
 source, _, _ = original_loader.get_source(template_env, "solver.cc.jinja")
 header, _, _ = original_loader.get_source(template_env, "solver.h.jinja")
+source, header = patch_solver_templates(source, header)
 template_env.loader = ChoiceLoader(
     [
         DictLoader(
             {
-                "solver.cc.jinja": patch_solver_template(source),
-                "solver.h.jinja": patch_solver_header_template(header),
+                "solver.cc.jinja": source,
+                "solver.h.jinja": header,
             }
         ),
         original_loader,
