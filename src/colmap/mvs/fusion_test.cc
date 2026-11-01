@@ -476,6 +476,19 @@ struct StereoFusionExactDepthTestPeer {
     return count;
   }
 
+  static char PixelMaskValue(const StereoFusion& fusion,
+                             size_t image,
+                             size_t row,
+                             size_t col) {
+    return fusion.fused_pixel_masks_.at(image).Get(row, col);
+  }
+  static size_t DepthBorrowCount(const StereoFusion& fusion) {
+    size_t reads = 0;
+    for (const auto& worker : fusion.task_neighborhood_reads_) {
+      reads += worker.pointer_reads;
+    }
+    return reads;
+  }
   static bool HasFullRamInputs(const StereoFusion& fusion) {
     return !fusion.full_ram_inputs_.empty();
   }
@@ -649,8 +662,8 @@ TEST(StereoFusion, NormalWindowUsesExactWholeOwnerThenTiledFallback) {
   StereoFusion fusion(options, base.workspace_path, "COLMAP", "", "geometric");
   StereoFusionExactDepthTestPeer::PrepareRing(fusion, base, 2, false);
   StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion);
-  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 1);
-  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 1);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 2);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 2);
   const auto before = fusion.GetBoundedCacheStats();
   ASSERT_TRUE(before);
   EXPECT_EQ(before->normal_tile_loads, 0);
@@ -666,9 +679,9 @@ TEST(StereoFusion, NormalWindowUsesExactWholeOwnerThenTiledFallback) {
   EXPECT_FLOAT_EQ(whole->GetNormal(10, 16)(1), -16.5f);
   EXPECT_EQ(fusion.GetBoundedCacheStats()->hits, before->hits);
   EXPECT_EQ(fusion.GetNormalTileRingStats().misses, 0);
-  // View1 is outside the hot window but its original depth remains admitted.
+  // View2 is outside the hot window but its original depth remains admitted.
   // Exercise its exact tile while the whole-normal owner is still pinned.
-  auto tile = StereoFusionExactDepthTestPeer::AcquireView(fusion, 1, 10, 16);
+  auto tile = StereoFusionExactDepthTestPeer::AcquireView(fusion, 2, 10, 16);
   ASSERT_TRUE(tile);
   EXPECT_LT(tile->normal_map.GetWidth(), 17);
   EXPECT_FLOAT_EQ(tile->GetNormal(10, 16)(0), 186.25f);
@@ -793,7 +806,7 @@ TEST(StereoFusion, NormalWindowStopAndLoadFailurePublishNothing) {
     restored.write(bytes.data(), bytes.size());
   }
   StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion);
-  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 2);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 4);
   StereoFusionExactDepthTestPeer::ClearNormalWindow(fusion);
 }
 TEST(StereoFusion, CompleteTileNeighborhoodAliasesWholeImageOwners) {
@@ -915,7 +928,7 @@ TEST(StereoFusion, NormalWindowPinsPreserveDepthAndBudgetLoaderExtra) {
   EXPECT_EQ(scratch.components.bitmap, pins.components.bitmap);
 }
 
-TEST(StereoFusion, NormalWindowPinsPriorityCapAndTinyFallback) {
+TEST(StereoFusion, NormalWindowPinsUseAvailableBudgetAndTinyFallback) {
   using internal::NormalWindowFusionPins;
   EXPECT_TRUE(NormalWindowFusionPins({}, {}, {}, {}, 0).normal.empty());
   const auto tiny = NormalWindowFusionPins({10}, {8}, {16}, {16}, 17);
@@ -926,7 +939,8 @@ TEST(StereoFusion, NormalWindowPinsPriorityCapAndTinyFallback) {
                                           std::vector<size_t>(12, 1),
                                           std::vector<size_t>(12, 1),
                                           100);
-  EXPECT_EQ(cap.normal, (std::vector<size_t>{0, 1, 2, 3, 4, 5, 6, 7}));
+  EXPECT_EQ(cap.normal,
+            (std::vector<size_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}));
   EXPECT_EQ(cap.components.depth.size(), 12);
   // Normals may replace only nonroot bitmap pins, never the baseline depths.
   const auto mixed = NormalWindowFusionPins(
@@ -937,6 +951,20 @@ TEST(StereoFusion, NormalWindowPinsPriorityCapAndTinyFallback) {
   EXPECT_ANY_THROW(NormalWindowFusionPins({1}, {1}, {2}, {1}, 16));
   const size_t max = std::numeric_limits<size_t>::max();
   EXPECT_TRUE(NormalWindowFusionPins({max}, {1}, {1}, {1}, max).normal.empty());
+}
+
+TEST(StereoFusion, NormalWindowPinsShareScratchAndSkipOversizedLoads) {
+  using internal::NormalWindowFusionPins;
+  const auto exact =
+      NormalWindowFusionPins({1, 1, 1}, {1, 1, 1}, {2, 2, 2}, {3, 7, 3}, 15);
+  EXPECT_EQ(exact.normal, (std::vector<size_t>{0, 1}));
+  EXPECT_EQ(exact.components.bitmap, (std::vector<size_t>{0, 1, 2}));
+  EXPECT_EQ(exact.largest_normal_extra, 5);
+  const auto smaller =
+      NormalWindowFusionPins({1, 1, 1}, {1, 1, 1}, {2, 2, 2}, {3, 7, 3}, 14);
+  EXPECT_EQ(smaller.normal, (std::vector<size_t>{0, 2}));
+  EXPECT_EQ(smaller.components.bitmap, exact.components.bitmap);
+  EXPECT_EQ(smaller.largest_normal_extra, 1);
 }
 
 TEST(StereoFusion, NormalTileRingReusesFp32CroppedTiles) {
@@ -2628,6 +2656,136 @@ TEST(StereoFusion, ZeroMinimumSkipsEmptySamples) {
         ASSERT_EQ(visibility[0].size(), 1);
       }
     }
+  }
+}
+
+TEST(StereoFusion, BoundedNeighborhoodSeedsNonpositiveDepthBeforeRows) {
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  const auto names = ReadTextFileLines(root / "stereo" / "fusion.cfg");
+  ASSERT_EQ(names.size(), 2);
+  const auto write_depth = [&](float value) {
+    Mat<float> depth(30, 20, 1);
+    depth.Fill(value);
+    for (const auto& name : names) {
+      depth.Write(root / "stereo" / "depth_maps" / (name + ".geometric.bin"));
+    }
+  };
+  Mat<float> probe_depth(1, 1, 1);
+  probe_depth.Fill(0.0f);
+  internal::FusionPixelMask probe_mask(1, 1);
+  probe_mask.ExcludeNonpositiveDepth(internal::FusionFloatMapView(probe_depth));
+  const bool seed_supported = probe_mask.Get(0, 0) != 0;
+  for (const bool components : {false, true}) {
+    SCOPED_TRACE(components);
+    write_depth(0.0f);
+    StereoFusionOptions options;
+    options.num_threads = 4;
+    options.min_num_pixels = options.max_num_pixels = 2;
+    options.bounded_cache = true;
+    options.bounded_cache_components = components;
+    options.bounded_cache_neighborhood = true;
+    options.bounded_cache_diagnostics = true;
+    options.cache_size = 1.0;
+    StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+    fusion.Run();
+    EXPECT_TRUE(fusion.GetFusedPoints().empty());
+    EXPECT_TRUE(fusion.GetFusedPointsVisibility().empty());
+    const auto stats = fusion.GetBoundedCacheStats();
+    ASSERT_TRUE(stats);
+    EXPECT_GT(stats->loads, 0);
+    EXPECT_EQ(stats->reserved_bytes, 0);
+    EXPECT_LE(stats->peak_charged_bytes, stats->capacity_bytes);
+    for (size_t image = 0; image < 2; ++image) {
+      for (size_t row = 0; row < 20; ++row) {
+        for (size_t col = 0; col < 30; ++col) {
+          EXPECT_EQ(StereoFusionExactDepthTestPeer::PixelMaskValue(
+                        fusion, image, row, col),
+                    seed_supported ? 1 : 0);
+        }
+      }
+    }
+    if (seed_supported) {
+      EXPECT_EQ(StereoFusionExactDepthTestPeer::DepthBorrowCount(fusion), 0);
+    }
+    // A fresh Run must not retain exclusions from a previous depth generation.
+    write_depth(5.0f);
+    fusion.Run();
+    EXPECT_FALSE(fusion.GetFusedPoints().empty());
+  }
+}
+
+TEST(StereoFusion, CompleteBoundedWindowBorrowsResidentViewsAndCancels) {
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  StereoFusionOptions options;
+  options.num_threads = 1;
+  options.min_num_pixels = options.max_num_pixels = 2;
+  options.bounded_cache = true;
+  options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.cache_size = 1.0;
+  StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+  bool observed = false;
+  fusion.SetCheckIfStoppedFunc([&] {
+    observed |= StereoFusionExactDepthTestPeer::HasFullRamInputs(fusion);
+    return observed;
+  });
+  fusion.Run();
+  EXPECT_TRUE(observed);
+  EXPECT_TRUE(fusion.GetFusedPoints().empty());
+  EXPECT_FALSE(StereoFusionExactDepthTestPeer::HasFullRamInputs(fusion));
+  ASSERT_TRUE(fusion.GetBoundedCacheStats());
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  observed = false;
+  fusion.SetCheckIfStoppedFunc([&] {
+    observed |= StereoFusionExactDepthTestPeer::HasFullRamInputs(fusion);
+    return false;
+  });
+  fusion.Run();
+  EXPECT_TRUE(observed);
+  EXPECT_FALSE(fusion.GetFusedPoints().empty());
+  EXPECT_FALSE(StereoFusionExactDepthTestPeer::HasFullRamInputs(fusion));
+  const auto names = ReadTextFileLines(root / "stereo" / "fusion.cfg");
+  Mat<float> depth(15, 10, 1);
+  depth.Fill(5.0f);
+  Mat<float> normal(15, 10, 3);
+  normal.Fill(0.0f);
+  for (size_t row = 0; row < 10; ++row) {
+    for (size_t col = 0; col < 15; ++col) normal.Set(row, col, 2, 1.0f);
+  }
+  for (const auto& name : names) {
+    depth.Write(root / "stereo" / "depth_maps" / (name + ".geometric.bin"));
+    normal.Write(root / "stereo" / "normal_maps" / (name + ".geometric.bin"));
+  }
+  options.bounded_cache_compact_rgb = true;
+  StereoFusion compact(options, root, "COLMAP", "", "geometric");
+  bool compact_resident = false;
+  compact.SetCheckIfStoppedFunc([&] {
+    compact_resident |=
+        StereoFusionExactDepthTestPeer::HasFullRamInputs(compact);
+    return false;
+  });
+  compact.Run();
+  EXPECT_FALSE(compact_resident);
+  EXPECT_FALSE(compact.GetFusedPoints().empty());
+  auto generic_options = options;
+  generic_options.bounded_cache_neighborhood = false;
+  StereoFusion generic(generic_options, root, "COLMAP", "", "geometric");
+  generic.Run();
+  ASSERT_EQ(compact.GetFusedPoints().size(), generic.GetFusedPoints().size());
+  EXPECT_EQ(compact.GetFusedPointsVisibility(),
+            generic.GetFusedPointsVisibility());
+  for (size_t i = 0; i < compact.GetFusedPoints().size(); ++i) {
+    const auto& actual = compact.GetFusedPoints()[i];
+    const auto& expected = generic.GetFusedPoints()[i];
+    EXPECT_FLOAT_EQ(actual.x, expected.x);
+    EXPECT_FLOAT_EQ(actual.y, expected.y);
+    EXPECT_FLOAT_EQ(actual.z, expected.z);
+    EXPECT_FLOAT_EQ(actual.nx, expected.nx);
+    EXPECT_FLOAT_EQ(actual.ny, expected.ny);
+    EXPECT_FLOAT_EQ(actual.nz, expected.nz);
+    EXPECT_EQ(actual.r, expected.r);
+    EXPECT_EQ(actual.g, expected.g);
+    EXPECT_EQ(actual.b, expected.b);
   }
 }
 
