@@ -92,13 +92,38 @@ template <typename Allocate>
 void SparseAllocation(const char* operation,
                       Allocate&& allocate,
                       const SparseSourceTestFailure* failure = nullptr) {
-  // Never reinterpret an earlier async/device error as this allocation's OOM.
-  SparseRuntime(cudaPeekAtLastError(),
-                "preexisting CUDA error before sparse allocation");
-  const auto status = SparseOperation(failure, operation, allocate);
-  if (status == cudaErrorMemoryAllocation || status == cudaErrorNotSupported)
-    ConsumeOwnRefusal(status);
-  SparseRuntime(status, operation, true);
+  // Allocation lambdas validate that failed calls left no unresolved output.
+  const auto result = CudaTryAllocation(
+      [&] { return SparseOperation(failure, operation, allocate); },
+      [] { return true; },
+      true);
+  switch (result.origin) {
+    case CudaAllocationOrigin::kSuccess:
+      return;
+    case CudaAllocationOrigin::kRefused:
+      throw SparseCallFailure(operation,
+                              static_cast<int>(result.code),
+                              result.code == cudaErrorNotSupported
+                                  ? SparseFailureKind::kUnsupported
+                                  : SparseFailureKind::kResource);
+    case CudaAllocationOrigin::kPriorError:
+      throw SparseCallFailure("preexisting CUDA error before sparse allocation",
+                              static_cast<int>(result.code),
+                              SparseFailureKind::kFatal);
+    case CudaAllocationOrigin::kLastErrorMismatch:
+      throw SparseCallFailure("unexpected CUDA error after sparse refusal",
+                              static_cast<int>(result.code),
+                              SparseFailureKind::kFatal);
+    case CudaAllocationOrigin::kUnresolvedOutput:
+      throw SparseCallFailure("unresolved sparse allocation output",
+                              static_cast<int>(result.code),
+                              SparseFailureKind::kFatal);
+    case CudaAllocationOrigin::kRuntimeFailure:
+      throw SparseCallFailure(
+          operation, static_cast<int>(result.code), SparseFailureKind::kFatal);
+  }
+  throw SparseCallFailure(
+      "unrecognized sparse allocation result", -1, SparseFailureKind::kFatal);
 }
 #ifdef COLMAP_SPARSE_SOURCE_RUNTIME
 void SparseDriver(CUresult status,
@@ -164,7 +189,9 @@ class SourceDeviceScope {
   ~SourceDeviceScope() {
     if (changed_ && !restored_) {
       const auto status = cudaSetDevice(previous_);
-      if (status != cudaSuccess)
+      if (status != cudaSuccess &&
+          !CudaCleanupScope::ObserveCleanup("cudaSetDevice source view restore",
+                                            static_cast<int>(status)))
         LOG(FATAL) << "Terminal source-view device restore failure: "
                    << static_cast<int>(status);
     }
@@ -544,10 +571,15 @@ struct PatchMatchSparseSources::Impl {
   }
   ~Impl() {
     if (abandoned) return;  // Explicit failed cleanup was already surfaced.
-    if (active_views.load() != 0)
+    if (active_views.load() != 0) {
+      if (CudaCleanupScope::ObserveCleanup("sparse bank has live texture views",
+                                           -1))
+        return;
       LOG(FATAL) << "Sparse bank destroyed with live texture views";
+    }
     const auto result = Cleanup();
-    if (result.operation)
+    if (result.operation && !CudaCleanupScope::ObserveCleanup(
+                                result.operation, result.code, result.driver))
       LOG(FATAL) << "Terminal sparse cleanup failure: " << result.operation
                  << " code " << result.code;
   }
@@ -897,7 +929,9 @@ struct PatchMatchSourceArray<T>::Impl {
     try {
       Close();
     } catch (const SparseCallFailure& error) {
-      LOG(FATAL) << "Terminal source-view cleanup failure: " << error.what();
+      if (!CudaCleanupScope::ObserveCleanup(
+              error.operation, error.code, error.driver))
+        LOG(FATAL) << "Terminal source-view cleanup failure: " << error.what();
     }
   }
 };

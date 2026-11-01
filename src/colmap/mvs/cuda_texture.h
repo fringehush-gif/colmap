@@ -60,10 +60,10 @@ class CudaArrayLayeredTexture {
   const size_t height_;
   const size_t depth_;
 
-  cudaArray_t array_;
+  cudaArray_t array_ = nullptr;
   const cudaTextureDesc texture_desc_;
   cudaResourceDesc resource_desc_;
-  cudaTextureObject_t texture_;
+  cudaTextureObject_t texture_ = 0;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -196,27 +196,43 @@ CudaArrayLayeredTexture<T>::CudaArrayLayeredTexture(
 
   cudaExtent extent = make_cudaExtent(width_, height_, depth_);
   const cudaChannelFormatDesc fmt = cudaCreateChannelDesc<T>();
-  CUDA_SAFE_CALL(cudaMalloc3DArray(&array_, &fmt, extent, cudaArrayLayered));
+  CUDA_SAFE_ALLOCATE(
+      "cudaMalloc3DArray",
+      array_,
+      cudaMalloc3DArray(&array_, &fmt, extent, cudaArrayLayered));
 
   memset(&resource_desc_, 0, sizeof(resource_desc_));
   resource_desc_.resType = cudaResourceTypeArray;
   resource_desc_.res.array.array = array_;
 
   try {
-    CUDA_SAFE_CALL(cudaCreateTextureObject(
-        &texture_, &resource_desc_, &texture_desc_, nullptr));
+    CUDA_SAFE_ALLOCATE(
+        "cudaCreateTextureObject",
+        texture_,
+        cudaCreateTextureObject(
+            &texture_, &resource_desc_, &texture_desc_, nullptr));
   } catch (...) {
     // A failed constructor does not run the destructor. Preserve the original
     // texture-creation exception even if this best-effort cleanup fails.
-    (void)cudaFreeArray(array_);
+    const auto status = cudaFreeArray(array_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFreeArray",
+                                           static_cast<int>(status));
     throw;
   }
 }
 
 template <typename T>
 CudaArrayLayeredTexture<T>::~CudaArrayLayeredTexture() {
-  CUDA_SAFE_CALL(cudaDestroyTextureObject(texture_));
-  CUDA_SAFE_CALL(cudaFreeArray(array_));
+  const auto texture_status = cudaDestroyTextureObject(texture_);
+  if (CudaCleanupScope::ObserveCleanup("cudaDestroyTextureObject",
+                                       static_cast<int>(texture_status))) {
+    const auto array_status = cudaFreeArray(array_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFreeArray",
+                                           static_cast<int>(array_status));
+  } else {
+    CUDA_SAFE_CALL(texture_status);
+    CUDA_SAFE_CALL(cudaFreeArray(array_));
+  }
 }
 
 template <typename T>

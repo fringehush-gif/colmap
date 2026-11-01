@@ -5,6 +5,8 @@
 #include "colmap/util/logging.h"
 #include "colmap/util/string.h"
 
+#include <exception>
+
 namespace colmap {
 
 std::string GetCudaErrorMessage(const cudaError_t error) {
@@ -58,6 +60,89 @@ void CudaSafeCall(const cudaError_t error,
                                      file.c_str(),
                                      line,
                                      GetCudaErrorMessage(error).c_str());
+  }
+}
+
+CudaAllocationRefused::CudaAllocationRefused(const char* operation,
+                                             cudaError_t code)
+    : std::invalid_argument(
+          StringPrintf("%s: %s", operation, GetCudaErrorMessage(code).c_str())),
+      operation_(operation),
+      code_(code) {}
+
+bool CudaIsAllocationRefusal(cudaError_t status, bool allow_unsupported) {
+#ifdef COLMAP_HIP_ENABLED
+  return status == hipErrorOutOfMemory ||
+         (allow_unsupported && status == hipErrorNotSupported);
+#else
+  return status == cudaErrorMemoryAllocation ||
+         (allow_unsupported && status == cudaErrorNotSupported);
+#endif
+}
+
+void CudaAllocationFailure(const char* operation,
+                           CudaAllocationResult result,
+                           const char* file,
+                           int line) {
+  const char* reason = "runtime failure";
+  switch (result.origin) {
+    case CudaAllocationOrigin::kPriorError:
+      reason = "preexisting error";
+      break;
+    case CudaAllocationOrigin::kLastErrorMismatch:
+      reason = "last-error mismatch";
+      break;
+    case CudaAllocationOrigin::kUnresolvedOutput:
+      reason = "unresolved output";
+      break;
+    case CudaAllocationOrigin::kRuntimeFailure:
+      break;
+    case CudaAllocationOrigin::kSuccess:
+    case CudaAllocationOrigin::kRefused:
+      reason = "invalid failure origin";
+      break;
+  }
+  LOG(FATAL_THROW) << StringPrintf("CUDA allocation %s: %s at %s:%d - %s",
+                                   operation,
+                                   reason,
+                                   file,
+                                   line,
+                                   GetCudaErrorMessage(result.code).c_str());
+  std::terminate();
+}
+
+thread_local CudaCleanupScope* CudaCleanupScope::current_ = nullptr;
+
+CudaCleanupScope::CudaCleanupScope() noexcept : previous_(current_) {
+  current_ = this;
+}
+CudaCleanupScope::~CudaCleanupScope() noexcept {
+  if (current_ != this) std::terminate();
+  current_ = previous_;
+}
+bool CudaCleanupScope::ObserveCleanup(const char* operation,
+                                      int code,
+                                      bool driver) noexcept {
+  const bool active = current_ != nullptr;
+  if (code != 0) {
+    for (auto* scope = current_; scope != nullptr; scope = scope->previous_) {
+      if (scope->operation_ == nullptr) {
+        scope->operation_ =
+            operation != nullptr ? operation : "unknown operation";
+        scope->code_ = code;
+        scope->driver_ = driver;
+      }
+    }
+  }
+  return active;
+}
+void CudaCleanupScope::Check() const {
+  if (operation_ != nullptr) {
+    std::throw_with_nested(
+        std::runtime_error(StringPrintf("CUDA %s cleanup %s failed (code %d)",
+                                        driver_ ? "driver" : "runtime",
+                                        operation_,
+                                        code_)));
   }
 }
 
