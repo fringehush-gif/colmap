@@ -41,6 +41,15 @@
 
 namespace colmap {
 namespace mvs {
+namespace {
+std::vector<char> UnpackSnapshot(
+    const internal::FusionPixelMask::PackedSnapshot& snapshot) {
+  std::vector<char> result(snapshot.size(), 1);
+  snapshot.ForEachUnset([&](size_t offset) { result.at(offset) = 0; });
+  return result;
+}
+}  // namespace
+
 TEST(StereoFusion, ResidentNonpositiveDepthSeedsMaskWithoutChangingSpecials) {
   if (sizeof(float) != sizeof(uint32_t) ||
       !std::numeric_limits<float>::is_iec559) {
@@ -96,7 +105,7 @@ TEST(StereoFusion, ResidentNonpositiveDepthSeedsMaskWithoutChangingSpecials) {
     std::feclearexcept(FE_ALL_EXCEPT);
     mask.ExcludeNonpositiveDepth(internal::FusionFloatMapView(depth));
     EXPECT_EQ(std::fetestexcept(FE_ALL_EXCEPT), 0);
-    EXPECT_EQ(mask.Snapshot(0, kSize), expected);
+    EXPECT_EQ(UnpackSnapshot(mask.Snapshot(0, kSize)), expected);
   }
   EXPECT_EQ(
       std::memcmp(
@@ -111,11 +120,12 @@ TEST(StereoFusion, ResidentNonpositiveDepthSeedsMaskWithoutChangingSpecials) {
     if (failure == 3) bad.data = nullptr;
     internal::FusionPixelMask untouched(kWidth, kHeight);
     untouched.ExcludeNonpositiveDepth(bad);
-    EXPECT_EQ(untouched.Snapshot(0, kSize), std::vector<char>(kSize, 0));
+    EXPECT_EQ(UnpackSnapshot(untouched.Snapshot(0, kSize)),
+              std::vector<char>(kSize, 0));
   }
   internal::FusionPixelMask empty;
   empty.ExcludeNonpositiveDepth(internal::FusionFloatMapView());
-  EXPECT_TRUE(empty.Snapshot(0, 0).empty());
+  EXPECT_TRUE(UnpackSnapshot(empty.Snapshot(0, 0)).empty());
 }
 
 TEST(StereoFusion, VisibilityBlocksPreserveListsAcrossBoundariesAndReuse) {
@@ -219,20 +229,21 @@ TEST(StereoFusion, AtomicPixelMaskInitializesBoundsAndMoves) {
       std::is_nothrow_move_constructible_v<internal::FusionPixelMask>);
   static_assert(!std::is_copy_constructible_v<internal::FusionPixelMask>);
   internal::FusionPixelMask empty;
-  EXPECT_TRUE(empty.Snapshot(0, 0).empty());
+  EXPECT_TRUE(UnpackSnapshot(empty.Snapshot(0, 0)).empty());
   EXPECT_THROW(empty.Get(0, 0), std::out_of_range);
   std::vector<internal::FusionPixelMask> masks(1);
   masks[0] = internal::FusionPixelMask(3, 2);
-  EXPECT_EQ(masks[0].Snapshot(0, 6), std::vector<char>(6, 0));
+  EXPECT_EQ(UnpackSnapshot(masks[0].Snapshot(0, 6)), std::vector<char>(6, 0));
   masks[0].Set(0, 1, 1);
   masks[0].Set(1, 2, 1);
   masks.resize(4);
   EXPECT_EQ(masks[0].Get(0, 1), 1);
   EXPECT_EQ(masks[0].Get(1, 0), 0);
-  EXPECT_EQ(masks[0].Snapshot(1, 6), (std::vector<char>{1, 0, 0, 0, 1}));
-  EXPECT_TRUE(masks[0].Snapshot(6, 6).empty());
-  EXPECT_THROW(masks[0].Snapshot(4, 3), std::out_of_range);
-  EXPECT_THROW(masks[0].Snapshot(2, 7), std::out_of_range);
+  EXPECT_EQ(UnpackSnapshot(masks[0].Snapshot(1, 6)),
+            (std::vector<char>{1, 0, 0, 0, 1}));
+  EXPECT_TRUE(UnpackSnapshot(masks[0].Snapshot(6, 6)).empty());
+  EXPECT_THROW(UnpackSnapshot(masks[0].Snapshot(4, 3)), std::out_of_range);
+  EXPECT_THROW(UnpackSnapshot(masks[0].Snapshot(2, 7)), std::out_of_range);
   EXPECT_THROW(masks[0].Set(2, 0, 1), std::out_of_range);
   EXPECT_THROW(masks[0].Get(2, 0), std::out_of_range);
 }
@@ -246,12 +257,15 @@ TEST(StereoFusion, PackedAtomicPixelMaskPreservesTailsAliasesAndMoves) {
     mask.Set(index / kWidth, index % kWidth, 1);
     expected[index] = 1;
   }
-  EXPECT_EQ(mask.Snapshot(0, kPixels), expected);
-  EXPECT_EQ(mask.Snapshot(61, 67), (std::vector<char>{0, 0, 1, 1, 0, 0}));
-  EXPECT_EQ(mask.Snapshot(kPixels - 2, kPixels), (std::vector<char>{0, 1}));
-  EXPECT_TRUE(mask.Snapshot(kPixels, kPixels).empty());
-  EXPECT_THROW(mask.Snapshot(kPixels + 1, kPixels + 1), std::out_of_range);
-  EXPECT_THROW(mask.Snapshot(64, 63), std::out_of_range);
+  EXPECT_EQ(UnpackSnapshot(mask.Snapshot(0, kPixels)), expected);
+  EXPECT_EQ(UnpackSnapshot(mask.Snapshot(61, 67)),
+            (std::vector<char>{0, 0, 1, 1, 0, 0}));
+  EXPECT_EQ(UnpackSnapshot(mask.Snapshot(kPixels - 2, kPixels)),
+            (std::vector<char>{0, 1}));
+  EXPECT_TRUE(UnpackSnapshot(mask.Snapshot(kPixels, kPixels)).empty());
+  EXPECT_THROW(UnpackSnapshot(mask.Snapshot(kPixels + 1, kPixels + 1)),
+               std::out_of_range);
+  EXPECT_THROW(UnpackSnapshot(mask.Snapshot(64, 63)), std::out_of_range);
   EXPECT_THROW(mask.Get(kHeight, 0), std::out_of_range);
   EXPECT_THROW(mask.Get(0, 127), std::out_of_range);
   EXPECT_THROW(mask.Set(0, 127, 0), std::out_of_range);
@@ -263,24 +277,96 @@ TEST(StereoFusion, PackedAtomicPixelMaskPreservesTailsAliasesAndMoves) {
   EXPECT_THROW(mask.Get(wrapped_row, kWidth - 1), std::out_of_range);
   mask.Set(wrapped_row, kWidth, 0);
   expected[0] = 0;
-  EXPECT_EQ(mask.Snapshot(0, kPixels), expected);
+  EXPECT_EQ(UnpackSnapshot(mask.Snapshot(0, kPixels)), expected);
   EXPECT_THROW(mask.Set(0, 0, 2), std::invalid_argument);
-  EXPECT_EQ(mask.Snapshot(0, kPixels), expected);
+  EXPECT_EQ(UnpackSnapshot(mask.Snapshot(0, kPixels)), expected);
 
   internal::FusionPixelMask moved(std::move(mask));
-  EXPECT_EQ(moved.Snapshot(0, kPixels), expected);
-  EXPECT_TRUE(mask.Snapshot(0, 0).empty());
-  EXPECT_THROW(mask.Snapshot(1, 1), std::out_of_range);
+  EXPECT_EQ(UnpackSnapshot(moved.Snapshot(0, kPixels)), expected);
+  EXPECT_TRUE(UnpackSnapshot(mask.Snapshot(0, 0)).empty());
+  EXPECT_THROW(UnpackSnapshot(mask.Snapshot(1, 1)), std::out_of_range);
   EXPECT_THROW(mask.Get(0, 0), std::out_of_range);
   internal::FusionPixelMask assigned(1, 1);
   assigned = std::move(moved);
-  EXPECT_EQ(assigned.Snapshot(0, kPixels), expected);
-  EXPECT_TRUE(moved.Snapshot(0, 0).empty());
-  EXPECT_THROW(moved.Snapshot(1, 1), std::out_of_range);
+  EXPECT_EQ(UnpackSnapshot(assigned.Snapshot(0, kPixels)), expected);
+  EXPECT_TRUE(UnpackSnapshot(moved.Snapshot(0, 0)).empty());
+  EXPECT_THROW(UnpackSnapshot(moved.Snapshot(1, 1)), std::out_of_range);
   EXPECT_THROW(moved.Set(0, 0, 1), std::out_of_range);
   internal::FusionPixelMask zero_height(std::numeric_limits<size_t>::max(), 0);
-  EXPECT_TRUE(zero_height.Snapshot(0, 0).empty());
+  EXPECT_TRUE(UnpackSnapshot(zero_height.Snapshot(0, 0)).empty());
   EXPECT_THROW(zero_height.Get(0, 0), std::out_of_range);
+}
+
+TEST(StereoFusion, PackedSnapshotBoundariesMovesAndImmutability) {
+  internal::FusionPixelMask mask(160, 1);
+  for (const size_t index : {size_t{1}, size_t{63}, size_t{64}, size_t{129}})
+    mask.Set(0, index, 1);
+  auto snapshot = mask.Snapshot(1, 130);
+  ASSERT_EQ(snapshot.size(), 129);
+  const auto before = UnpackSnapshot(snapshot);
+  std::vector<char> expected(129, 0);
+  for (const size_t offset : {size_t{0}, size_t{62}, size_t{63}, size_t{128}})
+    expected[offset] = 1;
+  EXPECT_EQ(before, expected);
+  std::atomic<bool> start{false};
+  std::thread writer([&] {
+    while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+    for (size_t pass = 0; pass < 128; ++pass) {
+      for (size_t index = 0; index < 160; ++index)
+        mask.Set(0, index, static_cast<char>(pass & 1));
+    }
+  });
+  start.store(true, std::memory_order_release);
+  for (int pass = 0; pass < 128; ++pass)
+    EXPECT_EQ(UnpackSnapshot(snapshot), before);
+  writer.join();
+  EXPECT_EQ(UnpackSnapshot(snapshot), before);
+  auto moved = std::move(snapshot);
+  EXPECT_TRUE(snapshot.empty());
+  snapshot.ForEachUnset([](size_t) { ADD_FAILURE() << "moved-from snapshot"; });
+  EXPECT_EQ(UnpackSnapshot(moved), before);
+  internal::FusionPixelMask::PackedSnapshot assigned;
+  assigned = std::move(moved);
+  EXPECT_TRUE(moved.empty());
+  EXPECT_EQ(UnpackSnapshot(assigned), before);
+  const auto empty = mask.Snapshot(159, 159);
+  EXPECT_TRUE(empty.empty());
+  EXPECT_EQ(empty.size(), 0);
+  empty.ForEachUnset([](size_t) { ADD_FAILURE() << "empty snapshot"; });
+}
+
+TEST(StereoFusion, PackedSnapshotVisitsUnsetInOrderAcrossBoundaries) {
+  constexpr size_t kSize = 193;
+  for (const int pattern : {0, 1, 2, 3}) {
+    internal::FusionPixelMask mask(kSize, 1);
+    std::vector<char> expected(kSize);
+    for (size_t i = 0; i < kSize; ++i) {
+      const bool set = pattern == 1 || (pattern == 2 && (i % 3 == 0)) ||
+                       (pattern == 3 && i != 63 && i != 64 && i != 129);
+      if (set) mask.Set(0, i, 1);
+      expected[i] = static_cast<char>(set);
+    }
+    for (const auto& [first, last] : {std::pair<size_t, size_t>{0, 0},
+                                      {1, 2},
+                                      {1, 63},
+                                      {1, 64},
+                                      {1, 65},
+                                      {63, 130},
+                                      {64, 128},
+                                      {65, 193},
+                                      {0, kSize},
+                                      {kSize, kSize}}) {
+      SCOPED_TRACE(pattern);
+      SCOPED_TRACE(first);
+      SCOPED_TRACE(last);
+      const auto snapshot = mask.Snapshot(first, last);
+      std::vector<size_t> actual, reference;
+      snapshot.ForEachUnset([&](size_t offset) { actual.push_back(offset); });
+      for (size_t i = first; i < last; ++i)
+        if (!expected[i]) reference.push_back(i - first);
+      EXPECT_EQ(actual, reference);
+    }
+  }
 }
 
 TEST(StereoFusion, PackedAtomicPixelMaskKeepsDisjointConcurrentBits) {
@@ -299,14 +385,14 @@ TEST(StereoFusion, PackedAtomicPixelMaskKeepsDisjointConcurrentBits) {
   std::thread first(write, 0), second(write, 1);
   first.join();
   second.join();
-  const auto snapshot = mask.Snapshot(0, kRows * kBits);
+  const auto snapshot = UnpackSnapshot(mask.Snapshot(0, kRows * kBits));
   EXPECT_TRUE(std::all_of(
       snapshot.begin(), snapshot.end(), [](char value) { return value == 1; }));
   mask.Set(17, 31, 0);
   for (size_t col = 0; col < kBits; ++col)
     EXPECT_EQ(mask.Get(17, col), col == 31 ? 0 : 1);
   mask.Set(17, 31, 1);
-  EXPECT_EQ(mask.Snapshot(17 * kBits + 29, 17 * kBits + 34),
+  EXPECT_EQ(UnpackSnapshot(mask.Snapshot(17 * kBits + 29, 17 * kBits + 34)),
             std::vector<char>(5, 1));
 }
 
@@ -326,7 +412,7 @@ TEST(StereoFusion, AtomicPixelMaskAllowsConcurrentStoresAndSnapshots) {
   std::thread second(write);
   start.store(true, std::memory_order_release);
   for (int repeat = 0; repeat < 8; ++repeat) {
-    const auto snapshot = mask.Snapshot(0, kSide * kSide);
+    const auto snapshot = UnpackSnapshot(mask.Snapshot(0, kSide * kSide));
     EXPECT_TRUE(std::all_of(snapshot.begin(), snapshot.end(), [](char value) {
       return value == 0 || value == 1;
     }));
@@ -335,7 +421,7 @@ TEST(StereoFusion, AtomicPixelMaskAllowsConcurrentStoresAndSnapshots) {
   }
   first.join();
   second.join();
-  const auto snapshot = mask.Snapshot(0, kSide * kSide);
+  const auto snapshot = UnpackSnapshot(mask.Snapshot(0, kSide * kSide));
   EXPECT_TRUE(std::all_of(
       snapshot.begin(), snapshot.end(), [](char value) { return value == 1; }));
 }

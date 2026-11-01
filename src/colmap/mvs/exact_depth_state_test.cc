@@ -32,8 +32,13 @@ struct StereoFusionExactDepthTestPeer {
     std::vector<std::vector<char>> masks;
     for (size_t index = 0; index < fusion.fused_pixel_masks_.size(); ++index) {
       const auto& [width, height] = fusion.depth_map_sizes_.at(index);
-      masks.push_back(fusion.fused_pixel_masks_[index].Snapshot(
-          0, static_cast<size_t>(width) * height));
+      auto& values = masks.emplace_back();
+      values.reserve(static_cast<size_t>(width) * height);
+      for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+          values.push_back(fusion.fused_pixel_masks_[index].Get(row, col));
+        }
+      }
     }
     return masks;
   }
