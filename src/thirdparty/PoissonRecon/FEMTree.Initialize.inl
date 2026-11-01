@@ -580,7 +580,7 @@ size_t FEMTreeInitializer< Dim , Real >::_AddSimplex( FEMTreeNode& root , node_i
 		// Get the grid index of the first vertex of the simplex
 		for( int d=0 ; d<Dim ; d++ ) idx0.idx[d] = (int)( s[0][d] * (1<<(tDepth+1)) );
 		bool done = false;
-		for( int k=1 ; k<=Dim && !done ; k++ )
+		for( int k=1 ; k<Dim && !done ; k++ )
 		{
 			for( int d=0 ; d<Dim ; d++ ) idx.idx[d] = (int)( s[k][d] * (1<<(tDepth+1)) );
 			if( idx!=idx0 ) done = true;
@@ -824,7 +824,10 @@ DenseNodeData< typename FEMTreeInitializer< Dim , Real >::GeometryNodeType , Iso
 
 	geometryNodeDesignators.resize( nodeCount );
 
-	ThreadPool::ParallelFor( 0 , nodeSimplices.size() , [&]( unsigned int , size_t i ){ for( FEMTreeNode *node=nodeSimplices[i].node ; node ; node=node->parent ) geometryNodeDesignators[node] = GeometryNodeType::BOUNDARY; } );
+	// A marked ancestor already has a completely marked parent chain.
+	for( const auto &nodeSimplex : nodeSimplices )
+		for( FEMTreeNode *node=nodeSimplex.node ; node && geometryNodeDesignators[node]!=GeometryNodeType::BOUNDARY ; node=node->parent )
+			geometryNodeDesignators[node] = GeometryNodeType::BOUNDARY;
 
 	// Propagate out from the boundary nodes
 	std::vector< const FEMTreeNode * > interiorNodes , exteriorNodes;

@@ -12,6 +12,7 @@
 // FEM declarations require the preceding vendor configuration.
 #include "thirdparty/PoissonRecon/FEMTree.h"
 #include "thirdparty/PoissonRecon/Geometry.h"
+#include "thirdparty/PoissonRecon/PoissonRecon.h"
 #include "thirdparty/PoissonRecon/PolygonIndexChain.h"
 #include "thirdparty/PoissonRecon/RegularTree.h"
 #include "thirdparty/PoissonRecon/SurfaceTrimmer.h"
@@ -156,6 +157,103 @@ std::vector<PlyPoint> MakeDeterministicColoredCubePoints() {
     }
   }
   return points;
+}
+
+TEST(PoissonMeshing, EnvelopeErosionProducesFiniteMesh) {
+  using Pool = PoissonRecon::ThreadPool;
+  struct RestorePoolState {
+    unsigned int num_threads;
+    Pool::ParallelType parallelization;
+    Pool::ScheduleType schedule;
+    size_t chunk_size;
+    ~RestorePoolState() {
+      Pool::SetNumThreads(num_threads);
+      Pool::ParallelizationType = parallelization;
+      Pool::Schedule = schedule;
+      Pool::ChunkSize = chunk_size;
+    }
+  } restore{Pool::NumThreads(),
+            Pool::ParallelizationType,
+            Pool::Schedule,
+            Pool::ChunkSize};
+
+  const auto dir = CreateTestDir();
+  const auto input = dir / "points.ply";
+  const auto envelope_path = dir / "envelope.ply";
+  WriteBinaryPlyPoints(
+      input, MakeDeterministicColoredCubePoints(), true, false);
+  PlyTexturedMesh envelope;
+  envelope.mesh.vertices = {{-1.2f, -1.2f, -1.2f},
+                            {1.2f, -1.2f, -1.2f},
+                            {1.2f, 1.2f, -1.2f},
+                            {-1.2f, 1.2f, -1.2f},
+                            {-1.2f, -1.2f, 1.2f},
+                            {1.2f, -1.2f, 1.2f},
+                            {1.2f, 1.2f, 1.2f},
+                            {-1.2f, 1.2f, 1.2f}};
+  envelope.mesh.faces = {{0, 2, 1},
+                         {0, 3, 2},
+                         {4, 5, 6},
+                         {4, 6, 7},
+                         {0, 1, 5},
+                         {0, 5, 4},
+                         {1, 2, 6},
+                         {1, 6, 5},
+                         {2, 3, 7},
+                         {2, 7, 6},
+                         {3, 0, 4},
+                         {3, 4, 7}};
+  WriteTextPlyMesh(envelope_path, envelope);
+
+  for (const int base_depth : {1, 2}) {
+    for (const unsigned int workers : {1u, 4u}) {
+      SCOPED_TRACE(base_depth);
+      SCOPED_TRACE(workers);
+      Pool::SetNumThreads(workers);
+      const auto output = dir / ("mesh-" + std::to_string(base_depth) + "-" +
+                                 std::to_string(workers) + ".ply");
+      std::vector<std::string> args = {
+          "poisson_recon",
+          "--in",
+          input.string(),
+          "--out",
+          output.string(),
+          "--envelope",
+          envelope_path.string(),
+          "--depth",
+          "4",
+          "--fullDepth",
+          "2",
+          "--baseDepth",
+          std::to_string(base_depth),
+          "--envelopeDepth",
+          "3",
+          "--scale",
+          "1.5",
+          "--chunkSize",
+          "1",
+          "--schedule",
+          std::to_string(static_cast<int>(Pool::STATIC)),
+          "--parallel",
+          std::to_string(static_cast<int>(Pool::ASYNC))};
+      std::vector<char*> argv;
+      for (auto& arg : args) argv.push_back(arg.data());
+      ASSERT_EQ(RunPoissonRecon(static_cast<int>(argv.size()), argv.data()), 0);
+      const auto mesh = ReadPlyMesh(output).mesh;
+      ASSERT_FALSE(mesh.vertices.empty());
+      ASSERT_FALSE(mesh.faces.empty());
+      for (const auto& vertex : mesh.vertices) {
+        EXPECT_TRUE(std::isfinite(vertex.x));
+        EXPECT_TRUE(std::isfinite(vertex.y));
+        EXPECT_TRUE(std::isfinite(vertex.z));
+      }
+      for (const auto& face : mesh.faces) {
+        ASSERT_LT(face.vertex_idx1, mesh.vertices.size());
+        ASSERT_LT(face.vertex_idx2, mesh.vertices.size());
+        ASSERT_LT(face.vertex_idx3, mesh.vertices.size());
+      }
+    }
+  }
 }
 
 bool WriteReorderedRgbAsciiPly(const std::filesystem::path& path,

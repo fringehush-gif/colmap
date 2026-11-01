@@ -318,7 +318,24 @@ namespace PLY
 			}
 			else if( elem_name=="face" )
 			{
-				ply->get_property( elem_name , Face< Index >::Properties );
+				const PlyProperty *faceProperty = nullptr;
+				for( const PlyProperty &prop : plist ) if( prop.name=="vertex_indices" )
+				{
+					faceProperty = &prop;
+					break;
+				}
+				if( !faceProperty ) for( const PlyProperty &prop : plist ) if( prop.name=="vertex_index" )
+				{
+					faceProperty = &prop;
+					break;
+				}
+				if( num_elems && ( !faceProperty || !faceProperty->is_list ) ) MK_THROW( "Could not read face vertex indices" );
+				if( faceProperty )
+				{
+					PlyProperty prop = Face< Index >::Properties[0];
+					prop.name = faceProperty->name;
+					ply->get_property( elem_name , &prop );
+				}
 				polygons.resize( num_elems );
 				for( size_t j=0 ; j<num_elems ; j++ )
 				{
