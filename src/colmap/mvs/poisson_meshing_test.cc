@@ -1720,6 +1720,46 @@ TEST(PoissonMeshing, NeighborKeyCopyAssignmentOwnsCachedWindows) {
   CheckNeighborKeyCopyAssignment<3, true>();
 }
 
+TEST(PoissonMeshing, OutputFailureAfterSolveAllowsAnotherCall) {
+  const auto test_dir = CreateTestDir();
+  const auto input_path = test_dir / "points.ply";
+  const auto bad_output_path = test_dir / "directory.ply";
+  const auto good_output_path = test_dir / "mesh.ply";
+  WriteBinaryPlyPoints(
+      input_path, MakeDeterministicColoredCubePoints(), true, true);
+  ASSERT_TRUE(std::filesystem::create_directory(bad_output_path));
+
+  PoissonRecon::ThreadPool::SetNumThreads(1);
+  std::vector<std::string> args = {"poisson_recon",
+                                   "--in",
+                                   input_path.string(),
+                                   "--out",
+                                   bad_output_path.string(),
+                                   "--depth",
+                                   "4",
+                                   "--fullDepth",
+                                   "4"};
+  std::vector<char*> argv;
+  for (auto& arg : args) argv.push_back(arg.data());
+  try {
+    (void)RunPoissonRecon(static_cast<int>(argv.size()), argv.data());
+    FAIL() << "Expected output-open failure after Solve";
+  } catch (const std::exception& error) {
+    EXPECT_NE(
+        std::string(error.what()).find("Could not create ply file for writing"),
+        std::string::npos);
+  }
+
+  PoissonMeshingOptions options;
+  options.depth = 4;
+  options.trim = 0;
+  options.num_threads = 1;
+  ASSERT_TRUE(PoissonMeshing(options, input_path, good_output_path));
+  const auto mesh = ReadPlyMesh(good_output_path).mesh;
+  EXPECT_FALSE(mesh.vertices.empty());
+  EXPECT_FALSE(mesh.faces.empty());
+}
+
 TEST(PoissonMeshing, SequentialCallsUseFreshOptions) {
   const auto test_dir = CreateTestDir();
   const auto input_path = test_dir / "points.ply";

@@ -165,7 +165,8 @@ namespace PoissonRecon
 				if     ( schedule==ScheduleType::STATIC  ) ThreadFunction = _StaticThreadFunction;
 				else if( schedule==ScheduleType::DYNAMIC ) ThreadFunction = _DynamicThreadFunction;
 
-				static std::vector< std::future< void > > futures;
+				// Join outstanding tasks before their stack-bound callbacks die.
+				std::vector< std::future< void > > futures;
 				futures.resize( numThreads-1 );
 				for( unsigned int t=1 ; t<numThreads ; t++ ) futures[t-1] = std::async( std::launch::async , ThreadFunction , t );
 				ThreadFunction( 0 );
