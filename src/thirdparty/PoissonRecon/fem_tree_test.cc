@@ -10,6 +10,7 @@
 
 // FEMTree requires the configuration declarations before its headers.
 // clang-format off
+#include "normal_capture.h"
 #include "PreProcessor.h"
 #include "FEMTree.h"
 // clang-format on
@@ -75,6 +76,198 @@ TEST(PoissonThreadPoolTest, AsyncExceptionsJoinOutstandingWorkers) {
     EXPECT_EQ(completed.load(), 3);
   }
 }
+
+#ifdef _OPENMP
+TEST(PoissonThreadPoolTest, OpenMpExceptionsJoinAndRestoreCaptureScope) {
+  using Pool = PoissonRecon::ThreadPool;
+  using namespace std::chrono_literals;
+  const int old_dynamic = omp_get_dynamic();
+  omp_set_dynamic(0);
+  int team_size = 0;
+#pragma omp parallel num_threads(2)
+  {
+#pragma omp single
+    team_size = omp_get_num_threads();
+  }
+  omp_set_dynamic(old_dynamic);
+  if (team_size < 2) GTEST_SKIP() << "OpenMP needs two workers";
+
+  for (const auto schedule : {Pool::STATIC, Pool::DYNAMIC}) {
+    SCOPED_TRACE(static_cast<int>(schedule));
+    std::promise<void> blocked, throwing, release;
+    auto blocked_future = blocked.get_future();
+    auto throwing_future = throwing.get_future();
+    auto release_future = release.get_future().share();
+    std::atomic<int> restored{0};
+    std::atomic<bool> worker_finished{false};
+    std::vector<std::vector<PoissonNormalGpu::Record>> records(2);
+    auto result = std::async(std::launch::async, [&] {
+      omp_set_dynamic(0);
+      Pool::ParallelFor(
+          0,
+          2,
+          [&](unsigned int thread, size_t chunk) {
+            auto* const prior_target = PoissonNormalCapture::target;
+            const bool prior_admission = PoissonNormalCapture::admitted;
+            try {
+              PoissonNormalCapture::Scope admission(true);
+              PoissonNormalCapture::ThreadScope scope(&records[thread]);
+              if (chunk == 0) {
+                if (blocked_future.wait_for(5s) != std::future_status::ready)
+                  throw std::runtime_error("worker did not start");
+                throwing.set_value();
+                throw std::runtime_error("injected worker failure");
+              }
+              blocked.set_value();
+              if (release_future.wait_for(5s) != std::future_status::ready)
+                throw std::runtime_error("worker release timed out");
+              worker_finished = true;
+            } catch (...) {
+              if (PoissonNormalCapture::target == prior_target &&
+                  PoissonNormalCapture::admitted == prior_admission)
+                ++restored;
+              throw;
+            }
+            if (PoissonNormalCapture::target == prior_target &&
+                PoissonNormalCapture::admitted == prior_admission)
+              ++restored;
+          },
+          2,
+          Pool::OPEN_MP,
+          schedule,
+          1);
+    });
+    const auto started = throwing_future.wait_for(5s);
+    const bool returned_early =
+        started == std::future_status::ready &&
+        result.wait_for(100ms) == std::future_status::ready;
+    release.set_value();
+    EXPECT_EQ(started, std::future_status::ready);
+    EXPECT_FALSE(returned_early);
+    EXPECT_THROW(result.get(), std::runtime_error);
+    EXPECT_TRUE(worker_finished.load());
+    EXPECT_EQ(restored.load(), 2);
+
+    std::atomic<size_t> completed{0};
+    Pool::ParallelFor(
+        0,
+        8,
+        [&](unsigned int, size_t) { ++completed; },
+        2,
+        Pool::OPEN_MP,
+        schedule,
+        1);
+    EXPECT_EQ(completed.load(), 8);
+  }
+}
+#endif
+
+#if defined(_OPENMP) && defined(POISSON_NORMAL_NATIVE_GPU)
+TEST(PoissonFEMTreeTest, CapturedNormalCallbackFailureJoinsBeforeReturn) {
+  using namespace PoissonRecon;
+  using Pool = ThreadPool;
+  using namespace std::chrono_literals;
+  const int old_dynamic = omp_get_dynamic();
+  omp_set_dynamic(0);
+  int team_size = 0;
+#pragma omp parallel num_threads(2)
+  {
+#pragma omp single
+    team_size = omp_get_num_threads();
+  }
+  if (team_size < 2) {
+    omp_set_dynamic(old_dynamic);
+    GTEST_SKIP() << "OpenMP needs two workers";
+  }
+  struct RestorePool {
+    unsigned int threads = Pool::NumThreads();
+    Pool::ParallelType parallel = Pool::ParallelizationType;
+    Pool::ScheduleType schedule = Pool::Schedule;
+    size_t chunk = Pool::ChunkSize;
+    int dynamic;
+    ~RestorePool() {
+      Pool::SetNumThreads(threads);
+      Pool::ParallelizationType = parallel;
+      Pool::Schedule = schedule;
+      Pool::ChunkSize = chunk;
+      omp_set_dynamic(dynamic);
+    }
+  } restore{Pool::NumThreads(),
+            Pool::ParallelizationType,
+            Pool::Schedule,
+            Pool::ChunkSize,
+            old_dynamic};
+  Pool::SetNumThreads(2);
+  Pool::ParallelizationType = Pool::OPEN_MP;
+  Pool::Schedule = Pool::DYNAMIC;
+  Pool::ChunkSize = 128;
+
+  using Tree = FEMTree<3, float>;
+  using P = Point<float, 3>;
+  constexpr size_t kSamples = 400000;
+  Tree tree(1024);
+  Tree::PointSample sample{};
+  sample.node = &tree.spaceRoot();
+  sample.sample = ProjectiveData<P, float>(P(0.5f, 0.5f, 0.5f), 1.f);
+  std::vector<Tree::PointSample> samples(kSamples, sample);
+  std::vector<P> normals(kSamples, P(1.f, 0.f, 0.f));
+  // A valid estimator object is only an admission input: this callback never
+  // returns true, so the estimator and splatting path are never read.
+  Tree::DensityEstimator<2> density(0, 1, 1.f);
+  ProjectiveData<Point<float, 2>, float> weights;
+  std::atomic<size_t> calls{0};
+  std::atomic<unsigned int> observed_threads{0};
+  std::atomic<bool> admitted_target{false};
+  std::promise<void> second_callback;
+  auto second_ready = second_callback.get_future();
+  std::function<bool(P, P&)> convert = [&](P, P&) {
+    const auto index = calls.fetch_add(1);
+    observed_threads.fetch_or(1u << omp_get_thread_num());
+    if (PoissonNormalCapture::target) admitted_target = true;
+    if (index == 0) {
+      if (second_ready.wait_for(5s) != std::future_status::ready)
+        throw std::runtime_error("second capture callback did not start");
+      throw std::bad_alloc();
+    }
+    if (index == 1) second_callback.set_value();
+    return false;
+  };
+  auto* const prior_target = PoissonNormalCapture::target;
+  const bool prior_admitted = PoissonNormalCapture::admitted;
+  {
+    PoissonNormalCapture::Scope admission(true);
+    using Sig = IsotropicUIntPack<3, FEMDegreeAndBType<2>::Signature>;
+    EXPECT_THROW(tree.setInterpolatedDataField(P(),
+                                               Sig(),
+                                               samples,
+                                               normals,
+                                               &density,
+                                               0,
+                                               0,
+                                               0.f,
+                                               weights,
+                                               convert),
+                 std::bad_alloc);
+    EXPECT_TRUE(PoissonNormalCapture::admitted);
+  }
+  EXPECT_TRUE(admitted_target.load());
+  EXPECT_EQ(observed_threads.load() & 3u, 3u);
+  EXPECT_EQ(PoissonNormalCapture::target, prior_target);
+  EXPECT_EQ(PoissonNormalCapture::admitted, prior_admitted);
+  const size_t count_after_return = calls.load();
+  std::atomic<size_t> reused{0};
+  Pool::ParallelFor(
+      0,
+      8,
+      [&](unsigned int, size_t) { ++reused; },
+      2,
+      Pool::OPEN_MP,
+      Pool::DYNAMIC,
+      1);
+  EXPECT_EQ(reused.load(), 8);
+  EXPECT_EQ(calls.load(), count_after_return);
+}
+#endif
 
 TEST(PoissonFEMTreeTest, NeighborSelectionCanBeEmpty) {
   PoissonRecon::FEMTree<3, float> tree(1024);
