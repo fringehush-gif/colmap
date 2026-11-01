@@ -762,10 +762,16 @@ void StereoFusion::Run() {
         static_cast<size_t>(num_threads);
     const size_t slots =
         static_cast<size_t>(options_.bounded_cache_normal_tile_slots);
-    THROW_CHECK_LE(largest_component, per_worker);
-    THROW_CHECK_LE(largest_tile, (per_worker - largest_component) / slots)
+    const bool tile_fallback_fits =
+        largest_component <= per_worker &&
+        largest_tile <= (per_worker - largest_component) / slots;
+    // A complete neighborhood borrows whole-image owners and needs no tile
+    // fallback. Check fallback admission at each actual partial root.
+    THROW_CHECK(options_.bounded_cache_neighborhood || tile_fallback_fits)
         << "Normal tile rings need retained pins and component headroom";
-    normal_tile_worker_headroom_ = largest_component + slots * largest_tile;
+    if (tile_fallback_fits) {
+      normal_tile_worker_headroom_ = largest_component + slots * largest_tile;
+    }
     const size_t soft_slots =
         slots >= 1024 ? 4096 : std::max(size_t{1024}, slots * 4);
     normal_tile_rings_.resize(num_threads);
@@ -1382,6 +1388,9 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
   bool normal_prefill_stopped = false;
   bool parallel_normal_loads = false;
   if (options_.bounded_cache_normal_tile_size > 0 && !whole_group_admitted) {
+    THROW_CHECK_GT(normal_tile_worker_headroom_, 0)
+        << "Partial normal-tile neighborhoods need retained pins and "
+           "component headroom";
     // The checked Run admission already establishes workers * headroom <= cap.
     // Pin root depth + eventual RGB, then favor other depths; an excluded RGB
     // stays demand-loaded after the geometry checks.
