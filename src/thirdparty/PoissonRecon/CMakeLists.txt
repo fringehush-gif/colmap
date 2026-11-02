@@ -93,3 +93,20 @@ if(TESTS_ENABLED AND OPENMP_FOUND)
     target_link_libraries(colmap_poisson_recon_ply_writer_test
         OpenMP::OpenMP_CXX)
 endif()
+
+# Keep the allocator override and backend shim isolated from production CUDA.
+COLMAP_ADD_TEST(
+    NAME aux_capture_test
+    SRCS aux_capture_test.cc
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_poisson_recon_aux_capture_test PRIVATE
+        RELEASE POISSON_AUX_NATIVE_GPU)
+    if(MSVC)
+        target_compile_options(colmap_poisson_recon_aux_capture_test PRIVATE /bigobj)
+    endif()
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_poisson_recon_aux_capture_test
+            OpenMP::OpenMP_CXX)
+    endif()
+endif()
