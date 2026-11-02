@@ -71,13 +71,7 @@ CudaAllocationRefused::CudaAllocationRefused(const char* operation,
       code_(code) {}
 
 bool CudaIsAllocationRefusal(cudaError_t status, bool allow_unsupported) {
-#ifdef COLMAP_HIP_ENABLED
-  return status == hipErrorOutOfMemory ||
-         (allow_unsupported && status == hipErrorNotSupported);
-#else
-  return status == cudaErrorMemoryAllocation ||
-         (allow_unsupported && status == cudaErrorNotSupported);
-#endif
+  return cuda_allocation_internal::IsRefusal(status, allow_unsupported);
 }
 
 void CudaAllocationFailure(const char* operation,

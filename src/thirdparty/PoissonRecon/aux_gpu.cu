@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#include "colmap/util/cuda_allocation.h"
+
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -37,18 +40,43 @@ bool KernelUnavailable(cudaError_t e) {
          e == cudaErrorJitCompilationDisabled;
 }
 struct AllocationFailure {};
+struct CleanupState {
+  cudaError_t error = cudaSuccess;
+  void Record(cudaError_t e) noexcept {
+    if (error == cudaSuccess && e != cudaSuccess) error = e;
+  }
+};
+void CheckAllocation(colmap::CudaAllocationResult result, bool has_output) {
+  if (result.origin == colmap::CudaAllocationOrigin::kSuccess) {
+    if (!has_output)
+      throw std::runtime_error("aux GPU: empty successful allocation");
+    return;
+  }
+  if (result.origin == colmap::CudaAllocationOrigin::kRefused)
+    throw AllocationFailure{};
+  throw std::runtime_error("aux GPU: terminal allocation state " +
+                           std::to_string(static_cast<int>(result.origin)) +
+                           ": " +
+                           std::to_string(static_cast<int>(result.code)));
+}
 template <class T>
 struct Buffer {
   T* p_ = nullptr;
-  explicit Buffer(std::size_t n) {
+  CleanupState& cleanup_;
+  Buffer(CleanupState& cleanup, std::size_t n) : cleanup_(cleanup) {
     if (n) {
-      const cudaError_t e = cudaMalloc(&p_, n * sizeof(T));
-      if (e == cudaErrorMemoryAllocation) throw AllocationFailure{};
-      Check(e);
+      const auto result = colmap::CudaTryAllocation(
+          [&] { return cudaMalloc(&p_, n * sizeof(T)); },
+          [&] { return p_ == nullptr; });
+      if (result.origin != colmap::CudaAllocationOrigin::kSuccess && p_) {
+        cleanup_.Record(cudaFree(p_));
+        p_ = nullptr;
+      }
+      CheckAllocation(result, p_ != nullptr);
     }
   }
-  ~Buffer() {
-    if (p_) cudaFree(p_);
+  ~Buffer() noexcept {
+    if (p_) cleanup_.Record(cudaFree(p_));
   }
   Buffer(const Buffer&) = delete;
   void Put(const T* src, std::size_t n) {
@@ -57,18 +85,33 @@ struct Buffer {
 };
 struct Events {
   cudaEvent_t a_ = nullptr, b_ = nullptr;
-  Events() {
-    Check(cudaEventCreate(&a_));
+  CleanupState& cleanup_;
+  void Release(cudaEvent_t& event) noexcept {
+    if (event) {
+      cleanup_.Record(cudaEventDestroy(event));
+      event = nullptr;
+    }
+  }
+  void Create(cudaEvent_t& event) {
+    const auto result =
+        colmap::CudaTryAllocation([&] { return cudaEventCreate(&event); },
+                                  [&] { return event == nullptr; });
+    if (result.origin != colmap::CudaAllocationOrigin::kSuccess) Release(event);
+    CheckAllocation(result, event != nullptr);
+  }
+  explicit Events(CleanupState& cleanup) : cleanup_(cleanup) {
     try {
-      Check(cudaEventCreate(&b_));
+      Create(a_);
+      Create(b_);
     } catch (...) {
-      cudaEventDestroy(a_);
+      Release(b_);
+      Release(a_);
       throw;
     }
   }
-  ~Events() {
-    cudaEventDestroy(a_);
-    cudaEventDestroy(b_);
+  ~Events() noexcept {
+    Release(b_);
+    Release(a_);
   }
 };
 __global__ void Gather(std::uint32_t begin,
@@ -110,10 +153,6 @@ bool Available(Stats& s) {
   };
   // Do not reinterpret an existing CUDA failure as missing kernel support.
   const cudaError_t pending = cudaPeekAtLastError();
-  if (DeviceUnavailable(pending)) {
-    ClearExpected(pending);
-    return reject("device-unavailable");
-  }
   Check(pending);
   cudaFuncAttributes attributes{};
   const cudaError_t e = cudaFuncGetAttributes(&attributes, Gather);
@@ -132,6 +171,7 @@ bool Available(Stats& s) {
   return true;
 }
 bool Reduce(const View& v, Four* output, Stats& s) {
+  Check(cudaPeekAtLastError());
   const auto started = Clock::now();
   auto reject = [&](const char* reason) {
     s.reason = reason;
@@ -194,12 +234,14 @@ bool Reduce(const View& v, Four* output, Stats& s) {
   }
   Check(memory_status);
   if (s.device_bytes > free * 3 / 4) return reject("device-capacity");
+  CleanupState cleanup;
   try {
-    Buffer<std::uint32_t> co(v.nodes + 1), children(v.nodes - 1),
-        so(v.nodes + 1), si(v.seeds);
-    Buffer<Four> seeds(v.seeds), out(v.nodes);
-    Buffer<double> sums(4ull * v.nodes);
-    Events events;
+    Buffer<std::uint32_t> co(cleanup, v.nodes + 1),
+        children(cleanup, v.nodes - 1), so(cleanup, v.nodes + 1),
+        si(cleanup, v.seeds);
+    Buffer<Four> seeds(cleanup, v.seeds), out(cleanup, v.nodes);
+    Buffer<double> sums(cleanup, 4ull * v.nodes);
+    Events events(cleanup);
     const auto upload = Clock::now();
     co.Put(v.child_offsets, v.nodes + 1);
     children.Put(v.children, v.nodes - 1);
@@ -231,10 +273,17 @@ bool Reduce(const View& v, Four* output, Stats& s) {
     const auto download = Clock::now();
     Check(cudaMemcpy(output, out.p_, 16ull * v.nodes, cudaMemcpyDeviceToHost));
     s.download_seconds = Elapsed(download);
-  } catch (const AllocationFailure&) {
-    ClearExpected(cudaErrorMemoryAllocation);
-    return reject("device-allocation");
+  } catch (...) {
+    if (cleanup.error != cudaSuccess)
+      std::throw_with_nested(std::runtime_error(
+          "aux GPU cleanup failure: " + std::to_string(int(cleanup.error))));
+    try {
+      throw;
+    } catch (const AllocationFailure&) {
+      return reject("device-allocation");
+    }
   }
+  Check(cleanup.error);
   s.reason = "complete";
   s.total_seconds = Elapsed(started);
   return true;
