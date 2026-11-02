@@ -12,6 +12,7 @@
 #include <array>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <vector>
 
@@ -689,20 +690,6 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
           return static_cast<uint8_t>(std::clamp(scaled, 0.0f, 255.0f));
         };
 
-    auto ReadInt = [&](const char* buf, size_t num_bytes) {
-      if (num_bytes == 4) {
-        const auto val = ReadFromBuffer<int32_t>(buf, 0);
-        return static_cast<int>(is_little_endian ? LittleEndianToNative(val)
-                                                 : BigEndianToNative(val));
-      } else if (num_bytes == 2) {
-        const auto val = ReadFromBuffer<int16_t>(buf, 0);
-        return static_cast<int>(is_little_endian ? LittleEndianToNative(val)
-                                                 : BigEndianToNative(val));
-      } else {
-        return static_cast<int>(ReadFromBuffer<uint8_t>(buf, 0));
-      }
-    };
-
     // Read binary vertex data
     std::vector<char> buffer(num_bytes_per_vertex);
     for (size_t i = 0; i < num_vertices; ++i) {
@@ -735,26 +722,48 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
     const size_t face_count_bytes = PlyTypeBytes(face_count_type);
     const size_t face_index_bytes = PlyTypeBytes(face_index_type);
 
+    const auto IsSigned = [](const std::string& type) {
+      return type == "char" || type == "int8" || type == "short" ||
+             type == "int16" || type == "int" || type == "int32";
+    };
+    const bool face_count_signed = IsSigned(face_count_type);
+    const bool face_index_signed = IsSigned(face_index_type);
+    auto ReadInt = [&](const char* buf, size_t num_bytes, bool is_signed) {
+      auto ReadTyped = [&](auto type_tag) -> int64_t {
+        using T = decltype(type_tag);
+        const auto val = ReadFromBuffer<T>(buf, 0);
+        return is_little_endian ? LittleEndianToNative(val)
+                                : BigEndianToNative(val);
+      };
+      if (num_bytes == 4) {
+        return is_signed ? ReadTyped(int32_t{}) : ReadTyped(uint32_t{});
+      } else if (num_bytes == 2) {
+        return is_signed ? ReadTyped(int16_t{}) : ReadTyped(uint16_t{});
+      }
+      return is_signed ? ReadTyped(int8_t{}) : ReadTyped(uint8_t{});
+    };
+
     std::vector<char> face_buffer(std::max(face_count_bytes, face_index_bytes));
     for (size_t i = 0; i < num_faces; ++i) {
       file.read(face_buffer.data(), face_count_bytes);
       THROW_CHECK(file.good()) << "Unexpected end of PLY file at face " << i;
 
-      const int num_face_vertices =
-          ReadInt(face_buffer.data(), face_count_bytes);
+      const int64_t num_face_vertices =
+          ReadInt(face_buffer.data(), face_count_bytes, face_count_signed);
       THROW_CHECK_EQ(num_face_vertices, 3)
           << "Only triangular faces are supported";
 
-      int indices[3];
+      size_t indices[3];
       for (int j = 0; j < 3; ++j) {
         file.read(face_buffer.data(), face_index_bytes);
         THROW_CHECK(file.good())
             << "Unexpected end of PLY file at face " << i << " index " << j;
-        indices[j] = ReadInt(face_buffer.data(), face_index_bytes);
-        THROW_CHECK_GE(indices[j], 0)
-            << "Negative face vertex index at face " << i;
-        THROW_CHECK_LT(indices[j], static_cast<int>(num_vertices))
+        const int64_t index =
+            ReadInt(face_buffer.data(), face_index_bytes, face_index_signed);
+        THROW_CHECK_GE(index, 0) << "Negative face vertex index at face " << i;
+        THROW_CHECK_LT(static_cast<uint64_t>(index), num_vertices)
             << "Face vertex index out of bounds at face " << i;
+        indices[j] = static_cast<size_t>(index);
       }
 
       result.mesh.faces.emplace_back(indices[0], indices[1], indices[2]);
@@ -762,12 +771,16 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
       if (has_texcoord) {
         uint8_t num_texcoords;
         file.read(reinterpret_cast<char*>(&num_texcoords), sizeof(uint8_t));
+        THROW_CHECK(file.good())
+            << "Unexpected end of PLY file at face " << i << " texcoord count";
         THROW_CHECK_EQ(num_texcoords, 6)
             << "Expected 6 texture coordinates per triangular face";
 
         for (int j = 0; j < 6; ++j) {
           float uv;
           file.read(reinterpret_cast<char*>(&uv), sizeof(float));
+          THROW_CHECK(file.good()) << "Unexpected end of PLY file at face " << i
+                                   << " texcoord " << j;
           if (is_little_endian) {
             uv = LittleEndianToNative(uv);
           } else {
@@ -912,15 +925,25 @@ void WriteTextPlyMesh(const std::filesystem::path& path,
 
 void WriteBinaryPlyMesh(const std::filesystem::path& path,
                         const PlyTexturedMesh& mesh) {
-  std::fstream text_file(path, std::ios::out);
-  THROW_CHECK_FILE_OPEN(text_file, path);
-  SetFullPrecTextStream(text_file);
-
   const bool has_texcoords = !mesh.face_uvs.empty();
   if (has_texcoords) {
     THROW_CHECK_EQ(mesh.face_uvs.size(), mesh.mesh.faces.size() * 6)
         << "Expected 6 UV coordinates per face";
   }
+
+  for (const auto& face : mesh.mesh.faces) {
+    for (const size_t index :
+         {face.vertex_idx1, face.vertex_idx2, face.vertex_idx3}) {
+      THROW_CHECK_LE(index,
+                     static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+          << "Face vertex index exceeds binary PLY int range";
+      THROW_CHECK_LT(index, mesh.mesh.vertices.size());
+    }
+  }
+
+  std::fstream text_file(path, std::ios::out);
+  THROW_CHECK_FILE_OPEN(text_file, path);
+  SetFullPrecTextStream(text_file);
 
   text_file << "ply\n";
   text_file << "format binary_little_endian 1.0\n";
@@ -954,14 +977,11 @@ void WriteBinaryPlyMesh(const std::filesystem::path& path,
 
   for (size_t i = 0; i < mesh.mesh.faces.size(); ++i) {
     const auto& face = mesh.mesh.faces[i];
-    THROW_CHECK_LT(face.vertex_idx1, mesh.mesh.vertices.size());
-    THROW_CHECK_LT(face.vertex_idx2, mesh.mesh.vertices.size());
-    THROW_CHECK_LT(face.vertex_idx3, mesh.mesh.vertices.size());
     const uint8_t kNumVertices = 3;
     WriteBinaryLittleEndian<uint8_t>(&binary_file, kNumVertices);
-    WriteBinaryLittleEndian<int>(&binary_file, face.vertex_idx1);
-    WriteBinaryLittleEndian<int>(&binary_file, face.vertex_idx2);
-    WriteBinaryLittleEndian<int>(&binary_file, face.vertex_idx3);
+    WriteBinaryLittleEndian<int32_t>(&binary_file, face.vertex_idx1);
+    WriteBinaryLittleEndian<int32_t>(&binary_file, face.vertex_idx2);
+    WriteBinaryLittleEndian<int32_t>(&binary_file, face.vertex_idx3);
 
     if (has_texcoords) {
       const uint8_t kNumTexcoords = 6;
