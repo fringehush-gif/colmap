@@ -23,10 +23,17 @@ class PatchMatchStateMap {
     const size_t b = CheckedBytes(Pitch(height), width, sources);
     capacity_ = std::max(a, b);
     if (capacity_ != 0)
-      CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_));
+      CUDA_SAFE_ALLOCATE(
+          "cudaMalloc",
+          ptr_,
+          cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_));
     Reorient(width, height);
   }
-  ~PatchMatchStateMap() { (void)cudaFree(ptr_); }
+  ~PatchMatchStateMap() {
+    const auto status = cudaFree(ptr_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                           static_cast<int>(status));
+  }
   PatchMatchStateMap(const PatchMatchStateMap&) = delete;
   PatchMatchStateMap& operator=(const PatchMatchStateMap&) = delete;
 

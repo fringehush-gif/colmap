@@ -408,11 +408,13 @@ RegularTreeNode< Dim , FEMTreeNodeData , depth_and_offset_type >* FEMTree< Dim ,
 	Real width = Real(1.0);
 	FEMTreeNode* node = _spaceRoot;
 	LocalDepth d = _localDepth( node );
-	while( ( d<0 && node->children ) || ( d>=0 && d<maxDepth ) )
+	while( d<0 || d<maxDepth )
 	{
-		if( !node->children ) node->template initChildren< ThreadSafe >( nodeAllocator , _nodeInitializer );
+		FEMTreeNode* childNodes = node->template getChildren< ThreadSafe >();
+		if( d<0 && !childNodes ) break;
+		if( !childNodes ) childNodes = node->template getOrInitChildren< ThreadSafe >( nodeAllocator , _nodeInitializer );
 		int cIndex = FEMTreeNode::ChildIndex( center , p );
-		node = node->children + cIndex;
+		node = childNodes + cIndex;
 		d++;
 		width /= 2;
 		for( int d=0 ; d<Dim ; d++ )
@@ -437,9 +439,9 @@ RegularTreeNode< Dim , FEMTreeNodeData , depth_and_offset_type >* FEMTree< Dim ,
 
 	while( depth<maxDepth )
 	{
-		if( !node->children ) node->template initChildren< ThreadSafe >( nodeAllocator , _nodeInitializer );
+		FEMTreeNode* childNodes = node->template getOrInitChildren< ThreadSafe >( nodeAllocator , _nodeInitializer );
 		int cIndex = FEMTreeNode::ChildIndex( center , p );
-		node = node->children + cIndex;
+		node = childNodes + cIndex;
 
 		depth++;
 		width /= 2;

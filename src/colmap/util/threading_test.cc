@@ -4,6 +4,9 @@
 
 #include "colmap/util/logging.h"
 
+#include <atomic>
+#include <chrono>
+#include <future>
 #include <stdexcept>
 
 #include <gtest/gtest.h>
@@ -475,6 +478,188 @@ TEST(Thread, DefaultCallback) {
   EXPECT_TRUE(called_back1);
   EXPECT_TRUE(called_back2);
 }
+
+TEST(Thread, LifecycleFailuresPreserveCompletionNotifications) {
+  class TestThread : public Thread {
+   public:
+    bool fail_run = false;
+    bool ran = false;
+    void Run() override {
+      ran = true;
+      SignalValidSetup();
+      if (fail_run) throw std::runtime_error("run failure");
+    }
+  };
+  for (const int phase : {0, 1, 2, 3}) {
+    SCOPED_TRACE(phase);
+    TestThread thread;
+    thread.fail_run = phase == 1;
+    bool notified = false;
+    int succeeded = 0;
+    thread.AddCallback(Thread::STARTED_CALLBACK, [&] {
+      if (phase == 0) throw std::runtime_error("started failure");
+    });
+    thread.AddCallback(Thread::SUCCEEDED_CALLBACK, [&] {
+      ++succeeded;
+      if (phase == 2) throw std::runtime_error("success failure");
+    });
+    thread.AddCallback(Thread::FINISHED_CALLBACK,
+                       [] { throw std::runtime_error("finished failure"); });
+    thread.AddCallback(Thread::FINISHED_CALLBACK, [&] { notified = true; });
+    thread.AddCallback(Thread::FINISHED_CALLBACK,
+                       [] { throw std::runtime_error("later failure"); });
+    thread.Start();
+    try {
+      thread.Wait();
+      FAIL() << "Expected lifecycle failure";
+    } catch (const std::runtime_error& error) {
+      const char* messages[] = {"started failure",
+                                "run failure",
+                                "success failure",
+                                "finished failure"};
+      EXPECT_STREQ(error.what(), messages[phase]);
+    }
+    EXPECT_EQ(succeeded, phase >= 2 ? 1 : 0);
+    EXPECT_TRUE(notified);
+    EXPECT_TRUE(thread.IsFinished());
+    EXPECT_EQ(thread.ran, phase != 0);
+    EXPECT_EQ(thread.CheckValidSetup(), phase != 0);
+  }
+}
+
+TEST(Thread, SuccessCallbackSkipsStoppedRun) {
+  class TestThread : public Thread {
+   public:
+    bool stop_run = false;
+    void Run() override {
+      SignalValidSetup();
+      if (stop_run) Stop();
+    }
+  };
+  for (const bool stopped : {false, true}) {
+    SCOPED_TRACE(stopped);
+    TestThread thread;
+    thread.stop_run = stopped;
+    int succeeded = 0, finished = 0;
+    thread.AddCallback(Thread::SUCCEEDED_CALLBACK, [&] { ++succeeded; });
+    thread.AddCallback(Thread::FINISHED_CALLBACK, [&] { ++finished; });
+    thread.Start();
+    EXPECT_NO_THROW(thread.Wait());
+    EXPECT_EQ(succeeded, stopped ? 0 : 1);
+    EXPECT_EQ(finished, 1);
+  }
+}
+
+TEST(Thread, CompletionFailureAllowsRestart) {
+  class TestThread : public Thread {
+    void Run() override { SignalValidSetup(); }
+  } thread;
+  bool fail_once = true;
+  int completions = 0;
+  thread.AddCallback(Thread::FINISHED_CALLBACK, [&] {
+    if (fail_once) {
+      fail_once = false;
+      throw std::runtime_error("completion failure");
+    }
+  });
+  thread.AddCallback(Thread::FINISHED_CALLBACK, [&] { ++completions; });
+  thread.Start();
+  EXPECT_THROW(thread.Wait(), std::runtime_error);
+  thread.Start();
+  EXPECT_NO_THROW(thread.Wait());
+  EXPECT_EQ(completions, 2);
+}
+
+TEST(Thread, RestartJoinsThrowingCompletionWithoutHoldingStateMutex) {
+  class TestThread : public Thread {
+    void Run() override { SignalValidSetup(); }
+  } thread;
+  std::promise<void> entered, release;
+  auto entered_future = entered.get_future();
+  auto released = release.get_future().share();
+  int callbacks = 0;
+  thread.AddCallback(Thread::FINISHED_CALLBACK, [&] {
+    if (++callbacks == 1) {
+      entered.set_value();
+      released.wait();
+      throw std::runtime_error("old completion failure");
+    }
+  });
+  thread.Start();
+  const auto entered_status = entered_future.wait_for(std::chrono::seconds(5));
+  if (entered_status != std::future_status::ready) {
+    release.set_value();
+    EXPECT_THROW(thread.Wait(), std::runtime_error);
+    ASSERT_EQ(entered_status, std::future_status::ready);
+  }
+  EXPECT_TRUE(thread.IsFinished());
+  auto restart = std::async(std::launch::async, [&] { thread.Start(); });
+  EXPECT_EQ(restart.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+  release.set_value();
+  ASSERT_EQ(restart.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(restart.get());
+  EXPECT_NO_THROW(thread.Wait());
+  EXPECT_EQ(callbacks, 2);
+}
+
+}  // namespace
+
+TEST(Thread, StopDuringRestartIsNotLost) {
+  class TestThread : public Thread {
+   public:
+    std::atomic<int> runs{0};
+    std::atomic<bool> second_run_stopped{false};
+    void Run() override {
+      SignalValidSetup();
+      if (++runs == 2) second_run_stopped = IsStopped();
+    }
+  } thread;
+  std::promise<void> entered, release;
+  auto entered_future = entered.get_future();
+  auto released = release.get_future().share();
+  int completions = 0;
+  int successes = 0;
+  thread.AddCallback(Thread::SUCCEEDED_CALLBACK, [&] { ++successes; });
+  thread.AddCallback(Thread::FINISHED_CALLBACK, [&] {
+    if (++completions == 1) {
+      entered.set_value();
+      released.wait();
+    }
+  });
+  thread.Start();
+  const auto entered_status = entered_future.wait_for(std::chrono::seconds(5));
+  if (entered_status != std::future_status::ready) {
+    release.set_value();
+    thread.Wait();
+    ASSERT_EQ(entered_status, std::future_status::ready);
+  }
+  auto restart = std::async(std::launch::async, [&] { thread.Start(); });
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  bool starting = false;
+  while (!starting && std::chrono::steady_clock::now() < deadline) {
+    {
+      std::lock_guard<std::mutex> lock(thread.mutex_);
+      starting = thread.starting_;
+    }
+    if (!starting) std::this_thread::yield();
+  }
+  if (starting) thread.Stop();
+  release.set_value();
+  ASSERT_EQ(restart.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  EXPECT_NO_THROW(restart.get());
+  EXPECT_NO_THROW(thread.Wait());
+  ASSERT_TRUE(starting);
+  EXPECT_EQ(thread.runs.load(), 2);
+  EXPECT_TRUE(thread.second_run_stopped.load());
+  EXPECT_EQ(successes, 1);
+  EXPECT_EQ(completions, 2);
+}
+
+namespace {
 
 TEST(ThreadPool, NoArgNoReturn) {
   std::function<void(void)> Func = []() {

@@ -29,6 +29,7 @@ DAMAGE.
 #include "PreProcessor.h"
 #include "Reconstructors.h"
 
+#include <memory>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -322,7 +323,7 @@ void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 	}
 
 	Profiler profiler(20);
-	Implicit *implicit = NULL;
+	std::unique_ptr< Implicit > implicit;
 	typename Reconstructor::Poisson::SolutionParameters< Real > sParams;
 	Reconstructor::LevelSetExtractionParameters meParams;
 
@@ -358,9 +359,9 @@ void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 
 	double startTime = Time();
 
-	InputSampleFactory *_inputSampleFactory;
-	if constexpr( HasAuxData ) _inputSampleFactory = new InputSampleFactory( VertexFactory::PositionFactory< Real , Dim >() , InputSampleDataFactory( VertexFactory::NormalFactory< Real , Dim >() , auxDataFactory ) );
-	else _inputSampleFactory = new InputSampleFactory( VertexFactory::PositionFactory< Real , Dim >() , VertexFactory::NormalFactory< Real , Dim >() );
+	std::unique_ptr< InputSampleFactory > _inputSampleFactory;
+	if constexpr( HasAuxData ) _inputSampleFactory = std::make_unique< InputSampleFactory >( VertexFactory::PositionFactory< Real , Dim >() , InputSampleDataFactory( VertexFactory::NormalFactory< Real , Dim >() , auxDataFactory ) );
+	else _inputSampleFactory = std::make_unique< InputSampleFactory >( VertexFactory::PositionFactory< Real , Dim >() , VertexFactory::NormalFactory< Real , Dim >() );
 	InputSampleFactory &inputSampleFactory = *_inputSampleFactory;
 	XForm< Real , Dim+1 > toModel = XForm< Real , Dim+1 >::Identity();
 
@@ -381,38 +382,38 @@ void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 		}
 	}
 	std::vector< typename InputSampleFactory::VertexType > inCorePoints;
-	InputPointStream *pointStream;
+	std::unique_ptr< InputPointStream > pointStream;
 
 	// Get the point stream
 	{
 		profiler.reset();
-		char *ext = GetFileExtension( options.In.value );
+		std::unique_ptr< char[] > ext( GetFileExtension( options.In.value ) );
 
 		if( options.InCore.set )
 		{
-			InputPointStream *_pointStream;
-			if     ( !strcasecmp( ext , "bnpts" ) ) _pointStream = new BinaryInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory );
-			else if( !strcasecmp( ext , "ply"   ) ) _pointStream = new    PLYInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory );
-			else                                    _pointStream = new  ASCIIInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory );
+			std::unique_ptr< InputPointStream > _pointStream;
+			if     ( !strcasecmp( ext.get() , "bnpts" ) ) _pointStream.reset( new BinaryInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory ) );
+			else if( !strcasecmp( ext.get() , "ply"   ) ) _pointStream.reset( new    PLYInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory ) );
+			else                                    _pointStream.reset( new  ASCIIInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory ) );
 			typename InputSampleFactory::VertexType p = inputSampleFactory();
 			while( _pointStream->read( p ) ) inCorePoints.push_back( p );
-			delete _pointStream;
+			_pointStream.reset();
 
-			pointStream = new VectorBackedInputDataStream< typename InputSampleFactory::VertexType >( inCorePoints );
+			pointStream.reset( new VectorBackedInputDataStream< typename InputSampleFactory::VertexType >( inCorePoints ) );
 		}
 		else
 		{
-			if     ( !strcasecmp( ext , "bnpts" ) ) pointStream = new BinaryInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory );
-			else if( !strcasecmp( ext , "ply"   ) ) pointStream = new    PLYInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory );
-			else                                    pointStream = new  ASCIIInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory );
+			if     ( !strcasecmp( ext.get() , "bnpts" ) ) pointStream.reset( new BinaryInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory ) );
+			else if( !strcasecmp( ext.get() , "ply"   ) ) pointStream.reset( new    PLYInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory ) );
+			else                                    pointStream.reset( new  ASCIIInputDataStream< InputSampleFactory >( options.In.value , inputSampleFactory ) );
 		}
-		delete[] ext;
+
 	}
 
-	typename Reconstructor::Poisson::EnvelopeMesh< Real , Dim > *envelopeMesh = NULL;
+	std::unique_ptr< typename Reconstructor::Poisson::EnvelopeMesh< Real , Dim > > envelopeMesh;
 	if( options.Envelope.set )
 	{
-		envelopeMesh = new typename Reconstructor::Poisson::EnvelopeMesh< Real , Dim >();
+		envelopeMesh = std::make_unique< typename Reconstructor::Poisson::EnvelopeMesh< Real , Dim > >();
 		{
 			std::vector< std::vector< int > > polygons;
 			std::vector< std::string > comments;
@@ -493,10 +494,10 @@ void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 		if( options.Transform.set )
 		{
 			Reconstructor::TransformedInputOrientedSampleStream< Real , Dim , typename AuxDataFactory::VertexType > _sampleStream( toModel , sampleStream );
-			implicit = Solver::Solve( _sampleStream , sParams , auxDataFactory() , envelopeMesh );
+			implicit.reset( Solver::Solve( _sampleStream , sParams , auxDataFactory() , envelopeMesh.get() ) );
 			implicit->unitCubeToModel = toModel.inverse() * implicit->unitCubeToModel;
 		}
-		else implicit = Solver::Solve( sampleStream , sParams , auxDataFactory() , envelopeMesh );
+		else implicit.reset( Solver::Solve( sampleStream , sParams , auxDataFactory() , envelopeMesh.get() ) );
 	}
 	else
 	{
@@ -505,15 +506,15 @@ void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 		if( options.Transform.set )
 		{
 			Reconstructor::TransformedInputOrientedSampleStream< Real , Dim > _sampleStream( toModel , sampleStream );
-			implicit = Solver::Solve( _sampleStream , sParams , envelopeMesh );
+			implicit.reset( Solver::Solve( _sampleStream , sParams , envelopeMesh.get() ) );
 			implicit->unitCubeToModel = toModel.inverse() * implicit->unitCubeToModel;
 		}
-		else implicit = Solver::Solve( sampleStream , sParams , envelopeMesh );
+		else implicit.reset( Solver::Solve( sampleStream , sParams , envelopeMesh.get() ) );
 	}
 
-	delete pointStream;
-	delete _inputSampleFactory;
-	delete envelopeMesh;
+	pointStream.reset();
+	_inputSampleFactory.reset();
+	envelopeMesh.reset();
 
 	if( options.Tree.set )
 	{
@@ -570,7 +571,6 @@ void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 		else MK_WARN( "Mesh extraction is only supported in dimensions 2 and 3" );
 
 	if( options.Verbose.set ) std::cout << "#          Total Solve: " << Time()-startTime << " (s), " << MemoryInfo::PeakMemoryUsageMB() << " (MB)" << std::endl;
-	delete implicit;
 }
 
 #ifndef FAST_COMPILE

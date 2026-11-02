@@ -157,6 +157,24 @@ TEST(PlyMeshFace, ParameterizedConstructor) {
   EXPECT_EQ(face.vertex_idx3, 30);
 }
 
+#ifdef __linux__
+TEST(Ply, FailedOutputIsReported) {
+  const std::filesystem::path path = "/dev/full";
+  const std::vector<PlyPoint> points(1);
+  const PlyTexturedMesh mesh;
+  for (const bool normals : {false, true}) {
+    for (const bool colors : {false, true}) {
+      EXPECT_THROW(WriteTextPlyPoints(path, points, normals, colors),
+                   std::invalid_argument);
+      EXPECT_THROW(WriteBinaryPlyPoints(path, points, normals, colors),
+                   std::invalid_argument);
+    }
+  }
+  EXPECT_THROW(WriteTextPlyMesh(path, mesh), std::invalid_argument);
+  EXPECT_THROW(WriteBinaryPlyMesh(path, mesh), std::invalid_argument);
+}
+#endif  // __linux__
+
 TEST(Ply, BinaryPointWireBytes) {
   const auto test_dir = CreateTestDir();
   const auto test_file = test_dir / "wire.ply";

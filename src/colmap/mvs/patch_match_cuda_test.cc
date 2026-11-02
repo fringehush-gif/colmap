@@ -40,6 +40,132 @@
 #include <cuda_runtime_api.h>
 #endif
 
+// Selection is process-global because controller work runs on a pool thread.
+// The production cleanup observer itself remains thread-local.
+#ifdef COLMAP_TEST_CUDA_ALLOCATION_WRAPPING
+#include <atomic>
+namespace {
+std::atomic<size_t> wrapped_eligible{0}, wrapped_fail_at{0};
+std::atomic<bool> wrapped_fired{false}, wrapped_fail_cleanup{false};
+std::atomic<size_t> wrapped_cleanup_injected{0};
+std::atomic<bool> wrapped_arm_on_first_meminfo{false};
+std::atomic<size_t> wrapped_meminfo_calls{0};
+std::atomic<bool> wrapped_track_initial_dense{false};
+std::atomic<size_t> wrapped_dense_captures{0},
+    wrapped_dense_cleanup_injected{0};
+thread_local bool wrapped_worker_armed = false;
+thread_local cudaArray_t wrapped_initial_dense = nullptr;
+std::atomic<int> wrapped_status{static_cast<int>(cudaErrorMemoryAllocation)};
+bool InjectAllocation() {
+  if (wrapped_arm_on_first_meminfo && !wrapped_worker_armed) return false;
+  if (!colmap::CudaCleanupScope::ObserveCleanup("test probe", 0)) return false;
+  const size_t ordinal = ++wrapped_eligible;
+  const size_t selected = wrapped_fail_at.load();
+  if (selected == 0 || ordinal != selected) return false;
+  wrapped_fired = true;
+  return true;
+}
+cudaError_t MaybeInjectCleanup(cudaError_t actual) {
+  if (actual != cudaSuccess || !wrapped_fired || !wrapped_fail_cleanup ||
+      !colmap::CudaCleanupScope::ObserveCleanup("test probe", 0))
+    return actual;
+  bool expected = true;
+  if (!wrapped_fail_cleanup.compare_exchange_strong(expected, false))
+    return actual;
+  ++wrapped_cleanup_injected;
+  // Real release already succeeded. Caller observes a terminal failure and
+  // must not readmit; run this case in a fresh subprocess and exit promptly.
+  return cudaErrorUnknown;
+}
+void ResetAllocationInjection(size_t ordinal,
+                              cudaError_t status,
+                              bool cleanup_failure = false,
+                              bool arm_on_first_meminfo = false) {
+  wrapped_arm_on_first_meminfo = arm_on_first_meminfo;
+  wrapped_track_initial_dense = false;
+  wrapped_dense_captures = 0;
+  wrapped_dense_cleanup_injected = 0;
+  wrapped_meminfo_calls = 0;
+  wrapped_eligible = 0;
+  wrapped_fired = false;
+  wrapped_cleanup_injected = 0;
+  wrapped_status = static_cast<int>(status);
+  wrapped_fail_cleanup = cleanup_failure;
+  wrapped_fail_at = ordinal;
+}
+}  // namespace
+extern "C" cudaError_t __real_cudaMalloc(void**, size_t);
+extern "C" cudaError_t __real_cudaMallocPitch(void**, size_t*, size_t, size_t);
+extern "C" cudaError_t __real_cudaMalloc3DArray(cudaArray_t*,
+                                                const cudaChannelFormatDesc*,
+                                                cudaExtent,
+                                                unsigned int);
+extern "C" cudaError_t __real_cudaMemGetInfo(size_t*, size_t*);
+extern "C" cudaError_t __real_cudaFree(void*);
+extern "C" cudaError_t __real_cudaFreeArray(cudaArray_t);
+extern "C" cudaError_t __wrap_cudaMalloc(void** out, size_t size) {
+  if (InjectAllocation()) {
+    *out = nullptr;
+    return static_cast<cudaError_t>(wrapped_status.load());
+  }
+  return __real_cudaMalloc(out, size);
+}
+extern "C" cudaError_t __wrap_cudaMallocPitch(void** out,
+                                              size_t* pitch,
+                                              size_t width,
+                                              size_t height) {
+  if (InjectAllocation()) {
+    *out = nullptr;
+    return static_cast<cudaError_t>(wrapped_status.load());
+  }
+  return __real_cudaMallocPitch(out, pitch, width, height);
+}
+extern "C" cudaError_t __wrap_cudaMalloc3DArray(
+    cudaArray_t* out,
+    const cudaChannelFormatDesc* desc,
+    cudaExtent extent,
+    unsigned int flags) {
+  if (InjectAllocation()) {
+    *out = nullptr;
+    return static_cast<cudaError_t>(wrapped_status.load());
+  }
+  const cudaError_t status = __real_cudaMalloc3DArray(out, desc, extent, flags);
+  // The five-view photo fixture has four source layers; its first such
+  // allocation in the first constructor is the initial dense source array.
+  if (status == cudaSuccess && wrapped_track_initial_dense &&
+      !wrapped_worker_armed && wrapped_initial_dense == nullptr &&
+      extent.depth == 4 && desc->x == 8 &&
+      colmap::CudaCleanupScope::ObserveCleanup("test probe", 0)) {
+    wrapped_initial_dense = *out;
+    ++wrapped_dense_captures;
+  }
+  return status;
+}
+extern "C" cudaError_t __wrap_cudaMemGetInfo(size_t* free, size_t* total) {
+  const cudaError_t status = __real_cudaMemGetInfo(free, total);
+  if (status == cudaSuccess) {
+    ++wrapped_meminfo_calls;
+    if (wrapped_arm_on_first_meminfo) wrapped_worker_armed = true;
+  }
+  return status;
+}
+extern "C" cudaError_t __wrap_cudaFree(void* ptr) {
+  const cudaError_t actual = __real_cudaFree(ptr);
+  return ptr ? MaybeInjectCleanup(actual) : actual;
+}
+extern "C" cudaError_t __wrap_cudaFreeArray(cudaArray_t ptr) {
+  const cudaError_t actual = __real_cudaFreeArray(ptr);
+  if (actual == cudaSuccess && ptr && wrapped_track_initial_dense &&
+      wrapped_worker_armed && ptr == wrapped_initial_dense) {
+    wrapped_track_initial_dense = false;
+    wrapped_initial_dense = nullptr;
+    ++wrapped_dense_cleanup_injected;
+    return cudaErrorUnknown;
+  }
+  return ptr ? MaybeInjectCleanup(actual) : actual;
+}
+#endif
+
 namespace colmap {
 namespace mvs {
 class PatchMatchControllerTestAccess {
@@ -51,6 +177,36 @@ class PatchMatchControllerTestAccess {
     controller.sparse_test_hooks_ = nullptr;
   }
 #ifndef COLMAP_HIP_ENABLED
+  static void RunPair(PatchMatchController& controller,
+                      Hooks& hooks,
+                      const PatchMatchOptions& options,
+                      size_t first,
+                      size_t second) {
+    controller.ReadWorkspace();
+    controller.ReadProblems();
+    controller.ReadGpuIndices();
+    controller.thread_pool_ = std::make_unique<ThreadPool>(1);
+    controller.io_thread_pool_ = std::make_unique<ThreadPool>(2);
+    controller.sparse_test_hooks_ = &hooks;
+    try {
+      controller.thread_pool_->AddTask(
+          &PatchMatchController::ProcessProblemPair,
+          &controller,
+          options,
+          first,
+          second);
+      controller.thread_pool_->Wait();
+    } catch (const AggregateException& errors) {
+      controller.sparse_test_hooks_ = nullptr;
+      if (errors.exceptions().size() == 1)
+        std::rethrow_exception(errors.exceptions().front());
+      throw;
+    } catch (...) {
+      controller.sparse_test_hooks_ = nullptr;
+      throw;
+    }
+    controller.sparse_test_hooks_ = nullptr;
+  }
   static std::array<size_t, 3> PreparedBitmapCounts(
       PatchMatchController& controller, const bool retain_sources) {
     controller.ReadWorkspace();
@@ -1118,6 +1274,350 @@ TEST_F(CudaTest, SparseSourceCleanRefusalsReleasePartialSetup) {
   EXPECT_TRUE(retained_bitmap.expired());
 }
 
+class ControllerWorkspaceFixture {
+ public:
+  ControllerWorkspaceFixture(size_t width, size_t height)
+      : width_(width), height_(height) {
+    SyntheticDatasetOptions dataset;
+    dataset.num_rigs = 1;
+    dataset.num_cameras_per_rig = 1;
+    dataset.num_frames_per_rig = 5;
+    dataset.camera_width = width_;
+    dataset.camera_height = height_;
+    SynthesizeDataset(dataset, &reconstruction);
+    for (int image = 1; image <= 5; ++image)
+      names.push_back(reconstruction.Image(image).Name());
+  }
+  std::filesystem::path Workspace() {
+    const auto root =
+        CreateTestDir() / ("workspace_" + std::to_string(workspace_index_++));
+    CreateDirIfNotExists(root);
+    for (const auto* dir : {"images", "sparse", "stereo"})
+      CreateDirIfNotExists(root / dir);
+    for (const auto* dir : {"depth_maps", "normal_maps", "consistency_graphs"})
+      CreateDirIfNotExists(root / "stereo" / dir);
+    reconstruction.Write(root / "sparse");
+    std::ofstream config(root / "stereo/patch-match.cfg");
+    for (size_t i = 0; i < names.size(); ++i) {
+      Bitmap bitmap(width_, height_, false);
+      auto& pixels = bitmap.RowMajorData();
+      for (size_t y = 0; y < height_; ++y)
+        for (size_t x = 0; x < width_; ++x)
+          pixels[y * width_ + x] = (17 * x + 31 * y + x * y + 19 * i) % 256;
+      bitmap.Write(root / "images" / names[i]);
+      config << names[i] << "\n";
+      bool first = true;
+      for (size_t j = 0; j < names.size(); ++j) {
+        if (j == i) continue;
+        if (!first) config << ",";
+        config << names[j];
+        first = false;
+      }
+      config << "\n";
+    }
+    config.close();
+    return root;
+  }
+  static auto Outputs(const std::filesystem::path& root) {
+    std::map<std::filesystem::path, std::vector<char> > maps;
+    for (const auto* family : {"depth_maps", "normal_maps"}) {
+      for (const auto& file :
+           std::filesystem::directory_iterator(root / "stereo" / family)) {
+        if (!file.is_regular_file()) continue;
+        std::ifstream stream(file.path(), std::ios::binary);
+        EXPECT_TRUE(stream.good());
+        maps[file.path().lexically_relative(root / "stereo")] =
+            std::vector<char>(std::istreambuf_iterator<char>(stream),
+                              std::istreambuf_iterator<char>());
+        EXPECT_FALSE(
+            maps[file.path().lexically_relative(root / "stereo")].empty());
+      }
+    }
+    return maps;
+  }
+  static PatchMatchOptions Options() {
+    PatchMatchOptions options;
+    options.gpu_index = "0";
+    options.num_threads = 12;
+    options.rotation_buffer_reuse = true;
+    options.sparse_source_sharing = false;
+    return options;
+  }
+
+ private:
+  size_t width_, height_, workspace_index_ = 0;
+  Reconstruction reconstruction;
+  std::vector<std::string> names;
+};
+
+#ifdef COLMAP_TEST_CUDA_ALLOCATION_WRAPPING
+std::pair<size_t, size_t> FindControllerFixtureShape(bool batch,
+                                                     bool checkpoint) {
+  for (const auto& shape : std::vector<std::pair<size_t, size_t> >{
+           {513, 257}, {1025, 513}, {1536, 1024}}) {
+    if (!CanPairPatchMatchViews(shape.first,
+                                shape.second,
+                                shape.first,
+                                shape.second,
+                                false,
+                                checkpoint))
+      continue;
+    const std::vector<std::pair<size_t, size_t> > shapes(5, shape);
+    if (!batch || (CanBatchPatchMatchViews(shapes, false, checkpoint) &&
+                   CanBatchPatchMatchViews(shapes, true, checkpoint))) {
+      return shape;
+    }
+  }
+  return {0, 0};
+}
+
+TEST_F(CudaTest, ControllerPairAllocationRefusals) {
+  auto options = ControllerWorkspaceFixture::Options();
+  const auto [width, height] =
+      FindControllerFixtureShape(false, options.checkpoint_hmm);
+  if (width == 0) GTEST_SKIP() << "Required controller admission unavailable";
+  ControllerWorkspaceFixture fixture(width, height);
+  const auto workspace = [&] { return fixture.Workspace(); };
+  const auto outputs = ControllerWorkspaceFixture::Outputs;
+  {
+    struct ResetOnExit {
+      ~ResetOnExit() { ResetAllocationInjection(0, cudaErrorMemoryAllocation); }
+    } reset_on_exit;
+    auto photo_options = options;
+    photo_options.geom_consistency = false;
+    photo_options.filter = false;
+    photo_options.sparse_source_sharing = false;
+    ASSERT_TRUE(CanPairPatchMatchViews(
+        width, height, width, height, false, photo_options.checkpoint_hmm));
+
+    const auto control_root = workspace();
+    PatchMatchControllerTestAccess::Hooks control_hooks;
+    ResetAllocationInjection(0, cudaErrorMemoryAllocation, false, true);
+    {
+      PatchMatchController control(photo_options, control_root, "COLMAP", "");
+      ASSERT_NO_THROW(PatchMatchControllerTestAccess::RunPair(
+          control, control_hooks, photo_options, 0, 1));
+    }
+    const auto pair_expected = outputs(control_root);
+    ASSERT_EQ(pair_expected.size(), 4u);
+    ASSERT_EQ(control_hooks.written_references.size(), 2u);
+    ASSERT_NE(control_hooks.written_references[0],
+              control_hooks.written_references[1]);
+    ASSERT_GE(wrapped_meminfo_calls.load(), 2u)
+        << "Pair was not admitted through second owner";
+    ASSERT_GE(wrapped_eligible.load(), 2u);
+
+    const auto refused_root = workspace();
+    PatchMatchControllerTestAccess::Hooks refused_hooks;
+    ResetAllocationInjection(2, cudaErrorMemoryAllocation, false, true);
+    {
+      PatchMatchController refused(photo_options, refused_root, "COLMAP", "");
+      ASSERT_NO_THROW(PatchMatchControllerTestAccess::RunPair(
+          refused, refused_hooks, photo_options, 0, 1));
+    }
+    ASSERT_TRUE(wrapped_fired.load());
+    // The second query is in the optional refusal handler, after first-owner
+    // admission. The native low-memory path would propagate this fake OOM.
+    ASSERT_GE(wrapped_meminfo_calls.load(), 2u);
+    EXPECT_EQ(refused_hooks.written_references,
+              control_hooks.written_references);
+    EXPECT_EQ(outputs(refused_root), pair_expected);
+
+    // Arm before all queries: the second eligible allocation belongs to the
+    // mandatory first constructor. It may not be converted to pair fallback.
+    const auto mandatory_root = workspace();
+    PatchMatchControllerTestAccess::Hooks mandatory_hooks;
+    ResetAllocationInjection(2, cudaErrorMemoryAllocation);
+    {
+      PatchMatchController mandatory(
+          photo_options, mandatory_root, "COLMAP", "");
+      EXPECT_THROW(PatchMatchControllerTestAccess::RunPair(
+                       mandatory, mandatory_hooks, photo_options, 0, 1),
+                   colmap::CudaAllocationRefused);
+    }
+    EXPECT_TRUE(wrapped_fired.load());
+    EXPECT_EQ(wrapped_meminfo_calls.load(), 0u);
+    EXPECT_TRUE(mandatory_hooks.written_references.empty());
+    EXPECT_TRUE(outputs(mandatory_root).empty());
+
+    const auto invalid_root = workspace();
+    PatchMatchControllerTestAccess::Hooks invalid_hooks;
+    ResetAllocationInjection(2, cudaErrorInvalidValue, false, true);
+    try {
+      PatchMatchController invalid(photo_options, invalid_root, "COLMAP", "");
+      PatchMatchControllerTestAccess::RunPair(
+          invalid, invalid_hooks, photo_options, 0, 1);
+      FAIL() << "Expected terminal non-allocation error";
+    } catch (const colmap::CudaAllocationRefused&) {
+      FAIL() << "Non-allocation error must not permit readmission";
+    } catch (const std::exception&) {
+      SUCCEED();
+    }
+    EXPECT_TRUE(wrapped_fired.load());
+    EXPECT_EQ(wrapped_meminfo_calls.load(), 1u);
+    EXPECT_TRUE(invalid_hooks.written_references.empty());
+    EXPECT_TRUE(outputs(invalid_root).empty());
+  }
+}
+
+TEST_F(CudaTest, ControllerPairCleanupFailureIsTerminal) {
+  auto photo_options = ControllerWorkspaceFixture::Options();
+  photo_options.geom_consistency = false;
+  photo_options.filter = false;
+  photo_options.sparse_source_sharing = false;
+  const auto [width, height] =
+      FindControllerFixtureShape(false, photo_options.checkpoint_hmm);
+  if (width == 0) GTEST_SKIP() << "Required controller admission unavailable";
+  ControllerWorkspaceFixture fixture(width, height);
+  const auto workspace = [&] { return fixture.Workspace(); };
+  // Re-exec so an unresolved cleanup status never resumes a CUDA context.
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      ([&] {
+        const auto root = workspace();
+        PatchMatchControllerTestAccess::Hooks hooks;
+        ResetAllocationInjection(2, cudaErrorMemoryAllocation, true, true);
+        try {
+          PatchMatchController failed(photo_options, root, "COLMAP", "");
+          PatchMatchControllerTestAccess::RunPair(
+              failed, hooks, photo_options, 0, 1);
+        } catch (const colmap::CudaAllocationRefused&) {
+          std::_Exit(21);  // Cleanup failure must override retryable refusal.
+        } catch (const std::exception& error) {
+          const bool correct =
+              wrapped_fired.load() && wrapped_cleanup_injected.load() == 1 &&
+              wrapped_meminfo_calls.load() == 1 &&
+              hooks.written_references.empty() &&
+              std::string(error.what()).find("cleanup") != std::string::npos;
+          std::_Exit(correct ? 0 : 22);
+        }
+        std::_Exit(23);  // Unexpected successful retry.
+      }()),
+      ::testing::ExitedWithCode(0),
+      "");
+}
+
+TEST_F(CudaTest, InitialSparseAttachmentCleanupFailureIsTerminal) {
+  if (!PatchMatchSparseSources::IsSupported())
+    GTEST_SKIP() << "Sparse source arrays are unavailable";
+  auto options = ControllerWorkspaceFixture::Options();
+  options.sparse_source_sharing = true;
+  const auto [width, height] =
+      FindControllerFixtureShape(true, options.checkpoint_hmm);
+  if (width == 0) GTEST_SKIP() << "Required controller admission unavailable";
+  ControllerWorkspaceFixture fixture(width, height);
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      ([&] {
+        const auto root = fixture.Workspace();
+        PatchMatchControllerTestAccess::Hooks hooks;
+        ResetAllocationInjection(0, cudaSuccess, false, true);
+        wrapped_track_initial_dense = true;
+        try {
+          PatchMatchController controller(options, root, "COLMAP", "");
+          PatchMatchControllerTestAccess::Run(controller, hooks);
+        } catch (const AggregateException& errors) {
+          bool cleanup_error = false;
+          if (errors.exceptions().size() == 1) {
+            try {
+              std::rethrow_exception(errors.exceptions().front());
+            } catch (const CudaAllocationRefused&) {
+              std::_Exit(34);
+            } catch (const SparseSourceResourceRefused&) {
+              std::_Exit(35);
+            } catch (const std::runtime_error& error) {
+              cleanup_error = std::string(error.what()).find("cleanup") !=
+                              std::string::npos;
+            } catch (...) {
+              std::_Exit(36);
+            }
+          }
+          const bool no_readmission = std::none_of(
+              hooks.memory_queries.begin(),
+              hooks.memory_queries.end(),
+              [](const auto& q) {
+                return std::string(q.phase) == "after-initial-sparse-refusal" ||
+                       std::string(q.phase) == "pair-or-single-selection";
+              });
+          const bool correct = cleanup_error && no_readmission &&
+                               !wrapped_fired.load() &&
+                               wrapped_dense_captures.load() == 1 &&
+                               wrapped_dense_cleanup_injected.load() == 1 &&
+                               hooks.written_references.empty();
+          std::_Exit(correct ? 0 : 31);
+        } catch (...) {
+          std::_Exit(32);
+        }
+        std::_Exit(33);
+      }()),
+      ::testing::ExitedWithCode(0),
+      "");
+}
+
+TEST_F(CudaTest, ControllerBatchAllocationRefusal) {
+  auto options = ControllerWorkspaceFixture::Options();
+  const auto [width, height] =
+      FindControllerFixtureShape(true, options.checkpoint_hmm);
+  if (width == 0) GTEST_SKIP() << "Required controller admission unavailable";
+  ControllerWorkspaceFixture fixture(width, height);
+  const auto workspace = [&] { return fixture.Workspace(); };
+  const auto outputs = ControllerWorkspaceFixture::Outputs;
+  const auto control_root = workspace();
+  PatchMatchControllerTestAccess::Hooks control_hooks;
+  struct ResetOnExit {
+    ~ResetOnExit() { ResetAllocationInjection(0, cudaErrorMemoryAllocation); }
+  } reset_on_exit;
+  ResetAllocationInjection(0, cudaErrorMemoryAllocation, false, true);
+  {
+    PatchMatchController control(options, control_root, "COLMAP", "");
+    PatchMatchControllerTestAccess::Run(control, control_hooks);
+  }
+  const auto expected = outputs(control_root);
+  ASSERT_EQ(expected.size(), 20);
+  ASSERT_EQ(control_hooks.written_references.size(), 10);
+  std::map<int, size_t> control_writes;
+  for (const int ref : control_hooks.written_references) ++control_writes[ref];
+  ASSERT_EQ(control_writes.size(), 5);
+  for (const auto& item : control_writes) EXPECT_EQ(item.second, 2);
+  ASSERT_GT(wrapped_meminfo_calls.load(), 0u);
+  ASSERT_GE(wrapped_eligible.load(), 2u)
+      << "No second scoped allocation after the first memory query";
+  ASSERT_FALSE(wrapped_fired.load());
+  {
+    const auto root = workspace();
+    PatchMatchControllerTestAccess::Hooks hooks;
+    // After the first owner and admission query, select the second eligible
+    // allocation; a post-refusal marker below must confirm the actual path.
+    ResetAllocationInjection(2, cudaErrorMemoryAllocation, false, true);
+    PatchMatchController controller(options, root, "COLMAP", "");
+    ASSERT_NO_THROW(PatchMatchControllerTestAccess::Run(controller, hooks));
+    ASSERT_TRUE(wrapped_fired.load());
+    const auto admission = std::find_if(
+        hooks.memory_queries.begin(),
+        hooks.memory_queries.end(),
+        [](const auto& q) { return std::string(q.phase) == "admission"; });
+    ASSERT_NE(admission, hooks.memory_queries.end());
+    const auto refusal = std::find_if(
+        admission + 1, hooks.memory_queries.end(), [](const auto& q) {
+          return std::string(q.phase) == "after-optional-cuda-refusal";
+        });
+    ASSERT_NE(refusal, hooks.memory_queries.end());
+    ASSERT_GT(refusal->free_bytes, 0);
+    const auto smaller = std::find_if(
+        refusal + 1, hooks.memory_queries.end(), [](const auto& q) {
+          return std::string(q.phase) == "pair-or-single-selection";
+        });
+    ASSERT_NE(smaller, hooks.memory_queries.end());
+    ASSERT_EQ(hooks.written_references, control_hooks.written_references);
+    ASSERT_EQ(outputs(root), expected);
+    std::map<int, size_t> writes;
+    for (const int ref : hooks.written_references) ++writes[ref];
+    EXPECT_EQ(writes, control_writes);
+    ResetAllocationInjection(0, cudaErrorMemoryAllocation);
+  }
+}
+#endif
+
 TEST_F(CudaTest, ControllerReadmitsInitialLaterAndGeometryAttachmentRefusals) {
   const bool sparse_supported = PatchMatchSparseSources::IsSupported();
   size_t width = sparse_supported ? 0 : 513;
@@ -1136,70 +1636,10 @@ TEST_F(CudaTest, ControllerReadmitsInitialLaterAndGeometryAttachmentRefusals) {
     ASSERT_GT(width, 0)
         << "Expected supported lane must admit a bounded fixture";
   }
-  SyntheticDatasetOptions dataset;
-  dataset.num_rigs = 1;
-  dataset.num_cameras_per_rig = 1;
-  dataset.num_frames_per_rig = 5;
-  dataset.camera_width = width;
-  dataset.camera_height = height;
-  Reconstruction reconstruction;
-  SynthesizeDataset(dataset, &reconstruction);
-  std::vector<std::string> names;
-  for (int image = 1; image <= 5; ++image)
-    names.push_back(reconstruction.Image(image).Name());
-  size_t workspace_index = 0;
-  const auto workspace = [&]() {
-    const auto root =
-        CreateTestDir() / ("workspace_" + std::to_string(workspace_index++));
-    CreateDirIfNotExists(root);
-    for (const auto* dir : {"images", "sparse", "stereo"})
-      CreateDirIfNotExists(root / dir);
-    for (const auto* dir : {"depth_maps", "normal_maps", "consistency_graphs"})
-      CreateDirIfNotExists(root / "stereo" / dir);
-    reconstruction.Write(root / "sparse");
-    std::ofstream config(root / "stereo/patch-match.cfg");
-    for (size_t i = 0; i < names.size(); ++i) {
-      Bitmap bitmap(width, height, false);
-      auto& pixels = bitmap.RowMajorData();
-      for (size_t y = 0; y < height; ++y)
-        for (size_t x = 0; x < width; ++x)
-          pixels[y * width + x] = (17 * x + 31 * y + x * y + 19 * i) % 256;
-      bitmap.Write(root / "images" / names[i]);
-      config << names[i] << "\n";
-      bool first = true;
-      for (size_t j = 0; j < names.size(); ++j) {
-        if (j == i) continue;
-        if (!first) config << ",";
-        config << names[j];
-        first = false;
-      }
-      config << "\n";
-    }
-    config.close();
-    return root;
-  };
-  const auto outputs = [](const std::filesystem::path& root) {
-    std::map<std::filesystem::path, std::vector<char> > maps;
-    for (const auto* family : {"depth_maps", "normal_maps"}) {
-      for (const auto& file :
-           std::filesystem::directory_iterator(root / "stereo" / family)) {
-        if (!file.is_regular_file()) continue;
-        std::ifstream stream(file.path(), std::ios::binary);
-        EXPECT_TRUE(stream.good());
-        maps[file.path().lexically_relative(root / "stereo")] =
-            std::vector<char>(std::istreambuf_iterator<char>(stream),
-                              std::istreambuf_iterator<char>());
-        EXPECT_FALSE(
-            maps[file.path().lexically_relative(root / "stereo")].empty());
-      }
-    }
-    return maps;
-  };
-  auto options = PatchMatchOptions{};
-  options.gpu_index = "0";
-  options.num_threads = 12;
-  options.rotation_buffer_reuse = true;
-  options.sparse_source_sharing = false;
+  ControllerWorkspaceFixture fixture(width, height);
+  const auto workspace = [&] { return fixture.Workspace(); };
+  const auto outputs = ControllerWorkspaceFixture::Outputs;
+  auto options = ControllerWorkspaceFixture::Options();
   {
     const auto root = workspace();
     options.sparse_source_sharing = true;
@@ -1225,6 +1665,7 @@ TEST_F(CudaTest, ControllerReadmitsInitialLaterAndGeometryAttachmentRefusals) {
   for (const int ref : control_hooks.written_references) ++control_writes[ref];
   ASSERT_EQ(control_writes.size(), 5);
   for (const auto& item : control_writes) EXPECT_EQ(item.second, 2);
+
   options.sparse_source_sharing = true;
   if (!sparse_supported) {
     const auto root = workspace();

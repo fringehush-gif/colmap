@@ -33,8 +33,23 @@
 
 #include <gtest/gtest.h>
 
+#ifdef __linux__
+#include <csignal>
+
+#include <sys/resource.h>
+#endif
+
 namespace colmap {
 namespace mvs {
+namespace {
+std::vector<char> UnpackSnapshot(
+    const internal::FusionPixelMask::PackedSnapshot& snapshot) {
+  std::vector<char> result(snapshot.size(), 1);
+  snapshot.ForEachUnset([&](size_t offset) { result.at(offset) = 0; });
+  return result;
+}
+}  // namespace
+
 TEST(StereoFusion, ResidentNonpositiveDepthSeedsMaskWithoutChangingSpecials) {
   if (sizeof(float) != sizeof(uint32_t) ||
       !std::numeric_limits<float>::is_iec559) {
@@ -90,7 +105,7 @@ TEST(StereoFusion, ResidentNonpositiveDepthSeedsMaskWithoutChangingSpecials) {
     std::feclearexcept(FE_ALL_EXCEPT);
     mask.ExcludeNonpositiveDepth(internal::FusionFloatMapView(depth));
     EXPECT_EQ(std::fetestexcept(FE_ALL_EXCEPT), 0);
-    EXPECT_EQ(mask.Snapshot(0, kSize), expected);
+    EXPECT_EQ(UnpackSnapshot(mask.Snapshot(0, kSize)), expected);
   }
   EXPECT_EQ(
       std::memcmp(
@@ -105,11 +120,12 @@ TEST(StereoFusion, ResidentNonpositiveDepthSeedsMaskWithoutChangingSpecials) {
     if (failure == 3) bad.data = nullptr;
     internal::FusionPixelMask untouched(kWidth, kHeight);
     untouched.ExcludeNonpositiveDepth(bad);
-    EXPECT_EQ(untouched.Snapshot(0, kSize), std::vector<char>(kSize, 0));
+    EXPECT_EQ(UnpackSnapshot(untouched.Snapshot(0, kSize)),
+              std::vector<char>(kSize, 0));
   }
   internal::FusionPixelMask empty;
   empty.ExcludeNonpositiveDepth(internal::FusionFloatMapView());
-  EXPECT_TRUE(empty.Snapshot(0, 0).empty());
+  EXPECT_TRUE(UnpackSnapshot(empty.Snapshot(0, 0)).empty());
 }
 
 TEST(StereoFusion, VisibilityBlocksPreserveListsAcrossBoundariesAndReuse) {
@@ -213,20 +229,21 @@ TEST(StereoFusion, AtomicPixelMaskInitializesBoundsAndMoves) {
       std::is_nothrow_move_constructible_v<internal::FusionPixelMask>);
   static_assert(!std::is_copy_constructible_v<internal::FusionPixelMask>);
   internal::FusionPixelMask empty;
-  EXPECT_TRUE(empty.Snapshot(0, 0).empty());
+  EXPECT_TRUE(UnpackSnapshot(empty.Snapshot(0, 0)).empty());
   EXPECT_THROW(empty.Get(0, 0), std::out_of_range);
   std::vector<internal::FusionPixelMask> masks(1);
   masks[0] = internal::FusionPixelMask(3, 2);
-  EXPECT_EQ(masks[0].Snapshot(0, 6), std::vector<char>(6, 0));
+  EXPECT_EQ(UnpackSnapshot(masks[0].Snapshot(0, 6)), std::vector<char>(6, 0));
   masks[0].Set(0, 1, 1);
   masks[0].Set(1, 2, 1);
   masks.resize(4);
   EXPECT_EQ(masks[0].Get(0, 1), 1);
   EXPECT_EQ(masks[0].Get(1, 0), 0);
-  EXPECT_EQ(masks[0].Snapshot(1, 6), (std::vector<char>{1, 0, 0, 0, 1}));
-  EXPECT_TRUE(masks[0].Snapshot(6, 6).empty());
-  EXPECT_THROW(masks[0].Snapshot(4, 3), std::out_of_range);
-  EXPECT_THROW(masks[0].Snapshot(2, 7), std::out_of_range);
+  EXPECT_EQ(UnpackSnapshot(masks[0].Snapshot(1, 6)),
+            (std::vector<char>{1, 0, 0, 0, 1}));
+  EXPECT_TRUE(UnpackSnapshot(masks[0].Snapshot(6, 6)).empty());
+  EXPECT_THROW(UnpackSnapshot(masks[0].Snapshot(4, 3)), std::out_of_range);
+  EXPECT_THROW(UnpackSnapshot(masks[0].Snapshot(2, 7)), std::out_of_range);
   EXPECT_THROW(masks[0].Set(2, 0, 1), std::out_of_range);
   EXPECT_THROW(masks[0].Get(2, 0), std::out_of_range);
 }
@@ -240,12 +257,15 @@ TEST(StereoFusion, PackedAtomicPixelMaskPreservesTailsAliasesAndMoves) {
     mask.Set(index / kWidth, index % kWidth, 1);
     expected[index] = 1;
   }
-  EXPECT_EQ(mask.Snapshot(0, kPixels), expected);
-  EXPECT_EQ(mask.Snapshot(61, 67), (std::vector<char>{0, 0, 1, 1, 0, 0}));
-  EXPECT_EQ(mask.Snapshot(kPixels - 2, kPixels), (std::vector<char>{0, 1}));
-  EXPECT_TRUE(mask.Snapshot(kPixels, kPixels).empty());
-  EXPECT_THROW(mask.Snapshot(kPixels + 1, kPixels + 1), std::out_of_range);
-  EXPECT_THROW(mask.Snapshot(64, 63), std::out_of_range);
+  EXPECT_EQ(UnpackSnapshot(mask.Snapshot(0, kPixels)), expected);
+  EXPECT_EQ(UnpackSnapshot(mask.Snapshot(61, 67)),
+            (std::vector<char>{0, 0, 1, 1, 0, 0}));
+  EXPECT_EQ(UnpackSnapshot(mask.Snapshot(kPixels - 2, kPixels)),
+            (std::vector<char>{0, 1}));
+  EXPECT_TRUE(UnpackSnapshot(mask.Snapshot(kPixels, kPixels)).empty());
+  EXPECT_THROW(UnpackSnapshot(mask.Snapshot(kPixels + 1, kPixels + 1)),
+               std::out_of_range);
+  EXPECT_THROW(UnpackSnapshot(mask.Snapshot(64, 63)), std::out_of_range);
   EXPECT_THROW(mask.Get(kHeight, 0), std::out_of_range);
   EXPECT_THROW(mask.Get(0, 127), std::out_of_range);
   EXPECT_THROW(mask.Set(0, 127, 0), std::out_of_range);
@@ -257,24 +277,96 @@ TEST(StereoFusion, PackedAtomicPixelMaskPreservesTailsAliasesAndMoves) {
   EXPECT_THROW(mask.Get(wrapped_row, kWidth - 1), std::out_of_range);
   mask.Set(wrapped_row, kWidth, 0);
   expected[0] = 0;
-  EXPECT_EQ(mask.Snapshot(0, kPixels), expected);
+  EXPECT_EQ(UnpackSnapshot(mask.Snapshot(0, kPixels)), expected);
   EXPECT_THROW(mask.Set(0, 0, 2), std::invalid_argument);
-  EXPECT_EQ(mask.Snapshot(0, kPixels), expected);
+  EXPECT_EQ(UnpackSnapshot(mask.Snapshot(0, kPixels)), expected);
 
   internal::FusionPixelMask moved(std::move(mask));
-  EXPECT_EQ(moved.Snapshot(0, kPixels), expected);
-  EXPECT_TRUE(mask.Snapshot(0, 0).empty());
-  EXPECT_THROW(mask.Snapshot(1, 1), std::out_of_range);
+  EXPECT_EQ(UnpackSnapshot(moved.Snapshot(0, kPixels)), expected);
+  EXPECT_TRUE(UnpackSnapshot(mask.Snapshot(0, 0)).empty());
+  EXPECT_THROW(UnpackSnapshot(mask.Snapshot(1, 1)), std::out_of_range);
   EXPECT_THROW(mask.Get(0, 0), std::out_of_range);
   internal::FusionPixelMask assigned(1, 1);
   assigned = std::move(moved);
-  EXPECT_EQ(assigned.Snapshot(0, kPixels), expected);
-  EXPECT_TRUE(moved.Snapshot(0, 0).empty());
-  EXPECT_THROW(moved.Snapshot(1, 1), std::out_of_range);
+  EXPECT_EQ(UnpackSnapshot(assigned.Snapshot(0, kPixels)), expected);
+  EXPECT_TRUE(UnpackSnapshot(moved.Snapshot(0, 0)).empty());
+  EXPECT_THROW(UnpackSnapshot(moved.Snapshot(1, 1)), std::out_of_range);
   EXPECT_THROW(moved.Set(0, 0, 1), std::out_of_range);
   internal::FusionPixelMask zero_height(std::numeric_limits<size_t>::max(), 0);
-  EXPECT_TRUE(zero_height.Snapshot(0, 0).empty());
+  EXPECT_TRUE(UnpackSnapshot(zero_height.Snapshot(0, 0)).empty());
   EXPECT_THROW(zero_height.Get(0, 0), std::out_of_range);
+}
+
+TEST(StereoFusion, PackedSnapshotBoundariesMovesAndImmutability) {
+  internal::FusionPixelMask mask(160, 1);
+  for (const size_t index : {size_t{1}, size_t{63}, size_t{64}, size_t{129}})
+    mask.Set(0, index, 1);
+  auto snapshot = mask.Snapshot(1, 130);
+  ASSERT_EQ(snapshot.size(), 129);
+  const auto before = UnpackSnapshot(snapshot);
+  std::vector<char> expected(129, 0);
+  for (const size_t offset : {size_t{0}, size_t{62}, size_t{63}, size_t{128}})
+    expected[offset] = 1;
+  EXPECT_EQ(before, expected);
+  std::atomic<bool> start{false};
+  std::thread writer([&] {
+    while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+    for (size_t pass = 0; pass < 128; ++pass) {
+      for (size_t index = 0; index < 160; ++index)
+        mask.Set(0, index, static_cast<char>(pass & 1));
+    }
+  });
+  start.store(true, std::memory_order_release);
+  for (int pass = 0; pass < 128; ++pass)
+    EXPECT_EQ(UnpackSnapshot(snapshot), before);
+  writer.join();
+  EXPECT_EQ(UnpackSnapshot(snapshot), before);
+  auto moved = std::move(snapshot);
+  EXPECT_TRUE(snapshot.empty());
+  snapshot.ForEachUnset([](size_t) { ADD_FAILURE() << "moved-from snapshot"; });
+  EXPECT_EQ(UnpackSnapshot(moved), before);
+  internal::FusionPixelMask::PackedSnapshot assigned;
+  assigned = std::move(moved);
+  EXPECT_TRUE(moved.empty());
+  EXPECT_EQ(UnpackSnapshot(assigned), before);
+  const auto empty = mask.Snapshot(159, 159);
+  EXPECT_TRUE(empty.empty());
+  EXPECT_EQ(empty.size(), 0);
+  empty.ForEachUnset([](size_t) { ADD_FAILURE() << "empty snapshot"; });
+}
+
+TEST(StereoFusion, PackedSnapshotVisitsUnsetInOrderAcrossBoundaries) {
+  constexpr size_t kSize = 193;
+  for (const int pattern : {0, 1, 2, 3}) {
+    internal::FusionPixelMask mask(kSize, 1);
+    std::vector<char> expected(kSize);
+    for (size_t i = 0; i < kSize; ++i) {
+      const bool set = pattern == 1 || (pattern == 2 && (i % 3 == 0)) ||
+                       (pattern == 3 && i != 63 && i != 64 && i != 129);
+      if (set) mask.Set(0, i, 1);
+      expected[i] = static_cast<char>(set);
+    }
+    for (const auto& [first, last] : {std::pair<size_t, size_t>{0, 0},
+                                      {1, 2},
+                                      {1, 63},
+                                      {1, 64},
+                                      {1, 65},
+                                      {63, 130},
+                                      {64, 128},
+                                      {65, 193},
+                                      {0, kSize},
+                                      {kSize, kSize}}) {
+      SCOPED_TRACE(pattern);
+      SCOPED_TRACE(first);
+      SCOPED_TRACE(last);
+      const auto snapshot = mask.Snapshot(first, last);
+      std::vector<size_t> actual, reference;
+      snapshot.ForEachUnset([&](size_t offset) { actual.push_back(offset); });
+      for (size_t i = first; i < last; ++i)
+        if (!expected[i]) reference.push_back(i - first);
+      EXPECT_EQ(actual, reference);
+    }
+  }
 }
 
 TEST(StereoFusion, PackedAtomicPixelMaskKeepsDisjointConcurrentBits) {
@@ -293,14 +385,14 @@ TEST(StereoFusion, PackedAtomicPixelMaskKeepsDisjointConcurrentBits) {
   std::thread first(write, 0), second(write, 1);
   first.join();
   second.join();
-  const auto snapshot = mask.Snapshot(0, kRows * kBits);
+  const auto snapshot = UnpackSnapshot(mask.Snapshot(0, kRows * kBits));
   EXPECT_TRUE(std::all_of(
       snapshot.begin(), snapshot.end(), [](char value) { return value == 1; }));
   mask.Set(17, 31, 0);
   for (size_t col = 0; col < kBits; ++col)
     EXPECT_EQ(mask.Get(17, col), col == 31 ? 0 : 1);
   mask.Set(17, 31, 1);
-  EXPECT_EQ(mask.Snapshot(17 * kBits + 29, 17 * kBits + 34),
+  EXPECT_EQ(UnpackSnapshot(mask.Snapshot(17 * kBits + 29, 17 * kBits + 34)),
             std::vector<char>(5, 1));
 }
 
@@ -320,7 +412,7 @@ TEST(StereoFusion, AtomicPixelMaskAllowsConcurrentStoresAndSnapshots) {
   std::thread second(write);
   start.store(true, std::memory_order_release);
   for (int repeat = 0; repeat < 8; ++repeat) {
-    const auto snapshot = mask.Snapshot(0, kSide * kSide);
+    const auto snapshot = UnpackSnapshot(mask.Snapshot(0, kSide * kSide));
     EXPECT_TRUE(std::all_of(snapshot.begin(), snapshot.end(), [](char value) {
       return value == 0 || value == 1;
     }));
@@ -329,7 +421,7 @@ TEST(StereoFusion, AtomicPixelMaskAllowsConcurrentStoresAndSnapshots) {
   }
   first.join();
   second.join();
-  const auto snapshot = mask.Snapshot(0, kSide * kSide);
+  const auto snapshot = UnpackSnapshot(mask.Snapshot(0, kSide * kSide));
   EXPECT_TRUE(std::all_of(
       snapshot.begin(), snapshot.end(), [](char value) { return value == 1; }));
 }
@@ -384,6 +476,19 @@ struct StereoFusionExactDepthTestPeer {
     return count;
   }
 
+  static char PixelMaskValue(const StereoFusion& fusion,
+                             size_t image,
+                             size_t row,
+                             size_t col) {
+    return fusion.fused_pixel_masks_.at(image).Get(row, col);
+  }
+  static size_t DepthBorrowCount(const StereoFusion& fusion) {
+    size_t reads = 0;
+    for (const auto& worker : fusion.task_neighborhood_reads_) {
+      reads += worker.pointer_reads;
+    }
+    return reads;
+  }
   static bool HasFullRamInputs(const StereoFusion& fusion) {
     return !fusion.full_ram_inputs_.empty();
   }
@@ -549,6 +654,7 @@ TEST(StereoFusion, NormalWindowUsesExactWholeOwnerThenTiledFallback) {
   StereoFusionOptions options;
   options.bounded_cache = options.bounded_cache_components = true;
   options.bounded_cache_neighborhood = true;
+  options.bounded_cache_diagnostics = true;
   options.bounded_cache_normal_tile_size = 7;
   options.bounded_cache_normal_tile_slots = 2;
   options.bounded_cache_normal_mapped_bytes = 1 << 20;
@@ -557,8 +663,8 @@ TEST(StereoFusion, NormalWindowUsesExactWholeOwnerThenTiledFallback) {
   StereoFusion fusion(options, base.workspace_path, "COLMAP", "", "geometric");
   StereoFusionExactDepthTestPeer::PrepareRing(fusion, base, 2, false);
   StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion);
-  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 1);
-  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 1);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 2);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowPointers(fusion), 2);
   const auto before = fusion.GetBoundedCacheStats();
   ASSERT_TRUE(before);
   EXPECT_EQ(before->normal_tile_loads, 0);
@@ -574,9 +680,12 @@ TEST(StereoFusion, NormalWindowUsesExactWholeOwnerThenTiledFallback) {
   EXPECT_FLOAT_EQ(whole->GetNormal(10, 16)(1), -16.5f);
   EXPECT_EQ(fusion.GetBoundedCacheStats()->hits, before->hits);
   EXPECT_EQ(fusion.GetNormalTileRingStats().misses, 0);
-  // View1 is outside the hot window but its original depth remains admitted.
+  const auto diagnostic = fusion.GetBoundedCacheDiagnosticRow();
+  ASSERT_TRUE(diagnostic);
+  EXPECT_NE(diagnostic->find("normal_prefill_borrows=1 "), std::string::npos);
+  // View2 is outside the hot window but its original depth remains admitted.
   // Exercise its exact tile while the whole-normal owner is still pinned.
-  auto tile = StereoFusionExactDepthTestPeer::AcquireView(fusion, 1, 10, 16);
+  auto tile = StereoFusionExactDepthTestPeer::AcquireView(fusion, 2, 10, 16);
   ASSERT_TRUE(tile);
   EXPECT_LT(tile->normal_map.GetWidth(), 17);
   EXPECT_FLOAT_EQ(tile->GetNormal(10, 16)(0), 186.25f);
@@ -701,7 +810,7 @@ TEST(StereoFusion, NormalWindowStopAndLoadFailurePublishNothing) {
     restored.write(bytes.data(), bytes.size());
   }
   StereoFusionExactDepthTestPeer::PrepareNormalWindow(fusion);
-  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 2);
+  EXPECT_EQ(StereoFusionExactDepthTestPeer::NormalWindowOwners(fusion), 4);
   StereoFusionExactDepthTestPeer::ClearNormalWindow(fusion);
 }
 TEST(StereoFusion, CompleteTileNeighborhoodAliasesWholeImageOwners) {
@@ -823,7 +932,7 @@ TEST(StereoFusion, NormalWindowPinsPreserveDepthAndBudgetLoaderExtra) {
   EXPECT_EQ(scratch.components.bitmap, pins.components.bitmap);
 }
 
-TEST(StereoFusion, NormalWindowPinsPriorityCapAndTinyFallback) {
+TEST(StereoFusion, NormalWindowPinsUseAvailableBudgetAndTinyFallback) {
   using internal::NormalWindowFusionPins;
   EXPECT_TRUE(NormalWindowFusionPins({}, {}, {}, {}, 0).normal.empty());
   const auto tiny = NormalWindowFusionPins({10}, {8}, {16}, {16}, 17);
@@ -834,7 +943,8 @@ TEST(StereoFusion, NormalWindowPinsPriorityCapAndTinyFallback) {
                                           std::vector<size_t>(12, 1),
                                           std::vector<size_t>(12, 1),
                                           100);
-  EXPECT_EQ(cap.normal, (std::vector<size_t>{0, 1, 2, 3, 4, 5, 6, 7}));
+  EXPECT_EQ(cap.normal,
+            (std::vector<size_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}));
   EXPECT_EQ(cap.components.depth.size(), 12);
   // Normals may replace only nonroot bitmap pins, never the baseline depths.
   const auto mixed = NormalWindowFusionPins(
@@ -845,6 +955,20 @@ TEST(StereoFusion, NormalWindowPinsPriorityCapAndTinyFallback) {
   EXPECT_ANY_THROW(NormalWindowFusionPins({1}, {1}, {2}, {1}, 16));
   const size_t max = std::numeric_limits<size_t>::max();
   EXPECT_TRUE(NormalWindowFusionPins({max}, {1}, {1}, {1}, max).normal.empty());
+}
+
+TEST(StereoFusion, NormalWindowPinsShareScratchAndSkipOversizedLoads) {
+  using internal::NormalWindowFusionPins;
+  const auto exact =
+      NormalWindowFusionPins({1, 1, 1}, {1, 1, 1}, {2, 2, 2}, {3, 7, 3}, 15);
+  EXPECT_EQ(exact.normal, (std::vector<size_t>{0, 1}));
+  EXPECT_EQ(exact.components.bitmap, (std::vector<size_t>{0, 1, 2}));
+  EXPECT_EQ(exact.largest_normal_extra, 5);
+  const auto smaller =
+      NormalWindowFusionPins({1, 1, 1}, {1, 1, 1}, {2, 2, 2}, {3, 7, 3}, 14);
+  EXPECT_EQ(smaller.normal, (std::vector<size_t>{0, 2}));
+  EXPECT_EQ(smaller.components.bitmap, exact.components.bitmap);
+  EXPECT_EQ(smaller.largest_normal_extra, 1);
 }
 
 TEST(StereoFusion, NormalTileRingReusesFp32CroppedTiles) {
@@ -2046,6 +2170,154 @@ TEST(StereoFusion, CompactResidentRgbMatchesDiskFusion) {
   }
 }
 
+#ifdef __linux__
+TEST(WritePointsVisibility, FailedOutputIsReported) {
+  EXPECT_THROW(WritePointsVisibility("/dev/full", {{1, 2}, {}, {3}}),
+               std::invalid_argument);
+}
+#endif  // __linux__
+
+namespace {
+std::string ReadFusionTestBytes(const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  THROW_CHECK(file.is_open()) << path;
+  return {std::istreambuf_iterator<char>(file),
+          std::istreambuf_iterator<char>()};
+}
+}  // namespace
+
+TEST(WriteFusedPointCloud, ReplacesPairAndRejectsCountMismatch) {
+  const auto dir = CreateTestDir();
+  const auto path = dir / "fused.ply";
+  const auto vis = AddFileExtension(path, ".vis");
+  PlyPoint point;
+  point.x = 1.25f;
+  point.g = 17;
+  const std::vector<PlyPoint> points{point};
+  const std::vector<std::vector<int>> visibility{{1, 3}};
+  WriteFusedPointCloud(path, points, visibility);
+  const auto old_ply = ReadFusionTestBytes(path);
+  const auto old_vis = ReadFusionTestBytes(vis);
+  EXPECT_THROW(WriteFusedPointCloud(path, points, {}), std::invalid_argument);
+  EXPECT_EQ(ReadFusionTestBytes(path), old_ply);
+  EXPECT_EQ(ReadFusionTestBytes(vis), old_vis);
+
+  point.x = 2.5f;
+  point.g = 31;
+  const std::vector<PlyPoint> replacement{point};
+  const std::vector<std::vector<int>> replacement_vis{{2}};
+  WriteFusedPointCloud(path, replacement, replacement_vis);
+  const auto actual = ReadPly(path);
+  ASSERT_EQ(actual.size(), 1);
+  EXPECT_FLOAT_EQ(actual[0].x, 2.5f);
+  EXPECT_EQ(actual[0].g, 31);
+  EXPECT_EQ(ReadPointsVisibility(vis, 1), replacement_vis);
+  const auto expected_ply = dir / "expected.ply";
+  const auto expected_vis = dir / "expected.vis";
+  WriteBinaryPlyPoints(expected_ply, replacement);
+  WritePointsVisibility(expected_vis, replacement_vis);
+  EXPECT_EQ(ReadFusionTestBytes(path), ReadFusionTestBytes(expected_ply));
+  EXPECT_EQ(ReadFusionTestBytes(vis), ReadFusionTestBytes(expected_vis));
+}
+
+TEST(WriteFusedPointCloud,
+     VisibilityPublishFailureRemovesCompletionAndRetries) {
+  const auto dir = CreateTestDir();
+  const auto path = dir / "fused.ply";
+  const auto vis = AddFileExtension(path, ".vis");
+  const std::vector<PlyPoint> points(1);
+  const std::vector<std::vector<int>> visibility{{1}};
+  WriteFusedPointCloud(path, points, visibility);
+  ASSERT_TRUE(std::filesystem::remove(vis));
+  ASSERT_TRUE(std::filesystem::create_directory(vis));
+  EXPECT_THROW(WriteFusedPointCloud(path, points, visibility), std::exception);
+  EXPECT_FALSE(std::filesystem::exists(path));
+  EXPECT_TRUE(std::filesystem::is_directory(vis));
+  ASSERT_TRUE(std::filesystem::remove(vis));
+  EXPECT_NO_THROW(WriteFusedPointCloud(path, points, visibility));
+  EXPECT_EQ(ReadPly(path).size(), 1);
+  EXPECT_EQ(ReadPointsVisibility(vis, 1), visibility);
+}
+
+#ifdef __linux__
+TEST(WriteFusedPointCloud, StagingWriteFailurePreservesExistingPair) {
+  const auto dir = CreateTestDir();
+  const auto path = dir / "fused.ply";
+  const auto vis = AddFileExtension(path, ".vis");
+  const std::vector<PlyPoint> points(1);
+  const std::vector<std::vector<int>> visibility{{1}};
+  WriteFusedPointCloud(path, points, visibility);
+  const auto old_ply = ReadFusionTestBytes(path);
+  const auto old_vis = ReadFusionTestBytes(vis);
+  struct LimitGuard {
+    struct rlimit old_limit;
+    using Handler = void (*)(int);
+    Handler old_handler;
+    explicit LimitGuard(rlim_t max_bytes) {
+      THROW_CHECK_EQ(getrlimit(RLIMIT_FSIZE, &old_limit), 0);
+      old_handler = std::signal(SIGXFSZ, SIG_IGN);
+      THROW_CHECK(old_handler != SIG_ERR);
+      struct rlimit limited = old_limit;
+      limited.rlim_cur = max_bytes;
+      if (setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+        std::signal(SIGXFSZ, old_handler);
+        throw std::runtime_error("Cannot set file size limit");
+      }
+    }
+    ~LimitGuard() {
+      setrlimit(RLIMIT_FSIZE, &old_limit);
+      std::signal(SIGXFSZ, old_handler);
+    }
+  };
+  // Verify the 1024-byte boundary reaches payload rather than header.
+  const std::vector<PlyPoint> large_points(512);
+  const std::vector<std::vector<int>> large_visibility(512, {1});
+  const auto sizing_ply = dir / "sizing.ply";
+  WriteBinaryPlyPoints(sizing_ply, large_points);
+  const auto sizing_bytes = ReadFusionTestBytes(sizing_ply);
+  const auto header_end = sizing_bytes.find("end_header\n");
+  ASSERT_NE(header_end, std::string::npos);
+  ASSERT_LT(header_end + std::string("end_header\n").size(), 1024);
+  ASSERT_GT(sizing_bytes.size(), 1024);
+  ASSERT_TRUE(std::filesystem::remove(sizing_ply));
+
+  // One-point PLY fits; a long visibility list forces its later stage to fail.
+  const std::vector<std::vector<int>> long_visibility(1,
+                                                      std::vector<int>(512, 1));
+  const auto small_ply = dir / "small.ply";
+  const auto large_vis = dir / "large.vis";
+  WriteBinaryPlyPoints(small_ply, points);
+  WritePointsVisibility(large_vis, long_visibility);
+  ASSERT_LT(std::filesystem::file_size(small_ply), 1024);
+  ASSERT_GT(std::filesystem::file_size(large_vis), 1024);
+  ASSERT_TRUE(std::filesystem::remove(small_ply));
+  ASSERT_TRUE(std::filesystem::remove(large_vis));
+
+  for (int mode = 0; mode < 3; ++mode) {
+    SCOPED_TRACE(mode);
+    std::string error;
+    {
+      LimitGuard guard(mode == 0 ? 0 : 1024);
+      try {
+        if (mode == 2) {
+          WriteFusedPointCloud(path, points, long_visibility);
+        } else {
+          WriteFusedPointCloud(path, large_points, large_visibility);
+        }
+      } catch (const std::exception& exception) {
+        error = exception.what();
+      }
+    }
+    EXPECT_NE(error.find(mode == 2 ? "Failed to write visibility file"
+                                   : "Failed to write PLY file"),
+              std::string::npos);
+    EXPECT_EQ(ReadFusionTestBytes(path), old_ply);
+    EXPECT_EQ(ReadFusionTestBytes(vis), old_vis);
+  }
+  EXPECT_NO_THROW(WriteFusedPointCloud(path, points, visibility));
+}
+#endif  // __linux__
+
 TEST(ReadPointsVisibility, BinaryWireBytes) {
   const auto test_file = CreateTestDir() / "wire.vis";
   std::vector<std::vector<std::vector<int>>> cases = {
@@ -2391,6 +2663,136 @@ TEST(StereoFusion, ZeroMinimumSkipsEmptySamples) {
   }
 }
 
+TEST(StereoFusion, BoundedNeighborhoodSeedsNonpositiveDepthBeforeRows) {
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  const auto names = ReadTextFileLines(root / "stereo" / "fusion.cfg");
+  ASSERT_EQ(names.size(), 2);
+  const auto write_depth = [&](float value) {
+    Mat<float> depth(30, 20, 1);
+    depth.Fill(value);
+    for (const auto& name : names) {
+      depth.Write(root / "stereo" / "depth_maps" / (name + ".geometric.bin"));
+    }
+  };
+  Mat<float> probe_depth(1, 1, 1);
+  probe_depth.Fill(0.0f);
+  internal::FusionPixelMask probe_mask(1, 1);
+  probe_mask.ExcludeNonpositiveDepth(internal::FusionFloatMapView(probe_depth));
+  const bool seed_supported = probe_mask.Get(0, 0) != 0;
+  for (const bool components : {false, true}) {
+    SCOPED_TRACE(components);
+    write_depth(0.0f);
+    StereoFusionOptions options;
+    options.num_threads = 4;
+    options.min_num_pixels = options.max_num_pixels = 2;
+    options.bounded_cache = true;
+    options.bounded_cache_components = components;
+    options.bounded_cache_neighborhood = true;
+    options.bounded_cache_diagnostics = true;
+    options.cache_size = 1.0;
+    StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+    fusion.Run();
+    EXPECT_TRUE(fusion.GetFusedPoints().empty());
+    EXPECT_TRUE(fusion.GetFusedPointsVisibility().empty());
+    const auto stats = fusion.GetBoundedCacheStats();
+    ASSERT_TRUE(stats);
+    EXPECT_GT(stats->loads, 0);
+    EXPECT_EQ(stats->reserved_bytes, 0);
+    EXPECT_LE(stats->peak_charged_bytes, stats->capacity_bytes);
+    for (size_t image = 0; image < 2; ++image) {
+      for (size_t row = 0; row < 20; ++row) {
+        for (size_t col = 0; col < 30; ++col) {
+          EXPECT_EQ(StereoFusionExactDepthTestPeer::PixelMaskValue(
+                        fusion, image, row, col),
+                    seed_supported ? 1 : 0);
+        }
+      }
+    }
+    if (seed_supported) {
+      EXPECT_EQ(StereoFusionExactDepthTestPeer::DepthBorrowCount(fusion), 0);
+    }
+    // A fresh Run must not retain exclusions from a previous depth generation.
+    write_depth(5.0f);
+    fusion.Run();
+    EXPECT_FALSE(fusion.GetFusedPoints().empty());
+  }
+}
+
+TEST(StereoFusion, CompleteBoundedWindowBorrowsResidentViewsAndCancels) {
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  StereoFusionOptions options;
+  options.num_threads = 1;
+  options.min_num_pixels = options.max_num_pixels = 2;
+  options.bounded_cache = true;
+  options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.cache_size = 1.0;
+  StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+  bool observed = false;
+  fusion.SetCheckIfStoppedFunc([&] {
+    observed |= StereoFusionExactDepthTestPeer::HasFullRamInputs(fusion);
+    return observed;
+  });
+  fusion.Run();
+  EXPECT_TRUE(observed);
+  EXPECT_TRUE(fusion.GetFusedPoints().empty());
+  EXPECT_FALSE(StereoFusionExactDepthTestPeer::HasFullRamInputs(fusion));
+  ASSERT_TRUE(fusion.GetBoundedCacheStats());
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  observed = false;
+  fusion.SetCheckIfStoppedFunc([&] {
+    observed |= StereoFusionExactDepthTestPeer::HasFullRamInputs(fusion);
+    return false;
+  });
+  fusion.Run();
+  EXPECT_TRUE(observed);
+  EXPECT_FALSE(fusion.GetFusedPoints().empty());
+  EXPECT_FALSE(StereoFusionExactDepthTestPeer::HasFullRamInputs(fusion));
+  const auto names = ReadTextFileLines(root / "stereo" / "fusion.cfg");
+  Mat<float> depth(15, 10, 1);
+  depth.Fill(5.0f);
+  Mat<float> normal(15, 10, 3);
+  normal.Fill(0.0f);
+  for (size_t row = 0; row < 10; ++row) {
+    for (size_t col = 0; col < 15; ++col) normal.Set(row, col, 2, 1.0f);
+  }
+  for (const auto& name : names) {
+    depth.Write(root / "stereo" / "depth_maps" / (name + ".geometric.bin"));
+    normal.Write(root / "stereo" / "normal_maps" / (name + ".geometric.bin"));
+  }
+  options.bounded_cache_compact_rgb = true;
+  StereoFusion compact(options, root, "COLMAP", "", "geometric");
+  bool compact_resident = false;
+  compact.SetCheckIfStoppedFunc([&] {
+    compact_resident |=
+        StereoFusionExactDepthTestPeer::HasFullRamInputs(compact);
+    return false;
+  });
+  compact.Run();
+  EXPECT_FALSE(compact_resident);
+  EXPECT_FALSE(compact.GetFusedPoints().empty());
+  auto generic_options = options;
+  generic_options.bounded_cache_neighborhood = false;
+  StereoFusion generic(generic_options, root, "COLMAP", "", "geometric");
+  generic.Run();
+  ASSERT_EQ(compact.GetFusedPoints().size(), generic.GetFusedPoints().size());
+  EXPECT_EQ(compact.GetFusedPointsVisibility(),
+            generic.GetFusedPointsVisibility());
+  for (size_t i = 0; i < compact.GetFusedPoints().size(); ++i) {
+    const auto& actual = compact.GetFusedPoints()[i];
+    const auto& expected = generic.GetFusedPoints()[i];
+    EXPECT_FLOAT_EQ(actual.x, expected.x);
+    EXPECT_FLOAT_EQ(actual.y, expected.y);
+    EXPECT_FLOAT_EQ(actual.z, expected.z);
+    EXPECT_FLOAT_EQ(actual.nx, expected.nx);
+    EXPECT_FLOAT_EQ(actual.ny, expected.ny);
+    EXPECT_FLOAT_EQ(actual.nz, expected.nz);
+    EXPECT_EQ(actual.r, expected.r);
+    EXPECT_EQ(actual.g, expected.g);
+    EXPECT_EQ(actual.b, expected.b);
+  }
+}
+
 TEST(StereoFusion, CompleteViewSetDoesNotReserveWorkerCopies) {
   const auto root = CreateTwoViewNormalDecisionFixture();
   Workspace::Options workspace_options;
@@ -2435,6 +2837,272 @@ TEST(StereoFusion, CompleteViewSetDoesNotReserveWorkerCopies) {
     EXPECT_LE(stats->peak_charged_bytes, stats->capacity_bytes);
     EXPECT_EQ(stats->reserved_bytes, 0);
   }
+}
+
+// Root 0 is a leaf, root 1 a hub; after the first root is fused the
+// second root must not inherit its complete-neighborhood admission.
+TEST(StereoFusion, CompleteTileRootThenPartialRootNeedsFallbackHeadroom) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  const auto root = CreateTestDir();
+  for (const auto* dir :
+       {"sparse", "images", "stereo/depth_maps", "stereo/normal_maps"}) {
+    CreateDirIfNotExists(root / dir, true);
+  }
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 4;
+  dataset.num_points3D = 90;
+  dataset.camera_width = 30;
+  dataset.camera_height = 20;
+  dataset.camera_params = {30.0, 15.0, 10.0, 0.0};
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  for (const frame_t frame_id : reconstruction.RegFrameIds()) {
+    reconstruction.Frame(frame_id).SetRigFromWorld(Rigid3d());
+  }
+  reconstruction.Write(root / "sparse");
+  Model initial;
+  initial.Read(root, "COLMAP");
+  ASSERT_EQ(initial.images.size(), 4);
+  std::vector<image_t> image_ids;
+  std::vector<std::string> image_names;
+  for (int index = 0; index < 4; ++index) {
+    const auto& name = initial.GetImageName(index);
+    image_names.push_back(name);
+    bool found = false;
+    for (const auto& [id, image] : reconstruction.Images()) {
+      if (image.Name() == name) {
+        image_ids.push_back(id);
+        found = true;
+        break;
+      }
+    }
+    ASSERT_TRUE(found);
+  }
+  std::vector<point3D_t> point_ids;
+  for (const auto& [id, point] : reconstruction.Points3D()) {
+    ASSERT_EQ(point.track.Length(), 4);
+    point_ids.push_back(id);
+  }
+  std::sort(point_ids.begin(), point_ids.end());
+  ASSERT_GE(point_ids.size(), 3);
+  const std::array<int, 3> leaves{0, 2, 3};
+  for (size_t index = 0; index < point_ids.size(); ++index) {
+    const image_t leaf = image_ids[leaves[index % leaves.size()]];
+    const auto elements =
+        reconstruction.Point3D(point_ids[index]).track.Elements();
+    for (const auto& element : elements) {
+      if (element.image_id != image_ids[1] && element.image_id != leaf) {
+        reconstruction.DeleteObservation(element.image_id, element.point2D_idx);
+      }
+    }
+  }
+  reconstruction.Write(root / "sparse");
+  {
+    std::ofstream config(root / "stereo/fusion.cfg");
+    for (const auto& name : image_names) {
+      config << name << '\n';
+      Mat<float> depth(30, 20, 1);
+      depth.Fill(5.0f);
+      depth.Write(root / "stereo/depth_maps" / (name + ".geometric.bin"));
+      Mat<float> normal(30, 20, 3);
+      normal.Fill(0.0f);
+      for (size_t row = 0; row < 20; ++row) {
+        for (size_t col = 0; col < 30; ++col) normal.Set(row, col, 2, 1.0f);
+      }
+      normal.Write(root / "stereo/normal_maps" / (name + ".geometric.bin"));
+      Bitmap bitmap(30, 20, true);
+      bitmap.Fill(BitmapColor<uint8_t>(0, 64, 128));
+      bitmap.Write(root / "images" / name);
+    }
+  }
+  Model model;
+  model.Read(root, "COLMAP");
+  for (int index = 0; index < 4; ++index) {
+    ASSERT_EQ(model.GetImageName(index), image_names[index]);
+  }
+  const auto adjacency = model.GetMaxOverlappingImages(50, 0.0);
+  ASSERT_EQ(adjacency[0], std::vector<int>({1}));
+  ASSERT_EQ(adjacency[1].size(), 3);
+  EXPECT_NE(std::find(adjacency[1].begin(), adjacency[1].end(), 0),
+            adjacency[1].end());
+  EXPECT_NE(std::find(adjacency[1].begin(), adjacency[1].end(), 2),
+            adjacency[1].end());
+  EXPECT_NE(std::find(adjacency[1].begin(), adjacency[1].end(), 3),
+            adjacency[1].end());
+
+  Workspace::Options workspace_options;
+  workspace_options.workspace_path = root;
+  workspace_options.workspace_format = "COLMAP";
+  workspace_options.input_type = "geometric";
+  workspace_options.image_as_rgb = true;
+  workspace_options.cache_size = 1.0;
+  BoundedWorkspace estimates(workspace_options);
+  using Component = BoundedWorkspace::Component;
+  const size_t first = estimates.GetResidentBytesEstimate(0, Component::kImage);
+  const size_t hub = estimates.GetResidentBytesEstimate(1, Component::kImage);
+  const size_t extra =
+      std::max(estimates.GetLoadReservationBytes(0, Component::kImage) - first,
+               estimates.GetLoadReservationBytes(1, Component::kImage) - hub);
+  const size_t capacity = first + hub + extra + 64;
+  const size_t later =
+      hub + estimates.GetResidentBytesEstimate(2, Component::kImage) +
+      estimates.GetResidentBytesEstimate(3, Component::kImage);
+  ASSERT_GT(later, capacity);
+  const size_t tile = estimates.GetNormalTileResidentBytes(0, 7);
+  const size_t component =
+      std::max({estimates.GetNormalTileReservationBytes(0, 7),
+                estimates.GetLoadReservationBytes(0, Component::kDepth),
+                estimates.GetLoadReservationBytes(0, Component::kBitmap)});
+  ASSERT_GT(component + 4 * tile, capacity / 12);
+  StereoFusionOptions options;
+  options.num_threads = 12;
+  options.max_traversal_depth = 2;
+  options.min_num_pixels = options.max_num_pixels = 2;
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = 4;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 1;
+  options.cache_size = static_cast<double>(capacity) / (1ULL << 30);
+  ASSERT_TRUE(options.Check());
+  StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+  try {
+    fusion.Run();
+    FAIL() << "Expected the later partial root to refuse tile fallback";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_NE(
+        std::string(error.what()).find("Partial normal-tile neighborhoods"),
+        std::string::npos);
+  }
+  const auto stats = fusion.GetBoundedCacheStats();
+  ASSERT_TRUE(stats);
+  // Two whole owners prove the first root reached admission before the later
+  // partial root was refused; no partial prefill or tile load may survive.
+  EXPECT_EQ(stats->component_loads[static_cast<size_t>(Component::kImage)], 2);
+  EXPECT_EQ(stats->normal_tile_loads, 0);
+  EXPECT_LE(stats->peak_charged_bytes, stats->capacity_bytes);
+  EXPECT_EQ(stats->reserved_bytes, 0);
+  EXPECT_TRUE(fusion.GetFusedPoints().empty());
+}
+
+// A tight complete owner set must not be rejected merely because hypothetical
+// per-worker fallback tiles would not fit. The estimator keeps this fixture
+// independent of hardcoded cache accounting.
+TEST(StereoFusion, CompleteTileOwnersDoNotRequireFallbackHeadroom) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  Workspace::Options workspace_options;
+  workspace_options.workspace_path = root;
+  workspace_options.workspace_format = "COLMAP";
+  workspace_options.input_type = "geometric";
+  workspace_options.image_as_rgb = true;
+  workspace_options.cache_size = 1.0;
+  BoundedWorkspace estimates(workspace_options);
+  using Component = BoundedWorkspace::Component;
+  size_t resident_total = 0, loader_extra = 0, largest_component = 0;
+  size_t largest_tile = 0;
+  for (const int view : {0, 1}) {
+    const size_t resident =
+        estimates.GetResidentBytesEstimate(view, Component::kImage);
+    const size_t reserved =
+        estimates.GetLoadReservationBytes(view, Component::kImage);
+    ASSERT_GE(reserved, resident);
+    resident_total += resident;
+    loader_extra = std::max(loader_extra, reserved - resident);
+    largest_tile =
+        std::max(largest_tile, estimates.GetNormalTileResidentBytes(view, 7));
+    largest_component =
+        std::max({largest_component,
+                  estimates.GetNormalTileReservationBytes(view, 7),
+                  estimates.GetLoadReservationBytes(view, Component::kDepth),
+                  estimates.GetLoadReservationBytes(view, Component::kBitmap)});
+  }
+  constexpr size_t kWorkers = 12;
+  constexpr size_t kSlots = 4;
+  const size_t capacity = resident_total + loader_extra + 64;
+  ASSERT_GT(largest_component + kSlots * largest_tile, capacity / kWorkers);
+  StereoFusionOptions options;
+  options.num_threads = kWorkers;
+  options.min_num_pixels = options.max_num_pixels = 2;
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = kSlots;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 1;
+  options.cache_size = static_cast<double>(capacity) / (1ULL << 30);
+  ASSERT_TRUE(options.Check());
+  StereoFusion complete(options, root, "COLMAP", "", "geometric");
+  ASSERT_NO_THROW(complete.Run());
+  EXPECT_FALSE(complete.GetFusedPoints().empty());
+  const auto stats = complete.GetBoundedCacheStats();
+  ASSERT_TRUE(stats);
+  EXPECT_EQ(stats->capacity_bytes, capacity);
+  EXPECT_EQ(stats->component_loads[static_cast<size_t>(Component::kImage)], 2);
+  EXPECT_EQ(stats->normal_tile_loads, 0);
+  EXPECT_LE(stats->peak_charged_bytes, stats->capacity_bytes);
+  EXPECT_EQ(stats->reserved_bytes, 0);
+
+  auto generous_options = options;
+  const size_t generous_capacity =
+      resident_total + loader_extra +
+      kWorkers * (largest_component + kSlots * largest_tile) + 64;
+  generous_options.cache_size =
+      static_cast<double>(generous_capacity) / (1ULL << 30);
+  StereoFusion generous(generous_options, root, "COLMAP", "", "geometric");
+  ASSERT_NO_THROW(generous.Run());
+  const auto sorted_points = [](const auto& points) {
+    std::vector<std::array<float, 9>> result;
+    result.reserve(points.size());
+    for (const auto& p : points) {
+      result.push_back({p.x,
+                        p.y,
+                        p.z,
+                        p.nx,
+                        p.ny,
+                        p.nz,
+                        static_cast<float>(p.r),
+                        static_cast<float>(p.g),
+                        static_cast<float>(p.b)});
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+  };
+  EXPECT_EQ(sorted_points(complete.GetFusedPoints()),
+            sorted_points(generous.GetFusedPoints()));
+  for (const auto& visibility : complete.GetFusedPointsVisibility()) {
+    auto sorted = visibility;
+    std::sort(sorted.begin(), sorted.end());
+    EXPECT_EQ(sorted, (std::vector<int>{0, 1}));
+  }
+
+  // Whole owners no longer fit, and the same tile fallback is still too large.
+  ASSERT_GT(resident_total, 1);
+  const size_t partial_capacity = resident_total - 1;
+  ASSERT_GT(largest_component + kSlots * largest_tile,
+            partial_capacity / kWorkers);
+  options.cache_size = static_cast<double>(partial_capacity) / (1ULL << 30);
+  StereoFusion partial(options, root, "COLMAP", "", "geometric");
+  EXPECT_THROW(partial.Run(), std::exception);
+  EXPECT_TRUE(partial.GetFusedPoints().empty());
+  const auto partial_stats = partial.GetBoundedCacheStats();
+  ASSERT_TRUE(partial_stats);
+  EXPECT_EQ(
+      partial_stats->component_loads[static_cast<size_t>(Component::kImage)],
+      0);
+  EXPECT_EQ(partial_stats->normal_tile_loads, 0);
+  EXPECT_EQ(partial_stats->reserved_bytes, 0);
+
+  // Without neighborhoods there is no complete-owner admission to defer to.
+  options.bounded_cache_neighborhood = false;
+  options.cache_size = static_cast<double>(capacity) / (1ULL << 30);
+  StereoFusion no_neighborhood(options, root, "COLMAP", "", "geometric");
+  EXPECT_THROW(no_neighborhood.Run(), std::exception);
+  ASSERT_TRUE(no_neighborhood.GetBoundedCacheStats());
+  EXPECT_EQ(no_neighborhood.GetBoundedCacheStats()->reserved_bytes, 0);
 }
 
 TEST(StereoFusion, RetiredEagerInputsSurviveInterruptionAndRepeat) {

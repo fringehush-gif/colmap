@@ -30,6 +30,7 @@ DAMAGE.
 #define REGULAR_GRID_INCLUDED
 
 #include <type_traits>
+#include <utility>
 #include "Array.h"
 #include "Geometry.h"
 #include "MyMiscellany.h"
@@ -69,6 +70,24 @@ namespace PoissonRecon
 		static bool ReadHeader( std::string fileName , unsigned int &dim , std::string &type );
 
 		RegularGrid( void ) : _values( NullPointer( DataType ) ){ for( unsigned int d=0 ; d<Dim ; d++ ) _res[d] = 0; }
+		RegularGrid( const RegularGrid& ) = delete;
+		RegularGrid& operator = ( const RegularGrid& ) = delete;
+		RegularGrid( RegularGrid&& grid ) : _values( grid._values )
+		{
+			grid._values = NullPointer( DataType );
+			for( unsigned int d=0 ; d<Dim ; d++ ) _res[d] = std::exchange( grid._res[d] , 0 );
+		}
+		RegularGrid& operator = ( RegularGrid&& grid )
+		{
+			if( this!=&grid )
+			{
+				DeletePointer( _values );
+				_values = grid._values;
+				grid._values = NullPointer( DataType );
+				for( unsigned int d=0 ; d<Dim ; d++ ) _res[d] = std::exchange( grid._res[d] , 0 );
+			}
+			return *this;
+		}
 		~RegularGrid( void ){ DeletePointer( _values ); }
 
 		template< typename Real > static void Read( std::string fileName , unsigned int res[Dim] , Pointer( DataType ) &values , XForm< Real , Dim+1 > &gridToModel );

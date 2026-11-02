@@ -5,9 +5,11 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -80,6 +82,82 @@ TEST(PlyWriterTest, VectorRoundTripBinaryAndAscii) {
       EXPECT_FLOAT_EQ(decoded[i].x, vertices[i].x);
       EXPECT_FLOAT_EQ(decoded[i].y, vertices[i].y);
       EXPECT_FLOAT_EQ(decoded[i].z, vertices[i].z);
+    }
+  }
+}
+
+template <typename OutputIndex>
+void CompareStreamingAndVectorWriter(const std::filesystem::path& dir,
+                                     const int type,
+                                     const bool empty) {
+  const std::vector<Vertex> vertices = {
+      {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+  const std::vector<std::vector<int>> faces =
+      empty ? std::vector<std::vector<int>>{}
+            : std::vector<std::vector<int>>{
+                  {0, 1, 2}, {}, {0, 1, 2, 3}, {3, 2, 1}};
+  std::vector<std::vector<OutputIndex>> converted;
+  converted.reserve(faces.size());
+  for (const auto& face : faces)
+    converted.emplace_back(face.begin(), face.end());
+  Input<Vertex> vertex_stream(vertices);
+  Input<std::vector<int>> face_stream(faces);
+  const std::string suffix = std::to_string(type) + "-" +
+                             std::to_string(empty) + "-" +
+                             std::to_string(sizeof(OutputIndex)) + "-" +
+                             std::to_string(std::is_signed_v<OutputIndex>);
+  const auto stream_path = dir / ("stream-" + suffix + ".ply");
+  const auto vector_path = dir / ("vector-" + suffix + ".ply");
+  PoissonRecon::PLY::Write<VertexFactory, int, float, 3, OutputIndex>(
+      stream_path.string(),
+      VertexFactory{},
+      vertices.size(),
+      faces.size(),
+      vertex_stream,
+      face_stream,
+      type,
+      {});
+  PoissonRecon::PLY::WritePolygons<VertexFactory, OutputIndex>(
+      vector_path.string(), VertexFactory{}, vertices, converted, type, {});
+  std::ifstream stream(stream_path, std::ios::binary);
+  std::ifstream vector(vector_path, std::ios::binary);
+  ASSERT_TRUE(stream.is_open());
+  ASSERT_TRUE(vector.is_open());
+  const std::vector<char> stream_bytes((std::istreambuf_iterator<char>(stream)),
+                                       std::istreambuf_iterator<char>());
+  const std::vector<char> vector_bytes((std::istreambuf_iterator<char>(vector)),
+                                       std::istreambuf_iterator<char>());
+  EXPECT_EQ(stream_bytes, vector_bytes);
+  std::vector<Vertex> decoded;
+  std::vector<std::vector<OutputIndex>> decoded_faces;
+  std::vector<std::string> comments;
+  int decoded_type = 0;
+  PoissonRecon::PLY::ReadPolygons<VertexFactory, OutputIndex>(
+      stream_path.string(),
+      VertexFactory{},
+      decoded,
+      decoded_faces,
+      decoded_type,
+      comments);
+  EXPECT_EQ(decoded_type, type);
+  EXPECT_EQ(decoded_faces, converted);
+  ASSERT_EQ(decoded.size(), vertices.size());
+  for (size_t i = 0; i < vertices.size(); ++i) {
+    EXPECT_FLOAT_EQ(decoded[i].x, vertices[i].x);
+    EXPECT_FLOAT_EQ(decoded[i].y, vertices[i].y);
+    EXPECT_FLOAT_EQ(decoded[i].z, vertices[i].z);
+  }
+}
+
+TEST(PlyWriterTest, StreamingFacesMatchVectorWireFormat) {
+  const auto dir = colmap::CreateTestDir();
+  for (const int type : {PLY_ASCII, PLY_BINARY_LE, PLY_BINARY_BE}) {
+    for (const bool empty : {false, true}) {
+      SCOPED_TRACE(type);
+      SCOPED_TRACE(empty);
+      CompareStreamingAndVectorWriter<int>(dir, type, empty);
+      CompareStreamingAndVectorWriter<unsigned int>(dir, type, empty);
+      CompareStreamingAndVectorWriter<long long>(dir, type, empty);
     }
   }
 }

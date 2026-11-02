@@ -504,6 +504,29 @@ TEST_F(WorkspaceTests, CachedBitmapReadFailureCanBeRetried) {
   reader->Close();
 }
 
+TEST_F(WorkspaceTests, EagerBitmapReadFailureCanBeRetried) {
+  auto options = GetOptions();
+  options.num_threads = 1;
+  Workspace workspace(options);
+  std::atomic<int> reads{0};
+  auto reader =
+      ScopedBitmapReader::Create({workspace.GetBitmapPath(0)},
+                                 [&](const auto&, bool, bool, Bitmap* target) {
+                                   *target = Bitmap(10, 5, true);
+                                   target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+                                   return ++reads > 1;
+                                 },
+                                 {{10, 5}});
+  EXPECT_THROW(workspace.Load({image_name_}), std::exception);
+  EXPECT_EQ(reads.load(), 1);
+  EXPECT_THROW(workspace.GetBitmap(0), std::exception);
+
+  ASSERT_NO_THROW(workspace.Load({image_name_}));
+  EXPECT_EQ(reads.load(), 2);
+  ExpectLoadedWorkspaceData(workspace);
+  reader->Close();
+}
+
 TEST_F(WorkspaceTests, EagerLoadMissingInputCanBeRestored) {
   auto options = GetOptions();
   options.num_threads = 1;
@@ -1487,6 +1510,41 @@ TEST(BoundedWorkspaceBase, MappedNormalStripeKeysPinAcrossBands) {
   EXPECT_EQ(
       repaired.AcquireMappedNormalWindow(image, 256, 4)->ReadFloat3(256, 9).z(),
       2.0f);
+}
+
+TEST(BoundedWorkspaceBase, NormalReadChecksShapeAndCroppedCoordinates) {
+  BoundedWorkspace::ImageData image;
+  image.normal_origin_x = 8;
+  image.normal_origin_y = 9;
+  image.normal_map = NormalMap(3, 2);
+  for (size_t row = 0; row < 2; ++row) {
+    for (size_t col = 0; col < 3; ++col) {
+      image.normal_map.Set(row, col, 0, row * 3 + col + 0.25f);
+      image.normal_map.Set(row, col, 1, -2.5f);
+      image.normal_map.Set(row, col, 2, 17.0f);
+      EXPECT_EQ(image.GetNormal(row + 9, col + 8),
+                Eigen::Vector3f(row * 3 + col + 0.25f, -2.5f, 17.0f));
+    }
+  }
+  EXPECT_THROW(image.GetNormal(8, 8), std::exception);
+  EXPECT_THROW(image.GetNormal(9, 7), std::exception);
+  EXPECT_THROW(image.GetNormal(11, 8), std::exception);
+  EXPECT_THROW(image.GetNormal(9, 11), std::exception);
+  EXPECT_THROW(image.GetNormal(std::numeric_limits<size_t>::max(), 8),
+               std::exception);
+  EXPECT_THROW(image.GetNormal(9, std::numeric_limits<size_t>::max()),
+               std::exception);
+  image.normal_map = NormalMap();
+  EXPECT_THROW(image.GetNormal(9, 8), std::exception);
+  const auto root = CreateTestDir();
+  for (size_t channels : {1, 2, 4}) {
+    Mat<float> malformed(3, 2, channels);
+    malformed.Fill(1.0f);
+    const auto path = root / (std::to_string(channels) + ".bin");
+    malformed.Write(path);
+    image.normal_map.Read(path);
+    EXPECT_THROW(image.GetNormal(9, 8), std::exception);
+  }
 }
 
 }  // namespace

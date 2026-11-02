@@ -27,6 +27,7 @@
 
 #include <Eigen/Core>
 #include <boost/container_hash/hash.hpp>
+#include <boost/core/bit.hpp>
 
 namespace colmap {
 class ThreadPool;
@@ -154,6 +155,52 @@ struct FusionFloatMapView {
 // workers.
 class FusionPixelMask {
  public:
+  class PackedSnapshot {
+   public:
+    PackedSnapshot() = default;
+    PackedSnapshot(const PackedSnapshot&) = default;
+    PackedSnapshot& operator=(const PackedSnapshot&) = default;
+    PackedSnapshot(PackedSnapshot&& other) noexcept
+        : words_(std::move(other.words_)),
+          first_bit_(std::exchange(other.first_bit_, 0)),
+          size_(std::exchange(other.size_, 0)) {}
+    PackedSnapshot& operator=(PackedSnapshot&& other) noexcept {
+      if (this != &other) {
+        words_ = std::move(other.words_);
+        first_bit_ = std::exchange(other.first_bit_, 0);
+        size_ = std::exchange(other.size_, 0);
+      }
+      return *this;
+    }
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    template <typename Function>
+    void ForEachUnset(Function&& function) const {
+      size_t offset = 0;
+      size_t start_bit = first_bit_;
+      for (const uint64_t word : words_) {
+        if (offset == size_) break;
+        const size_t count = std::min(size_ - offset, kWordBits - start_bit);
+        uint64_t unset = ~word >> start_bit;
+        if (count < kWordBits) unset &= (uint64_t{1} << count) - 1;
+        while (unset != 0) {
+          function(offset + boost::core::countr_zero(unset));
+          unset &= unset - 1;
+        }
+        offset += count;
+        start_bit = 0;
+      }
+    }
+
+   private:
+    friend class FusionPixelMask;
+    PackedSnapshot(std::vector<uint64_t> words, size_t first_bit, size_t size)
+        : words_(std::move(words)), first_bit_(first_bit), size_(size) {}
+    std::vector<uint64_t> words_;
+    size_t first_bit_ = 0;
+    size_t size_ = 0;
+  };
+
   FusionPixelMask() = default;
   FusionPixelMask(size_t width, size_t height)
       : width_(width),
@@ -200,24 +247,18 @@ class FusionPixelMask {
   }
   // Snapshot only the task's bounded band. Words may be observed at different
   // times while workers update flags; this is not a coherent whole-band view.
-  std::vector<char> Snapshot(size_t first, size_t last) const {
+  PackedSnapshot Snapshot(size_t first, size_t last) const {
     if (first > last || last > size_) {
       throw std::out_of_range("Fusion mask snapshot is outside its storage");
     }
-    std::vector<char> values(last - first);
-    size_t index = first;
-    while (index < last) {
-      const size_t bit = index % kWordBits;
-      const uint64_t word =
-          data_[index / kWordBits].load(std::memory_order_relaxed);
-      const size_t count = std::min(last - index, kWordBits - bit);
-      for (size_t offset = 0; offset < count; ++offset) {
-        values[index - first + offset] =
-            static_cast<char>((word >> (bit + offset)) & uint64_t{1});
-      }
-      index += count;
+    if (first == last) return {};
+    const size_t first_word = first / kWordBits;
+    const size_t last_word = (last - 1) / kWordBits;
+    std::vector<uint64_t> words(last_word - first_word + 1);
+    for (size_t index = 0; index < words.size(); ++index) {
+      words[index] = data_[first_word + index].load(std::memory_order_relaxed);
     }
-    return values;
+    return PackedSnapshot(std::move(words), first % kWordBits, last - first);
   }
 
  private:
@@ -367,6 +408,8 @@ class StereoFusion : public BaseController {
                                                              int image_idx,
                                                              int row,
                                                              int col);
+  const BoundedWorkspace::ImageData* AcquireWorkerNormalTileFromRing(
+      int thread_id, int image_idx, int row, int col);
   const ImmutableMapRegion* AcquireWorkerMappedNormal(int image_idx, int row);
   void ClearMappedNormalRing();
   void InitFusedPixelMask(int image_idx, size_t width, size_t height);
@@ -386,7 +429,7 @@ class StereoFusion : public BaseController {
     internal::FusionFloatMapView normal;
     const Bitmap* bitmap = nullptr;
   };
-  // Borrowed only from the eager FP32 workspace, which outlives joined rows.
+  // Borrowed from eager or fully pinned neighborhood inputs until rows join.
   std::vector<FullRamInput> full_ram_inputs_;
   BoundedWorkspace* bounded_workspace_ = nullptr;
   std::vector<const BoundedWorkspace::ImageData*> neighborhood_data_;
@@ -443,7 +486,7 @@ class StereoFusion : public BaseController {
   };
   struct alignas(64) NormalTileRing {
     std::vector<NormalTileSlot> tiles;
-    NodeHashMap<NormalTileKey, size_t, boost::hash<NormalTileKey>> index;
+    FlatHashMap<NormalTileKey, size_t, boost::hash<NormalTileKey>> index;
     std::vector<size_t> last_slot_by_image;
     struct SoftSlot {
       NormalTileKey key{};
@@ -451,7 +494,7 @@ class StereoFusion : public BaseController {
       bool valid = false;
     };
     std::vector<SoftSlot> soft_tiles;
-    NodeHashMap<NormalTileKey, size_t, boost::hash<NormalTileKey>> soft_index;
+    FlatHashMap<NormalTileKey, size_t, boost::hash<NormalTileKey>> soft_index;
     size_t soft_next = 0, soft_hits = 0, soft_expired = 0;
     bool indexed = false;
     size_t next = 0, hits = 0, misses = 0;
@@ -523,6 +566,13 @@ class StereoFusion : public BaseController {
 // the mvs::Model, which is the location of the image in the images.bin/.txt.
 void WritePointsVisibility(
     const std::filesystem::path& path,
+    const std::vector<std::vector<int>>& points_visibility);
+
+// Publish a matching PLY and visibility pair. The PLY is published last so it
+// is absent if replacing the visibility file fails. Requires one writer.
+void WriteFusedPointCloud(
+    const std::filesystem::path& path,
+    const std::vector<PlyPoint>& points,
     const std::vector<std::vector<int>>& points_visibility);
 
 // Read per-point visibility data from a binary .vis file produced by the

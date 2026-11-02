@@ -36,6 +36,7 @@ DAMAGE.
 #include "PointExtent.h"
 #include "Reconstructors.streams.h"
 
+#include <memory>
 #include <mutex>
 
 namespace PoissonRecon
@@ -648,7 +649,7 @@ namespace PoissonRecon
 		template< typename Real , unsigned int Dim , unsigned int ... FEMSigs , typename ... AuxData >
 		Implicit< Real , Dim , UIntPack< FEMSigs... > , AuxData... > *Poisson::Solver< Real , Dim , UIntPack< FEMSigs... > , AuxData... >::Solve( InputOrientedSampleStream< Real , Dim , AuxData... > &pointStream , SolutionParameters< Real > params , AuxData ... zero , const EnvelopeMesh< Real , Dim > *envelopeMesh , InputValuedSampleStream< Real , Dim > *valueInterpolationStream )
 		{
-			Implicit< Real , Dim , UIntPack< FEMSigs... > , AuxData... > *implicitPtr = new Implicit< Real , Dim , UIntPack< FEMSigs... > , AuxData... >( zero... );
+			auto implicitPtr = std::make_unique< Implicit< Real , Dim , UIntPack< FEMSigs... > , AuxData... > >( zero... );
 			Implicit< Real , Dim , UIntPack< FEMSigs... > , AuxData... > &implicit = *implicitPtr;
 
 			if( params.valueInterpolationWeight<0 )
@@ -691,12 +692,12 @@ namespace PoissonRecon
 			size_t pointCount;
 
 			ProjectiveData< Point< Real , 2 > , Real > pointDepthAndWeight;
-			std::vector< typename FEMTree< Dim , Real >::PointSample > *valueInterpolationSamples = nullptr;
-			std::vector< Real > *valueInterpolationSampleData = nullptr;
+			std::unique_ptr< std::vector< typename FEMTree< Dim , Real >::PointSample > > valueInterpolationSamples;
+			std::unique_ptr< std::vector< Real > > valueInterpolationSampleData;
 			DenseNodeData< GeometryNodeType , IsotropicUIntPack< Dim , FEMTrivialSignature > > geometryNodeDesignators;
-			SparseNodeData< Point< Real , Dim > , NormalSigs > *normalInfo = nullptr;
-			std::vector< typename FEMTree< Dim , Real >::PointSample > *samples = new std::vector< typename FEMTree< Dim , Real >::PointSample >();
-			std::vector< InternalNormalAndAuxData > *sampleNormalAndAuxData = new std::vector< InternalNormalAndAuxData >();
+			std::unique_ptr< SparseNodeData< Point< Real , Dim > , NormalSigs > > normalInfo;
+			auto samples = std::make_unique< std::vector< typename FEMTree< Dim , Real >::PointSample > >();
+			auto sampleNormalAndAuxData = std::make_unique< std::vector< InternalNormalAndAuxData > >();
 
 			Real targetValue = (Real)0.5;
 
@@ -768,8 +769,8 @@ namespace PoissonRecon
 
 			if( valueInterpolationStream && params.valueInterpolationWeight )
 			{
-				valueInterpolationSamples = new std::vector< typename FEMTree< Dim , Real >::PointSample >();
-				valueInterpolationSampleData = new std::vector< Real >();
+				valueInterpolationSamples = std::make_unique< std::vector< typename FEMTree< Dim , Real >::PointSample > >();
+				valueInterpolationSampleData = std::make_unique< std::vector< Real > >();
 				// Wrap the point stream in a transforming stream
 				TransformedInputValuedSampleStream< Real , Dim > _valueInterpolationStream( modelToUnitCube , *valueInterpolationStream );
 
@@ -781,9 +782,9 @@ namespace PoissonRecon
 			}
 
 			{
-				InterpolationInfo *valueInterpolationInfo = NULL;
+				std::unique_ptr< InterpolationInfo > valueInterpolationInfo;
 				DenseNodeData< Real , Sigs > constraints;
-				InterpolationInfo *iInfo = NULL;
+				std::unique_ptr< InterpolationInfo > iInfo;
 				int solveDepth = params.depth;
 
 				implicit.tree.resetNodeIndices( 0 , std::make_tuple() );
@@ -798,7 +799,7 @@ namespace PoissonRecon
 				// Transform the Hermite samples into a vector field
 				{
 					profiler.reset();
-					normalInfo = new SparseNodeData< Point< Real , Dim > , NormalSigs >();
+					normalInfo = std::make_unique< SparseNodeData< Point< Real , Dim > , NormalSigs > >();
 
 					std::function< bool ( InternalNormalAndAuxData , Point< Real , Dim > & ) > ConversionFunction;
 					std::function< bool ( InternalNormalAndAuxData , Point< Real , Dim > & , Real & ) > ConversionAndBiasFunction;
@@ -984,14 +985,14 @@ namespace PoissonRecon
 					if( params.verbose ) std::cout << "#         Got aux data: " << profiler << std::endl;
 				}
 
-				delete sampleNormalAndAuxData;
+				sampleNormalAndAuxData.reset();
 
 				// Add the interpolation constraints
 				if( params.pointWeight>0 )
 				{
 					profiler.reset();
-					if( params.exactInterpolation ) iInfo = FEMTree< Dim , Real >::template       InitializeExactPointInterpolationInfo< Real , 0 > ( implicit.tree , *samples , Poisson::ConstraintDual< Dim , Real >( targetValue , params.pointWeight * pointDepthAndWeight.value()[1] ) , Poisson::SystemDual< Dim , Real >( params.pointWeight * pointDepthAndWeight.value()[1] ) , true , false );
-					else                            iInfo = FEMTree< Dim , Real >::template InitializeApproximatePointInterpolationInfo< Real , 0 > ( implicit.tree , *samples , Poisson::ConstraintDual< Dim , Real >( targetValue , params.pointWeight * pointDepthAndWeight.value()[1] ) , Poisson::SystemDual< Dim , Real >( params.pointWeight * pointDepthAndWeight.value()[1] ) , true , params.depth , 1 );
+					if( params.exactInterpolation ) iInfo.reset( FEMTree< Dim , Real >::template       InitializeExactPointInterpolationInfo< Real , 0 > ( implicit.tree , *samples , Poisson::ConstraintDual< Dim , Real >( targetValue , params.pointWeight * pointDepthAndWeight.value()[1] ) , Poisson::SystemDual< Dim , Real >( params.pointWeight * pointDepthAndWeight.value()[1] ) , true , false ) );
+					else                            iInfo.reset( FEMTree< Dim , Real >::template InitializeApproximatePointInterpolationInfo< Real , 0 > ( implicit.tree , *samples , Poisson::ConstraintDual< Dim , Real >( targetValue , params.pointWeight * pointDepthAndWeight.value()[1] ) , Poisson::SystemDual< Dim , Real >( params.pointWeight * pointDepthAndWeight.value()[1] ) , true , params.depth , 1 ) );
 					if( params.verbose ) std::cout <<  "#Initialized point interpolation constraints: " << profiler << std::endl;
 				}
 
@@ -1004,13 +1005,13 @@ namespace PoissonRecon
 					auto addNodeFunctor = [&]( int d , const int off[Dim] ){ return d<=(int)params.fullDepth; };
 					if constexpr( sizeof...(AuxData) )
 					{
-						if( geometryNodeDesignators.size() ) implicit.tree.template finalizeForMultigridWithDirichlet< MaxDegree , Degrees::Max() >( params.baseDepth , addNodeFunctor , hasDataFunctor , [&]( const FEMTreeNode *node ){ return node->nodeData.nodeIndex<(node_index_type)geometryNodeDesignators.size() && geometryNodeDesignators[node]==GeometryNodeType::EXTERIOR; } , std::make_tuple( iInfo ) , std::make_tuple( normalInfo , implicit.density , implicit._auxData , &geometryNodeDesignators ) );
-						else                                 implicit.tree.template finalizeForMultigrid             < MaxDegree , Degrees::Max() >( params.baseDepth , addNodeFunctor , hasDataFunctor ,                                                                                                                                                                                   std::make_tuple( iInfo ) , std::make_tuple( normalInfo , implicit.density , implicit._auxData ) );
+						if( geometryNodeDesignators.size() ) implicit.tree.template finalizeForMultigridWithDirichlet< MaxDegree , Degrees::Max() >( params.baseDepth , addNodeFunctor , hasDataFunctor , [&]( const FEMTreeNode *node ){ return node->nodeData.nodeIndex<(node_index_type)geometryNodeDesignators.size() && geometryNodeDesignators[node]==GeometryNodeType::EXTERIOR; } , std::make_tuple( iInfo.get() ) , std::make_tuple( normalInfo.get() , implicit.density , implicit._auxData , &geometryNodeDesignators ) );
+						else                                 implicit.tree.template finalizeForMultigrid             < MaxDegree , Degrees::Max() >( params.baseDepth , addNodeFunctor , hasDataFunctor ,                                                                                                                                                                                   std::make_tuple( iInfo.get() ) , std::make_tuple( normalInfo.get() , implicit.density , implicit._auxData ) );
 					}
 					else
 					{
-						if( geometryNodeDesignators.size() ) implicit.tree.template finalizeForMultigridWithDirichlet< MaxDegree , Degrees::Max() >( params.baseDepth , addNodeFunctor , hasDataFunctor , [&]( const FEMTreeNode *node ){ return node->nodeData.nodeIndex<(node_index_type)geometryNodeDesignators.size() && geometryNodeDesignators[node]==GeometryNodeType::EXTERIOR; } , std::make_tuple( iInfo ) , std::make_tuple( normalInfo , implicit.density , &geometryNodeDesignators ) );
-						else                                 implicit.tree.template finalizeForMultigrid             < MaxDegree , Degrees::Max() >( params.baseDepth , addNodeFunctor , hasDataFunctor ,                                                                                                                                                                                   std::make_tuple( iInfo ) , std::make_tuple( normalInfo , implicit.density ) );
+						if( geometryNodeDesignators.size() ) implicit.tree.template finalizeForMultigridWithDirichlet< MaxDegree , Degrees::Max() >( params.baseDepth , addNodeFunctor , hasDataFunctor , [&]( const FEMTreeNode *node ){ return node->nodeData.nodeIndex<(node_index_type)geometryNodeDesignators.size() && geometryNodeDesignators[node]==GeometryNodeType::EXTERIOR; } , std::make_tuple( iInfo.get() ) , std::make_tuple( normalInfo.get() , implicit.density , &geometryNodeDesignators ) );
+						else                                 implicit.tree.template finalizeForMultigrid             < MaxDegree , Degrees::Max() >( params.baseDepth , addNodeFunctor , hasDataFunctor ,                                                                                                                                                                                   std::make_tuple( iInfo.get() ) , std::make_tuple( normalInfo.get() , implicit.density ) );
 					}
 
 					if( params.verbose ) std::cout << "#       Finalized tree: " << profiler << std::endl;
@@ -1040,24 +1041,24 @@ namespace PoissonRecon
 				}
 
 				// Free up the normal info
-				delete normalInfo , normalInfo = NULL;
+				normalInfo.reset();
 
 				if( params.pointWeight>0 )
 				{
 					profiler.reset();
-					implicit.tree.addInterpolationConstraints( constraints , solveDepth , std::make_tuple( iInfo ) );
+					implicit.tree.addInterpolationConstraints( constraints , solveDepth , std::make_tuple( iInfo.get() ) );
 					if( params.verbose ) std::cout << "#Set point constraints: " << profiler << std::endl;
 				}
 
 				if( valueInterpolationSamples && params.valueInterpolationWeight )
 				{
 					profiler.reset();
-					if( params.exactInterpolation ) valueInterpolationInfo = FEMTree< Dim , Real >::template       InitializeExactPointAndDataInterpolationInfo< Real , Real , 0 > ( implicit.tree , *valueInterpolationSamples , GetPointer( *valueInterpolationSampleData ) , Poisson::ValueInterpolationConstraintDual< Dim , Real >( params.valueInterpolationWeight ) , Poisson::ValueInterpolationSystemDual< Dim , Real >( params.valueInterpolationWeight ) , true , false );
-					else                            valueInterpolationInfo = FEMTree< Dim , Real >::template InitializeApproximatePointAndDataInterpolationInfo< Real , Real , 0 > ( implicit.tree , *valueInterpolationSamples , GetPointer( *valueInterpolationSampleData ) , Poisson::ValueInterpolationConstraintDual< Dim , Real >( params.valueInterpolationWeight ) , Poisson::ValueInterpolationSystemDual< Dim , Real >( params.valueInterpolationWeight ) , true , params.depth , 1 );
-					delete valueInterpolationSamples , valueInterpolationSamples = NULL;
-					delete valueInterpolationSampleData , valueInterpolationSampleData = NULL;
+					if( params.exactInterpolation ) valueInterpolationInfo.reset( FEMTree< Dim , Real >::template       InitializeExactPointAndDataInterpolationInfo< Real , Real , 0 > ( implicit.tree , *valueInterpolationSamples , GetPointer( *valueInterpolationSampleData ) , Poisson::ValueInterpolationConstraintDual< Dim , Real >( params.valueInterpolationWeight ) , Poisson::ValueInterpolationSystemDual< Dim , Real >( params.valueInterpolationWeight ) , true , false ) );
+					else                            valueInterpolationInfo.reset( FEMTree< Dim , Real >::template InitializeApproximatePointAndDataInterpolationInfo< Real , Real , 0 > ( implicit.tree , *valueInterpolationSamples , GetPointer( *valueInterpolationSampleData ) , Poisson::ValueInterpolationConstraintDual< Dim , Real >( params.valueInterpolationWeight ) , Poisson::ValueInterpolationSystemDual< Dim , Real >( params.valueInterpolationWeight ) , true , params.depth , 1 ) );
+					valueInterpolationSamples.reset();
+					valueInterpolationSampleData.reset();
 
-					implicit.tree.addInterpolationConstraints( constraints , solveDepth , std::make_tuple( valueInterpolationInfo ) );
+					implicit.tree.addInterpolationConstraints( constraints , solveDepth , std::make_tuple( valueInterpolationInfo.get() ) );
 					if( params.verbose ) std::cout << "#Set value interpolation constraints: " << profiler << std::endl;
 				}
 
@@ -1071,11 +1072,11 @@ namespace PoissonRecon
 					_sInfo.cgDepth = 0 , _sInfo.cascadic = true , _sInfo.vCycles = 1 , _sInfo.iters = params.iters , _sInfo.cgAccuracy = params.cgSolverAccuracy , _sInfo.verbose = params.verbose , _sInfo.showResidual = params.showResidual , _sInfo.showGlobalResidual = SHOW_GLOBAL_RESIDUAL_NONE , _sInfo.sliceBlockSize = 1;
 					_sInfo.baseVCycles = params.baseVCycles;
 					typename FEMIntegrator::template System< Sigs , IsotropicUIntPack< Dim , 1 > > F( { 0. , 1. } );
-					if( valueInterpolationInfo ) implicit.solution = implicit.tree.solveSystem( Sigs() , F , constraints , params.baseDepth , params.solveDepth , _sInfo , std::make_tuple( iInfo , valueInterpolationInfo ) );
-					else                         implicit.solution = implicit.tree.solveSystem( Sigs() , F , constraints , params.baseDepth , params.solveDepth , _sInfo , std::make_tuple( iInfo ) );
+					if( valueInterpolationInfo ) implicit.solution = implicit.tree.solveSystem( Sigs() , F , constraints , params.baseDepth , params.solveDepth , _sInfo , std::make_tuple( iInfo.get() , valueInterpolationInfo.get() ) );
+					else                         implicit.solution = implicit.tree.solveSystem( Sigs() , F , constraints , params.baseDepth , params.solveDepth , _sInfo , std::make_tuple( iInfo.get() ) );
 					if( params.verbose ) std::cout << "# Linear system solved: " << profiler << std::endl;
-					if( iInfo ) delete iInfo , iInfo = NULL;
-					if( valueInterpolationInfo ) delete valueInterpolationInfo , valueInterpolationInfo = NULL;
+					iInfo.reset();
+					valueInterpolationInfo.reset();
 				}
 			}
 
@@ -1099,8 +1100,8 @@ namespace PoissonRecon
 					std::cout << "Iso-Value: " << implicit.isoValue << " = " << valueSum << " / " << weightSum << std::endl;
 				}
 			}
-			delete samples;
-			return implicitPtr;
+			samples.reset();
+			return implicitPtr.release();
 		}
 
 		// Implementation of the derived Poisson::Implicit's constructor

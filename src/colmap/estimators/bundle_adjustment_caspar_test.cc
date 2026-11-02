@@ -4,13 +4,49 @@
 
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 #include "colmap/geometry/rigid3_matchers.h"
+#include "colmap/math/random.h"
 #include "colmap/scene/reconstruction_matchers.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/models.h"
 
+#include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
+#include <cuda_runtime_api.h>
 #include <gtest/gtest.h>
+
+namespace caspar {
+struct GraphSolverTestAccess {
+  using Real = colmap::StorageType;
+  static Real* InitialNorm(GraphSolver& solver) {
+    return solver.solver__r_0_norm2_tot_;
+  }
+  static Real* UpdatedNorm(GraphSolver& solver) {
+    return solver.solver__r_kp1_norm2_tot_;
+  }
+  static Real* NegAlpha(GraphSolver& solver) {
+    return solver.solver__neg_alpha_;
+  }
+  static Real* PrincipalResidual(GraphSolver& solver) {
+    return solver.nodes__PinholePrincipalPoint__r_k_;
+  }
+  static Real* PrincipalW(GraphSolver& solver) {
+    return solver.nodes__PinholePrincipalPoint__w_;
+  }
+  static Real* PointResidual(GraphSolver& solver) {
+    return solver.nodes__Point__r_k_;
+  }
+  static Real* PointW(GraphSolver& solver) { return solver.nodes__Point__w_; }
+  static void Update(GraphSolver& solver) { solver.DoUpdateRFirst(); }
+  static Real InitialHost(const GraphSolver& solver) {
+    return solver.pcg_r_0_norm2_;
+  }
+  static Real UpdatedHost(const GraphSolver& solver) {
+    return solver.pcg_r_kp1_norm2_;
+  }
+};
+}  // namespace caspar
 
 // Due to pose normalization operations, constant variables may not be perfectly
 // fixed during bundle adjustment.
@@ -55,9 +91,7 @@ constexpr double kConstantPoseVarEps = 1e-9;
   }
 
 #define CheckConstantPoint(point, orig_point) \
-  {                                           \
-    EXPECT_EQ((point).xyz, (orig_point).xyz); \
-  }
+  { EXPECT_EQ((point).xyz, (orig_point).xyz); }
 
 namespace colmap {
 namespace {
@@ -107,6 +141,111 @@ caspar::GraphSolver MakeParameterTestSolver(
                              device);
 }
 
+TEST(CasparFirstNorm, ResetsBothAccumulatorsBeforeRealKernelUpdates) {
+  int device_count = 0;
+  const cudaError_t status = cudaGetDeviceCount(&device_count);
+  if (status != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
+  }
+
+  using Access = caspar::GraphSolverTestAccess;
+  using Real = StorageType;
+  auto solver = MakeParameterTestSolver(caspar::SolverParams<double>(), 0);
+  // The constructor allocates one of every node; only these two are
+  // initialized.
+  solver.SetPinholeCalibNum(0);
+  solver.SetPinholeFocalNum(0);
+  solver.SetPinholePoseNum(0);
+  solver.SetSimpleRadialCalibNum(0);
+  solver.SetSimpleRadialFocalAndExtraNum(0);
+  solver.SetSimpleRadialPoseNum(0);
+  solver.SetSimpleRadialPrincipalPointNum(0);
+  const Real neg_alpha = -0.5;
+  const Real principal_r[] = {1, 2}, principal_w[] = {2, 0};
+  const Real point_r[] = {3, 0, 0, 0}, point_w[] = {2, 0, 0, 0};
+  // Float kernels use a padded float4 load; double kernels access three values.
+  constexpr size_t point_bytes =
+      sizeof(Real) * (sizeof(Real) == sizeof(float) ? 4 : 3);
+  ASSERT_EQ(cudaMemcpy(Access::NegAlpha(solver),
+                       &neg_alpha,
+                       sizeof(neg_alpha),
+                       cudaMemcpyHostToDevice),
+            cudaSuccess);
+  int call = 0;
+  const auto run = [&](size_t principal_count,
+                       size_t point_count,
+                       Real expected_initial,
+                       Real expected_updated) {
+    SCOPED_TRACE(::testing::Message() << "principal=" << principal_count
+                                      << " point=" << point_count);
+    solver.SetPinholePrincipalPointNum(principal_count);
+    solver.SetPointNum(point_count);
+    const Real initial_seed = Real(39 + 2 * call);
+    const Real updated_seed = Real(62 + 3 * call++);
+    ASSERT_EQ(cudaMemcpy(Access::InitialNorm(solver),
+                         &initial_seed,
+                         sizeof(Real),
+                         cudaMemcpyHostToDevice),
+              cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(Access::UpdatedNorm(solver),
+                         &updated_seed,
+                         sizeof(Real),
+                         cudaMemcpyHostToDevice),
+              cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(Access::PrincipalResidual(solver),
+                         principal_r,
+                         sizeof(principal_r),
+                         cudaMemcpyHostToDevice),
+              cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(Access::PrincipalW(solver),
+                         principal_w,
+                         sizeof(principal_w),
+                         cudaMemcpyHostToDevice),
+              cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(Access::PointResidual(solver),
+                         point_r,
+                         point_bytes,
+                         cudaMemcpyHostToDevice),
+              cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(Access::PointW(solver),
+                         point_w,
+                         point_bytes,
+                         cudaMemcpyHostToDevice),
+              cudaSuccess);
+    Access::Update(solver);
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    EXPECT_NEAR(Access::InitialHost(solver), expected_initial, 1e-6);
+    EXPECT_NEAR(Access::UpdatedHost(solver), expected_updated, 1e-6);
+    if (principal_count) {
+      Real values[2];
+      ASSERT_EQ(cudaMemcpy(values,
+                           Access::PrincipalResidual(solver),
+                           sizeof(values),
+                           cudaMemcpyDeviceToHost),
+                cudaSuccess);
+      EXPECT_NEAR(values[0], 0, 1e-6);
+      EXPECT_NEAR(values[1], 2, 1e-6);
+    }
+    if (point_count) {
+      Real values[4];
+      ASSERT_EQ(cudaMemcpy(values,
+                           Access::PointResidual(solver),
+                           point_bytes,
+                           cudaMemcpyDeviceToHost),
+                cudaSuccess);
+      EXPECT_NEAR(values[0], 2, 1e-6);
+      EXPECT_NEAR(values[1], 0, 1e-6);
+      EXPECT_NEAR(values[2], 0, 1e-6);
+    }
+  };
+  run(1, 1, 14, 8);
+  run(1, 1, 14, 8);
+  run(1, 0, 5, 4);
+  run(0, 1, 9, 4);
+  run(0, 0, 0, 0);
+}
+
 TEST(CasparParameters, RejectsInvalidUpdates) {
   caspar::SolverParams<double> valid;
   auto solver = MakeParameterTestSolver(valid, 0);
@@ -140,6 +279,146 @@ TEST(CasparParameters, RejectsInvalidUpdates) {
   valid.diag_init = 0.0;
   valid.pcg_iter_max = 1;
   EXPECT_NO_THROW(solver.set_params(valid));
+}
+
+TEST(CasparScoredPcg, IndependentCriteriaAcceptTheSameSingleStep) {
+  int device_count = 0;
+  const cudaError_t status = cudaGetDeviceCount(&device_count);
+  if (status != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
+  }
+  Reconstruction initial;
+  SyntheticDatasetOptions dataset_options;
+  dataset_options.num_rigs = 1;
+  dataset_options.num_cameras_per_rig = 1;
+  dataset_options.num_frames_per_rig = 3;
+  dataset_options.num_points3D = 64;
+  SynthesizeDataset(dataset_options, &initial);
+  SyntheticNoiseOptions noise_options;
+  noise_options.point3D_stddev = 0.02;
+  SynthesizeNoise(noise_options, &initial);
+
+  BundleAdjustmentConfig config;
+  for (const image_t image_id : initial.RegImageIds()) {
+    const auto& image = initial.Image(image_id);
+    config.AddImage(image_id);
+    config.SetConstantRigFromWorldPose(image.FrameId());
+    config.SetConstantCamIntrinsics(image.CameraId());
+  }
+  double reference_score = 0;
+  double reference_quality = 0;
+  for (const bool decrease_enabled : {false, true}) {
+    for (const bool score_exit_enabled : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "decrease=" << decrease_enabled
+                   << " score_exit=" << score_exit_enabled);
+      Reconstruction reconstruction = initial;
+      BundleAdjustmentOptions options;
+      options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
+      options.caspar->solver_iter_max = 1;
+      options.caspar->pcg_iter_max = 1;
+      options.caspar->pcg_rel_decrease_min = decrease_enabled ? 1.0 : -1.0;
+      options.caspar->pcg_rel_score_exit = score_exit_enabled ? 0.5 : -1.0;
+      options.caspar->collect_iteration_data = true;
+      auto adjuster =
+          CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+      const auto summary =
+          std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
+              adjuster->Solve());
+      ASSERT_NE(summary, nullptr);
+      ASSERT_EQ(summary->iterations.size(), 1);
+      const auto& iteration = summary->iterations.front();
+      ASSERT_GT(summary->initial_score, 0);
+      EXPECT_TRUE(iteration.step_accepted);
+      EXPECT_EQ(iteration.pcg_iter, 0);
+      EXPECT_LT(iteration.score_best, summary->initial_score);
+      EXPECT_TRUE(std::isfinite(iteration.step_quality));
+      if (!decrease_enabled && !score_exit_enabled) {
+        reference_score = iteration.score_best;
+        reference_quality = iteration.step_quality;
+      } else {
+        EXPECT_NEAR(iteration.score_best,
+                    reference_score,
+                    1e-4 * std::max(1.0, std::abs(reference_score)));
+        EXPECT_NEAR(iteration.step_quality,
+                    reference_quality,
+                    1e-4 * std::max(1.0, std::abs(reference_quality)));
+      }
+    }
+  }
+}
+
+TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
+  int device_count = 0;
+  const cudaError_t status = cudaGetDeviceCount(&device_count);
+  if (status != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
+  }
+  SetPRNGSeed(0);
+  Reconstruction initial;
+  SyntheticDatasetOptions data;
+  data.num_rigs = 1;
+  data.num_cameras_per_rig = 1;
+  data.num_frames_per_rig = 3;
+  data.num_points3D = 64;
+  SynthesizeDataset(data, &initial);
+  SyntheticNoiseOptions noise;
+  noise.point3D_stddev = 0.05;
+  noise.rig_from_world_rotation_stddev = 0.5;
+  noise.rig_from_world_translation_stddev = 0.02;
+  SynthesizeNoise(noise, &initial);
+  BundleAdjustmentConfig config;
+  for (const image_t id : initial.RegImageIds()) {
+    config.AddImage(id);
+  }
+  // Require a retained step followed by rejection on a fixed synthetic scene.
+  for (double diag : {1.0, 1e-3, 1e-6}) {
+    for (double decrease : {0.5, 0.8, 0.95}) {
+      const auto solve = [&](int pcg_limit) {
+        Reconstruction reconstruction = initial;
+        BundleAdjustmentOptions options;
+        options.refine_principal_point = true;
+        options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
+        options.caspar->solver_iter_max = 2;
+        options.caspar->pcg_iter_max = pcg_limit;
+        options.caspar->diag_init = diag;
+        options.caspar->diag_scaling_down = 0;
+        options.caspar->pcg_rel_decrease_min = decrease;
+        options.caspar->pcg_rel_score_exit = -1;
+        options.caspar->pcg_rel_error_exit = 1e-12;
+        options.caspar->collect_iteration_data = true;
+        options.caspar->gpu_index = "0";
+        auto adjuster =
+            CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+        return std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
+            adjuster->Solve());
+      };
+      const auto first = solve(1);
+      const auto second = solve(2);
+      ASSERT_NE(first, nullptr);
+      ASSERT_NE(second, nullptr);
+      if (first->iterations.size() < 2 || second->iterations.size() < 2) {
+        continue;
+      }
+      const auto& a = first->iterations[0];
+      const auto& b = second->iterations[0];
+      if (!a.step_accepted || !b.step_accepted || b.pcg_iter != 1 ||
+          std::abs(a.score_best - b.score_best) >
+              1e-6 * std::max(1.0, std::abs(a.score_best))) {
+        continue;
+      }
+      ASSERT_TRUE(std::isfinite(a.step_quality));
+      ASSERT_TRUE(std::isfinite(b.step_quality));
+      EXPECT_NEAR(a.step_quality,
+                  b.step_quality,
+                  1e-5 * std::max(1.0, std::abs(a.step_quality)));
+      EXPECT_NEAR(first->iterations[1].diag,
+                  second->iterations[1].diag,
+                  2e-5 * std::max(1e-9, std::abs(first->iterations[1].diag)));
+      return;
+    }
+  }
+  FAIL() << "No retained-then-rejected witness in the fixed fixture grid";
 }
 
 TEST(DefaultBundleAdjuster, RigThrowsErrorOnVariableSensorFromRig) {

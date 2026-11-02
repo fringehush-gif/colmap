@@ -33,6 +33,7 @@ DAMAGE.
 #include <atomic>
 #include <functional>
 #include <future>
+#include <exception>
 #ifdef _OPENMP
 #include <omp.h>
 #endif // _OPENMP
@@ -137,15 +138,26 @@ namespace PoissonRecon
 #ifdef _OPENMP
 			else if( pType==ParallelType::OPEN_MP )
 			{
+				std::exception_ptr exception;
+				auto guardedChunk = [&]( unsigned int thread , size_t chunk )
+					{
+						try { _ChunkFunction( thread , chunk ); }
+						catch( ... )
+						{
+#pragma omp critical( PoissonRecon_ThreadPool_Exception )
+							{ if( !exception ) exception = std::current_exception(); }
+						}
+					};
 				// NOLINTBEGIN(bugprone-branch-clone): the branches differ only
 				// in their OpenMP schedule pragma, which clang-tidy ignores.
 				if( schedule==ScheduleType::STATIC )
 #pragma omp parallel for num_threads( numThreads ) schedule( static , 1 )
-					for( int c=0 ; c<chunks ; c++ ) _ChunkFunction( omp_get_thread_num() , c );
+					for( int c=0 ; c<chunks ; c++ ) guardedChunk( omp_get_thread_num() , c );
 				else if( schedule==ScheduleType::DYNAMIC )
 #pragma omp parallel for num_threads( numThreads ) schedule( dynamic , 1 )
-					for( int c=0 ; c<chunks ; c++ ) _ChunkFunction( omp_get_thread_num() , c );
+					for( int c=0 ; c<chunks ; c++ ) guardedChunk( omp_get_thread_num() , c );
 				// NOLINTEND(bugprone-branch-clone)
+				if( exception ) std::rethrow_exception( exception );
 			}
 #endif // _OPENMP
 			else if( pType==ParallelType::ASYNC )
@@ -165,7 +177,8 @@ namespace PoissonRecon
 				if     ( schedule==ScheduleType::STATIC  ) ThreadFunction = _StaticThreadFunction;
 				else if( schedule==ScheduleType::DYNAMIC ) ThreadFunction = _DynamicThreadFunction;
 
-				static std::vector< std::future< void > > futures;
+				// Join outstanding tasks before their stack-bound callbacks die.
+				std::vector< std::future< void > > futures;
 				futures.resize( numThreads-1 );
 				for( unsigned int t=1 ; t<numThreads ; t++ ) futures[t-1] = std::async( std::launch::async , ThreadFunction , t );
 				ThreadFunction( 0 );

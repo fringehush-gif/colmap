@@ -21,16 +21,135 @@
 #include "thirdparty/VLFeat/sift.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <cfenv>
 #include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <set>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace colmap {
 namespace {
+
+class ScopedSiftRoundingMode {
+ public:
+  ScopedSiftRoundingMode() : original_(std::fegetround()) {}
+  ~ScopedSiftRoundingMode() { std::fesetround(original_); }
+
+ private:
+  const int original_;
+};
+
+TEST(SiftCPUExponentialTable, RetainsEachConstructionRoundingMode) {
+  const ScopedSiftRoundingMode restore_rounding;
+  std::vector<std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)>> filters;
+  std::vector<std::array<double, 257>> tables;
+  for (const int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    if (std::fesetround(mode) != 0) {
+      continue;
+    }
+    SCOPED_TRACE(mode);
+    filters.emplace_back(vl_sift_new(8, 8, 1, 3, 0), &vl_sift_delete);
+    ASSERT_NE(filters.back(), nullptr);
+    const auto* filter = filters.back().get();
+    std::array<double, 257> table;
+    for (size_t i = 0; i < table.size(); ++i) {
+      // Keep exp's argument a runtime input when checking directed rounding.
+      const volatile double exponent = -static_cast<double>(i) * (25.0 / 256);
+      EXPECT_EQ(filter->expn_tab[i], std::exp(exponent));
+      table[i] = filter->expn_tab[i];
+    }
+    tables.push_back(table);
+    // Later constructions must not rewrite any earlier filter's table.
+    for (size_t i = 0; i < filters.size(); ++i) {
+      EXPECT_TRUE(std::equal(tables[i].begin(),
+                            tables[i].end(),
+                            filters[i]->expn_tab));
+    }
+  }
+  ASSERT_FALSE(filters.empty());
+}
+
+TEST(SiftCPUExponentialTable, AllConsumersSurviveConcurrentConstruction) {
+  const ScopedSiftRoundingMode restore_rounding;
+  ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+  constexpr int kWidth = 64;
+  constexpr int kHeight = 64;
+  std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)> filter(
+      vl_sift_new(kWidth, kHeight, 1, 3, 0), &vl_sift_delete);
+  ASSERT_NE(filter, nullptr);
+  std::vector<vl_sift_pix> pixels(kWidth * kHeight);
+  for (int y = 0; y < kHeight; ++y) {
+    for (int x = 0; x < kWidth; ++x) {
+      pixels[y * kWidth + x] = ((x * x + 3 * y * y + x * y) % 127) / 128.0f;
+    }
+  }
+  ASSERT_EQ(vl_sift_process_first_octave(filter.get(), pixels.data()), 0);
+  VlSiftKeypoint keypoint;
+  vl_sift_keypoint_init(filter.get(), &keypoint, 31.25, 31.25, 2);
+  ASSERT_EQ(keypoint.o, filter->o_cur);
+  ASSERT_GE(keypoint.is, filter->s_min + 1);
+  ASSERT_LE(keypoint.is, filter->s_max - 2);
+  struct Outputs {
+    int num_angles;
+    std::array<double, 4> angles;
+    std::array<vl_sift_pix, 128> descriptor;
+    std::array<vl_sift_pix, 128> raw_descriptor;
+  };
+  const auto calculate = [&] {
+    Outputs output{};
+    output.num_angles = vl_sift_calc_keypoint_orientations(
+        filter.get(), output.angles.data(), &keypoint);
+    vl_sift_calc_keypoint_descriptor(
+        filter.get(), output.descriptor.data(), &keypoint, 0.37);
+    const auto* gradient =
+        filter->grad + (keypoint.is - filter->s_min - 1) * 2 * kWidth * kHeight;
+    vl_sift_calc_raw_descriptor(filter.get(),
+                                gradient,
+                                output.raw_descriptor.data(),
+                                kWidth,
+                                kHeight,
+                                keypoint.x,
+                                keypoint.y,
+                                keypoint.sigma,
+                                0.37);
+    return output;
+  };
+  const Outputs expected = calculate();
+  ASSERT_GT(expected.num_angles, 0);
+  ASSERT_GT(*std::max_element(expected.descriptor.begin(),
+                             expected.descriptor.end()),
+            0);
+  ASSERT_GT(*std::max_element(expected.raw_descriptor.begin(),
+                             expected.raw_descriptor.end()),
+            0);
+  // Under ThreadSanitizer this also catches identical-value shared writes:
+  // output parity alone cannot establish freedom from the original data race.
+  std::atomic<bool> start{false};
+  std::thread constructor([&] {
+    while (!start.load()) {
+      std::this_thread::yield();
+    }
+    for (int i = 0; i < 256; ++i) {
+      std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)> other(
+          vl_sift_new(8, 8, 1, 3, 0), &vl_sift_delete);
+    }
+  });
+  start.store(true);
+  for (int i = 0; i < 256; ++i) {
+    const Outputs actual = calculate();
+    EXPECT_EQ(actual.num_angles, expected.num_angles);
+    EXPECT_EQ(actual.angles, expected.angles);
+    EXPECT_EQ(actual.descriptor, expected.descriptor);
+    EXPECT_EQ(actual.raw_descriptor, expected.raw_descriptor);
+  }
+  constructor.join();
+}
 
 TEST(SiftCPUConvolution, MatchesScalarReferenceAcrossLayouts) {
   struct Shape {

@@ -133,15 +133,15 @@ float BoundedWorkspace::ImageData::GetDepth(const size_t row,
 
 Eigen::Vector3f BoundedWorkspace::ImageData::GetNormal(const size_t row,
                                                        const size_t col) const {
-  THROW_CHECK_GE(row, normal_origin_y);
-  THROW_CHECK_GE(col, normal_origin_x);
+  THROW_CHECK(row >= normal_origin_y && col >= normal_origin_x &&
+              row - normal_origin_y < normal_map.GetHeight() &&
+              col - normal_origin_x < normal_map.GetWidth() &&
+              normal_map.GetDepth() == 3);
   const size_t local_row = row - normal_origin_y;
   const size_t local_col = col - normal_origin_x;
-  THROW_CHECK_LT(local_row, normal_map.GetHeight());
-  THROW_CHECK_LT(local_col, normal_map.GetWidth());
-  Eigen::Vector3f normal;
-  normal_map.GetSlice(local_row, local_col, normal.data());
-  return normal;
+  return Eigen::Vector3f(normal_map.Get(local_row, local_col, 0),
+                         normal_map.Get(local_row, local_col, 1),
+                         normal_map.Get(local_row, local_col, 2));
 }
 
 struct BoundedWorkspace::CacheEntry {

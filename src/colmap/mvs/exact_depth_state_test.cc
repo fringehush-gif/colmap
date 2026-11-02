@@ -32,8 +32,13 @@ struct StereoFusionExactDepthTestPeer {
     std::vector<std::vector<char>> masks;
     for (size_t index = 0; index < fusion.fused_pixel_masks_.size(); ++index) {
       const auto& [width, height] = fusion.depth_map_sizes_.at(index);
-      masks.push_back(fusion.fused_pixel_masks_[index].Snapshot(
-          0, static_cast<size_t>(width) * height));
+      auto& values = masks.emplace_back();
+      values.reserve(static_cast<size_t>(width) * height);
+      for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+          values.push_back(fusion.fused_pixel_masks_[index].Get(row, col));
+        }
+      }
     }
     return masks;
   }
@@ -736,6 +741,11 @@ void VerifyPinnedFusionOutputParity(const Fixture& f) {
     auto raw_options = Variant(Options(false), variant);
     raw_options.bounded_cache_neighborhood = true;
     auto raw = RunFusionFixture(f, raw_options);
+    auto unseeded_options = raw_options;
+    unseeded_options.bounded_cache_neighborhood = false;
+    auto unseeded = RunFusionFixture(f, unseeded_options);
+    Require(SamePoints(*raw, *unseeded), "preseeding changed point output");
+
     for (bool complete : {false, true}) {
       auto exact_options = Variant(Options(true), variant);
       exact_options.bounded_cache_neighborhood = true;
@@ -743,12 +753,32 @@ void VerifyPinnedFusionOutputParity(const Fixture& f) {
           (complete ? 3 : 1) * page;
       exact_options.bounded_cache_normal_mapped_files = complete ? 3 : 1;
       auto exact = RunFusionFixture(f, exact_options);
-      Require(
-          SamePoints(*raw, *exact) &&
-              colmap::mvs::StereoFusionExactDepthTestPeer::Masks(*raw) ==
-                  colmap::mvs::StereoFusionExactDepthTestPeer::Masks(*exact),
-          "pin complete/fallback changed full FP32 points/VIS/contributor "
-          "order/visited state");
+      Require(SamePoints(*raw, *exact),
+              "pin complete/fallback changed point bits or visibility order");
+      const auto raw_masks =
+          colmap::mvs::StereoFusionExactDepthTestPeer::Masks(*raw);
+      const auto exact_masks =
+          colmap::mvs::StereoFusionExactDepthTestPeer::Masks(*exact);
+      Require(raw_masks.size() == exact_masks.size(), "mask roster differs");
+      size_t seeded_exclusions = 0;
+      for (size_t view = 0; view < raw_masks.size(); ++view) {
+        Require(raw_masks[view].size() == exact_masks[view].size(),
+                "mask grid differs");
+        for (size_t pixel = 0; pixel < raw_masks[view].size(); ++pixel) {
+          if (raw_masks[view][pixel] == exact_masks[view][pixel]) continue;
+          // Ordinary neighborhoods preseed exclusions. This independently
+          // authored fixture has +0 at pixel 1 in every source view.
+          Require(pixel == 1 && Bits(f.depths.at(pixel)) == Bits(0.0f) &&
+                      raw_masks[view][pixel] == 1 &&
+                      exact_masks[view][pixel] == 0,
+                  "visited state differs outside the source-zero exclusion");
+          ++seeded_exclusions;
+        }
+      }
+      std::cout << "variant=" << variant << " complete=" << complete
+                << " point_bits_and_visibility=exact positive_masks=exact"
+                << " preseeded_source_zero_exclusions=" << seeded_exclusions
+                << '\n';
       const auto stats = exact->GetDepthMappedNeighborhoodStats();
       const auto copies = exact->GetDepthExactStateReadCounts();
       Require(stats.borrowed_reads + stats.scalar_acquires ==
@@ -775,7 +805,7 @@ void VerifyPinnedFusionOutputParity(const Fixture& f) {
                   mapped.active_copies == 0 && mapped.reserved_files == 0 &&
                   mapped.reserved_bytes == 0 && mapped.waits == 0,
               "fusion pin lifetime/cap/self-wait failed");
-      AssertParity(*raw, *exact);
+      AssertParity(*unseeded, *exact);
     }
   }
 }

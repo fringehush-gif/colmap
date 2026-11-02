@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -197,31 +199,29 @@ FusionNormalWindowPins NormalWindowFusionPins(
   pins.components.bitmap.push_back(0);
   size_t remaining = budget - bitmap_bytes[0];
   for (const size_t index : baseline.depth) remaining -= depth_bytes[index];
-  // Keep at most eight root/BFS-priority normals within one quarter of the
-  // joint pin budget. Preserve admitted depths and root RGB before nonroot RGB.
-  const size_t normal_budget = budget / 4;
-  size_t normal_total = 0;
-  for (const size_t index : baseline.depth) {
+  // Keep the root normal hot, then preserve bitmap borrowing before using
+  // the remaining bytes for BFS-priority normals. Charge loader scratch once.
+  const auto admit_normal = [&](const size_t index) {
     THROW_CHECK_GE(normal_reservations[index], normal_bytes[index]);
     const size_t resident = normal_bytes[index];
     const size_t extra = std::max(pins.largest_normal_extra,
                                   normal_reservations[index] - resident);
-    if (pins.normal.size() == 8) break;
-    if (resident == 0 || resident > normal_budget - normal_total ||
-        resident > remaining || extra > remaining - resident)
-      continue;
-    remaining -= resident;
-    normal_total += resident;
+    const size_t additional_extra = extra - pins.largest_normal_extra;
+    if (resident == 0 || resident > remaining ||
+        additional_extra > remaining - resident)
+      return;
+    remaining -= resident + additional_extra;
     pins.largest_normal_extra = extra;
     pins.normal.push_back(index);
-  }
-  // Whole normals load serially after the depth join, so reserve their maximum
-  // loader extra once. The separate worker demand/ring reserve is untouched.
-  remaining -= pins.largest_normal_extra;
+  };
+  admit_normal(0);
   for (size_t index = 1; index < bitmap_bytes.size(); ++index) {
     if (bitmap_bytes[index] > remaining) continue;
     pins.components.bitmap.push_back(index);
     remaining -= bitmap_bytes[index];
+  }
+  for (const size_t index : baseline.depth) {
+    if (index != 0) admit_normal(index);
   }
   return pins;
 }
@@ -414,6 +414,7 @@ std::optional<std::string> StereoFusion::GetBoundedCacheDiagnosticRow() const {
   std::ostringstream row;
   row.imbue(std::locale::classic());
   row << "COLMAP_FUSION_CACHE_DIAGNOSTIC_V1"
+      << " borrow_counters_scope=generic_paths"
       << " tile_mode=" << (options_.bounded_cache_normal_tile_size > 0)
       << " direct_mapped_mode=" << direct_mapped_normals_;
   if (direct_mapped_normals_) {
@@ -762,10 +763,16 @@ void StereoFusion::Run() {
         static_cast<size_t>(num_threads);
     const size_t slots =
         static_cast<size_t>(options_.bounded_cache_normal_tile_slots);
-    THROW_CHECK_LE(largest_component, per_worker);
-    THROW_CHECK_LE(largest_tile, (per_worker - largest_component) / slots)
+    const bool tile_fallback_fits =
+        largest_component <= per_worker &&
+        largest_tile <= (per_worker - largest_component) / slots;
+    // A complete neighborhood borrows whole-image owners and needs no tile
+    // fallback. Check fallback admission at each actual partial root.
+    THROW_CHECK(options_.bounded_cache_neighborhood || tile_fallback_fits)
         << "Normal tile rings need retained pins and component headroom";
-    normal_tile_worker_headroom_ = largest_component + slots * largest_tile;
+    if (tile_fallback_fits) {
+      normal_tile_worker_headroom_ = largest_component + slots * largest_tile;
+    }
     const size_t soft_slots =
         slots >= 1024 ? 4096 : std::max(size_t{1024}, slots * 4);
     normal_tile_rings_.resize(num_threads);
@@ -816,26 +823,29 @@ void StereoFusion::Run() {
   // are too close to each other which may lead to duplicated work, since nearby
   // pixels are likely to get fused into the same point.
   const int kRowStride = 10;
+  using MaskSnapshot = internal::FusionPixelMask::PackedSnapshot;
   auto ProcessImageRows = [&, this](const int row_start,
-                                    const int height,
                                     const int width,
                                     const int image_idx,
-                                    const std::vector<char>& fused_pixel_mask) {
-    const int row_end = std::min(height, row_start + kRowStride);
-    // One row-band callback stays on its executing pool worker.
+                                    const MaskSnapshot& fused_pixel_mask) {
+    // One row-band callback stays on its executing pool worker. Offsets are
+    // visited in the same row-major order as the original scan.
     const int thread_id = thread_pool.GetThreadIndex();
-    for (int row = row_start; row < row_end; ++row) {
-      for (int col = 0; col < width; ++col) {
-        const size_t offset =
-            static_cast<size_t>(row - row_start) * width + col;
-        if (fused_pixel_mask.at(offset) > 0) {
-          continue;
-        }
-        Fuse(thread_id, image_idx, row, col);
-      }
-    }
+    fused_pixel_mask.ForEachUnset([&](const size_t offset) {
+      const int row = row_start + static_cast<int>(offset / width);
+      const int col = static_cast<int>(offset % width);
+      Fuse(thread_id, image_idx, row, col);
+    });
   };
 
+  // Depths enter a bounded workspace after metadata construction. Remember
+  // which resident maps have received the eager path's nonpositive mask seed.
+  std::vector<char> seeded_depth_masks(
+      bounded_workspace_ && options_.bounded_cache_neighborhood &&
+              !options_.bounded_cache_exact_depth
+          ? model.images.size()
+          : 0,
+      0);
   try {
     // Direct component pins are acquired before row tasks can borrow them.
     // A failed admission leaves no published raw pointer or retained pin.
@@ -879,6 +889,18 @@ void StereoFusion::Run() {
       if (bounded_workspace_ && options_.bounded_cache_neighborhood) {
         PrepareBoundedNeighborhood(image_idx, num_threads, prefill_pool);
         if (CheckIfStopped()) break;
+        // Previous row tasks and the current prefill have joined. This helper
+        // preserves existing exclusions, but must run before row dispatch.
+        if (!seeded_depth_masks.empty()) {
+          for (size_t view = 0; view < neighborhood_data_.size(); ++view) {
+            const auto* data = neighborhood_data_[view];
+            if (!seeded_depth_masks[view] && data) {
+              fused_pixel_masks_[view].ExcludeNonpositiveDepth(
+                  internal::FusionFloatMapView(data->depth_map));
+              seeded_depth_masks[view] = 1;
+            }
+          }
+        }
       }
 
       for (int row_start = 0; row_start < height; row_start += kRowStride) {
@@ -887,13 +909,9 @@ void StereoFusion::Run() {
         const size_t last = static_cast<size_t>(row_end) * width;
         // A task reads only its own rows. Move that snapshot into the bound
         // task rather than copying the entire image mask for every band.
-        std::vector<char> row_mask = fused_pixel_mask.Snapshot(first, last);
-        thread_pool.AddTask(ProcessImageRows,
-                            row_start,
-                            height,
-                            width,
-                            image_idx,
-                            std::move(row_mask));
+        auto row_mask = fused_pixel_mask.Snapshot(first, last);
+        thread_pool.AddTask(
+            ProcessImageRows, row_start, width, image_idx, std::move(row_mask));
       }
       thread_pool.Wait();
       if (depth_pin_exit.workspace) {
@@ -911,7 +929,8 @@ void StereoFusion::Run() {
                     views.end());
       }
 
-      if (!full_ram_inputs_.empty() && used_images_.at(image_idx)) {
+      if (!bounded_workspace_ && !full_ram_inputs_.empty() &&
+          used_images_.at(image_idx)) {
         // All readers joined and no remaining adjacency can reach this image.
         // Drop borrowed views before releasing their eager FP32 owners.
         full_ram_inputs_.at(image_idx) = FullRamInput();
@@ -988,7 +1007,7 @@ void StereoFusion::Run() {
     // Join before releasing any component or mapped owner they can borrow.
     try {
       thread_pool.Wait();
-    } catch (...) {
+    } catch (...) {  // NOLINT(bugprone-empty-catch): keep first failure.
     }
     std::fill(neighborhood_data_.begin(), neighborhood_data_.end(), nullptr);
     ClearNormalPrefillWindow();
@@ -1069,6 +1088,7 @@ void StereoFusion::ClearDirectComponentPins() {
 }
 
 void StereoFusion::ClearNormalPrefillWindow() {
+  if (bounded_workspace_) full_ram_inputs_.clear();
   normal_prefill_data_.clear();
   normal_prefill_leases_.clear();
 }
@@ -1157,6 +1177,15 @@ const BoundedWorkspace::ImageData* StereoFusion::AcquireWorkerNormalTile(
       return data;
     }
   }
+  return AcquireWorkerNormalTileFromRing(thread_id, image_idx, row, col);
+}
+
+const BoundedWorkspace::ImageData*
+StereoFusion::AcquireWorkerNormalTileFromRing(const int thread_id,
+                                              const int image_idx,
+                                              const int row,
+                                              const int col) {
+  auto& ring = normal_tile_rings_.at(thread_id);
   const auto contains = [row, col](const BoundedWorkspace::ImageData* data) {
     return data && static_cast<size_t>(col) >= data->normal_origin_x &&
            static_cast<size_t>(row) >= data->normal_origin_y &&
@@ -1382,6 +1411,9 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
   bool normal_prefill_stopped = false;
   bool parallel_normal_loads = false;
   if (options_.bounded_cache_normal_tile_size > 0 && !whole_group_admitted) {
+    THROW_CHECK_GT(normal_tile_worker_headroom_, 0)
+        << "Partial normal-tile neighborhoods need retained pins and "
+           "component headroom";
     // The checked Run admission already establishes workers * headroom <= cap.
     // Pin root depth + eventual RGB, then favor other depths; an excluded RGB
     // stays demand-loaded after the geometry checks.
@@ -1543,6 +1575,44 @@ void StereoFusion::PrepareBoundedNeighborhood(const int image_idx,
   for (size_t index = 0; index < prefill_views.size(); ++index) {
     neighborhood_data_[prefill_views[index]] =
         neighborhood_leases_[index].get();
+  }
+
+  // A complete pinned neighborhood can lend the same FP32 views as eager
+  // inputs. Publish only after validation; unsupported layouts stay generic.
+  if (whole_group_admitted && !options_.bounded_cache_exact_depth &&
+      !direct_mapped_normals_ && !direct_component_pins_admitted_ &&
+      prefill_views.size() == views.size() &&
+      depth_map_sizes_.size() == used_images_.size() &&
+      bitmap_scales_.size() == used_images_.size()) {
+    std::vector<FullRamInput> inputs(used_images_.size());
+    for (const int view : prefill_views) {
+      const auto* data = neighborhood_data_.at(view);
+      if (!data) return;
+      const auto& depth = data->depth_map;
+      const auto& normal = data->normal_map;
+      const auto& grid = depth_map_sizes_.at(view);
+      const size_t pixels = depth.GetData().size();
+      if (depth.GetDepth() != 1 || normal.GetDepth() != 3 ||
+          depth.GetWidth() != static_cast<size_t>(grid.first) ||
+          depth.GetHeight() != static_cast<size_t>(grid.second) ||
+          normal.GetWidth() != depth.GetWidth() ||
+          normal.GetHeight() != depth.GetHeight() ||
+          data->normal_origin_x != 0 || data->normal_origin_y != 0 ||
+          depth.GetWidth() == 0 ||
+          pixels / depth.GetWidth() != depth.GetHeight() ||
+          pixels % depth.GetWidth() != 0 ||
+          normal.GetData().size() / 3 != pixels ||
+          normal.GetData().size() % 3 != 0 ||
+          (data->bitmap_on_depth_grid &&
+           (bitmap_scales_.at(view) != std::make_pair(1.0f, 1.0f) ||
+            depth.GetWidth() > (1u << 24) || depth.GetHeight() > (1u << 24)))) {
+        return;
+      }
+      inputs.at(view) = {internal::FusionFloatMapView(depth),
+                         internal::FusionFloatMapView(normal),
+                         &data->bitmap};
+    }
+    full_ram_inputs_ = std::move(inputs);
   }
 }
 
@@ -1988,6 +2058,67 @@ void WritePointsVisibility(
     }
   }
   if (used != 0) flush();
+
+  file.close();
+  THROW_CHECK(file.good()) << "Failed to write visibility file: " << path;
+}
+
+namespace {
+// Remove only an existing regular result; a directory or symlink is not ours.
+void RemoveExistingRegularFile(const std::filesystem::path& path) {
+  std::error_code ec;
+  const auto status = std::filesystem::symlink_status(path, ec);
+  if (ec == std::errc::no_such_file_or_directory) return;
+  if (ec) throw std::filesystem::filesystem_error("stat output", path, ec);
+  if (status.type() == std::filesystem::file_type::not_found) return;
+  THROW_CHECK(std::filesystem::is_regular_file(status))
+      << "Refusing to replace non-regular output: " << path;
+  std::filesystem::remove(path);
+}
+}  // namespace
+
+void WriteFusedPointCloud(
+    const std::filesystem::path& path,
+    const std::vector<PlyPoint>& points,
+    const std::vector<std::vector<int>>& points_visibility) {
+  THROW_CHECK_EQ(points.size(), points_visibility.size());
+  const auto visibility_path = AddFileExtension(path, ".vis");
+
+  // An exclusive same-directory staging directory avoids touching stale or
+  // foreign temporary files. This is not a concurrent-writer protocol.
+  static std::atomic<uint64_t> sequence{0};
+  const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
+  std::filesystem::path stage;
+  for (int attempt = 0; attempt < 128; ++attempt) {
+    stage = path;
+    stage += ".fusion-stage-" + std::to_string(tick) + "-" +
+             std::to_string(sequence.fetch_add(1));
+    if (std::filesystem::create_directory(stage)) break;
+    stage.clear();
+  }
+  THROW_CHECK(!stage.empty()) << "Cannot create fusion staging directory";
+  const auto stage_ply = stage / "points.ply";
+  const auto stage_vis = stage / "points.vis";
+  try {
+    WriteBinaryPlyPoints(stage_ply, points);
+    WritePointsVisibility(stage_vis, points_visibility);
+
+    // The PLY is the completion name. Invalidate it before replacing VIS;
+    // never leave a new PLY next to an old or failed visibility output.
+    RemoveExistingRegularFile(path);
+    RemoveExistingRegularFile(visibility_path);
+    std::filesystem::rename(stage_vis, visibility_path);
+    std::filesystem::rename(stage_ply, path);
+  } catch (...) {
+    // Keep the original error even if best-effort temporary cleanup fails.
+    std::error_code ignored;
+    std::filesystem::remove(stage_ply, ignored);
+    std::filesystem::remove(stage_vis, ignored);
+    std::filesystem::remove(stage, ignored);
+    throw;
+  }
+  std::error_code ignored;
+  std::filesystem::remove(stage, ignored);
 }
 
 std::vector<std::vector<int>> ReadPointsVisibility(

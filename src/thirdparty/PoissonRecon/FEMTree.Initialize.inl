@@ -221,9 +221,9 @@ size_t FEMTreeInitializer< Dim , Real >::_AddSample( FEMTreeNode& root , Project
 		int d=0;
 		while( d<maxDepth )
 		{
-			if( !node->children ) node->template initChildren< ThreadSafe >( nodeAllocator , NodeInitializer );
+			FEMTreeNode* childNodes = node->template getOrInitChildren< ThreadSafe >( nodeAllocator , NodeInitializer );
 			int cIndex = FEMTreeNode::ChildIndex( center , p );
-			node = node->children + cIndex;
+			node = childNodes + cIndex;
 			d++;
 			width /= 2;
 			for( int d=0 ; d<Dim ; d++ )
@@ -346,9 +346,9 @@ size_t FEMTreeInitializer< Dim , Real >::_AddSimplex( FEMTreeNode& root , Simple
 		int d=0;
 		while( d<maxDepth )
 		{
-			if( !node->children ) node->template initChildren< ThreadSafe >( nodeAllocator , NodeInitializer );
+			FEMTreeNode* childNodes = node->template getOrInitChildren< ThreadSafe >( nodeAllocator , NodeInitializer );
 			int cIndex = FEMTreeNode::ChildIndex( center , p );
-			node = node->children + cIndex;
+			node = childNodes + cIndex;
 			d++;
 			width /= 2;
 			for( int d=0 ; d<Dim ; d++ )
@@ -429,7 +429,7 @@ size_t FEMTreeInitializer< Dim , Real >::_AddSimplex( FEMTreeNode* node , Simple
 	else
 	{
 		size_t sCount = 0;
-		if( !node->children ) node->template initChildren< ThreadSafe >( nodeAllocator , NodeInitializer );
+		FEMTreeNode* childNodes = node->template getOrInitChildren< ThreadSafe >( nodeAllocator , NodeInitializer );
 
 		// Split up the simplex and pass the parts on to the children
 		Point< Real , Dim > center;
@@ -445,7 +445,7 @@ size_t FEMTreeInitializer< Dim , Real >::_AddSimplex( FEMTreeNode* node , Simple
 			for( int c=0 ; c<(1<<d) ; c++ ) for( size_t i=0 ; i<childSimplices[c].size() ; i++ ) childSimplices[c][i].split( n , center[Dim-d-1] , temp[2*c] , temp[2*c+1] );
 			childSimplices = temp;
 		}
-		for( int c=0 ; c<(1<<Dim) ; c++ ) for( size_t i=0 ; i<childSimplices[c].size() ; i++ ) if( childSimplices[c][i].measure() ) sCount += _AddSimplex< ThreadSafe >( node->children+c , childSimplices[c][i] , maxDepth , samples , nodeToIndexMap , nodeAllocator , NodeInitializer );
+		for( int c=0 ; c<(1<<Dim) ; c++ ) for( size_t i=0 ; i<childSimplices[c].size() ; i++ ) if( childSimplices[c][i].measure() ) sCount += _AddSimplex< ThreadSafe >( childNodes+c , childSimplices[c][i] , maxDepth , samples , nodeToIndexMap , nodeAllocator , NodeInitializer );
 		return sCount;
 	}
 }

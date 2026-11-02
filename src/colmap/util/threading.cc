@@ -16,33 +16,56 @@ Thread::Thread()
       pausing_(false),
       finished_(false),
       setup_(false),
-      setup_valid_(false) {
+      setup_valid_(false),
+      starting_(false),
+      stop_pending_(false) {
   RegisterCallback(STARTED_CALLBACK);
   RegisterCallback(FINISHED_CALLBACK);
+  RegisterCallback(SUCCEEDED_CALLBACK);
 }
 
 void Thread::Start() {
   std::unique_lock<std::mutex> lock(mutex_);
+  THROW_CHECK(!starting_);
   THROW_CHECK(!started_ || finished_);
-  if (thread_.joinable()) {
-    thread_.join();
+  starting_ = true;
+  stop_pending_ = false;
+  // A finishing callback can need mutex_; never join while holding it.
+  lock.unlock();
+  try {
+    if (thread_.joinable()) thread_.join();
+  } catch (...) {
+    lock.lock();
+    starting_ = false;
+    stop_pending_ = false;
+    throw;
   }
-  error_ = nullptr;
-  timer_.Restart();
-  thread_ = std::thread(&Thread::RunFunc, this);
-  started_ = true;
-  stopped_ = false;
-  paused_ = false;
-  pausing_ = false;
-  finished_ = false;
-  setup_ = false;
-  setup_valid_ = false;
+  lock.lock();
+  try {
+    error_ = nullptr;
+    timer_.Restart();
+    thread_ = std::thread(&Thread::RunFunc, this);
+    started_ = true;
+    stopped_ = stop_pending_;
+    stop_pending_ = false;
+    paused_ = false;
+    pausing_ = false;
+    finished_ = false;
+    setup_ = false;
+    setup_valid_ = false;
+  } catch (...) {
+    starting_ = false;
+    stop_pending_ = false;
+    throw;
+  }
+  starting_ = false;
 }
 
 void Thread::Stop() {
   {
     std::unique_lock<std::mutex> lock(mutex_);
     stopped_ = true;
+    if (starting_) stop_pending_ = true;
   }
   Resume();
 }
@@ -153,10 +176,7 @@ bool Thread::CheckValidSetup() {
 }
 
 void Thread::RunFunc() {
-  Callback(STARTED_CALLBACK);
-  try {
-    Run();
-  } catch (...) {
+  const auto record_error = [this]() {
     // Rethrown by Wait in the calling thread, instead of terminating.
     try {
       throw;
@@ -166,20 +186,34 @@ void Thread::RunFunc() {
       LOG(ERROR) << "Thread failed with an unknown exception.";
     }
     std::unique_lock<std::mutex> lock(mutex_);
-    error_ = std::current_exception();
+    if (!error_) error_ = std::current_exception();
     // Unblock CheckValidSetup if the thread failed before signaling its setup.
     if (!setup_) {
       setup_ = true;
       setup_valid_ = false;
       setup_condition_.notify_all();
     }
+  };
+  try {
+    Callback(STARTED_CALLBACK);
+    Run();
+    if (!IsStopped()) Callback(SUCCEEDED_CALLBACK);
+  } catch (...) {
+    record_error();
   }
   {
     std::unique_lock<std::mutex> lock(mutex_);
     finished_ = true;
     timer_.Pause();
   }
-  Callback(FINISHED_CALLBACK);
+  // Completion notifications must still run after a sibling callback fails.
+  for (const auto& callback : callbacks_.at(FINISHED_CALLBACK)) {
+    try {
+      callback();
+    } catch (...) {
+      record_error();
+    }
+  }
 }
 
 ThreadPool::ThreadPool(const int num_threads)

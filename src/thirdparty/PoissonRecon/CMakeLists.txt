@@ -60,6 +60,13 @@ if(TESTS_ENABLED)
         target_link_libraries(colmap_poisson_recon_fem_tree_test
             OpenMP::OpenMP_CXX)
     endif()
+    if(OPENMP_FOUND AND CUDA_ENABLED AND NOT HIP_ENABLED)
+        target_compile_definitions(colmap_poisson_recon_fem_tree_test PRIVATE
+            RELEASE POISSON_AUX_NATIVE_GPU POISSON_TRIM_NATIVE_GPU
+            POISSON_NORMAL_NATIVE_GPU)
+        target_link_libraries(colmap_poisson_recon_fem_tree_test
+            colmap_poisson_recon)
+    endif()
 endif()
 
 # Exercise the private PLY writer independently of the Poisson executable.

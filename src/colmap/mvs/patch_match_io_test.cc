@@ -2,6 +2,8 @@
 
 #include "colmap/mvs/patch_match_io.h"
 
+#include "colmap/mvs/patch_match_options.h"
+
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -14,6 +16,26 @@
 namespace colmap {
 namespace mvs {
 namespace {
+
+TEST(PatchMatchOptions, WindowMatchesCompiledKernels) {
+  PatchMatchOptions options;
+  for (const int step : {1, 2}) {
+    options.window_step = step;
+    for (const int radius : {1, 20}) {
+      options.window_radius = radius;
+      EXPECT_TRUE(options.Check());
+    }
+    for (const int radius : {0, 21, 32}) {
+      options.window_radius = radius;
+      EXPECT_FALSE(options.Check());
+    }
+  }
+  options.window_radius = 5;
+  for (const int step : {0, 3}) {
+    options.window_step = step;
+    EXPECT_FALSE(options.Check());
+  }
+}
 
 TEST(PatchMatchInputReads, SubmissionFailureJoinsBorrowedSibling) {
   ThreadPool pool(2);
