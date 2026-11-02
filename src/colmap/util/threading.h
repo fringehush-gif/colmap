@@ -449,8 +449,9 @@ template <typename T>
 size_t JobQueue<T>::Clear() {
   std::unique_lock<std::mutex> lock(mutex_);
   const size_t num_cleared = jobs_.size();
-  std::queue<T> empty_jobs;
-  std::swap(jobs_, empty_jobs);
+  while (!jobs_.empty()) {
+    jobs_.pop();
+  }
   pop_condition_.notify_all();
   empty_condition_.notify_all();
   return num_cleared;
