@@ -6,6 +6,7 @@
 #include "colmap/util/file.h"
 #include "colmap/util/threading.h"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstdint>
@@ -130,25 +131,35 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
     normal_maps_[image_idx] = std::move(normal);
   };
 
-  // Each model slot is published by at most one task in this Load call.
-  std::vector<uint8_t> enqueued(num_images, 0);
-  const int num_threads = GetEffectiveNumThreads(options_.num_threads);
+  // Resolve the complete roster before starting workers. Keep first-occurrence
+  // order, including missing inputs, so each model slot is considered once.
+  std::vector<uint8_t> seen(num_images, 0);
+  std::vector<int> image_indices;
+  image_indices.reserve(std::min(image_names.size(), num_images));
+  for (const auto& image_name : image_names) {
+    const int image_idx = model_.GetImageIdx(image_name);
+    if (!seen[image_idx]) {
+      image_indices.push_back(image_idx);
+      seen[image_idx] = 1;
+    }
+  }
+  const int num_threads = static_cast<int>(std::min(
+      static_cast<size_t>(GetEffectiveNumThreads(options_.num_threads)),
+      std::max<size_t>(image_indices.size(), 1)));
   ThreadPool thread_pool(num_threads);
   Timer timer;
   timer.Start();
 
   LOG(INFO) << StringPrintf("Loading workspace data with %d threads...",
                             num_threads);
-  for (size_t i = 0; i < image_names.size(); ++i) {
-    const int image_idx = model_.GetImageIdx(image_names[i]);
-    if (enqueued[image_idx]) continue;
-    if (HasBitmap(image_idx) && HasDepthMap(image_idx)) {
+  for (const int image_idx : image_indices) {
+    if (HasBitmap(image_idx) && HasDepthMap(image_idx) &&
+        HasNormalMap(image_idx)) {
       thread_pool.AddTask(LoadWorkspaceData, image_idx);
-      enqueued[image_idx] = 1;
     } else {
       LOG(WARNING) << StringPrintf(
           "Ignoring image %s, because input does not exist.",
-          image_names[i].c_str());
+          model_.GetImageName(image_idx).c_str());
     }
   }
   try {

@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <locale>
 #include <string>
 #include <utility>
 #include <vector>
@@ -62,6 +63,22 @@ class MatFileTest : public ::testing::Test {
   }
 
   std::filesystem::path path_ = MatFilePath();
+};
+
+class CommaGrouping : public std::numpunct<char> {
+ protected:
+  char do_thousands_sep() const override { return ','; }
+  std::string do_grouping() const override { return "\3"; }
+};
+
+class ScopedGlobalLocale {
+ public:
+  explicit ScopedGlobalLocale(const std::locale& locale)
+      : previous_(std::locale::global(locale)) {}
+  ~ScopedGlobalLocale() { std::locale::global(previous_); }
+
+ private:
+  std::locale previous_;
 };
 
 TEST(Mat, Empty) {
@@ -280,6 +297,77 @@ TEST_F(MatFileTest, ReadAcceptsPositiveSignsAndWhitespace) {
     if (ImmutableMapRegion::Supported()) {
       ImmutableMapSource source(path_);
       EXPECT_EQ(source.GetShape(), (std::array<size_t, 3>{1, 1, 1}));
+    }
+  }
+}
+
+TEST_F(MatFileTest, FloatMapHeaderIgnoresGlobalDigitGrouping) {
+  const ScopedGlobalLocale locale(
+      std::locale(std::locale::classic(), new CommaGrouping));
+  WriteMatFile(path_,
+               "1,024&1&1&" +
+                   LittleEndianFloats(std::vector<uint32_t>(1024, 0x3f800000)));
+  Mat<float> mat(2, 1, 1);
+  mat.Fill(42.0f);
+  EXPECT_THROW(mat.Read(path_), std::exception);
+  EXPECT_EQ(mat.GetWidth(), 2);
+  EXPECT_EQ(mat.GetHeight(), 1);
+  EXPECT_EQ(mat.GetDepth(), 1);
+  EXPECT_FLOAT_EQ(mat.Get(0, 0), 42.0f);
+  if (ImmutableMapRegion::Supported()) {
+    EXPECT_THROW({ ImmutableMapSource source(path_); }, std::exception);
+  }
+}
+
+TEST_F(MatFileTest, SharedHeaderPreservesPayloadAndConsumerChannelLimits) {
+  for (const size_t depth : {1, 2, 3, 4}) {
+    for (const uint32_t first : {0x3f800020u, 0x3f800026u}) {
+      SCOPED_TRACE(depth);
+      SCOPED_TRACE(first);
+      std::vector<uint32_t> bits(2 * depth, 0x80000000u);
+      bits.front() = first;  // Payload starts with whitespace or '&'.
+      bits.back() = 0x7fc12345u;
+      WriteMatFile(
+          path_,
+          "2&1&" + std::to_string(depth) + "&" + LittleEndianFloats(bits));
+      Mat<float> mat;
+      mat.Read(path_);
+      ASSERT_EQ(mat.GetData().size(), bits.size());
+      EXPECT_EQ(mat.GetDepth(), depth);
+      for (size_t i = 0; i < bits.size(); ++i) {
+        EXPECT_EQ(FloatBits(mat.GetPtr()[i]), bits[i]);
+      }
+      if (ImmutableMapRegion::Supported()) {
+        if (depth == 1 || depth == 3) {
+          ImmutableMapSource source(path_);
+          EXPECT_EQ(source.GetShape(), (std::array<size_t, 3>{2, 1, depth}));
+        } else {
+          EXPECT_THROW({ ImmutableMapSource source(path_); }, std::exception);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(MatFileTest, SharedHeaderAcceptsExactByteLimit) {
+  for (const size_t padding : {121, 122, 123}) {
+    const std::string header = std::string(padding, ' ') + "1&1&1&";
+    SCOPED_TRACE(header.size());
+    WriteMatFile(path_, header + LittleEndianFloats({0x3f800026}));
+    Mat<float> mat;
+    if (header.size() <= 128) {
+      mat.Read(path_);
+      ASSERT_EQ(mat.GetData().size(), 1);
+      EXPECT_EQ(FloatBits(mat.GetPtr()[0]), 0x3f800026u);
+      if (ImmutableMapRegion::Supported()) {
+        ImmutableMapSource source(path_);
+        EXPECT_EQ(source.GetShape(), (std::array<size_t, 3>{1, 1, 1}));
+      }
+    } else {
+      EXPECT_THROW(mat.Read(path_), std::exception);
+      if (ImmutableMapRegion::Supported()) {
+        EXPECT_THROW({ ImmutableMapSource source(path_); }, std::exception);
+      }
     }
   }
 }

@@ -369,8 +369,43 @@ TEST_F(WorkspaceTests, ReleaseEagerImageInputsPreservesMetadataAndReload) {
   EXPECT_THROW(bounded.ReleaseFullRamImageInputs(0), std::invalid_argument);
 }
 
+TEST_F(WorkspaceTests, EagerLoadSkipsMissingNormalBeforeReadingAnyInput) {
+  auto options = GetOptions();
+  options.num_threads = 1;
+  Workspace workspace(options);
+  const auto normal_path = workspace.GetNormalMapPath(0);
+  ASSERT_TRUE(std::filesystem::remove(normal_path));
+  ASSERT_TRUE(workspace.HasBitmap(0));
+  ASSERT_TRUE(workspace.HasDepthMap(0));
+  ASSERT_FALSE(workspace.HasNormalMap(0));
+  std::atomic<int> reads{0};
+  auto reader =
+      ScopedBitmapReader::Create({workspace.GetBitmapPath(0)},
+                                 [&](const auto&, bool, bool, Bitmap* target) {
+                                   ++reads;
+                                   *target = Bitmap(10, 5, true);
+                                   target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+                                   return true;
+                                 },
+                                 {{10, 5}});
+
+  EXPECT_NO_THROW(workspace.Load({image_name_}));
+  EXPECT_EQ(reads.load(), 0);
+  EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+  EXPECT_THROW(workspace.GetDepthMap(0), std::invalid_argument);
+  EXPECT_THROW(workspace.GetNormalMap(0), std::invalid_argument);
+
+  Mat<float> normal(10, 5, 3);
+  normal.Fill(1.0f);
+  normal.Write(normal_path);
+  workspace.Load({image_name_});
+  EXPECT_EQ(reads.load(), 1);
+  ExpectLoadedWorkspaceData(workspace);
+  reader->Close();
+}
+
 TEST_F(WorkspaceTests, EagerLoadDeduplicatesPerCall) {
-  for (const int num_threads : {1, 2}) {
+  for (const int num_threads : {-9, -1, 0, 1, 2, 8}) {
     SCOPED_TRACE(num_threads);
     auto options = GetOptions();
     options.num_threads = num_threads;
@@ -385,7 +420,10 @@ TEST_F(WorkspaceTests, EagerLoadDeduplicatesPerCall) {
           return true;
         },
         {{10, 5}});
+    workspace.Load({});
+    EXPECT_EQ(reads.load(), 0);
     workspace.Load({image_name_, image_name_, image_name_});
+    EXPECT_EQ(workspace.GetOptions().num_threads, num_threads);
     ASSERT_EQ(reads.load(), 1);
     ExpectLoadedWorkspaceData(workspace);
     workspace.Load({image_name_, image_name_});
@@ -393,6 +431,79 @@ TEST_F(WorkspaceTests, EagerLoadDeduplicatesPerCall) {
     ExpectLoadedWorkspaceData(workspace);
     reader->Close();
   }
+}
+
+TEST_F(WorkspaceTests, EagerLoadResolvesAllNamesBeforeDispatch) {
+  auto options = GetOptions();
+  options.num_threads = 1;
+  Workspace workspace(options);
+  std::atomic<int> reads{0};
+  auto reader =
+      ScopedBitmapReader::Create({workspace.GetBitmapPath(0)},
+                                 [&](const auto&, bool, bool, Bitmap* target) {
+                                   ++reads;
+                                   *target = Bitmap(10, 5, true);
+                                   target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+                                   return true;
+                                 },
+                                 {{10, 5}});
+  for (const std::vector<std::string>& names :
+       {std::vector<std::string>{image_name_, "unknown-image"},
+        std::vector<std::string>{"unknown-image", image_name_}}) {
+    EXPECT_THROW(workspace.Load(names), std::invalid_argument);
+    EXPECT_EQ(reads.load(), 0);
+    EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+  }
+  ASSERT_NO_THROW(workspace.Load({image_name_}));
+  EXPECT_EQ(reads.load(), 1);
+  ExpectLoadedWorkspaceData(workspace);
+  reader->Close();
+}
+
+TEST_F(WorkspaceTests, EagerLoadPreservesFirstOccurrenceOrderWithOneWorker) {
+  SyntheticDatasetOptions synthetic_options;
+  synthetic_options.num_rigs = 1;
+  synthetic_options.num_cameras_per_rig = 1;
+  synthetic_options.num_frames_per_rig = 3;
+  synthetic_options.camera_width = 10;
+  synthetic_options.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(synthetic_options, &reconstruction);
+  reconstruction.Write(temp_dir_ / "sparse");
+  for (const auto& [image_id, image] : reconstruction.Images()) {
+    if (image.Name() == image_name_) continue;
+    for (const auto& folder : {"depth_maps", "normal_maps"}) {
+      std::filesystem::copy_file(
+          temp_dir_ / "stereo" / folder / (image_name_ + ".geometric.bin"),
+          temp_dir_ / "stereo" / folder / (image.Name() + ".geometric.bin"));
+    }
+    std::filesystem::copy_file(temp_dir_ / "images" / image_name_,
+                               temp_dir_ / "images" / image.Name());
+  }
+  auto options = GetOptions();
+  options.num_threads = 1;
+  Workspace workspace(options);
+  std::vector<std::filesystem::path> paths;
+  paths.reserve(3);
+  for (int image_idx = 0; image_idx < 3; ++image_idx) {
+    paths.push_back(workspace.GetBitmapPath(image_idx));
+  }
+  std::vector<std::string> read_names;
+  auto reader = ScopedBitmapReader::Create(
+      paths,
+      [&](const auto& path, bool, bool, Bitmap* target) {
+        read_names.push_back(path.filename().string());
+        *target = Bitmap(10, 5, true);
+        target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+        return true;
+      },
+      {{10, 5}, {10, 5}, {10, 5}});
+  const std::vector<std::string> names = {workspace.GetModel().GetImageName(2),
+                                          workspace.GetModel().GetImageName(0),
+                                          workspace.GetModel().GetImageName(1)};
+  workspace.Load({names[0], names[1], names[0], names[2], names[1]});
+  EXPECT_EQ(read_names, names);
+  reader->Close();
 }
 
 TEST_F(WorkspaceTests, CachedLeasesSurviveConcurrentClear) {

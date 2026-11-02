@@ -575,23 +575,10 @@ void StereoFusion::Run() {
     workspace_ = std::make_unique<CachedWorkspace>(workspace_options);
   } else {
     if (options_.full_ram_load_threads != -1) {
-      // Workspace::Load writes one model slot per name. An opt-in parallel
-      // loader must not schedule the same slot twice for duplicate cfg rows.
-      std::vector<std::string> unique_names;
-      FlatHashSet<std::string> seen;
-      unique_names.reserve(image_names.size());
-      for (const auto& name : image_names) {
-        if (seen.insert(name).second) unique_names.push_back(name);
-      }
-      const size_t roster_size = std::max<size_t>(unique_names.size(), 1);
-      workspace_options.num_threads = static_cast<int>(std::min(
-          static_cast<size_t>(options_.full_ram_load_threads), roster_size));
-      workspace_ = std::make_unique<Workspace>(workspace_options);
-      workspace_->Load(unique_names);
-    } else {
-      workspace_ = std::make_unique<Workspace>(workspace_options);
-      workspace_->Load(image_names);
+      workspace_options.num_threads = options_.full_ram_load_threads;
     }
+    workspace_ = std::make_unique<Workspace>(workspace_options);
+    workspace_->Load(image_names);
     num_threads = GetEffectiveNumThreads(options_.num_threads);
   }
 

@@ -41,7 +41,7 @@ struct StereoFusionOptions {
   int num_threads = -1;
 
   // Full-RAM workspace loading can use a separate positive thread count.
-  // -1 retains the existing num_threads behavior.
+  // -1 uses num_threads. Workspace caps either request to its unique roster.
   int full_ram_load_threads = -1;
   // Maximum image size in either dimension.
   int max_image_size = -1;
