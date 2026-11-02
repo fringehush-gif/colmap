@@ -96,8 +96,12 @@ void SetCudaDevicesBlockingSync(const std::vector<int>& gpu_indices) {
       CUDA_SAFE_CALL(cudaSetDevice(device));
       unsigned int previous_flags = 0;
       CUDA_SAFE_CALL(cudaGetDeviceFlags(&previous_flags));
+#if CUDART_VERSION >= 12010
       constexpr unsigned int kOtherFlags =
           cudaDeviceLmemResizeToMax | cudaDeviceSyncMemops;
+#else
+      constexpr unsigned int kOtherFlags = cudaDeviceLmemResizeToMax;
+#endif
       constexpr unsigned int kKnownFlags =
           cudaDeviceScheduleMask | cudaDeviceMapHost | kOtherFlags;
       THROW_CHECK_EQ(previous_flags & ~kKnownFlags, 0)
