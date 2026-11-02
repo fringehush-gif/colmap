@@ -660,6 +660,8 @@ Gaussian window size is set to have standard deviation
 #include "mathop.h"
 
 #include <assert.h>
+#include <fenv.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -1719,47 +1721,43 @@ normalize_histogram
   return norm;
 }
 
-/** ------------------------------------------------------------------
- ** @brief Run the SIFT descriptor on raw data
- **
- ** @param f        SIFT filter.
- ** @param grad     image gradients.
- ** @param descr    SIFT descriptor (output).
- ** @param width    image width.
- ** @param height   image height.
- ** @param x        keypoint x coordinate.
- ** @param y        keypoint y coordinate.
- ** @param sigma    keypoint scale.
- ** @param angle0   keypoint orientation.
- **
- ** The function runs the SIFT descriptor on raw data. Here @a image
- ** is a 2 x @a width x @a height array (by convention, the memory
- ** layout is a s such the first index is the fastest varying
- ** one). The first @a width x @a height layer of the array contains
- ** the gradient magnitude and the second the gradient angle (in
- ** radians, between 0 and @f$ 2\pi @f$). @a x, @a y and @a sigma give
- ** the keypoint center and scale respectively.
- **
- ** In order to be equivalent to a standard SIFT descriptor the image
- ** gradient must be computed at a smoothing level equal to the scale
- ** of the keypoint. In practice, the actual SIFT algorithm makes the
- ** following additional approximation, which influence the result:
- **
- ** - Scale is discretized in @c S levels.
- ** - The image is downsampled once for each octave (if you do this,
- **   the parameters @a x, @a y and @a sigma must be
- **   scaled too).
- **/
+typedef struct _VlSiftRawDescriptorSample {
+  vl_sift_pix win, rbinx, rbiny ;
+  int binx, biny ;
+} VlSiftRawDescriptorSample ;
 
-VL_EXPORT
-void
-vl_sift_calc_raw_descriptor (VlSiftFilt const *f,
+struct _VlSiftRawDescriptorGeometry {
+  int width, height, xi, yi, radius, rounding_mode ;
+  double x, y, sigma, angle0, magnif, windowSize ;
+  double expn_tab[EXPN_SZ + 1] ;
+  VlSiftRawDescriptorSample *samples ;
+} ;
+
+VL_INLINE void
+_vl_sift_raw_descriptor_sample(VlSiftFilt const *f,
+                               vl_sift_pix dx, vl_sift_pix dy,
+                               double ct0, double st0, double SBP,
+                               VlSiftRawDescriptorSample *sample)
+{
+  vl_sift_pix nx = ( ct0 * dx + st0 * dy) / SBP ;
+  vl_sift_pix ny = (-st0 * dx + ct0 * dy) / SBP ;
+  vl_sift_pix const wsigma = f->windowSize ;
+  sample->win = fast_expn(f, (nx*nx + ny*ny)/(2.0 * wsigma * wsigma)) ;
+  sample->binx = (int)vl_floor_f(nx - 0.5) ;
+  sample->biny = (int)vl_floor_f(ny - 0.5) ;
+  sample->rbinx = nx - (sample->binx + 0.5) ;
+  sample->rbiny = ny - (sample->biny + 0.5) ;
+}
+
+static void
+_vl_sift_calc_raw_descriptor (VlSiftFilt const *f,
                              vl_sift_pix const* grad,
                              vl_sift_pix *descr,
                              int width, int height,
                              double x, double y,
                              double sigma,
-                             double angle0)
+                             double angle0,
+                             VlSiftRawDescriptorGeometry const *geometry)
 {
   double const magnif = f-> magnif ;
 
@@ -1768,13 +1766,13 @@ vl_sift_calc_raw_descriptor (VlSiftFilt const *f,
   int const    xo     = 2 ;         /* x-stride */
   int const    yo     = 2 * w ;     /* y-stride */
 
-  int          xi     = (int) (x + 0.5) ;
-  int          yi     = (int) (y + 0.5) ;
+  int          xi     = geometry ? geometry->xi : (int) (x + 0.5) ;
+  int          yi     = geometry ? geometry->yi : (int) (y + 0.5) ;
 
   double const st0    = sin (angle0) ;
   double const ct0    = cos (angle0) ;
   double const SBP    = magnif * sigma + VL_EPSILON_D ;
-  int    const W      = floor
+  int    const W      = geometry ? geometry->radius : floor
     (sqrt(2.0) * SBP * (NBP + 1) / 2.0 + 0.5) ;
 
   int const binto = 1 ;          /* bin theta-stride */
@@ -1782,6 +1780,7 @@ vl_sift_calc_raw_descriptor (VlSiftFilt const *f,
   int const binxo = NBO ;        /* bin x-stride */
 
   int bin, dxi, dyi ;
+  vl_size sample_index = 0 ;
   vl_sift_pix const *pt ;
   vl_sift_pix       *dpt ;
 
@@ -1823,27 +1822,21 @@ vl_sift_calc_raw_descriptor (VlSiftFilt const *f,
       vl_sift_pix dx = xi + dxi - x;
       vl_sift_pix dy = yi + dyi - y;
 
-      /* get the displacement normalized w.r.t. the keypoint
-         orientation and extension */
-      vl_sift_pix nx = ( ct0 * dx + st0 * dy) / SBP ;
-      vl_sift_pix ny = (-st0 * dx + ct0 * dy) / SBP ;
+      VlSiftRawDescriptorSample local ;
+      VlSiftRawDescriptorSample const *sample ;
+      if (geometry) {
+        sample = geometry->samples + sample_index++ ;
+      } else {
+        _vl_sift_raw_descriptor_sample(f, dx, dy, ct0, st0, SBP, &local) ;
+        sample = &local ;
+      }
       vl_sift_pix nt = NBO * theta / (2 * VL_PI) ;
-
-      /* Get the Gaussian weight of the sample. The Gaussian window
-       * has a standard deviation equal to NBP/2. Note that dx and dy
-       * are in the normalized frame, so that -NBP/2 <= dx <=
-       * NBP/2. */
-      vl_sift_pix const wsigma = f->windowSize ;
-      vl_sift_pix win = fast_expn
-        (f, (nx*nx + ny*ny)/(2.0 * wsigma * wsigma)) ;
-
-      /* The sample will be distributed in 8 adjacent bins.
-         We start from the ``lower-left'' bin. */
-      int         binx = (int)vl_floor_f (nx - 0.5) ;
-      int         biny = (int)vl_floor_f (ny - 0.5) ;
+      vl_sift_pix win = sample->win ;
+      int binx = sample->binx ;
+      int biny = sample->biny ;
       int         bint = (int)vl_floor_f (nt) ;
-      vl_sift_pix rbinx = nx - (binx + 0.5) ;
-      vl_sift_pix rbiny = ny - (biny + 0.5) ;
+      vl_sift_pix rbinx = sample->rbinx ;
+      vl_sift_pix rbiny = sample->rbiny ;
       vl_sift_pix rbint = nt - bint ;
       int         dbinx ;
       int         dbiny ;
@@ -1902,6 +1895,143 @@ vl_sift_calc_raw_descriptor (VlSiftFilt const *f,
       normalize_histogram (descr, descr + NBO*NBP*NBP) ;
     }
   }
+}
+
+/** ------------------------------------------------------------------
+ ** @brief Run the SIFT descriptor on raw data
+ **
+ ** @param f        SIFT filter.
+ ** @param grad     image gradients.
+ ** @param descr    SIFT descriptor (output).
+ ** @param width    image width.
+ ** @param height   image height.
+ ** @param x        keypoint x coordinate.
+ ** @param y        keypoint y coordinate.
+ ** @param sigma    keypoint scale.
+ ** @param angle0   keypoint orientation.
+ **
+ ** The function runs the SIFT descriptor on raw data. Here @a image
+ ** is a 2 x @a width x @a height array (by convention, the memory
+ ** layout is a s such the first index is the fastest varying
+ ** one). The first @a width x @a height layer of the array contains
+ ** the gradient magnitude and the second the gradient angle (in
+ ** radians, between 0 and @f$ 2\pi @f$). @a x, @a y and @a sigma give
+ ** the keypoint center and scale respectively.
+ **
+ ** In order to be equivalent to a standard SIFT descriptor the image
+ ** gradient must be computed at a smoothing level equal to the scale
+ ** of the keypoint. In practice, the actual SIFT algorithm makes the
+ ** following additional approximation, which influence the result:
+ **
+ ** - Scale is discretized in @c S levels.
+ ** - The image is downsampled once for each octave (if you do this,
+ **   the parameters @a x, @a y and @a sigma must be
+ **   scaled too).
+ **/
+
+VL_EXPORT
+void
+vl_sift_calc_raw_descriptor (VlSiftFilt const *f,
+                             vl_sift_pix const* grad,
+                             vl_sift_pix *descr,
+                             int width, int height,
+                             double x, double y,
+                             double sigma,
+                             double angle0)
+{
+  _vl_sift_calc_raw_descriptor(f, grad, descr, width, height,
+                               x, y, sigma, angle0, NULL) ;
+}
+
+/** @brief Prepare reusable spatial geometry for raw descriptors.
+ ** @return Owned geometry, or NULL on allocation failure or unsupported geometry.
+ **
+ ** Geometry is independent of the gradient samples. The original arithmetic and
+ ** raster order are retained. Calls fall back to the ordinary implementation if
+ ** filter magnification, window, table, or rounding mode changes. Floating-point
+ ** exception flags and enabled-trap timing are not part of this API's contract.
+ ** Other floating-point control modes must remain unchanged between preparation
+ ** and evaluation. Cached raster bounds are used together with cached samples.
+ **/
+VL_EXPORT VlSiftRawDescriptorGeometry *
+vl_sift_prepare_raw_descriptor(VlSiftFilt const *f, int width, int height,
+                               double x, double y, double sigma, double angle0)
+{
+  VlSiftRawDescriptorGeometry *geometry ;
+  vl_size count, index = 0 ;
+  int xi, yi, W, dxi, dyi, xmin, xmax, ymin, ymax, rounding_mode ;
+  double SBP, radius, ct0, st0, maxdx, maxdy ;
+  if (width <= 0 || height <= 1 ||
+      (vl_size)width > (vl_size)INT_MAX / 2 / (vl_size)height ||
+      !isfinite(x) || !isfinite(y) || !isfinite(sigma) ||
+      !isfinite(angle0) || !isfinite(f->magnif) || !isfinite(f->windowSize) ||
+      x < 0 || x > width - 1 || y < 0 || y >= height - 1 ||
+      sigma <= 0 || f->magnif <= 0 || f->windowSize <= 0 ||
+      !isfinite((vl_sift_pix)f->windowSize) || (vl_sift_pix)f->windowSize <= 0)
+    return NULL ;
+  SBP = f->magnif * sigma + VL_EPSILON_D ;
+  radius = floor(sqrt(2.0) * SBP * (NBP + 1) / 2.0 + 0.5) ;
+  if (!isfinite(radius) || radius > INT_MAX - 1) return NULL ;
+  rounding_mode = fegetround() ;
+  if (rounding_mode == -1) return NULL ;
+  W = (int)radius ;
+  xi = (int)(x + 0.5) ; yi = (int)(y + 0.5) ;
+  xmin = VL_MAX(-W, -xi) ; xmax = VL_MIN(W, width - xi - 1) ;
+  ymin = VL_MAX(-W, -yi) ; ymax = VL_MIN(W, height - yi - 1) ;
+  maxdx = VL_MAX(fabs(xi + xmin - x), fabs(xi + xmax - x)) ;
+  maxdy = VL_MAX(fabs(yi + ymin - y), fabs(yi + ymax - y)) ;
+  /* Keep normalized coordinates representable before integer bin conversion. */
+  if ((maxdx + maxdy) / SBP >= INT_MAX / 2) return NULL ;
+  count = (vl_size)(xmax - xmin + 1) * (vl_size)(ymax - ymin + 1) ;
+  if (count > ((vl_size)-1 - sizeof(*geometry)) / sizeof(*geometry->samples))
+    return NULL ;
+  geometry = vl_malloc(sizeof(*geometry) + count * sizeof(*geometry->samples)) ;
+  if (!geometry) return NULL ;
+  geometry->samples = (VlSiftRawDescriptorSample *)(geometry + 1) ;
+  geometry->width = width ; geometry->height = height ;
+  geometry->xi = xi ; geometry->yi = yi ; geometry->radius = W ;
+  geometry->x = x ; geometry->y = y ; geometry->sigma = sigma ;
+  geometry->angle0 = angle0 ; geometry->magnif = f->magnif ;
+  geometry->windowSize = f->windowSize ; geometry->rounding_mode = rounding_mode ;
+  /* Both arrays have the same extent; retain their exact representation. */
+  /* NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
+  memcpy(geometry->expn_tab, f->expn_tab, sizeof(geometry->expn_tab)) ;
+  ct0 = cos(angle0) ; st0 = sin(angle0) ;
+  for (dyi = ymin ; dyi <= ymax ; ++dyi) {
+    for (dxi = xmin ; dxi <= xmax ; ++dxi) {
+      vl_sift_pix dx = xi + dxi - x ;
+      vl_sift_pix dy = yi + dyi - y ;
+      _vl_sift_raw_descriptor_sample(
+        f, dx, dy, ct0, st0, SBP, geometry->samples + index++) ;
+    }
+  }
+  return geometry ;
+}
+
+VL_EXPORT void
+vl_sift_delete_raw_descriptor_geometry(VlSiftRawDescriptorGeometry *geometry)
+{
+  vl_free(geometry) ;
+}
+
+/** @brief Evaluate with prepared geometry and a live normalization threshold.
+ ** @a geometry must be a successful preparation result. Gradients retain the
+ ** ordinary interleaved magnitude/orientation layout and descriptor has 128 floats.
+ **/
+VL_EXPORT void
+vl_sift_calc_raw_descriptor_prepared(VlSiftFilt const *f,
+                                     VlSiftRawDescriptorGeometry const *geometry,
+                                     vl_sift_pix const *grad, vl_sift_pix *descr)
+{
+  vl_bool matches = f->magnif == geometry->magnif &&
+    f->windowSize == geometry->windowSize &&
+    fegetround() == geometry->rounding_mode &&
+    /* Conservative invalidation compares bytes, not numerical equality. */
+    /* NOLINTNEXTLINE(bugprone-suspicious-memory-comparison) */
+    memcmp(f->expn_tab, geometry->expn_tab, sizeof(geometry->expn_tab)) == 0 ;
+  _vl_sift_calc_raw_descriptor(f, grad, descr, geometry->width, geometry->height,
+    geometry->x, geometry->y, geometry->sigma, geometry->angle0,
+    matches ? geometry : NULL) ;
 }
 
 /** ------------------------------------------------------------------

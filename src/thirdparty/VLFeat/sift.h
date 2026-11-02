@@ -133,6 +133,24 @@ void  vl_sift_calc_raw_descriptor        (VlSiftFilt const *f,
                                           double x, double y,
                                           double s, double angle0) ;
 
+/** Optional reusable spatial geometry; destroy with the matching owner API.
+ ** Keep other floating-point controls unchanged between preparation and use.
+ ** Magnification/window/table or rounding changes use the ordinary path.
+ ** The normalization threshold remains live. Exception flags/trap timing
+ ** are outside the prepared API contract. NULL preparation means use the
+ ** existing ordinary raw-descriptor entry point.
+ **/
+typedef struct _VlSiftRawDescriptorGeometry VlSiftRawDescriptorGeometry ;
+VL_EXPORT VlSiftRawDescriptorGeometry *
+vl_sift_prepare_raw_descriptor(VlSiftFilt const *f, int width, int height,
+                               double x, double y, double sigma, double angle0) ;
+VL_EXPORT void
+vl_sift_delete_raw_descriptor_geometry(VlSiftRawDescriptorGeometry *geometry) ;
+VL_EXPORT void
+vl_sift_calc_raw_descriptor_prepared(VlSiftFilt const *f,
+                                     VlSiftRawDescriptorGeometry const *geometry,
+                                     vl_sift_pix const *grad, vl_sift_pix *descr) ;
+
 VL_EXPORT
 void  vl_sift_keypoint_init              (VlSiftFilt const *f,
                                           VlSiftKeypoint *k,

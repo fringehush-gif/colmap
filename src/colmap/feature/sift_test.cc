@@ -18,6 +18,7 @@
 #endif
 
 #include "thirdparty/VLFeat/imopv.h"
+#include "thirdparty/VLFeat/mathop.h"
 #include "thirdparty/VLFeat/sift.h"
 
 #include <algorithm>
@@ -26,7 +27,10 @@
 #include <cfenv>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <set>
 #include <thread>
@@ -362,6 +366,316 @@ TEST(SiftCPUDescriptorSupport, ExponentialTableEndpointIsFinite) {
   EXPECT_EQ(descriptor, reference);
 }
 
+struct RawSiftGeometryCase {
+  int width;
+  int height;
+  double x;
+  double y;
+  double sigma;
+  double angle;
+};
+
+using RawSiftGeometryPtr =
+    std::unique_ptr<VlSiftRawDescriptorGeometry,
+                    decltype(&vl_sift_delete_raw_descriptor_geometry)>;
+
+RawSiftGeometryPtr PrepareRawSiftGeometry(VlSiftFilt* filter,
+                                          const RawSiftGeometryCase& geometry) {
+  return RawSiftGeometryPtr(vl_sift_prepare_raw_descriptor(filter,
+                                                           geometry.width,
+                                                           geometry.height,
+                                                           geometry.x,
+                                                           geometry.y,
+                                                           geometry.sigma,
+                                                           geometry.angle),
+                            &vl_sift_delete_raw_descriptor_geometry);
+}
+
+std::vector<vl_sift_pix> CreateRawSiftGradient(int width,
+                                               int height,
+                                               int phase = 0) {
+  std::vector<vl_sift_pix> gradient(2 * width * height);
+  for (size_t i = 0; i < gradient.size() / 2; ++i) {
+    gradient[2 * i] =
+        0.1f + static_cast<float>((17 * i + 13 * phase) % 101) / 101;
+    gradient[2 * i + 1] = static_cast<float>((29 * i + 97 * phase) % 1009) *
+                          static_cast<float>(2 * VL_PI) / 1009;
+  }
+  return gradient;
+}
+
+std::array<vl_sift_pix, 128> ExpectPreparedRawSiftMatchesOrdinary(
+    VlSiftFilt* filter,
+    const RawSiftGeometryCase& geometry,
+    const VlSiftRawDescriptorGeometry* prepared,
+    const std::vector<vl_sift_pix>& gradient) {
+  std::array<vl_sift_pix, 128> ordinary;
+  std::array<vl_sift_pix, 128> actual;
+  ordinary.fill(13.25f);
+  actual.fill(17.75f);
+  vl_sift_calc_raw_descriptor(filter,
+                              gradient.data(),
+                              ordinary.data(),
+                              geometry.width,
+                              geometry.height,
+                              geometry.x,
+                              geometry.y,
+                              geometry.sigma,
+                              geometry.angle);
+  vl_sift_calc_raw_descriptor_prepared(
+      filter, prepared, gradient.data(), actual.data());
+  // Exact output bits are the parity contract, including signed zero.
+  // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison)
+  EXPECT_EQ(std::memcmp(actual.data(),
+                        ordinary.data(),
+                        ordinary.size() * sizeof(ordinary[0])),
+            0);
+  return ordinary;
+}
+
+TEST(SiftCPUPreparedRawDescriptor, OrdinaryImpulseAndZeroHaveExpectedLayout) {
+  const ScopedSiftRoundingMode restore_rounding;
+  ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+  std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)> filter(
+      vl_sift_new(16, 16, 1, 3, 0), &vl_sift_delete);
+  ASSERT_NE(filter, nullptr);
+  const RawSiftGeometryCase geometry{31, 31, 15, 15, 2, 0};
+  const auto prepared = PrepareRawSiftGeometry(filter.get(), geometry);
+  ASSERT_NE(prepared, nullptr);
+  std::vector<vl_sift_pix> gradient(2 * 31 * 31, 0);
+  gradient[2 * (15 * 31 + 15)] = 1;
+  const auto descriptor = ExpectPreparedRawSiftMatchesOrdinary(
+      filter.get(), geometry, prepared.get(), gradient);
+  // One centered, zero-angle impulse contributes to four spatial cells in
+  // orientation bin zero; this anchor does not share the geometry helper.
+  for (size_t i = 0; i < descriptor.size(); ++i) {
+    SCOPED_TRACE(i);
+    if (i == 40 || i == 48 || i == 72 || i == 80) {
+      EXPECT_NEAR(descriptor[i], 0.5f, 1e-5f);
+    } else {
+      EXPECT_EQ(descriptor[i], 0);
+    }
+  }
+  std::fill(gradient.begin(), gradient.end(), 0);
+  EXPECT_EQ(ExpectPreparedRawSiftMatchesOrdinary(
+                filter.get(), geometry, prepared.get(), gradient),
+            (std::array<vl_sift_pix, 128>{}));
+}
+
+TEST(SiftCPUPreparedRawDescriptor, ShapesScalesAndClippedBordersMatchOrdinary) {
+  const ScopedSiftRoundingMode restore_rounding;
+  ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+  std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)> filter(
+      vl_sift_new(16, 16, 1, 3, 0), &vl_sift_delete);
+  ASSERT_NE(filter, nullptr);
+  for (const auto& geometry :
+       {RawSiftGeometryCase{31, 31, 15, 15, 2, 0},
+        RawSiftGeometryCase{23, 19, 7.25, 8.1, 0.2, 0.7},
+        RawSiftGeometryCase{23, 19, 0, 0, 2, -1.4},
+        RawSiftGeometryCase{23, 19, 22, 17, 7.5, 0.7},
+        RawSiftGeometryCase{2, 2, 0.37, 0, 0.2, 0},
+        RawSiftGeometryCase{31, 31, 15.5, 14.25, 7.5, 0.37}}) {
+    SCOPED_TRACE(::testing::Message()
+                 << geometry.width << "x" << geometry.height
+                 << " center=" << geometry.x << "," << geometry.y
+                 << " sigma=" << geometry.sigma);
+    const auto prepared = PrepareRawSiftGeometry(filter.get(), geometry);
+    ASSERT_NE(prepared, nullptr);
+    const auto descriptor = ExpectPreparedRawSiftMatchesOrdinary(
+        filter.get(),
+        geometry,
+        prepared.get(),
+        CreateRawSiftGradient(geometry.width, geometry.height));
+    EXPECT_GT(*std::max_element(descriptor.begin(), descriptor.end()), 0);
+    for (const float value : descriptor) {
+      EXPECT_TRUE(std::isfinite(value));
+      EXPECT_GE(value, 0);
+      EXPECT_LE(value, 1);
+    }
+  }
+}
+
+TEST(SiftCPUPreparedRawDescriptor,
+     ReusedGeometryAcceptsDifferentGradientBatches) {
+  std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)> filter(
+      vl_sift_new(16, 16, 1, 3, 0), &vl_sift_delete);
+  ASSERT_NE(filter, nullptr);
+  const RawSiftGeometryCase geometry{31, 31, 15, 15, 2, 0};
+  const auto prepared = PrepareRawSiftGeometry(filter.get(), geometry);
+  ASSERT_NE(prepared, nullptr);
+  const auto first = ExpectPreparedRawSiftMatchesOrdinary(
+      filter.get(), geometry, prepared.get(), CreateRawSiftGradient(31, 31));
+  // DSP supplies a different gradient patch at each scale while retaining the
+  // same descriptor geometry. Check every float in each independently varied
+  // row.
+  for (const int num_scales : {1, 3, 10}) {
+    for (int scale = 0; scale < num_scales; ++scale) {
+      SCOPED_TRACE(::testing::Message()
+                   << num_scales << " scales, row=" << scale);
+      const auto descriptor = ExpectPreparedRawSiftMatchesOrdinary(
+          filter.get(),
+          geometry,
+          prepared.get(),
+          CreateRawSiftGradient(31, 31, scale + 1));
+      EXPECT_NE(descriptor, first);
+    }
+  }
+}
+
+TEST(SiftCPUPreparedRawDescriptor,
+     FilterChangesFallBackAndThresholdRemainsLive) {
+  const ScopedSiftRoundingMode restore_rounding;
+  ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+  std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)> filter(
+      vl_sift_new(16, 16, 1, 3, 0), &vl_sift_delete);
+  ASSERT_NE(filter, nullptr);
+  const RawSiftGeometryCase geometry{31, 31, 15, 15, 2, 0};
+  const auto prepared = PrepareRawSiftGeometry(filter.get(), geometry);
+  ASSERT_NE(prepared, nullptr);
+  const auto gradient = CreateRawSiftGradient(31, 31);
+  const auto original = ExpectPreparedRawSiftMatchesOrdinary(
+      filter.get(), geometry, prepared.get(), gradient);
+  const double magnification = vl_sift_get_magnif(filter.get());
+  vl_sift_set_magnif(filter.get(), 2);
+  EXPECT_NE(ExpectPreparedRawSiftMatchesOrdinary(
+                filter.get(), geometry, prepared.get(), gradient),
+            original);
+  vl_sift_set_magnif(filter.get(), magnification);
+  const double window = vl_sift_get_window_size(filter.get());
+  vl_sift_set_window_size(filter.get(), 0.75);
+  EXPECT_NE(ExpectPreparedRawSiftMatchesOrdinary(
+                filter.get(), geometry, prepared.get(), gradient),
+            original);
+  vl_sift_set_window_size(filter.get(), window);
+  const double table_entry = filter->expn_tab[1];
+  filter->expn_tab[1] *= 0.5;
+  EXPECT_NE(ExpectPreparedRawSiftMatchesOrdinary(
+                filter.get(), geometry, prepared.get(), gradient),
+            original);
+  filter->expn_tab[1] = table_entry;
+  vl_sift_set_norm_thresh(filter.get(), 100);
+  EXPECT_EQ(ExpectPreparedRawSiftMatchesOrdinary(
+                filter.get(), geometry, prepared.get(), gradient),
+            (std::array<vl_sift_pix, 128>{}));
+  vl_sift_set_norm_thresh(filter.get(), 0);
+  EXPECT_EQ(ExpectPreparedRawSiftMatchesOrdinary(
+                filter.get(), geometry, prepared.get(), gradient),
+            original);
+}
+
+TEST(SiftCPUPreparedRawDescriptor, RoundingChangesMatchOrdinary) {
+  const ScopedSiftRoundingMode restore_rounding;
+  ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+  std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)> filter(
+      vl_sift_new(16, 16, 1, 3, 0), &vl_sift_delete);
+  ASSERT_NE(filter, nullptr);
+  const RawSiftGeometryCase geometry{31, 31, 15, 15, 2, 0};
+  const auto prepared = PrepareRawSiftGeometry(filter.get(), geometry);
+  ASSERT_NE(prepared, nullptr);
+  const auto gradient = CreateRawSiftGradient(31, 31);
+  int supported_modes = 0;
+  for (const int mode : {FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    if (std::fesetround(mode) == 0) {
+      SCOPED_TRACE(mode);
+      ++supported_modes;
+      ExpectPreparedRawSiftMatchesOrdinary(
+          filter.get(), geometry, prepared.get(), gradient);
+    }
+  }
+  if (supported_modes == 0)
+    GTEST_SKIP() << "No directed rounding mode available";
+}
+
+TEST(SiftCPUPreparedRawDescriptor,
+     RefusesInvalidGeometryAndRetainsRawReadBounds) {
+  std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)> filter(
+      vl_sift_new(16, 16, 1, 3, 0), &vl_sift_delete);
+  ASSERT_NE(filter, nullptr);
+  for (const auto& geometry :
+       {RawSiftGeometryCase{0, 31, 0, 0, 2, 0},
+        RawSiftGeometryCase{31, 1, 0, 0, 2, 0},
+        RawSiftGeometryCase{31, 31, 15, 15, 0, 0},
+        RawSiftGeometryCase{31, 31, 15, 15, -1, 0},
+        RawSiftGeometryCase{
+            31, 31, 15, 15, std::numeric_limits<double>::quiet_NaN(), 0},
+        RawSiftGeometryCase{
+            std::numeric_limits<int>::max(), 31, 15, 15, 2, 0}}) {
+    EXPECT_EQ(PrepareRawSiftGeometry(filter.get(), geometry), nullptr);
+  }
+  // Preparation accepts this real center, but rounding places yi on the last
+  // row. The ordinary API's early return must remain a no-write in both paths.
+  const RawSiftGeometryCase geometry{31, 31, 15, 29.75, 2, 0};
+  const auto prepared = PrepareRawSiftGeometry(filter.get(), geometry);
+  ASSERT_NE(prepared, nullptr);
+  const auto gradient = CreateRawSiftGradient(31, 31);
+  std::array<vl_sift_pix, 128> ordinary, actual, sentinel;
+  sentinel.fill(13.25f);
+  ordinary = actual = sentinel;
+  vl_sift_calc_raw_descriptor(filter.get(),
+                              gradient.data(),
+                              ordinary.data(),
+                              geometry.width,
+                              geometry.height,
+                              geometry.x,
+                              geometry.y,
+                              geometry.sigma,
+                              geometry.angle);
+  vl_sift_calc_raw_descriptor_prepared(
+      filter.get(), prepared.get(), gradient.data(), actual.data());
+  EXPECT_EQ(ordinary, sentinel);
+  EXPECT_EQ(actual, sentinel);
+}
+
+#if GTEST_HAS_DEATH_TEST
+int num_raw_sift_allocation_refusals = 0;
+void* RefuseRawSiftAllocation(size_t) {
+  ++num_raw_sift_allocation_refusals;
+  return nullptr;
+}
+
+void RunRawSiftAllocationRefusalChild() {
+  // This fresh child owns every object created under these allocator callbacks.
+  // Never replace process-global VLFeat allocators in the parent test process.
+  vl_set_alloc_func(std::malloc, std::realloc, std::calloc, std::free);
+  VlSiftFilt* filter = vl_sift_new(16, 16, 1, 3, 0);
+  if (!filter) std::_Exit(1);
+  const auto gradient = CreateRawSiftGradient(31, 31);
+  vl_set_alloc_func(
+      RefuseRawSiftAllocation, std::realloc, std::calloc, std::free);
+  auto* refused = vl_sift_prepare_raw_descriptor(filter, 31, 31, 15, 15, 2, 0);
+  vl_set_alloc_func(std::malloc, std::realloc, std::calloc, std::free);
+  if (refused || num_raw_sift_allocation_refusals != 1) std::_Exit(2);
+  auto* prepared = vl_sift_prepare_raw_descriptor(filter, 31, 31, 15, 15, 2, 0);
+  if (!prepared) std::_Exit(3);
+  std::array<vl_sift_pix, 128> ordinary{}, actual{};
+  vl_sift_calc_raw_descriptor(
+      filter, gradient.data(), ordinary.data(), 31, 31, 15, 15, 2, 0);
+  vl_sift_calc_raw_descriptor_prepared(
+      filter, prepared, gradient.data(), actual.data());
+  // Exact output bits are the parity contract, including signed zero.
+  // NOLINTNEXTLINE(bugprone-suspicious-memory-comparison)
+  if (std::memcmp(ordinary.data(),
+                  actual.data(),
+                  ordinary.size() * sizeof(ordinary[0])) != 0 ||
+      *std::max_element(ordinary.begin(), ordinary.end()) <= 0)
+    std::_Exit(4);
+  vl_sift_delete_raw_descriptor_geometry(prepared);
+  vl_sift_delete(filter);
+  std::_Exit(0);
+}
+#endif
+
+TEST(SiftCPUPreparedRawDescriptorDeathTest,
+     AllocationRefusalDoesNotPoisonReuse) {
+#if GTEST_HAS_DEATH_TEST
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      RunRawSiftAllocationRefusalChild(), ::testing::ExitedWithCode(0), "");
+#else
+  GTEST_SKIP() << "Allocator injection requires an isolated child process";
+#endif
+}
+
 Bitmap CreateImageWithSquare(const int size) {
   Bitmap bitmap(size, size, false);
   bitmap.Fill(BitmapColor<uint8_t>(0, 0, 0));
@@ -392,8 +706,8 @@ void ValidateKeypoints(const FeatureKeypoints& keypoints,
     EXPECT_LE(keypoints[i].x, bitmap.Width());
     EXPECT_LE(keypoints[i].y, bitmap.Height());
     EXPECT_GT(keypoints[i].ComputeScale(), 0);
-    EXPECT_GT(keypoints[i].ComputeOrientation(), -M_PI);
-    EXPECT_LT(keypoints[i].ComputeOrientation(), M_PI);
+    EXPECT_GT(keypoints[i].ComputeOrientation(), -VL_PI);
+    EXPECT_LT(keypoints[i].ComputeOrientation(), VL_PI);
   }
 }
 
@@ -510,6 +824,114 @@ INSTANTIATE_TEST_SUITE_P(
         SiftCpuExtractionParams{
             "CovariantAffineDSPSift", true, true, false, false, 22}),
     [](const auto& info) { return info.param.name; });
+
+TEST(SiftCPUPreparedExtraction,
+     UnitScaleDspMatchesCovariantForOneAndManyFeatures) {
+  const Bitmap bitmap = CreateImageWithSquare(256);
+  for (const bool affine : {false, true}) {
+    for (const int max_features : {1, 8192}) {
+      for (const auto normalization :
+           {SiftExtractionOptions::Normalization::L1_ROOT,
+            SiftExtractionOptions::Normalization::L2}) {
+        SCOPED_TRACE(::testing::Message() << "affine=" << affine
+                                          << " max_features=" << max_features);
+        FeatureKeypoints reference_keypoints;
+        FeatureDescriptors reference;
+        for (const bool pooling : {false, true}) {
+          FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+          options.use_gpu = false;
+          options.sift->force_covariant_extractor = true;
+          options.sift->estimate_affine_shape = affine;
+          options.sift->max_num_features = max_features;
+          options.sift->normalization = normalization;
+          options.sift->domain_size_pooling = pooling;
+          options.sift->dsp_num_scales = 1;
+          options.sift->dsp_min_scale = options.sift->dsp_max_scale = 1;
+          auto extractor = CreateSiftFeatureExtractor(options);
+          ASSERT_NE(extractor, nullptr);
+          FeatureKeypoints keypoints;
+          FeatureDescriptors descriptors;
+          ASSERT_TRUE(extractor->Extract(bitmap, &keypoints, &descriptors));
+          ASSERT_GT(keypoints.size(), 0);
+          if (max_features == 1) EXPECT_EQ(keypoints.size(), 1);
+          ValidateKeypoints(keypoints, bitmap);
+          ASSERT_EQ(descriptors.data.rows(), keypoints.size());
+          ASSERT_EQ(descriptors.data.cols(), 128);
+          // Byte rounding/clamping does not preserve a tight 512-norm bound.
+          // Exact full-matrix equality below is the contract for this pair.
+          for (Eigen::Index row = 0; row < descriptors.data.rows(); ++row) {
+            EXPECT_GT(descriptors.data.row(row).maxCoeff(), 0);
+          }
+          if (!pooling) {
+            reference_keypoints = keypoints;
+            reference = descriptors;
+          } else {
+            EXPECT_EQ(keypoints, reference_keypoints);
+            ASSERT_EQ(descriptors.data.rows(), reference.data.rows());
+            ASSERT_EQ(descriptors.data.cols(), reference.data.cols());
+            EXPECT_EQ(std::memcmp(descriptors.data.data(),
+                                  reference.data.data(),
+                                  static_cast<size_t>(reference.data.size())),
+                      0);
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(SiftCPUPreparedExtraction, NondefaultDspAndDescriptorFreeExtraction) {
+  const Bitmap bitmap = CreateImageWithSquare(256);
+  for (const bool affine : {false, true}) {
+    for (const int num_scales : {1, 3}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "affine=" << affine << " scales=" << num_scales);
+      FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+      options.use_gpu = false;
+      options.sift->estimate_affine_shape = affine;
+      options.sift->domain_size_pooling = true;
+      options.sift->dsp_num_scales = num_scales;
+      options.sift->dsp_min_scale = 0.5;
+      options.sift->dsp_max_scale = 2;
+      auto extractor = CreateSiftFeatureExtractor(options);
+      ASSERT_NE(extractor, nullptr);
+      FeatureKeypoints keypoints;
+      FeatureDescriptors descriptors;
+      ASSERT_TRUE(extractor->Extract(bitmap, &keypoints, &descriptors));
+      ASSERT_GT(keypoints.size(), 0);
+      EXPECT_EQ(descriptors.data.rows(), keypoints.size());
+      EXPECT_EQ(descriptors.data.cols(), 128);
+      ValidateKeypoints(keypoints, bitmap);
+      for (Eigen::Index row = 0; row < descriptors.data.rows(); ++row) {
+        EXPECT_GT(descriptors.data.row(row).maxCoeff(), 0);
+      }
+      FeatureKeypoints descriptor_free_keypoints;
+      ASSERT_TRUE(
+          extractor->Extract(bitmap, &descriptor_free_keypoints, nullptr));
+      EXPECT_EQ(descriptor_free_keypoints, keypoints);
+    }
+  }
+}
+
+TEST(SiftCPUPreparedExtraction, EmptyCovariantAndDspInputsProduceEmptyOutputs) {
+  Bitmap bitmap(64, 64, false);
+  bitmap.Fill(BitmapColor<uint8_t>(0, 0, 0));
+  for (const bool pooling : {false, true}) {
+    FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+    options.use_gpu = false;
+    options.sift->force_covariant_extractor = true;
+    options.sift->domain_size_pooling = pooling;
+    options.sift->dsp_num_scales = 3;
+    auto extractor = CreateSiftFeatureExtractor(options);
+    ASSERT_NE(extractor, nullptr);
+    FeatureKeypoints keypoints;
+    FeatureDescriptors descriptors;
+    ASSERT_TRUE(extractor->Extract(bitmap, &keypoints, &descriptors));
+    EXPECT_TRUE(keypoints.empty());
+    EXPECT_EQ(descriptors.data.rows(), 0);
+    EXPECT_EQ(descriptors.data.cols(), 128);
+  }
+}
 
 TEST(ExtractSiftFeaturesGPU, Nominal) {
   RunGpuTest([] {
