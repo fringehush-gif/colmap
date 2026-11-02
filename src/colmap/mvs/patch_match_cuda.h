@@ -28,6 +28,8 @@ class PatchMatchSourceArray;
 class PatchMatchSparseSources;
 class PackedNccCostMap;
 struct PackedNccCostView;
+class Fixed24NccCostMap;
+struct Fixed24NccCostView;
 
 class PatchMatchCuda {
  public:
@@ -65,7 +67,7 @@ class PatchMatchCuda {
   template <int kWindowSize,
             int kWindowStep,
             bool kCheckpointHmm,
-            bool kPackedCost = false>
+            int kCostBits = 0>
   void RunWithWindowSizeAndStep();
 
   GpuMatView<float> GeometryView(const GpuMat<float>& owner) const;
@@ -86,8 +88,9 @@ class PatchMatchCuda {
   size_t CostMapHeight() const;
   size_t CostMapDepth() const;
   size_t CostMapCapacityBytes() const;
-  template <bool kPacked>
+  template <int kCostBits>
   auto CostMapView() const;
+  void CheckCostMapDomain() const;
 #ifndef COLMAP_HIP_ENABLED
   void InitAlternateOrientationMemory(const PatchMatchCuda* geometry_donor);
   void EnsureGeometryRotationMemory();
@@ -109,7 +112,7 @@ class PatchMatchCuda {
 
   const PatchMatchOptions options_;
   const PatchMatch::Problem problem_;
-  bool packed_cost_ = false;
+  int cost_bits_ = 0;
 
   // Dimensions for sweeping from top to bottom, i.e. one thread per column.
   dim3 sweep_block_size_;
@@ -171,6 +174,7 @@ class PatchMatchCuda {
   std::unique_ptr<PatchMatchProbabilityUnorm16> prev_sel_prob_unorm16_map_;
   std::unique_ptr<PatchMatchStateMap> cost_map_;
   std::unique_ptr<PackedNccCostMap> packed_cost_map_;
+  std::unique_ptr<Fixed24NccCostMap> fixed24_cost_map_;
   std::unique_ptr<PatchMatchHmmCheckpoint> hmm_checkpoint_;
   // Canonical original-image perimeter; corners retain one shared state.
   std::unique_ptr<GpuMat<curandState>> rand_state_map_;
@@ -230,7 +234,7 @@ bool CanPairPatchMatchViews(size_t first_width,
                             bool geometric,
                             bool checkpoint_hmm,
                             bool probability_unorm16,
-                            bool ncc_cost_unorm16);
+                            int ncc_cost_bits);
 
 // Both instances own prepared, independent real inputs on one CUDA device.
 void RunPatchMatchPair(PatchMatchCuda& first,
@@ -258,7 +262,7 @@ bool CanBatchPatchMatchViews(
     bool geometric,
     bool checkpoint_hmm,
     bool probability_unorm16,
-    bool ncc_cost_unorm16);
+    int ncc_cost_bits);
 #endif
 
 }  // namespace mvs

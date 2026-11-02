@@ -479,5 +479,219 @@ TEST(PackedNccCostMap, RejectsInvalidOrOverflowingDimensions) {
 }
 #endif
 
+// Test persisted words, not a second implementation of the device quantizer.
+#ifndef COLMAP_HIP_ENABLED
+namespace {
+__host__ __device__ uint32_t Fixed24CodePattern(size_t i, size_t source) {
+  const uint32_t index = static_cast<uint32_t>(i);
+  const uint32_t code = ((index & 0xffffu) << 8) |
+                        ((index ^ (index >> 8) ^ (index >> 16)) & 0xffu);
+  return code ^ ((static_cast<uint32_t>(source) * 0x5a39c7u) & 0xffffffu);
+}
+__global__ void RoundTripFixed24Codes(Fixed24NccCostView view) {
+  const size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t plane = view.GetWidth() * view.GetHeight();
+  if (i >= plane * view.GetDepth()) return;
+  const size_t source = i / plane, pixel = i % plane;
+  const size_t row = pixel / view.GetWidth(), col = pixel % view.GetWidth();
+  const uint32_t code = Fixed24CodePattern(pixel, source);
+  const size_t index = (source * view.height + row) * view.pixel_pitch + col;
+  view.codes[index] = static_cast<uint16_t>(code >> 8);
+  view.low_codes[index] = static_cast<uint8_t>(code);
+  view.Set(row, col, source, view.Get(row, col, source));
+}
+__global__ void WriteFixed24Cost(Fixed24NccCostView view, float value) {
+  view.Set(0, 0, 0, value);
+}
+__global__ void ReadFixed24Cost(Fixed24NccCostView view, float* output) {
+  output[0] = view.Get(0, 0, 0);
+}
+std::vector<uint32_t> Fixed24Codes(const Fixed24NccCostMap& map) {
+  const auto view = map.View();
+  const size_t width = map.GetWidth(), rows = map.GetHeight() * map.GetDepth();
+  std::vector<uint16_t> high(width * rows);
+  std::vector<uint8_t> low(width * rows);
+  CUDA_SAFE_CALL(cudaMemcpy2D(high.data(),
+                              width * sizeof(uint16_t),
+                              view.codes,
+                              2 * view.pixel_pitch,
+                              width * sizeof(uint16_t),
+                              rows,
+                              cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaMemcpy2D(low.data(),
+                              width,
+                              view.low_codes,
+                              view.pixel_pitch,
+                              width,
+                              rows,
+                              cudaMemcpyDeviceToHost));
+  std::vector<uint32_t> result(high.size());
+  for (size_t i = 0; i < result.size(); ++i) {
+    result[i] = (static_cast<uint32_t>(high[i]) << 8) | low[i];
+  }
+  return result;
+}
+}  // namespace
+
+TEST(Fixed24NccCostMap, ScalarErrorBoundAndExactEndpoints) {
+  Fixed24NccCostMap map(1, 1, 1);
+  GpuMat<float> output(1, 1);
+  for (const float cost : {0.0f,
+                           -0.0f,
+                           2.0f,
+                           0.5f,
+                           1.0f,
+                           1.5f,
+                           0.1234567f,
+                           0x1p-24f,
+                           3.0f * 0x1p-24f,
+                           std::numeric_limits<float>::denorm_min(),
+                           std::nextafter(1.0f, 0.0f),
+                           std::nextafter(1.0f, 2.0f),
+                           std::nextafter(2.0f, 0.0f)}) {
+    WriteFixed24Cost<<<1, 1>>>(map.View(), cost);
+    ReadFixed24Cost<<<1, 1>>>(map.View(), output.GetPtr());
+    CUDA_SYNC_AND_CHECK();
+    EXPECT_NO_THROW(map.CheckDomain());
+    float actual = 0;
+    output.CopyToHost(&actual, sizeof(float));
+    if (cost == std::nextafter(2.0f, 0.0f)) {
+      EXPECT_EQ(actual, 2.0f);
+    } else if (cost >= 1.0f || cost == 0.0f) {
+      EXPECT_EQ(actual, cost);
+    } else {
+      EXPECT_LE(std::abs(actual - cost), 0x1p-24f);
+    }
+  }
+}
+TEST(Fixed24NccCostMap, CodeWordsRoundTripAcrossSources) {
+  static_assert(Fixed24NccCostView::kStorageBits == 24);
+  constexpr size_t kPlane = 256 * 256, kSources = 3;
+  Fixed24NccCostMap map(256, 256, kSources);
+  RoundTripFixed24Codes<<<kPlane * kSources / 256, 256>>>(map.View());
+  CUDA_SYNC_AND_CHECK();
+  EXPECT_NO_THROW(map.CheckDomain());
+  const auto codes = Fixed24Codes(map);
+  for (size_t i = 0; i < codes.size(); ++i) {
+    ASSERT_EQ(codes[i], Fixed24CodePattern(i % kPlane, i / kPlane)) << i;
+  }
+}
+
+TEST(Fixed24NccCostMap, RejectsEachInvalidDomain) {
+  for (const float invalid : {-0.1f,
+                              -std::numeric_limits<float>::denorm_min(),
+                              2.1f,
+                              std::nextafter(2.0f, 3.0f),
+                              std::numeric_limits<float>::infinity(),
+                              -std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+    Fixed24NccCostMap map(1, 1, 1);
+    WriteFixed24Cost<<<1, 1>>>(map.View(), FloatFromBits(0x3f923456u));
+    CUDA_SYNC_AND_CHECK();
+    const auto original = Fixed24Codes(map);
+    WriteFixed24Cost<<<1, 1>>>(map.View(), invalid);
+    CUDA_SYNC_AND_CHECK();
+    EXPECT_ANY_THROW(map.CheckDomain());
+    EXPECT_EQ(Fixed24Codes(map), original);
+    WriteFixed24Cost<<<1, 1>>>(map.View(), 0.0f);
+    CUDA_SYNC_AND_CHECK();
+    EXPECT_ANY_THROW(map.CheckDomain());
+  }
+}
+
+TEST(Fixed24NccCostMap, RotatesOddPlanesWithBoundedScratch) {
+  for (const auto [width, height] :
+       {std::pair<size_t, size_t>{1, 1}, {7, 5}, {257, 3}, {513, 257}}) {
+    for (const size_t kSources : {size_t{1}, size_t{2}, size_t{3}}) {
+      Fixed24NccCostMap map(width, height, kSources);
+      const size_t capacity = map.GetCapacityBytes();
+      std::vector<uint32_t> expected(width * height * kSources);
+      std::vector<uint16_t> high(expected.size());
+      std::vector<uint8_t> low(expected.size());
+      for (size_t i = 0; i < expected.size(); ++i) {
+        expected[i] =
+            Fixed24CodePattern(i % (width * height), i / (width * height));
+        high[i] = static_cast<uint16_t>(expected[i] >> 8);
+        low[i] = static_cast<uint8_t>(expected[i]);
+      }
+      const auto view = map.View();
+      CUDA_SAFE_CALL(cudaMemcpy2D(view.codes,
+                                  2 * view.pixel_pitch,
+                                  high.data(),
+                                  width * sizeof(uint16_t),
+                                  width * sizeof(uint16_t),
+                                  height * kSources,
+                                  cudaMemcpyHostToDevice));
+      CUDA_SAFE_CALL(cudaMemcpy2D(view.low_codes,
+                                  view.pixel_pitch,
+                                  low.data(),
+                                  width,
+                                  width,
+                                  height * kSources,
+                                  cudaMemcpyHostToDevice));
+      EXPECT_EQ(view.pixel_pitch, (width + 127) / 128 * 128);
+      PatchMatchStateMap original_float(width, height, kSources);
+      EXPECT_EQ((capacity - sizeof(uint32_t)) * 4,
+                original_float.GetCapacityBytes() * 3);
+      PatchMatchHmmCheckpoint scratch(width, height, kSources);
+      const size_t scratch_bytes = scratch.GetCapacityBytes();
+      const size_t next_plane = 2 * ((height + 127) / 128 * 128) * width;
+      EXPECT_ANY_THROW(
+          map.RotateWithPlaneScratch(scratch.GetPtr(), next_plane - 1));
+      EXPECT_ANY_THROW(map.RotateWithPlaneScratch(nullptr, scratch_bytes));
+      EXPECT_ANY_THROW(
+          map.RotateWithPlaneScratch(view.codes + 1, scratch_bytes));
+      EXPECT_ANY_THROW(
+          map.RotateWithPlaneScratch(view.low_codes, scratch_bytes));
+      EXPECT_ANY_THROW(
+          map.RotateWithPlaneScratch(view.domain_error, scratch_bytes));
+      EXPECT_ANY_THROW(map.RotateWithPlaneScratch(
+          reinterpret_cast<char*>(scratch.GetPtr()) + 1, scratch_bytes - 1));
+      EXPECT_EQ(map.GetWidth(), width);
+      EXPECT_EQ(map.GetHeight(), height);
+      EXPECT_EQ(Fixed24Codes(map), expected);
+      size_t w = width, h = height;
+      for (size_t turn = 0; turn < 4; ++turn) {
+        std::vector<uint32_t> rotated(expected.size());
+        for (size_t source = 0; source < kSources; ++source)
+          for (size_t row = 0; row < h; ++row)
+            for (size_t col = 0; col < w; ++col)
+              rotated[(source * w + (w - 1 - col)) * h + row] =
+                  expected[(source * h + row) * w + col];
+        map.RotateWithPlaneScratch(scratch.GetPtr(), scratch_bytes);
+        std::swap(w, h);
+        expected.swap(rotated);
+        ASSERT_EQ(Fixed24Codes(map), expected);
+        EXPECT_EQ(map.GetCapacityBytes(), capacity);
+        EXPECT_EQ(map.GetWidth(), w);
+        EXPECT_EQ(map.GetHeight(), h);
+        EXPECT_EQ(map.View().codes, view.codes);
+        EXPECT_EQ(map.View().low_codes, view.low_codes);
+      }
+      EXPECT_NO_THROW(map.CheckDomain());
+      EXPECT_ANY_THROW(map.Reorient(width + 1, height));
+      EXPECT_EQ(map.GetWidth(), width);
+      EXPECT_EQ(map.GetHeight(), height);
+      EXPECT_EQ(Fixed24Codes(map), expected);
+    }
+  }
+}
+
+TEST(Fixed24NccCostMap, RejectsInvalidOrOverflowingDimensions) {
+  EXPECT_ANY_THROW(Fixed24NccCostMap(0, 1, 1));
+  EXPECT_ANY_THROW(Fixed24NccCostMap(1, 0, 1));
+  EXPECT_ANY_THROW(Fixed24NccCostMap(1, 1, 0));
+  EXPECT_ANY_THROW(Fixed24NccCostMap(std::numeric_limits<size_t>::max(), 1, 1));
+  EXPECT_ANY_THROW(Fixed24NccCostMap(1, std::numeric_limits<size_t>::max(), 1));
+  EXPECT_ANY_THROW(Fixed24NccCostMap(1, 1, std::numeric_limits<size_t>::max()));
+  EXPECT_ANY_THROW(Fixed24NccCostMap(
+      static_cast<size_t>(std::numeric_limits<int>::max()), 1, 1));
+  EXPECT_ANY_THROW(Fixed24NccCostMap(
+      65536, 65536, static_cast<size_t>(std::numeric_limits<int>::max())));
+  EXPECT_ANY_THROW(Fixed24NccCostMap(
+      1048576, 1048576, static_cast<size_t>(std::numeric_limits<int>::max())));
+}
+#endif
+
 }  // namespace mvs
 }  // namespace colmap

@@ -242,7 +242,7 @@ void PatchMatchController::Run() {
                                     phase.geom_consistency,
                                     phase.checkpoint_hmm,
                                     phase.probability_unorm16,
-                                    phase.ncc_cost_unorm16)) {
+                                    phase.NccCostBits())) {
           std::vector<size_t> indices;
           for (size_t next = index; next < batch_end; ++next)
             indices.push_back(next);
@@ -264,7 +264,7 @@ void PatchMatchController::Run() {
                                      phase.geom_consistency,
                                      phase.checkpoint_hmm,
                                      phase.probability_unorm16,
-                                     phase.ncc_cost_unorm16)) {
+                                     phase.NccCostBits())) {
             thread_pool_->AddTask(&PatchMatchController::ProcessProblemPair,
                                   this,
                                   phase,
@@ -734,7 +734,7 @@ void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
                               options.geom_consistency,
                               options.checkpoint_hmm,
                               options.probability_unorm16,
-                              options.ncc_cost_unorm16)) {
+                              options.NccCostBits())) {
     run_native(first);
     run_native(second);
     return;
@@ -855,7 +855,7 @@ void PatchMatchController::ProcessProblemBatch(
                                    options.geom_consistency,
                                    options.checkpoint_hmm,
                                    options.probability_unorm16,
-                                   options.ncc_cost_unorm16)) {
+                                   options.NccCostBits())) {
           if (!owners[i])
             owners[i] = std::make_unique<PatchMatchCuda>(input[i]->options,
                                                          input[i]->problem);
@@ -926,7 +926,7 @@ void PatchMatchController::ProcessProblemBatch(
                                options.geom_consistency,
                                options.checkpoint_hmm,
                                options.probability_unorm16,
-                               options.ncc_cost_unorm16)) {
+                               options.NccCostBits())) {
     pair_or_single_fallback();
     return;
   }

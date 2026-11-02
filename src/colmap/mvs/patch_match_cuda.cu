@@ -955,11 +955,14 @@ __global__ void PackReferenceStatistics(const GpuMatView<float> sum,
 
 constexpr int kInitialCostStripeRows = 64;
 
-template <int kWindowSize, int kWindowStep, bool kPackedCost = false>
+template <int kWindowSize, int kWindowStep, int kCostBits = 0>
 __global__ void ComputeInitialCost(
     const RefCamera camera,
-    std::conditional_t<kPackedCost, PackedNccCostView, GpuMatView<float>>
-        cost_map,
+    std::conditional_t<kCostBits == 24,
+                       Fixed24NccCostView,
+                       std::conditional_t<kCostBits == 16,
+                                          PackedNccCostView,
+                                          GpuMatView<float>>> cost_map,
     const GpuMatView<float> depth_map,
     const GpuMatView<float> normal_map,
     const cudaTextureObject_t ref_image_texture,
@@ -1083,15 +1086,18 @@ template <int kWindowSize,
           bool kCheckpointHmm = false,
           int kSourceJobGroups = kCooperativeSampleBatchSize,
           bool kProbabilityUnorm16 = false,
-          bool kPackedCost = false>
+          int kCostBits = 0>
 __global__ void SweepFromTopToBottom(
     const RefCamera camera,
     GpuMatView<float> global_workspace,
     GpuMatView<curandState> rand_state_map,
     const PatchMatchRngPerimeter rand_state_layout,
     const unsigned int rand_state_rotation,
-    std::conditional_t<kPackedCost, PackedNccCostView, GpuMatView<float>>
-        cost_map,
+    std::conditional_t<kCostBits == 24,
+                       Fixed24NccCostView,
+                       std::conditional_t<kCostBits == 16,
+                                          PackedNccCostView,
+                                          GpuMatView<float>>> cost_map,
     GpuMatView<float> depth_map,
     GpuMatView<float> normal_map,
     PackedConsistencyMaskView consistency_mask,
@@ -2059,16 +2065,15 @@ PatchMatchCuda::PatchMatchCuda(
   THROW_CHECK(!options_.rotation_buffer_reuse)
       << "PatchMatchStereo.rotation_buffer_reuse requires CUDA";
 #endif
-  THROW_CHECK(!options_.ncc_cost_unorm16 ||
+  THROW_CHECK(!(options_.ncc_cost_unorm16 && options_.ncc_cost_fixed24));
+  cost_bits_ = options_.NccCostBits();
+  THROW_CHECK(!cost_bits_ ||
               (options_.checkpoint_hmm && options_.window_radius == 5 &&
                options_.window_step == 1))
-      << "UNORM16 NCC cost storage requires checkpoint HMM and radius 5 / step "
-         "1";
+      << "Packed NCC costs require checkpoint HMM and radius 5 / step 1";
 #ifdef COLMAP_HIP_ENABLED
-  THROW_CHECK(!options_.ncc_cost_unorm16)
-      << "UNORM16 NCC cost storage requires CUDA";
+  THROW_CHECK_EQ(cost_bits_, 0) << "Packed NCC costs require CUDA";
 #endif
-  packed_cost_ = options_.ncc_cost_unorm16;
   SetBestCudaDevice(std::stoi(options_.gpu_index));
 #ifndef COLMAP_HIP_ENABLED
   int device = 0;
@@ -2119,8 +2124,12 @@ void PatchMatchCuda::Run() {
 #endif
   // Only publish masks after a completed filtered sweep and final rotation.
   consistency_mask_valid_ = false;
-  if (packed_cost_) {
-    RunWithWindowSizeAndStep<11, 1, true, true>();
+  if (cost_bits_ == 24) {
+    RunWithWindowSizeAndStep<11, 1, true, 24>();
+    return;
+  }
+  if (cost_bits_ == 16) {
+    RunWithWindowSizeAndStep<11, 1, true, 16>();
     return;
   }
 #define CASE_WINDOW_RADIUS(window_radius, window_step)                       \
@@ -2191,27 +2200,41 @@ GpuMatView<float> PatchMatchCuda::GeometryView(
 }
 
 size_t PatchMatchCuda::CostMapWidth() const {
-  return packed_cost_ ? packed_cost_map_->GetWidth() : cost_map_->GetWidth();
+  if (cost_bits_ == 24) return fixed24_cost_map_->GetWidth();
+  if (cost_bits_ == 16) return packed_cost_map_->GetWidth();
+  return cost_map_->GetWidth();
 }
 size_t PatchMatchCuda::CostMapHeight() const {
-  return packed_cost_ ? packed_cost_map_->GetHeight() : cost_map_->GetHeight();
+  if (cost_bits_ == 24) return fixed24_cost_map_->GetHeight();
+  if (cost_bits_ == 16) return packed_cost_map_->GetHeight();
+  return cost_map_->GetHeight();
 }
 size_t PatchMatchCuda::CostMapDepth() const {
-  return packed_cost_ ? packed_cost_map_->GetDepth() : cost_map_->GetDepth();
+  if (cost_bits_ == 24) return fixed24_cost_map_->GetDepth();
+  if (cost_bits_ == 16) return packed_cost_map_->GetDepth();
+  return cost_map_->GetDepth();
 }
 size_t PatchMatchCuda::CostMapCapacityBytes() const {
-  return packed_cost_ ? packed_cost_map_->GetCapacityBytes()
-                      : cost_map_->GetCapacityBytes();
+  if (cost_bits_ == 24) return fixed24_cost_map_->GetCapacityBytes();
+  if (cost_bits_ == 16) return packed_cost_map_->GetCapacityBytes();
+  return cost_map_->GetCapacityBytes();
 }
-template <bool kPacked>
+template <int kCostBits>
 auto PatchMatchCuda::CostMapView() const {
-  if constexpr (kPacked) {
-    THROW_CHECK(packed_cost_);
+  static_assert(kCostBits == 0 || kCostBits == 16 || kCostBits == 24);
+  THROW_CHECK_EQ(cost_bits_, kCostBits);
+  if constexpr (kCostBits == 24) {
+    return fixed24_cost_map_->View();
+  } else if constexpr (kCostBits == 16) {
     return packed_cost_map_->View();
   } else {
-    THROW_CHECK(!packed_cost_);
     return cost_map_->View();
   }
+}
+
+void PatchMatchCuda::CheckCostMapDomain() const {
+  if (cost_bits_ == 24) fixed24_cost_map_->CheckDomain();
+  if (cost_bits_ == 16) packed_cost_map_->CheckDomain();
 }
 
 Mat<float> PatchMatchCuda::GeometryCopyToMat(const GpuMat<float>& owner) const {
@@ -2324,10 +2347,7 @@ std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
   return consistent_image_idxs;
 }
 
-template <int kWindowSize,
-          int kWindowStep,
-          bool kCheckpointHmm,
-          bool kPackedCost>
+template <int kWindowSize, int kWindowStep, bool kCheckpointHmm, int kCostBits>
 void PatchMatchCuda::RunWithWindowSizeAndStep() {
   // Wait for all initializations to finish.
   CUDA_SYNC_AND_CHECK();
@@ -2339,11 +2359,11 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   dim3 initial_cost_grid = sweep_grid_size_;
   initial_cost_grid.y =
       (CostMapHeight() + kInitialCostStripeRows - 1) / kInitialCostStripeRows;
-  ComputeInitialCost<kWindowSize, kWindowStep, kPackedCost>
+  ComputeInitialCost<kWindowSize, kWindowStep, kCostBits>
       <<<initial_cost_grid, sweep_block_size_>>>(
           MakeRefCamera(ref_K_host_[rotation_in_half_pi_],
                         ref_inv_K_host_[rotation_in_half_pi_]),
-          CostMapView<kPackedCost>(),
+          CostMapView<kCostBits>(),
           GeometryView(*depth_map_),
           GeometryView(*normal_map_),
           ref_image_texture_->GetObj(),
@@ -2355,7 +2375,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           options_.sigma_color,
           ReferenceStatisticsTexture());
   CUDA_SYNC_AND_CHECK();
-  if constexpr (kPackedCost) packed_cost_map_->CheckDomain();
+  if constexpr (kCostBits) CheckCostMapDomain();
 
   init_timer.Print("Initialization");
 
@@ -2457,7 +2477,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
                        kCheckpointHmm,                            \
                        kSourceJobGroups,                          \
                        UNORM,                                     \
-                       kPackedCost>                               \
+                       kCostBits>                                 \
       <<<sweep_kernel_grid_size, sweep_kernel_block_size>>>(      \
           MakeRefCamera(ref_K_host_[rotation_in_half_pi_],        \
                         ref_inv_K_host_[rotation_in_half_pi_]),   \
@@ -2465,7 +2485,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           rand_state_map_->View(),                                \
           (PatchMatchRngPerimeter{ref_width_, ref_height_}),      \
           static_cast<unsigned int>(rotation_in_half_pi_),        \
-          CostMapView<kPackedCost>(),                             \
+          CostMapView<kCostBits>(),                               \
           GeometryView(*depth_map_),                              \
           GeometryView(*normal_map_),                             \
           (PackedConsistencyMaskView{consistency_mask_->View()}), \
@@ -2570,7 +2590,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
       }
 
       CUDA_SYNC_AND_CHECK();
-      if constexpr (kPackedCost) packed_cost_map_->CheckDomain();
+      if constexpr (kCostBits) CheckCostMapDomain();
 
       Rotate();
 
@@ -2708,7 +2728,7 @@ size_t PairGridCount(size_t width, size_t height) {
   return (std::max(width, height) - 1) / 8 + 1;
 }
 
-template <bool kCheckpointHmm, bool kProbabilityUnorm16, bool kPackedCost>
+template <bool kCheckpointHmm, bool kProbabilityUnorm16, int kCostBits>
 size_t PairResidentBlocksPerSm(bool geometric,
                                bool final_filter,
                                size_t* sm_count) {
@@ -2734,7 +2754,7 @@ size_t PairResidentBlocksPerSm(bool geometric,
                                kCheckpointHmm,
                                kSourceJobGroups,
                                kProbabilityUnorm16,
-                               kPackedCost>,
+                               kCostBits>,
           8 * 4 * kSourceJobGroups,
           0));
     } else if (geometric) {
@@ -2750,7 +2770,7 @@ size_t PairResidentBlocksPerSm(bool geometric,
                                kCheckpointHmm,
                                kSourceJobGroups,
                                kProbabilityUnorm16,
-                               kPackedCost>,
+                               kCostBits>,
           8 * 4 * kSourceJobGroups,
           0));
     } else {
@@ -2766,7 +2786,7 @@ size_t PairResidentBlocksPerSm(bool geometric,
                                kCheckpointHmm,
                                kSourceJobGroups,
                                kProbabilityUnorm16,
-                               kPackedCost>,
+                               kCostBits>,
           8 * 4 * kSourceJobGroups,
           0));
     }
@@ -2783,13 +2803,20 @@ size_t PairResidentBlocksPerSm(bool geometric,
                                bool final_filter,
                                bool checkpoint_hmm,
                                bool probability_unorm16,
-                               bool ncc_cost_unorm16,
+                               int ncc_cost_bits,
                                size_t* sm_count) {
-  THROW_CHECK(!(probability_unorm16 || ncc_cost_unorm16) || checkpoint_hmm);
-  if (ncc_cost_unorm16) {
-    return probability_unorm16 ? PairResidentBlocksPerSm<true, true, true>(
+  THROW_CHECK(!(probability_unorm16 || ncc_cost_bits) || checkpoint_hmm);
+  THROW_CHECK(ncc_cost_bits == 0 || ncc_cost_bits == 16 || ncc_cost_bits == 24);
+  if (ncc_cost_bits == 24) {
+    return probability_unorm16 ? PairResidentBlocksPerSm<true, true, 24>(
                                      geometric, final_filter, sm_count)
-                               : PairResidentBlocksPerSm<true, false, true>(
+                               : PairResidentBlocksPerSm<true, false, 24>(
+                                     geometric, final_filter, sm_count);
+  }
+  if (ncc_cost_bits == 16) {
+    return probability_unorm16 ? PairResidentBlocksPerSm<true, true, 16>(
+                                     geometric, final_filter, sm_count)
+                               : PairResidentBlocksPerSm<true, false, 16>(
                                      geometric, final_filter, sm_count);
   }
   if (probability_unorm16)
@@ -2806,13 +2833,13 @@ bool PairFitsResidentWaves(size_t first_grid,
                            bool final_filter,
                            bool checkpoint_hmm,
                            bool probability_unorm16,
-                           bool ncc_cost_unorm16) {
+                           int ncc_cost_bits) {
   size_t sm_count = 0;
   const size_t per_sm = PairResidentBlocksPerSm(geometric,
                                                 final_filter,
                                                 checkpoint_hmm,
                                                 probability_unorm16,
-                                                ncc_cost_unorm16,
+                                                ncc_cost_bits,
                                                 &sm_count);
   return sm_count > 0 &&
          (first_grid - 1) / sm_count + (second_grid - 1) / sm_count + 2 <=
@@ -2873,9 +2900,8 @@ bool CanPairPatchMatchViews(size_t first_width,
                             bool geometric,
                             bool checkpoint_hmm,
                             bool probability_unorm16,
-                            bool ncc_cost_unorm16) {
-  if ((probability_unorm16 || ncc_cost_unorm16) && !checkpoint_hmm)
-    return false;
+                            int ncc_cost_bits) {
+  if ((probability_unorm16 || ncc_cost_bits) && !checkpoint_hmm) return false;
   if (!first_width || !first_height || !second_width || !second_height) {
     return false;
   }
@@ -2885,7 +2911,7 @@ bool CanPairPatchMatchViews(size_t first_width,
                                false,
                                checkpoint_hmm,
                                probability_unorm16,
-                               ncc_cost_unorm16);
+                               ncc_cost_bits);
 }
 
 bool CanBatchPatchMatchViews(
@@ -2914,9 +2940,8 @@ bool CanBatchPatchMatchViews(
     bool geometric,
     bool checkpoint_hmm,
     bool probability_unorm16,
-    bool ncc_cost_unorm16) {
-  if ((probability_unorm16 || ncc_cost_unorm16) && !checkpoint_hmm)
-    return false;
+    int ncc_cost_bits) {
+  if ((probability_unorm16 || ncc_cost_bits) && !checkpoint_hmm) return false;
   const size_t count = view_shapes.size();
   if (count < 3 || count > 5) return false;
   const size_t width = view_shapes.front().first;
@@ -2951,13 +2976,13 @@ bool CanBatchPatchMatchViews(
                                                     false,
                                                     checkpoint_hmm,
                                                     probability_unorm16,
-                                                    ncc_cost_unorm16);
+                                                    ncc_cost_bits);
   size_t sm_count = 0;
   const size_t resident = PairResidentBlocksPerSm(geometric,
                                                   false,
                                                   checkpoint_hmm,
                                                   probability_unorm16,
-                                                  ncc_cost_unorm16,
+                                                  ncc_cost_bits,
                                                   &sm_count);
   size_t capacity = 0, batch_grid_width = 0, batch_grid_height = 0;
   if (!sm_count || !resident || !multiply(sm_count, resident, &capacity) ||
@@ -3006,7 +3031,7 @@ bool CanBatchPatchMatchViews(
                                                           true,
                                                           checkpoint_hmm,
                                                           probability_unorm16,
-                                                          ncc_cost_unorm16,
+                                                          ncc_cost_bits,
                                                           &final_sm_count);
     size_t final_capacity = 0;
     if (!final_sm_count || !final_resident ||
@@ -3019,7 +3044,7 @@ bool CanBatchPatchMatchViews(
                                                 true,
                                                 checkpoint_hmm,
                                                 probability_unorm16,
-                                                ncc_cost_unorm16);
+                                                ncc_cost_bits);
     const size_t final_single_waves = waves(grid_height, final_capacity);
     size_t final_per_pair = 1;
     if (!final_pair_together &&
@@ -3050,9 +3075,10 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     THROW_CHECK_EQ(p.options_.window_step, 1);
     THROW_CHECK_EQ(p.options_.num_iterations, 5);
     THROW_CHECK_EQ(p.options_.checkpoint_hmm, first.options_.checkpoint_hmm);
-    THROW_CHECK_EQ(p.packed_cost_, first.packed_cost_);
-    THROW_CHECK_EQ(p.packed_cost_map_ != nullptr, p.packed_cost_);
-    THROW_CHECK_EQ(p.cost_map_ != nullptr, !p.packed_cost_);
+    THROW_CHECK_EQ(p.cost_bits_, first.cost_bits_);
+    THROW_CHECK_EQ(p.packed_cost_map_ != nullptr, p.cost_bits_ == 16);
+    THROW_CHECK_EQ(p.fixed24_cost_map_ != nullptr, p.cost_bits_ == 24);
+    THROW_CHECK_EQ(p.cost_map_ != nullptr, !p.cost_bits_);
     THROW_CHECK_EQ(p.options_.probability_unorm16,
                    first.options_.probability_unorm16);
     THROW_CHECK_EQ(p.options_.rotation_buffer_reuse,
@@ -3115,7 +3141,7 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
                                        first.options_.geom_consistency,
                                        first.options_.checkpoint_hmm,
                                        first.options_.probability_unorm16,
-                                       first.packed_cost_));
+                                       first.cost_bits_));
   }
   const bool final_together =
       !is_pair || !first.options_.geom_consistency ||
@@ -3126,7 +3152,7 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
           true,
           first.options_.checkpoint_hmm,
           first.options_.probability_unorm16,
-          first.packed_cost_);
+          first.cost_bits_);
   for (PatchMatchCuda* p : views) p->consistency_mask_valid_ = false;
 
   // Constructors/texture uploads and native initial-cost kernels finish before
@@ -3137,11 +3163,26 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     dim3 initial_cost_grid = p->sweep_grid_size_;
     initial_cost_grid.y = (p->CostMapHeight() + kInitialCostStripeRows - 1) /
                           kInitialCostStripeRows;
-    if (p->packed_cost_) {
-      ComputeInitialCost<11, 1, true>
+    if (p->cost_bits_ == 24) {
+      ComputeInitialCost<11, 1, 24>
           <<<initial_cost_grid, p->sweep_block_size_>>>(
               MakeRefCamera(p->ref_K_host_[0], p->ref_inv_K_host_[0]),
-              p->CostMapView<true>(),
+              p->CostMapView<24>(),
+              p->GeometryView(*p->depth_map_),
+              p->GeometryView(*p->normal_map_),
+              p->ref_image_texture_->GetObj(),
+              p->ReferenceStatisticsView(false),
+              p->ReferenceStatisticsView(true),
+              p->src_images_texture_->GetObj(),
+              p->poses_texture_[0]->GetObj(),
+              p->options_.sigma_spatial,
+              p->options_.sigma_color,
+              p->ReferenceStatisticsTexture());
+    } else if (p->cost_bits_ == 16) {
+      ComputeInitialCost<11, 1, 16>
+          <<<initial_cost_grid, p->sweep_block_size_>>>(
+              MakeRefCamera(p->ref_K_host_[0], p->ref_inv_K_host_[0]),
+              p->CostMapView<16>(),
               p->GeometryView(*p->depth_map_),
               p->GeometryView(*p->normal_map_),
               p->ref_image_texture_->GetObj(),
@@ -3171,7 +3212,7 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
   }
   CUDA_SYNC_AND_CHECK();
   for (PatchMatchCuda* p : views)
-    if (p->packed_cost_) p->packed_cost_map_->CheckDomain();
+    if (p->cost_bits_) p->CheckCostMapDomain();
 
   const auto prepare_last_mask = [](PatchMatchCuda& p, bool last) {
     if (!last || !p.options_.filter) return;
@@ -3276,20 +3317,19 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
       p.poses_texture_[p.rotation_in_half_pi_]->GetObj(),       \
       o,                                                        \
       p.ReferenceStatisticsTexture())
-#define PAIR_LAUNCH_STORAGE(G, P, F, CHECKPOINT, UNORM, SELECTED, PREVIOUS) \
-  do {                                                                      \
-    if constexpr (CHECKPOINT) {                                             \
-      if (p.packed_cost_) {                                                 \
-        PAIR_LAUNCH_TYPED(                                                  \
-            G, P, F, CHECKPOINT, UNORM, true, SELECTED, PREVIOUS);          \
-      } else {                                                              \
-        PAIR_LAUNCH_TYPED(                                                  \
-            G, P, F, CHECKPOINT, UNORM, false, SELECTED, PREVIOUS);         \
-      }                                                                     \
-    } else {                                                                \
-      PAIR_LAUNCH_TYPED(                                                    \
-          G, P, F, CHECKPOINT, UNORM, false, SELECTED, PREVIOUS);           \
-    }                                                                       \
+#define PAIR_LAUNCH_STORAGE(G, P, F, CHECKPOINT, UNORM, SELECTED, PREVIOUS)    \
+  do {                                                                         \
+    if constexpr (CHECKPOINT) {                                                \
+      if (p.cost_bits_ == 24) {                                                \
+        PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, UNORM, 24, SELECTED, PREVIOUS); \
+      } else if (p.cost_bits_ == 16) {                                         \
+        PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, UNORM, 16, SELECTED, PREVIOUS); \
+      } else {                                                                 \
+        PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, UNORM, 0, SELECTED, PREVIOUS);  \
+      }                                                                        \
+    } else {                                                                   \
+      PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, UNORM, 0, SELECTED, PREVIOUS);    \
+    }                                                                          \
   } while (false)
 #ifdef COLMAP_HIP_ENABLED
 #define PAIR_LAUNCH(GEOM, PHOTO_FILTER, GEO_FILTER, CHECKPOINT)            \
@@ -3399,7 +3439,7 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
           CUDA_SAFE_CALL(cudaStreamSynchronize(stream));
       }
       for (PatchMatchCuda* p : views)
-        if (p->packed_cost_) p->packed_cost_map_->CheckDomain();
+        if (p->cost_bits_) p->CheckCostMapDomain();
       for (PatchMatchCuda* p : views) {
         if (shared_geometry) {
           p->alternate_depth_map_ = std::move(geometry_depth);
@@ -3906,7 +3946,10 @@ void PatchMatchCuda::InitWorkspaceMemory() {
                  options_.probability_unorm16);
   THROW_CHECK_EQ(prev_sel_prob_map_ != nullptr, !options_.probability_unorm16);
 
-  if (packed_cost_) {
+  if (cost_bits_ == 24) {
+    fixed24_cost_map_ = std::make_unique<Fixed24NccCostMap>(
+        ref_width_, ref_height_, problem_.src_image_idxs.size());
+  } else if (cost_bits_ == 16) {
     packed_cost_map_ = std::make_unique<PackedNccCostMap>(
         ref_width_, ref_height_, problem_.src_image_idxs.size());
   } else {
@@ -4001,6 +4044,7 @@ void PatchMatchCuda::InitAlternateOrientationMemory(
   add_state(sel_prob_map_);
   add_state(cost_map_);
   add_state(packed_cost_map_);
+  add_state(fixed24_cost_map_);
   add_state(hmm_checkpoint_);
   add(consistency_mask_);
   add(alternate_consistency_mask_);
@@ -4032,7 +4076,10 @@ void PatchMatchCuda::RotateStateMaps(size_t width, size_t height) {
       prev_sel_prob_map_->RotateWithPlaneScratch(
           hmm_checkpoint_->GetPtr(), hmm_checkpoint_->GetCapacityBytes());
     }
-    if (packed_cost_) {
+    if (cost_bits_ == 24) {
+      fixed24_cost_map_->RotateWithPlaneScratch(
+          hmm_checkpoint_->GetPtr(), hmm_checkpoint_->GetCapacityBytes());
+    } else if (cost_bits_ == 16) {
       packed_cost_map_->RotateWithPlaneScratch(
           hmm_checkpoint_->GetPtr(), hmm_checkpoint_->GetCapacityBytes());
     } else {

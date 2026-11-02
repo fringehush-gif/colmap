@@ -1136,6 +1136,13 @@ void OptionManager::AddPatchMatchStereoOptions() {
       "Store persisted NCC costs in UNORM16 over [0,2]. Lossy; proposals and "
       "solver math remain FP32. Requires CUDA, checkpoint_hmm, radius 5 and "
       "step 1; unsupported settings are rejected.");
+  AddDefaultOption("PatchMatchStereo.ncc_cost_fixed24",
+                   &patch_match_stereo->ncc_cost_fixed24,
+                   "Lossy Fixed24 Q23 storage of persisted NCC costs in [0,2], "
+                   "using 25% less "
+                   "cost payload than FP32 plus a four-byte status flag. "
+                   "Requires CUDA, checkpoint_hmm, radius 5 and "
+                   "step 1; mutually exclusive with ncc_cost_unorm16.");
   AddDefaultOption(
       "PatchMatchStereo.probability_unorm16",
       &patch_match_stereo->probability_unorm16,

@@ -126,6 +126,16 @@ struct PatchMatchOptions {
   // Requires CUDA, checkpoint HMM, window_radius=5 and window_step=1.
   bool ncc_cost_unorm16 = false;
 
+  // Lossy Q23 fixed-point storage of persisted NCC costs over [0, 2].
+  // Uses 25% less cost payload than FP32 plus a four-byte status flag.
+  // Rounded incumbents can change outputs. Requires CUDA, checkpoint HMM,
+  // window_radius=5 and window_step=1; mutually exclusive with UNORM16.
+  bool ncc_cost_fixed24 = false;
+
+  int NccCostBits() const {
+    return ncc_cost_fixed24 ? 24 : (ncc_cost_unorm16 ? 16 : 0);
+  }
+
   void Print() const;
   bool Check() const;
 };
