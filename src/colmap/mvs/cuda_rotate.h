@@ -33,20 +33,30 @@ __global__ void CudaRotateKernel(T* output_data,
                                  const int height,
                                  const int input_pitch,
                                  const int output_pitch) {
-  int input_x = blockDim.x * blockIdx.x + threadIdx.x;
-  int input_y = blockDim.y * blockIdx.y + threadIdx.y;
-
-  if (input_x >= width || input_y >= height) {
-    return;
+  __shared__ T tile[TILE_DIM_ROTATE][TILE_DIM_ROTATE + 1];
+  const int input_x = TILE_DIM_ROTATE * blockIdx.x + threadIdx.x;
+  const int input_y = TILE_DIM_ROTATE * blockIdx.y + threadIdx.y;
+  for (int row = 0; row < TILE_DIM_ROTATE; row += blockDim.y) {
+    if (input_x < width && input_y + row < height) {
+      const auto* input_row = reinterpret_cast<const T*>(
+          reinterpret_cast<const char*>(input_data) +
+          static_cast<size_t>(input_y + row) * input_pitch);
+      tile[threadIdx.y + row][threadIdx.x] = input_row[input_x];
+    }
   }
+  __syncthreads();
 
-  int output_x = input_y;
-  int output_y = width - 1 - input_x;
-
-  *((T*)((char*)output_data + static_cast<size_t>(output_y) * output_pitch) +
-    output_x) =
-      *((T*)((char*)input_data + static_cast<size_t>(input_y) * input_pitch) +
-        input_x);
+  // Transpose in shared memory so both global reads and writes follow rows.
+  const int output_x = TILE_DIM_ROTATE * blockIdx.y + threadIdx.x;
+  const int source_x = TILE_DIM_ROTATE * blockIdx.x + threadIdx.y;
+  for (int row = 0; row < TILE_DIM_ROTATE; row += blockDim.y) {
+    if (output_x < height && source_x + row < width) {
+      auto* output_row = reinterpret_cast<T*>(
+          reinterpret_cast<char*>(output_data) +
+          static_cast<size_t>(width - 1 - source_x - row) * output_pitch);
+      output_row[output_x] = tile[threadIdx.x][threadIdx.y + row];
+    }
+  }
 }
 
 }  // namespace internal
@@ -58,10 +68,10 @@ void CudaRotate(const T* input,
                 const int height,
                 const int pitch_input,
                 const int pitch_output) {
-  dim3 block_dim(TILE_DIM_ROTATE, 1, 1);
+  dim3 block_dim(TILE_DIM_ROTATE, 8, 1);
   dim3 grid_dim;
   grid_dim.x = (width - 1) / TILE_DIM_ROTATE + 1;
-  grid_dim.y = height;
+  grid_dim.y = (height - 1) / TILE_DIM_ROTATE + 1;
 
   internal::CudaRotateKernel<<<grid_dim, block_dim>>>(
       output, input, width, height, pitch_input, pitch_output);

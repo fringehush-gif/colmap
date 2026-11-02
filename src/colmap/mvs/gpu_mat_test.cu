@@ -187,6 +187,21 @@ TEST(GpuMat, Rotate) {
   }
 }
 
+TEST(GpuMat, RotateTileEdges) {
+  for (const size_t width : {1, 7, 31, 32, 33, 63, 65}) {
+    for (const size_t height : {1, 5, 31, 32, 33, 63, 65}) {
+      for (const size_t depth : {1, 3}) {
+        TestRotateImage<int8_t>(width, height, depth);
+        TestRotateImage<int16_t>(width, height, depth);
+        TestRotateImage<int32_t>(width, height, depth);
+        TestRotateImage<int64_t>(width, height, depth);
+        TestRotateImage<float>(width, height, depth);
+        TestRotateImage<double>(width, height, depth);
+      }
+    }
+  }
+}
+
 namespace {
 
 float FloatFromBits(const std::uint32_t bits) {
