@@ -535,7 +535,13 @@ if constexpr (Dim == 3 && std::is_same_v<Real, float> &&
             if (scope->ready_)
               throw std::runtime_error("aux scale scope already filled");
             std::vector<const void*> captured;
-            captured.reserve(dataField.size());
+            try {
+              captured.reserve(dataField.size());
+            } catch (const std::bad_alloc&) {
+              // The field is complete; leave the optional scope unready so
+              // the caller performs its original full-tree scaling pass.
+              return;
+            }
             for (Node* node : output_nodes)
               if (IsActiveNode<Dim>(node)) captured.push_back(node);
             if (captured.size() != dataField.size())
