@@ -497,6 +497,75 @@ TEST(GeometricVerifierController, VerifyWithExistingMatches) {
   EXPECT_EQ(data.database->ReadTwoViewGeometries().size(), 6);
 }
 
+TEST(GeometricVerifierController, VerifySkipsMissingMatches) {
+  auto data = CreateTestData(3);
+  data.database->ClearMatches();
+  data.database->ClearTwoViewGeometries();
+  const image_t id1 = data.image_ids[0];
+  const image_t id2 = data.image_ids[1];
+  const image_t id3 = data.image_ids[2];
+
+  TwoViewGeometry geometry;
+  geometry.config = TwoViewGeometry::CALIBRATED;
+  geometry.E = Eigen::Matrix3d::Identity();
+  geometry.inlier_matches = {{0, 0}, {1, 1}};
+  data.database->WriteTwoViewGeometry(id1, id2, geometry);
+
+  GeometricVerifierOptions verifier_options;
+  verifier_options.num_threads = 1;
+  GeometricVerifierController controller(
+      verifier_options, TwoViewGeometryOptions(), data.cache);
+  ASSERT_TRUE(controller.Setup());
+
+  // Neither missing raw-match row produces a job. Existing geometry is kept.
+  controller.Verify({{id1, id2}, {id2, id3}});
+  EXPECT_FALSE(data.database->ExistsMatches(id1, id2));
+  EXPECT_FALSE(data.database->ExistsTwoViewGeometry(id2, id3));
+  const auto retained = data.database->ReadTwoViewGeometry(id1, id2);
+  EXPECT_EQ(retained.config, geometry.config);
+  ASSERT_TRUE(retained.E.has_value());
+  EXPECT_EQ(*retained.E, *geometry.E);
+  ASSERT_EQ(retained.inlier_matches.size(), geometry.inlier_matches.size());
+  for (size_t i = 0; i < geometry.inlier_matches.size(); ++i) {
+    EXPECT_EQ(retained.inlier_matches[i].point2D_idx1,
+              geometry.inlier_matches[i].point2D_idx1);
+    EXPECT_EQ(retained.inlier_matches[i].point2D_idx2,
+              geometry.inlier_matches[i].point2D_idx2);
+  }
+}
+
+TEST(GeometricVerifierController, VerifyMixedMissingAndEmptyMatches) {
+  auto data = CreateTestData(4);
+  const image_t id1 = data.image_ids[0];
+  const image_t id2 = data.image_ids[1];
+  const image_t id3 = data.image_ids[2];
+  const image_t id4 = data.image_ids[3];
+  MatchPairsWithoutVerification(data, {{id1, id2}});
+  ASSERT_FALSE(data.database->ReadMatches(id1, id2).empty());
+  data.database->WriteMatches(id2, id3, FeatureMatches());
+
+  GeometricVerifierOptions verifier_options;
+  verifier_options.num_threads = 1;
+  GeometricVerifierController controller(
+      verifier_options, TwoViewGeometryOptions(), data.cache);
+  ASSERT_TRUE(controller.Setup());
+
+  controller.Verify(
+      {{id3, id4}, {id1, id1}, {id1, id2}, {id2, id1}, {id2, id3}, {id3, id2}});
+  EXPECT_FALSE(data.database->ExistsMatches(id3, id4));
+  EXPECT_FALSE(data.database->ExistsTwoViewGeometry(id3, id4));
+  EXPECT_TRUE(data.database->ExistsTwoViewGeometry(id1, id2));
+  EXPECT_TRUE(data.database->ExistsMatches(id2, id3));
+  const auto empty_geometry = data.database->ReadTwoViewGeometry(id2, id3);
+  EXPECT_EQ(empty_geometry.config, TwoViewGeometry::DEGENERATE);
+  EXPECT_TRUE(empty_geometry.inlier_matches.empty());
+  EXPECT_EQ(data.database->NumVerifiedImagePairs(), 2);
+
+  // Missing rows also leave no outstanding output in a reused controller.
+  controller.Verify({{id3, id4}, {id1, id2}});
+  EXPECT_EQ(data.database->NumVerifiedImagePairs(), 2);
+}
+
 TEST(GeometricVerifierController, VerifyPropagatesErrors) {
   auto data = CreateTestData(3);
   const auto pairs = AllPairs(data.image_ids);
