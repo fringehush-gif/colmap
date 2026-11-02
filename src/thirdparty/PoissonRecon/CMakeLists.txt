@@ -56,6 +56,15 @@ if(TESTS_ENABLED AND OPENMP_FOUND)
 endif()
 
 COLMAP_ADD_TEST(
+    NAME geometry_test
+    SRCS geometry_test.cc
+)
+if(TESTS_ENABLED AND OPENMP_FOUND)
+    target_link_libraries(colmap_poisson_recon_geometry_test
+        OpenMP::OpenMP_CXX)
+endif()
+
+COLMAP_ADD_TEST(
     NAME template_return_test
     SRCS template_return_test.cc
 )

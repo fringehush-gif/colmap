@@ -329,7 +329,7 @@ namespace PoissonRecon
 
 		static Real Dot( const Point &p1 , const Point &p2 )
 		{
-			Real dot;
+			Real dot = {};
 			if( p1._dim!=p2._dim ) MK_THROW( "Dimensions differ: " , p1._dim , " != " , p2._dim );
 			for( size_t d=0 ; d<p1._dim ; d++ ) dot += p1[d] * p2[d];
 			return dot;
