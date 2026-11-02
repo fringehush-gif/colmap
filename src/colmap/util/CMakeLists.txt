@@ -71,7 +71,7 @@ if(CUDA_ENABLED)
         NAME colmap_util_cuda
         SRCS
             cuda.h cuda.cc
-            cudacc.h cudacc.cc
+            cudacc.h cudacc.cc cuda_allocation.h
         PUBLIC_LINK_LIBS
             colmap_util
             CUDA::cudart
@@ -280,7 +280,7 @@ if(HIP_ENABLED)
         NAME colmap_util_cuda
         SRCS
             cuda.h cuda.cc
-            cudacc.h cudacc.cc
+            cudacc.h cudacc.cc cuda_allocation.h
             cuda_to_hip.h
         PUBLIC_LINK_LIBS
             colmap_util

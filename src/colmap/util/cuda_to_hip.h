@@ -6,8 +6,9 @@
 // written in the CUDA spelling (cudaXxx, curandXxx). On ROCm builds, this
 // header aliases those names to their HIP equivalents, so original .cu files
 // compile unmodified when CMake's set_source_files_properties(LANGUAGE HIP)
-// hands them to the HIP toolchain. The only file that should reference
-// hipXxx symbols directly is this header.
+// hands them to the HIP toolchain. Keep CUDA-named GPU compatibility here;
+// cuda_allocation.h selects the runtime error API directly so its standalone
+// allocation helpers do not acquire the rocRAND dependency below.
 
 #if defined(COLMAP_HIP_ENABLED)
 
