@@ -503,21 +503,14 @@ void FeatureMatcherController::Match(
 
     num_outputs += 1;
 
-    // If only one of the matches or inlier matches exist, we recompute them
-    // from scratch and delete the existing results. This must be done before
-    // pushing the jobs to the queue, otherwise database constraints might fail
-    // when writing an existing result into the database.
-    if (exists_two_view_geometry) {
-      cache_->DeleteTwoViewGeometry(image_id1, image_id2);
-    }
-
     FeatureMatcherData data;
     data.image_id1 = image_id1;
     data.image_id2 = image_id2;
+    data.replace_matches = exists_matches;
+    data.replace_two_view_geometry = exists_two_view_geometry;
 
     if (exists_matches) {
       data.matches = cache_->GetMatches(image_id1, image_id2);
-      cache_->DeleteMatches(image_id1, image_id2);
       THROW_CHECK(verifier_queue_.Push(std::move(data)));
     } else {
       THROW_CHECK(matcher_queue_.Push(std::move(data)));
@@ -538,8 +531,7 @@ void FeatureMatcherController::Match(
       if (!error) {
         // Abort: drop the pairs queued for matching, which then never produce
         // an output, and wait for the pairs that are already being processed.
-        // The jobs queued for verification are kept, since some of them carry
-        // existing matches that were deleted from the database above.
+        // Keep draining jobs already queued for verification.
         error = output.error;
         num_outputs -= matcher_queue_.Clear();
       }
@@ -551,6 +543,12 @@ void FeatureMatcherController::Match(
       output.matches = {};
     }
 
+    if (output.replace_matches) {
+      cache_->DeleteMatches(output.image_id1, output.image_id2);
+    }
+    if (output.replace_two_view_geometry) {
+      cache_->DeleteTwoViewGeometry(output.image_id1, output.image_id2);
+    }
     cache_->WriteMatches(output.image_id1, output.image_id2, output.matches);
 
     WriteVerifiedTwoViewGeometry(*cache_,
@@ -665,7 +663,9 @@ void GeometricVerifierController::Verify(
 
     data.matches = cache_->GetMatches(image_id1, image_id2);
     // There exists a two view geometry without inlier matches.
-    if (cache_->ExistsTwoViewGeometry(image_id1, image_id2)) {
+    data.replace_two_view_geometry =
+        cache_->ExistsTwoViewGeometry(image_id1, image_id2);
+    if (data.replace_two_view_geometry) {
       data.two_view_geometry = cache_->GetTwoViewGeometry(image_id1, image_id2);
     }
     THROW_CHECK(verifier_queue_.Push(std::move(data)));
@@ -695,7 +695,7 @@ void GeometricVerifierController::Verify(
       output.matches = {};
     }
 
-    if (cache_->ExistsTwoViewGeometry(output.image_id1, output.image_id2)) {
+    if (output.replace_two_view_geometry) {
       cache_->DeleteTwoViewGeometry(output.image_id1, output.image_id2);
     }
 
