@@ -4,13 +4,20 @@
 
 #include "colmap/feature/sift.h"
 #include "colmap/scene/database.h"
+#include "colmap/util/cancellation.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/file.h"
 #include "colmap/util/misc.h"
 #include "colmap/util/opengl_utils.h"
 #include "colmap/util/timer.h"
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <exception>
+#include <mutex>
 #include <numeric>
+#include <thread>
 
 namespace colmap {
 namespace {
@@ -466,76 +473,179 @@ class FeatureExtractorController : public Thread {
                                                     writer_queue_.get());
   }
 
+  void Stop() override {
+    Thread::Stop();
+    Abort();
+  }
+
  private:
+  // Cleanup cannot recover from synchronization failures without risking
+  // destruction of live children; noexcept makes those failures terminal.
+  void Abort() noexcept {
+    if (aborted_.exchange(true)) {
+      return;
+    }
+    Thread::Stop();
+    // Stop before clearing so that no producer can refill a cleared queue.
+    resizer_queue_->Stop();
+    extractor_queue_->Stop();
+    writer_queue_->Stop();
+    resizer_queue_->Clear();
+    extractor_queue_->Clear();
+    writer_queue_->Clear();
+    for (auto& resizer : resizers_) resizer->Stop();
+    for (auto& extractor : extractors_) extractor->Stop();
+    writer_->Stop();
+  }
+
   void Run() override {
+    // Aborted queues cannot be restarted, and Thread::Start resets stopped_.
+    if (aborted_) {
+      Thread::Stop();
+      return;
+    }
     LOG_HEADING1("Feature extraction");
     Timer run_timer;
     run_timer.Start();
 
+    // Completion is expected only after the input queue is drained and closed.
     for (auto& resizer : resizers_) {
-      resizer->Start();
+      resizer->AddCallback(Thread::FINISHED_CALLBACK, [this] {
+        if (!resizers_closing_) Abort();
+      });
     }
-
     for (auto& extractor : extractors_) {
-      extractor->Start();
+      extractor->AddCallback(Thread::FINISHED_CALLBACK, [this] {
+        if (!extractors_closing_) Abort();
+      });
     }
+    writer_->AddCallback(Thread::FINISHED_CALLBACK, [this] {
+      if (!writer_closing_) Abort();
+    });
 
-    writer_->Start();
+    std::mutex monitor_mutex;
+    std::condition_variable monitor_condition;
+    bool monitor_done = false;
+    std::thread monitor;
+    std::exception_ptr error;
 
-    for (auto& extractor : extractors_) {
-      if (!extractor->CheckValidSetup()) {
-        return;
+    // A Wait rethrows a worker exception after joining. A second failure
+    // indicates that joining itself failed; destroying a live child is unsafe.
+    const auto join = [&](Thread* thread) {
+      try {
+        thread->Wait();
+      } catch (...) {
+        if (!error) error = std::current_exception();
+        Abort();
+        try {
+          thread->Wait();
+        } catch (...) {
+          std::terminate();
+        }
       }
-    }
+    };
 
-    while (image_reader_.NextIndex() < image_reader_.NumImages()) {
-      if (IsStopped()) {
-        resizer_queue_->Stop();
-        extractor_queue_->Stop();
-        resizer_queue_->Clear();
-        extractor_queue_->Clear();
-        break;
-      }
+    try {
+      // Signals only set an atomic flag. Poll it from normal thread context so
+      // a blocked producer or queue drain can be woken without a signal handler
+      // calling synchronization primitives.
+      monitor = std::thread([&] {
+        std::unique_lock<std::mutex> lock(monitor_mutex);
+        while (!monitor_done) {
+          if (ScopedSignalHandler::IsInterruptRequested()) {
+            lock.unlock();
+            Abort();
+            return;
+          }
+          monitor_condition.wait_for(lock, std::chrono::milliseconds(25));
+        }
+      });
 
-      ImageData image_data;
-      image_data.bitmap = std::make_unique<Bitmap>();
-      Bitmap mask;
-      image_data.status = image_reader_.Next(&image_data.rig,
-                                             &image_data.camera,
-                                             &image_data.image,
-                                             &image_data.pose_prior,
-                                             image_data.bitmap.get(),
-                                             &mask);
-      if (!mask.IsEmpty()) {
-        image_data.mask = std::make_unique<Bitmap>(std::move(mask));
-      }
+      const auto start = [&](Thread* thread) {
+        if (!aborted_) {
+          thread->Start();
+          if (aborted_) thread->Stop();
+        }
+      };
+      for (auto& resizer : resizers_) start(resizer.get());
+      for (auto& extractor : extractors_) start(extractor.get());
+      start(writer_.get());
 
-      if (image_data.status != ImageReader::Status::SUCCESS) {
-        // Release the memory, since it is not used afterwards.
-        *image_data.bitmap = Bitmap();
-        if (image_data.mask) {
-          *image_data.mask = Bitmap();
+      for (auto& extractor : extractors_) {
+        if (aborted_) break;
+        if (!extractor->CheckValidSetup()) {
+          Abort();
+          break;
         }
       }
 
-      THROW_CHECK(resizer_queue_->Push(std::move(image_data)));
+      while (!aborted_ &&
+             image_reader_.NextIndex() < image_reader_.NumImages()) {
+        ImageData image_data;
+        image_data.bitmap = std::make_unique<Bitmap>();
+        Bitmap mask;
+        image_data.status = image_reader_.Next(&image_data.rig,
+                                               &image_data.camera,
+                                               &image_data.image,
+                                               &image_data.pose_prior,
+                                               image_data.bitmap.get(),
+                                               &mask);
+        if (!mask.IsEmpty()) {
+          image_data.mask = std::make_unique<Bitmap>(std::move(mask));
+        }
+
+        if (image_data.status != ImageReader::Status::SUCCESS) {
+          *image_data.bitmap = Bitmap();
+          if (image_data.mask) {
+            *image_data.mask = Bitmap();
+          }
+        }
+
+        if (!resizer_queue_->Push(std::move(image_data))) break;
+      }
+
+      if (!aborted_) {
+        resizer_queue_->Wait();
+        if (!aborted_) {
+          resizers_closing_ = true;
+          resizer_queue_->Stop();
+          for (auto& resizer : resizers_) join(resizer.get());
+        }
+      }
+      if (!aborted_) {
+        extractor_queue_->Wait();
+        if (!aborted_) {
+          extractors_closing_ = true;
+          extractor_queue_->Stop();
+          for (auto& extractor : extractors_) join(extractor.get());
+        }
+      }
+      if (!aborted_) {
+        writer_queue_->Wait();
+        if (!aborted_) {
+          writer_closing_ = true;
+          writer_queue_->Stop();
+          join(writer_.get());
+        }
+      }
+    } catch (...) {
+      // A producer or startup exception takes precedence over cleanup errors.
+      error = std::current_exception();
+      Abort();
     }
 
-    resizer_queue_->Wait();
-    resizer_queue_->Stop();
-    for (auto& resizer : resizers_) {
-      resizer->Wait();
+    // Wait on every constructed child, including those never started. Errors
+    // are selected in resizer, extractor, writer order after any caller error.
+    for (auto& resizer : resizers_) join(resizer.get());
+    for (auto& extractor : extractors_) join(extractor.get());
+    join(writer_.get());
+    {
+      std::lock_guard<std::mutex> lock(monitor_mutex);
+      monitor_done = true;
     }
-
-    extractor_queue_->Wait();
-    extractor_queue_->Stop();
-    for (auto& extractor : extractors_) {
-      extractor->Wait();
-    }
-
-    writer_queue_->Wait();
-    writer_queue_->Stop();
-    writer_->Wait();
+    monitor_condition.notify_one();
+    if (monitor.joinable()) monitor.join();
+    if (error) std::rethrow_exception(error);
 
     run_timer.PrintMinutes();
   }
@@ -553,6 +663,11 @@ class FeatureExtractorController : public Thread {
   std::unique_ptr<JobQueue<ImageData>> resizer_queue_;
   std::unique_ptr<JobQueue<ImageData>> extractor_queue_;
   std::unique_ptr<JobQueue<ImageData>> writer_queue_;
+
+  std::atomic<bool> aborted_{false};
+  std::atomic<bool> resizers_closing_{false};
+  std::atomic<bool> extractors_closing_{false};
+  std::atomic<bool> writer_closing_{false};
 };
 
 // Import features from text files. Each image must have a corresponding text

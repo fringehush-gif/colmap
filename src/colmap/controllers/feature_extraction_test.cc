@@ -6,9 +6,16 @@
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
+#include <atomic>
+#include <condition_variable>
+#include <cstdlib>
 #include <fstream>
+#include <mutex>
+#include <stdexcept>
+#include <string>
 
 #include <gtest/gtest.h>
+#include <sqlite3.h>
 
 namespace colmap {
 namespace {
@@ -31,7 +38,7 @@ TEST(CreateFeatureExtractorController, Nominal) {
   CreateDirIfNotExists(image_path);
 
   // Create test images
-  const int kNumImages = 2;
+  const int kNumImages = 6;
   const Bitmap test_bitmap = CreateTestBitmap();
   for (int i = 0; i < kNumImages; ++i) {
     test_bitmap.Write(image_path / (std::to_string(i) + ".png"));
@@ -43,7 +50,7 @@ TEST(CreateFeatureExtractorController, Nominal) {
 
   FeatureExtractionOptions extraction_options;
   extraction_options.use_gpu = false;
-  extraction_options.num_threads = kNumImages;
+  extraction_options.num_threads = 2;
 
   // Create and run the controller
   auto controller = CreateFeatureExtractorController(
@@ -71,6 +78,155 @@ TEST(CreateFeatureExtractorController, Nominal) {
     EXPECT_EQ(descriptors.type, FeatureExtractorType::SIFT);
     EXPECT_EQ(descriptors.data.cols(), 128);
   }
+}
+
+// Keep regressions that can strand or terminate children in a subprocess.
+#ifndef COLMAP_ONNX_ENABLED
+TEST(CreateFeatureExtractorController, ExtractorSetupFailureJoinsChildren) {
+  ASSERT_EXIT(
+      {
+        const auto test_dir = CreateTestDir();
+        const auto image_path = test_dir / "images";
+        CreateDirIfNotExists(image_path);
+        CreateTestBitmap().Write(image_path / "test.png");
+        ImageReaderOptions reader_options;
+        reader_options.image_path = image_path;
+        FeatureExtractionOptions extraction_options(
+            FeatureExtractorType::ALIKED_N16ROT);
+        extraction_options.use_gpu = false;
+        extraction_options.num_threads = 2;
+        bool expected_error = false;
+        std::atomic<bool> succeeded{false};
+        {
+          auto controller = CreateFeatureExtractorController(
+              test_dir / "database.db", reader_options, extraction_options);
+          controller->AddCallback(Thread::SUCCEEDED_CALLBACK,
+                                  [&] { succeeded = true; });
+          controller->Start();
+          try {
+            controller->Wait();
+          } catch (const std::runtime_error& e) {
+            expected_error = std::string(e.what()).find(
+                                 "requires ONNX support") != std::string::npos;
+          }
+        }
+        std::_Exit(expected_error && !succeeded ? 0 : 1);
+      },
+      ::testing::ExitedWithCode(0),
+      "");
+}
+#endif
+
+TEST(CreateFeatureExtractorController,
+     StopDuringStartupAndRestartRemainStopped) {
+  ASSERT_EXIT(
+      {
+        const auto test_dir = CreateTestDir();
+        const auto image_path = test_dir / "images";
+        CreateDirIfNotExists(image_path);
+        CreateTestBitmap().Write(image_path / "test.png");
+        ImageReaderOptions reader_options;
+        reader_options.image_path = image_path;
+        FeatureExtractionOptions extraction_options;
+        extraction_options.use_gpu = false;
+        extraction_options.num_threads = 2;
+        std::atomic<bool> succeeded{false};
+        {
+          auto controller = CreateFeatureExtractorController(
+              test_dir / "database.db", reader_options, extraction_options);
+          controller->AddCallback(Thread::SUCCEEDED_CALLBACK,
+                                  [&] { succeeded = true; });
+          std::mutex mutex;
+          std::condition_variable condition;
+          bool started = false;
+          bool release = false;
+          controller->AddCallback(Thread::STARTED_CALLBACK, [&] {
+            std::unique_lock<std::mutex> lock(mutex);
+            started = true;
+            condition.notify_one();
+            condition.wait(lock, [&] { return release; });
+          });
+          controller->Start();
+          {
+            std::unique_lock<std::mutex> lock(mutex);
+            condition.wait(lock, [&] { return started; });
+          }
+          controller->Stop();
+          {
+            std::lock_guard<std::mutex> lock(mutex);
+            release = true;
+          }
+          condition.notify_one();
+          controller->Wait();
+          if (!controller->IsStopped()) std::_Exit(1);
+          controller->Start();
+          controller->Wait();
+          if (!controller->IsStopped()) std::_Exit(1);
+        }
+        std::_Exit(succeeded ? 1 : 0);
+      },
+      ::testing::ExitedWithCode(0),
+      "");
+}
+
+bool InstallWriterFailureTrigger(const std::filesystem::path& database_path) {
+  sqlite3* raw_database = nullptr;
+  const int open_result =
+      sqlite3_open(database_path.string().c_str(), &raw_database);
+  const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> database(
+      raw_database, sqlite3_close);
+  if (open_result != SQLITE_OK) return false;
+  return sqlite3_exec(database.get(),
+                      "CREATE TRIGGER f5_writer_failure BEFORE INSERT ON "
+                      "keypoints BEGIN SELECT RAISE(ABORT, 'F5 writer "
+                      "failure'); END;",
+                      nullptr,
+                      nullptr,
+                      nullptr) == SQLITE_OK;
+}
+
+TEST(CreateFeatureExtractorController, WriterFailureUnblocksPipeline) {
+  struct RestoreDeathTestStyle {
+    std::string old_style = GTEST_FLAG_GET(death_test_style);
+    ~RestoreDeathTestStyle() { GTEST_FLAG_SET(death_test_style, old_style); }
+  } restore_style;
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  ASSERT_EXIT(
+      {
+        const auto test_dir = CreateTestDir();
+        const auto image_path = test_dir / "images";
+        const auto database_path = test_dir / "database.db";
+        CreateDirIfNotExists(image_path);
+        const Bitmap bitmap = CreateTestBitmap();
+        for (int i = 0; i < 16; ++i) {
+          bitmap.Write(image_path / (std::to_string(i) + ".png"));
+        }
+        ImageReaderOptions reader_options;
+        reader_options.image_path = image_path;
+        FeatureExtractionOptions extraction_options;
+        extraction_options.use_gpu = false;
+        extraction_options.num_threads = 1;
+        std::atomic<bool> succeeded{false};
+        bool expected_error = false;
+        {
+          auto controller = CreateFeatureExtractorController(
+              database_path, reader_options, extraction_options);
+          if (!InstallWriterFailureTrigger(database_path)) std::_Exit(2);
+          controller->AddCallback(Thread::SUCCEEDED_CALLBACK,
+                                  [&] { succeeded = true; });
+          controller->Start();
+          try {
+            controller->Wait();
+          } catch (const std::runtime_error& e) {
+            expected_error =
+                std::string(e.what()).find(sqlite3_errstr(SQLITE_CONSTRAINT)) !=
+                std::string::npos;
+          }
+        }
+        std::_Exit(expected_error && !succeeded ? 0 : 1);
+      },
+      ::testing::ExitedWithCode(0),
+      "");
 }
 
 TEST(CreateFeatureExtractorController, WithCameraMask) {

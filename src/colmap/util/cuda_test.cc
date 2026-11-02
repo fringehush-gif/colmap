@@ -56,8 +56,12 @@ class CudaBlockingSync : public ::testing::Test {
 };
 
 TEST_F(CudaBlockingSync, PreservesOtherFlagsAndSharesPolicyWithWorkers) {
-  ASSERT_EQ(cudaSetDeviceFlags(cudaDeviceScheduleYield | cudaDeviceSyncMemops),
-            cudaSuccess);
+  unsigned int initial_flags =
+      cudaDeviceScheduleYield | cudaDeviceLmemResizeToMax;
+#if CUDART_VERSION >= 12010
+  initial_flags |= cudaDeviceSyncMemops;
+#endif
+  ASSERT_EQ(cudaSetDeviceFlags(initial_flags), cudaSuccess);
   unsigned int before_flags = 0;
   ASSERT_EQ(cudaGetDeviceFlags(&before_flags), cudaSuccess);
   SetCudaDevicesBlockingSync({device_, device_});

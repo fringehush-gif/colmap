@@ -1137,7 +1137,36 @@ TEST(JobQueue, Clear) {
   EXPECT_TRUE(job_queue.Push(0));
   EXPECT_EQ(job_queue.Size(), 1);
 
-  job_queue.Clear();
+  EXPECT_EQ(job_queue.Clear(), 1);
+  EXPECT_EQ(job_queue.Size(), 0);
+  EXPECT_EQ(job_queue.Clear(), 0);
+}
+
+TEST(JobQueue, ClearDestroysJobsWithConcurrentProducerAndWaiter) {
+  JobQueue<std::shared_ptr<int>> job_queue(1);
+  auto value = std::make_shared<int>(7);
+  std::weak_ptr<int> weak_value = value;
+  ASSERT_TRUE(job_queue.Push(value));
+  value.reset();
+
+  Barrier producer_barrier;
+  Barrier waiter_barrier;
+  std::thread producer([&] {
+    producer_barrier.Wait();
+    CHECK(job_queue.Push(std::make_shared<int>(8)));
+  });
+  std::thread waiter([&] {
+    waiter_barrier.Wait();
+    job_queue.Wait();
+  });
+  producer_barrier.Wait();
+  waiter_barrier.Wait();
+  EXPECT_EQ(job_queue.Clear(), 1);
+  EXPECT_TRUE(weak_value.expired());
+  producer.join();
+  // The producer may refill before the waiter observes the empty queue.
+  EXPECT_EQ(job_queue.Clear(), 1);
+  waiter.join();
   EXPECT_EQ(job_queue.Size(), 0);
 }
 
