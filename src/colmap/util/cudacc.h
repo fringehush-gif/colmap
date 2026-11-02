@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "colmap/util/cuda_allocation.h"
 #include "colmap/util/cuda_to_hip.h"
 
 #include <stdexcept>
@@ -68,39 +69,6 @@ class CudaAllocationRefused : public std::invalid_argument {
 };
 
 bool CudaIsAllocationRefusal(cudaError_t status, bool allow_unsupported);
-enum class CudaAllocationOrigin {
-  kSuccess,
-  kRefused,
-  kPriorError,
-  kLastErrorMismatch,
-  kUnresolvedOutput,
-  kRuntimeFailure,
-};
-struct CudaAllocationResult {
-  cudaError_t code;
-  CudaAllocationOrigin origin;
-};
-
-// Calls allocate at most once. Exceptions from the supplied call/validator
-// propagate unchanged, so caller-specific cleanup remains responsible for them.
-template <typename Allocate, typename CleanFailure>
-CudaAllocationResult CudaTryAllocation(Allocate&& allocate,
-                                       CleanFailure&& clean_failure,
-                                       bool allow_unsupported = false) {
-  const cudaError_t prior = cudaPeekAtLastError();
-  if (prior != cudaSuccess) return {prior, CudaAllocationOrigin::kPriorError};
-  const cudaError_t status = std::forward<Allocate>(allocate)();
-  if (status == cudaSuccess) return {status, CudaAllocationOrigin::kSuccess};
-  if (!std::forward<CleanFailure>(clean_failure)())
-    return {status, CudaAllocationOrigin::kUnresolvedOutput};
-  if (!CudaIsAllocationRefusal(status, allow_unsupported))
-    return {status, CudaAllocationOrigin::kRuntimeFailure};
-  const cudaError_t recorded = cudaGetLastError();
-  if (recorded != cudaSuccess && recorded != status)
-    return {recorded, CudaAllocationOrigin::kLastErrorMismatch};
-  return {status, CudaAllocationOrigin::kRefused};
-}
-
 [[noreturn]] void CudaAllocationFailure(const char* operation,
                                         CudaAllocationResult result,
                                         const char* file,
