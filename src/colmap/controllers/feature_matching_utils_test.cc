@@ -286,10 +286,41 @@ TEST(FeatureMatcherController, MatchMultiplePairs) {
   EXPECT_EQ(data.database->ReadTwoViewGeometries().size(), 6);
 }
 
+TEST(FeatureMatcherController, MatchReplacesExistingGeometryAfterSuccess) {
+  auto data = CreateTestData(2);
+  data.database->ClearMatches();
+  data.database->ClearTwoViewGeometries();
+  const image_t id1 = data.image_ids[0];
+  const image_t id2 = data.image_ids[1];
+  TwoViewGeometry old_geometry;
+  old_geometry.config = TwoViewGeometry::CALIBRATED;
+  old_geometry.E = Eigen::Matrix3d::Identity();
+  old_geometry.inlier_matches = {{0, 0}, {1, 1}};
+  data.database->WriteTwoViewGeometry(id1, id2, old_geometry);
+
+  FeatureMatchingOptions options = DefaultMatchingOptions();
+  options.skip_geometric_verification = true;
+  FeatureMatcherController controller(
+      options, TwoViewGeometryOptions(), data.cache);
+  ASSERT_TRUE(controller.Setup());
+  controller.Match({{id1, id2}});
+  EXPECT_TRUE(data.database->ExistsMatches(id1, id2));
+  EXPECT_FALSE(data.database->ExistsTwoViewGeometry(id1, id2));
+  controller.Match({{id1, id2}});
+  EXPECT_TRUE(data.database->ExistsMatches(id1, id2));
+}
+
 TEST(FeatureMatcherController, MatchPropagatesMatcherErrors) {
   auto data = CreateTestData(4);
   data.database->ClearMatches();
   data.database->ClearTwoViewGeometries();
+
+  TwoViewGeometry original_geometry;
+  original_geometry.config = TwoViewGeometry::CALIBRATED;
+  original_geometry.E = Eigen::Matrix3d::Identity();
+  original_geometry.inlier_matches = {{0, 0}, {1, 1}};
+  data.database->WriteTwoViewGeometry(
+      data.image_ids[0], data.image_ids[1], original_geometry);
 
   // Descriptors of an unexpected dimension make the SIFT matcher throw for all
   // pairs with the first image.
@@ -319,10 +350,124 @@ TEST(FeatureMatcherController, MatchPropagatesMatcherErrors) {
   EXPECT_FALSE(
       data.database->ExistsMatches(data.image_ids[0], data.image_ids[1]));
 
+  const auto retained =
+      data.database->ReadTwoViewGeometry(data.image_ids[0], data.image_ids[1]);
+  EXPECT_EQ(retained.config, original_geometry.config);
+  ASSERT_TRUE(retained.E.has_value());
+  EXPECT_EQ(*retained.E, *original_geometry.E);
+  EXPECT_FALSE(retained.F.has_value());
+  EXPECT_FALSE(retained.H.has_value());
+  EXPECT_FALSE(retained.cam2_from_cam1.has_value());
+  EXPECT_FALSE(retained.camera1.has_value());
+  EXPECT_FALSE(retained.camera2.has_value());
+  ASSERT_EQ(retained.inlier_matches.size(),
+            original_geometry.inlier_matches.size());
+  for (size_t i = 0; i < original_geometry.inlier_matches.size(); ++i) {
+    EXPECT_EQ(retained.inlier_matches[i].point2D_idx1,
+              original_geometry.inlier_matches[i].point2D_idx1);
+    EXPECT_EQ(retained.inlier_matches[i].point2D_idx2,
+              original_geometry.inlier_matches[i].point2D_idx2);
+  }
+
   // The controller remains usable for pairs without the broken image.
   controller.Match({{data.image_ids[1], data.image_ids[2]}});
   EXPECT_TRUE(
       data.database->ExistsMatches(data.image_ids[1], data.image_ids[2]));
+}
+
+TEST(FeatureMatcherController, MatchRetainsRawMatchesOnVerifierError) {
+  auto data = CreateTestData(3);
+  data.database->ClearMatches();
+  data.database->ClearTwoViewGeometries();
+  const image_t id1 = data.image_ids[0];
+  const image_t id2 = data.image_ids[1];
+  const image_t id3 = data.image_ids[2];
+  FeatureMatches original;
+  for (point2D_t i = 0; i < 20; ++i) {
+    original.emplace_back(i, i);
+  }
+  data.database->WriteMatches(id1, id2, original);
+  data.database->WriteMatches(id2, id3, original);
+
+  auto invalid_keypoints = data.database->ReadKeypointsBlob(id1);
+  invalid_keypoints = FeatureKeypointsBlob::Zero(invalid_keypoints.rows(), 3);
+  const auto keypoints2 = data.database->ReadKeypointsBlob(id2);
+  const auto keypoints3 = data.database->ReadKeypointsBlob(id3);
+  data.database->ClearKeypoints();
+  data.database->WriteKeypoints(id1, invalid_keypoints);
+  data.database->WriteKeypoints(id2, keypoints2);
+  data.database->WriteKeypoints(id3, keypoints3);
+  data.cache = std::make_shared<FeatureMatcherCache>(100, data.database);
+
+  FeatureMatcherController controller(
+      DefaultMatchingOptions(), TwoViewGeometryOptions(), data.cache);
+  ASSERT_TRUE(controller.Setup());
+  EXPECT_THAT(
+      ThrownMessage([&]() { controller.Match({{id1, id2}, {id2, id3}}); }),
+      testing::HasSubstr("Keypoint format not supported"));
+  const auto retained = data.database->ReadMatches(id1, id2);
+  ASSERT_EQ(retained.size(), original.size());
+  for (size_t i = 0; i < original.size(); ++i) {
+    EXPECT_EQ(retained[i].point2D_idx1, original[i].point2D_idx1);
+    EXPECT_EQ(retained[i].point2D_idx2, original[i].point2D_idx2);
+  }
+  EXPECT_FALSE(data.database->ExistsTwoViewGeometry(id1, id2));
+  EXPECT_TRUE(data.database->ExistsTwoViewGeometry(id2, id3));
+  // Force a new verification job after draining both successful and failed
+  // jobs.
+  data.database->DeleteTwoViewGeometry(id2, id3);
+  ASSERT_FALSE(data.database->ExistsTwoViewGeometry(id2, id3));
+  controller.Match({{id2, id3}});
+  EXPECT_TRUE(data.database->ExistsTwoViewGeometry(id2, id3));
+}
+
+TEST(FeatureMatcherController, GuidedFailureRetainsRawMatches) {
+  auto data = CreateTestData(3);
+  data.database->ClearMatches();
+  data.database->ClearTwoViewGeometries();
+  const image_t id1 = data.image_ids[0];
+  const image_t id2 = data.image_ids[1];
+  const image_t id3 = data.image_ids[2];
+  FeatureMatches original;
+  for (point2D_t i = 0; i < 20; ++i) {
+    original.emplace_back(i, i);
+  }
+  data.database->WriteMatches(id1, id2, original);
+
+  auto descriptors1 = data.database->ReadDescriptors(id1);
+  const auto descriptors2 = data.database->ReadDescriptors(id2);
+  const auto descriptors3 = data.database->ReadDescriptors(id3);
+  descriptors1.data =
+      FeatureDescriptorsData::Zero(descriptors1.data.rows(), 64);
+  data.database->ClearDescriptors();
+  data.database->WriteDescriptors(id1, descriptors1);
+  data.database->WriteDescriptors(id2, descriptors2);
+  data.database->WriteDescriptors(id3, descriptors3);
+  data.cache = std::make_shared<FeatureMatcherCache>(100, data.database);
+
+  FeatureMatchingOptions matching_options = DefaultMatchingOptions();
+  matching_options.guided_matching = true;
+  TwoViewGeometryOptions geometry_options;
+  // The verifier completes without touching descriptors; guided SIFT checks
+  // their dimensions even when the geometry was marked DEGENERATE.
+  geometry_options.min_num_inliers = 200;
+  FeatureMatcherController controller(
+      matching_options, geometry_options, data.cache);
+  ASSERT_TRUE(controller.Setup());
+  EXPECT_THAT(ThrownMessage([&]() { controller.Match({{id1, id2}}); }),
+              testing::HasSubstr("kSiftDescriptorDim"));
+  const auto retained = data.database->ReadMatches(id1, id2);
+  ASSERT_EQ(retained.size(), original.size());
+  for (size_t i = 0; i < original.size(); ++i) {
+    EXPECT_EQ(retained[i].point2D_idx1, original[i].point2D_idx1);
+    EXPECT_EQ(retained[i].point2D_idx2, original[i].point2D_idx2);
+  }
+  EXPECT_FALSE(data.database->ExistsTwoViewGeometry(id1, id2));
+  // A fresh healthy pair must traverse the workers after the guided error.
+  ASSERT_FALSE(data.database->ExistsMatches(id2, id3));
+  controller.Match({{id2, id3}});
+  EXPECT_TRUE(data.database->ExistsMatches(id2, id3));
+  EXPECT_TRUE(data.database->ExistsTwoViewGeometry(id2, id3));
 }
 
 TEST(FeatureMatcherController, SetupPropagatesMatcherCreationErrors) {
@@ -627,6 +772,33 @@ TEST(GeometricVerifierController, VerifyClearsDegenerateGeometry) {
   EXPECT_EQ(data.database->ReadMatches(pair_data.image_id1, pair_data.image_id2)
                 .size(),
             100);
+}
+
+TEST(FeatureMatcherController, MatchReplacesRawMatchesAfterSuccess) {
+  auto pair_data = CreateLowRatioPairData();
+  auto& data = pair_data.data;
+  const image_t id1 = pair_data.image_id1;
+  const image_t id2 = pair_data.image_id2;
+  ASSERT_EQ(data.database->ReadMatches(id1, id2).size(), 100);
+
+  TwoViewGeometryOptions geometry_options;
+  geometry_options.min_num_inliers = 200;
+  FeatureMatcherController controller(
+      DefaultMatchingOptions(), geometry_options, data.cache);
+  ASSERT_TRUE(controller.Setup());
+  controller.Match({{id1, id2}});
+
+  ASSERT_TRUE(data.database->ExistsMatches(id1, id2));
+  EXPECT_TRUE(data.database->ReadMatches(id1, id2).empty());
+  ASSERT_TRUE(data.database->ExistsTwoViewGeometry(id1, id2));
+  const auto geometry = data.database->ReadTwoViewGeometry(id1, id2);
+  EXPECT_EQ(geometry.config, TwoViewGeometry::DEGENERATE);
+  EXPECT_TRUE(geometry.inlier_matches.empty());
+  EXPECT_FALSE(geometry.F.has_value());
+  EXPECT_FALSE(geometry.E.has_value());
+  EXPECT_FALSE(geometry.H.has_value());
+  controller.Match({{id1, id2}});
+  EXPECT_TRUE(data.database->ReadMatches(id1, id2).empty());
 }
 
 TEST(FeatureMatcherController, MatchClearsDegenerateGeometry) {

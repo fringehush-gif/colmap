@@ -23,6 +23,10 @@ struct FeatureMatcherData {
   // through the remaining workers untouched, and
   // FeatureMatcherController::Match rethrows it.
   std::exception_ptr error;
+  // Existing rows to replace only after this job succeeds. Workers leave
+  // this dispatch metadata unchanged.
+  bool replace_matches = false;
+  bool replace_two_view_geometry = false;
 };
 
 class FeatureMatcherWorker : public Thread {
