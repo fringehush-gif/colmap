@@ -1142,9 +1142,12 @@ void Reconstruction::ExtractColorsForAllImages(
     Eigen::Vector3d sum = Eigen::Vector3d::Zero();
     int count = 0;
   };
-  ThreadPool thread_pool(GetEffectiveNumThreads(num_threads));
+  const int effective_num_threads = GetEffectiveNumThreads(num_threads);
+  // The pool must join active workers before destroying their accumulators,
+  // including when task submission throws before Wait() is reached.
   std::vector<FlatHashMap<point3D_t, ColorData>> thread_data(
-      thread_pool.NumThreads());
+      effective_num_threads);
+  ThreadPool thread_pool(effective_num_threads);
 
   for (const auto& image_id : RegImageIds()) {
     thread_pool.AddTask([&, image_id]() {

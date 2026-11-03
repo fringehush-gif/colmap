@@ -9,12 +9,16 @@
 #include "colmap/scene/reconstruction_matchers.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/bitmap.h"
+#include "colmap/sensor/bitmap_reader.h"
 #include "colmap/sensor/models.h"
 #include "colmap/util/file.h"
 #include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
+#include "colmap/util/threading.h"
 
+#include <atomic>
 #include <sstream>
+#include <stdexcept>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -1696,6 +1700,55 @@ TEST(Reconstruction, ExtractColorsForAllImages) {
     const auto& color = reconstruction.Point3D(point3D_id).color;
     EXPECT_EQ(color, Eigen::Vector3ub(kColor.r, kColor.g, kColor.b));
   }
+}
+
+TEST(Reconstruction, ExtractColorsForAllImagesPropagatesWorkerFailures) {
+  Reconstruction reconstruction;
+  SyntheticDatasetOptions options;
+  options.num_rigs = 1;
+  options.num_cameras_per_rig = 1;
+  options.num_frames_per_rig = 3;
+  options.num_points3D = 10;
+  SynthesizeDataset(options, &reconstruction);
+
+  const auto image_path = std::filesystem::absolute(CreateTestDir() / "images");
+  std::vector<std::filesystem::path> paths;
+  for (const image_t image_id : reconstruction.RegImageIds()) {
+    paths.push_back(image_path / reconstruction.Image(image_id).Name());
+  }
+  ASSERT_EQ(paths.size(), 3);
+  ASSERT_GT(reconstruction.NumPoints3D(), 0);
+  const Eigen::Vector3ub original_color(5, 6, 7);
+  for (const point3D_t point_id : reconstruction.Point3DIds()) {
+    reconstruction.Point3D(point_id).color = original_color;
+  }
+
+  std::atomic<int> reads{0};
+  auto reader = ScopedBitmapReader::Create(
+      paths, [&](const std::filesystem::path&, bool, bool, Bitmap*) -> bool {
+        ++reads;
+        throw std::runtime_error("injected color reader failure");
+      });
+  try {
+    reconstruction.ExtractColorsForAllImages(image_path, /*num_threads=*/2);
+    FAIL() << "Expected worker failures";
+  } catch (const AggregateException& error) {
+    EXPECT_EQ(error.exceptions().size(), paths.size());
+    for (const auto& exception : error.exceptions()) {
+      try {
+        std::rethrow_exception(exception);
+      } catch (const std::runtime_error& cause) {
+        EXPECT_STREQ(cause.what(), "injected color reader failure");
+      } catch (...) {
+        ADD_FAILURE() << "Unexpected worker exception type";
+      }
+    }
+  }
+  EXPECT_EQ(reads.load(), static_cast<int>(paths.size()));
+  for (const point3D_t point_id : reconstruction.Point3DIds()) {
+    EXPECT_EQ(reconstruction.Point3D(point_id).color, original_color);
+  }
+  reader->Close();
 }
 
 }  // namespace
