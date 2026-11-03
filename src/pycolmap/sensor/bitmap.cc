@@ -31,9 +31,6 @@ namespace {
 std::atomic<uint64_t> next_bitmap_scope_identity{1};
 
 struct PythonBitmapReaderState {
-  explicit PythonBitmapReaderState(py::function loader)
-      : loader(std::move(loader)) {}
-  py::function loader;
   std::weak_ptr<ScopedBitmapReader> reader;
   const uint64_t identity =
       next_bitmap_scope_identity.fetch_add(1, std::memory_order_relaxed);
@@ -93,21 +90,23 @@ class PythonBitmapReadScope {
     }
     // A final in-flight native reader may release this owner on its worker
     // thread. Python callback destruction must still occur with the GIL held.
-    state_ = std::shared_ptr<PythonBitmapReaderState>(
-        new PythonBitmapReaderState(std::move(loader)),
-        [](PythonBitmapReaderState* state) {
+    auto owned_loader = std::shared_ptr<py::function>(
+        new py::function(std::move(loader)), [](py::function* function) {
           py::gil_scoped_acquire acquire;
-          delete state;
+          delete function;
         });
+    // Statistics outlive closure without retaining the pixel provider.
+    state_ = std::make_shared<PythonBitmapReaderState>();
     // Reader retains callback state for admitted in-flight reads. The reverse
     // state->reader edge is weak, so this does not create an ownership cycle.
     const auto state = state_;
     reader_ = ScopedBitmapReader::Create(
         paths,
-        [state, mode](const std::filesystem::path& path,
-                      bool as_rgb,
-                      bool linearize,
-                      Bitmap* target) {
+        [state, owned_loader = std::move(owned_loader), mode](
+            const std::filesystem::path& path,
+            bool as_rgb,
+            bool linearize,
+            Bitmap* target) {
           const bool gray_only = mode == PayloadMode::kGray8;
           if (gray_only && as_rgb) {
             throw std::invalid_argument(
@@ -121,7 +120,7 @@ class PythonBitmapReadScope {
           py::gil_scoped_acquire acquire;
           py::object pixels;
           try {
-            pixels = state->loader(path);
+            pixels = (*owned_loader)(path);
           } catch (const py::error_already_set& error) {
             throw std::runtime_error(std::string("Bitmap RGB8 loader: ") +
                                      error.what());
