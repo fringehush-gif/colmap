@@ -148,6 +148,10 @@ std::unique_ptr<FeatureMatcher> FlexGlueTest::matcher_;
 
 TEST(FlexGlueMatchingOptions, Check) {
   FlexGlueMatchingOptions options;
+  // These options checks do not load models. Supply nonempty paths even when
+  // DOWNLOAD_ENABLED is off and the default model URIs are empty.
+  options.descriptor_model_path = "unused_descriptor.onnx";
+  options.matcher_model_path = "unused_matcher.onnx";
   // The image path is required and must exist.
   EXPECT_FALSE(options.Check());
   options.image_path = (CreateTestDir() / "does_not_exist").string();
@@ -176,10 +180,10 @@ TEST(FlexGlueMatchingOptions, Check) {
   options.feature_cache_size = 128;
   options.descriptor_model_path.clear();
   EXPECT_FALSE(options.Check());
-  options.descriptor_model_path = kDefaultFlexGlueDescriptorUri;
+  options.descriptor_model_path = "unused_descriptor.onnx";
   options.matcher_model_path.clear();
   EXPECT_FALSE(options.Check());
-  options.matcher_model_path = kDefaultFlexGlueMatcherUri;
+  options.matcher_model_path = "unused_matcher.onnx";
   // Without the float16 matcher, the float32 matcher is used.
   options.matcher_model_path_fp16.clear();
   EXPECT_TRUE(options.Check());
@@ -187,6 +191,8 @@ TEST(FlexGlueMatchingOptions, Check) {
 
 TEST(FlexGlueMatchingOptions, FeatureMatchingOptions) {
   FeatureMatchingOptions options(FeatureMatcherType::FLEXGLUE);
+  options.flexglue->descriptor_model_path = "unused_descriptor.onnx";
+  options.flexglue->matcher_model_path = "unused_matcher.onnx";
   options.flexglue->image_path = CreateTestDir().string();
   EXPECT_TRUE(options.Check());
   // FlexGlue only uses the keypoints, and the matching workers then neither
