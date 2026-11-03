@@ -6,7 +6,6 @@
 #include "colmap/util/logging.h"
 
 #include <algorithm>
-#include <algorithm>
 #include <iostream>
 
 namespace colmap {

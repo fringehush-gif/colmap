@@ -137,7 +137,11 @@ TEST(CudaDeviceHasComputeCapability, ValidDevice) {
   if (num_devices == 0) {
     GTEST_SKIP() << "No CUDA device available";
   }
+#ifdef COLMAP_HIP_ENABLED
+  EXPECT_FALSE(CudaDeviceHasComputeCapability(0, /*major=*/0));
+#else
   EXPECT_TRUE(CudaDeviceHasComputeCapability(0, /*major=*/0));
+#endif
   EXPECT_FALSE(CudaDeviceHasComputeCapability(0, /*major=*/100));
   // A device with compute capability 8.x also has 7.x.
   if (CudaDeviceHasComputeCapability(0, /*major=*/8)) {
