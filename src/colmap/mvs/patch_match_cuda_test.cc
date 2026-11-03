@@ -23,6 +23,7 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -1374,6 +1375,114 @@ TEST_P(PatchMatchCudaTest, SeparateCalibrationsMatchSerialOnSameDevice) {
       ExpectNonempty(actual_b, concurrent_b, filter);
       ExpectEquivalent(expected_a, actual_a);
       ExpectEquivalent(expected_b, actual_b);
+    }
+  }
+}
+
+template <typename Run>
+void ExpectProbabilityDomainFailure(Run&& run) {
+  try {
+    run();
+    ADD_FAILURE() << "Run returned after a rejected probability";
+  } catch (const std::invalid_argument& error) {
+    const std::string message(error.what());
+    EXPECT_NE(
+        message.find("UNORM16 probability saw nonfinite/out-of-range state"),
+        std::string::npos)
+        << message;
+  }
+}
+
+TEST_F(CudaTest, ProbabilityFailureIsRejectedByRunBeforeReadback) {
+  for (const int bits : {0, 16, 24, 20}) {
+    for (const bool oct40 : {false, true}) {
+      for (const bool rerun : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "bits=" << bits << " oct40="
+                                          << oct40 << " rerun=" << rerun);
+        Inputs inputs = MakeInputs(0, 2, 25, 33);
+        PatchMatch::Problem problem;
+        problem.ref_image_idx = 0;
+        problem.src_image_idxs = {1, 2};
+        problem.images = &inputs.images;
+        problem.depth_maps = &inputs.depths;
+        problem.normal_maps = &inputs.normals;
+        auto options = MakeOptions(false, false, false);
+        options.window_radius = 5;
+        options.window_step = 1;
+        options.checkpoint_hmm = true;
+        options.probability_unorm16 = true;
+        options.normal_oct40 = oct40;
+        options.ncc_cost_unorm16 = bits == 16;
+        options.ncc_cost_fixed24 = bits == 24;
+        options.ncc_cost_fixed20 = bits == 20;
+        ASSERT_TRUE(options.Check());
+        PatchMatchCuda owner(options, problem);
+        // Exercise normal completion independently of probability readback.
+        ASSERT_NO_THROW(owner.Run());
+        EXPECT_NO_THROW(owner.GetDepthMap());
+        if (!rerun) {
+          PatchMatchCuda fresh(options, problem);
+          PatchMatchCudaTestPeer::PoisonProbability(fresh);
+          ExpectProbabilityDomainFailure([&] { fresh.Run(); });
+        } else {
+          PatchMatchCudaTestPeer::PoisonProbability(owner);
+          ExpectProbabilityDomainFailure([&] { owner.Run(); });
+          if (oct40) {
+            EXPECT_ANY_THROW(owner.GetDepthMap());
+            EXPECT_ANY_THROW(owner.GetNormalMap());
+            EXPECT_ANY_THROW(owner.GetSelProbMap());
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST_F(CudaTest, ProbabilityFailureInvalidatesBatchResults) {
+  for (const bool oct40 : {false, true}) {
+    Inputs a = MakeInputs(0, 2, 25, 33), b = MakeInputs(1, 2, 25, 33),
+           c = MakeInputs(2, 2, 25, 33);
+    auto problem_for = [](Inputs& inputs) {
+      PatchMatch::Problem p;
+      p.ref_image_idx = 0;
+      p.src_image_idxs = {1, 2};
+      p.images = &inputs.images;
+      p.depth_maps = &inputs.depths;
+      p.normal_maps = &inputs.normals;
+      return p;
+    };
+    auto pa = problem_for(a), pb = problem_for(b), pc = problem_for(c);
+    auto options = MakeOptions(false, false, false);
+    options.window_radius = 5;
+    options.window_step = 1;
+    options.num_iterations = 5;
+    options.checkpoint_hmm = true;
+    options.probability_unorm16 = true;
+    options.ncc_cost_fixed20 = true;
+    options.normal_oct40 = oct40;
+    ASSERT_TRUE(options.Check());
+    PatchMatchCuda first(options, pa), second(options, pb), third(options, pc);
+    struct Streams {
+      std::array<cudaStream_t, 3> values{};
+      ~Streams() {
+        for (auto stream : values)
+          if (stream) (void)cudaStreamDestroy(stream);
+      }
+    } streams;
+    for (auto& stream : streams.values)
+      CUDA_SAFE_CALL(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    const auto [sa, sb, sc] = streams.values;
+    ASSERT_NO_THROW(
+        (RunPatchMatchBatch({&first, &second, &third}, {sa, sb, sc})));
+    PatchMatchCudaTestPeer::PoisonProbability(second);
+    ExpectProbabilityDomainFailure(
+        [&] { RunPatchMatchBatch({&first, &second, &third}, {sa, sb, sc}); });
+    for (const auto* owner : {&first, &second, &third}) {
+      if (oct40) {
+        EXPECT_ANY_THROW(owner->GetDepthMap());
+        EXPECT_ANY_THROW(owner->GetNormalMap());
+        EXPECT_ANY_THROW(owner->GetSelProbMap());
+      }
     }
   }
 }

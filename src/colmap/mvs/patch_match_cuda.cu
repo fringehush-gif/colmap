@@ -2170,6 +2170,8 @@ void PatchMatchCuda::Run() {
   consistency_mask_valid_ = false;
   try {
     RunImpl();
+    if (prev_sel_prob_unorm16_map_)
+      prev_sel_prob_unorm16_map_->ValidateStoredRange();
     CheckNormalDomain();
     results_valid_ = true;
   } catch (...) {
@@ -2247,8 +2249,6 @@ void PatchMatchCuda::RunImpl() {
 
 #undef CASE_WINDOW_RADIUS
 #undef CASE_WINDOW_STEP
-  if (prev_sel_prob_unorm16_map_)
-    prev_sel_prob_unorm16_map_->ValidateStoredRange();
 }
 
 GpuMatView<float> PatchMatchCuda::GeometryView(

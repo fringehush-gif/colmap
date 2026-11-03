@@ -6,5 +6,6 @@ class PatchMatchCuda;
 class PatchMatchCudaTestPeer {
  public:
   static void PoisonOctNormal(PatchMatchCuda& owner);
+  static void PoisonProbability(PatchMatchCuda& owner);
 };
 }  // namespace colmap::mvs
