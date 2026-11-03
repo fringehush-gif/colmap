@@ -204,7 +204,7 @@ struct BitmapReaderRegistry {
     std::weak_ptr<ScopedBitmapReader> reader;
   };
   std::mutex mutex;
-  FlatHashMap<std::string, Entry> entries;
+  FlatHashMap<std::filesystem::path::string_type, Entry> entries;
   std::atomic<size_t> count{0};
 };
 
@@ -213,8 +213,9 @@ BitmapReaderRegistry& ReaderRegistry() {
   return registry;
 }
 
-std::string ReaderPath(const std::filesystem::path& path) {
-  return std::filesystem::absolute(path).lexically_normal().generic_string();
+std::filesystem::path::string_type ReaderPath(
+    const std::filesystem::path& path) {
+  return std::filesystem::absolute(path).lexically_normal().native();
 }
 
 struct OIIOMetaData : public Bitmap::MetaData {
@@ -296,8 +297,10 @@ std::vector<uint8_t> ConvertColorSpace(const uint8_t* src_data,
   const OIIO::ImageBuf src(image_spec, const_cast<uint8_t*>(src_data));
   std::vector<uint8_t> tgt_data(height * pitch);
   OIIO::ImageBuf tgt(image_spec, tgt_data.data());
-  THROW_CHECK(OIIO::ImageBufAlgo::colorconvert(
-      tgt, src, OIIOFromStdStringView(from), OIIOFromStdStringView(to)));
+  if (!OIIO::ImageBufAlgo::colorconvert(
+          tgt, src, OIIOFromStdStringView(from), OIIOFromStdStringView(to))) {
+    THROW_CHECK(false) << tgt.geterror();
+  }
   return tgt_data;
 }
 
@@ -352,9 +355,9 @@ bool IsEquivalentColorSpace(const std::string_view& colorspace1,
 }  // namespace
 
 ScopedBitmapReader::ScopedBitmapReader(
-    std::vector<std::string> paths,
+    std::vector<PathKey> paths,
     Callback callback,
-    FlatHashMap<std::string, std::pair<int, int>> image_sizes)
+    FlatHashMap<PathKey, std::pair<int, int>> image_sizes)
     : paths_(std::move(paths)),
       callback_(std::move(callback)),
       image_sizes_(std::move(image_sizes)) {}
@@ -371,9 +374,9 @@ std::shared_ptr<ScopedBitmapReader> ScopedBitmapReader::Create(
     throw std::invalid_argument(
         "Bitmap reader dimensions must cover its exact roster");
   }
-  FlatHashMap<std::string, std::pair<int, int>> image_sizes;
-  std::vector<std::string> keys;
-  FlatHashSet<std::string> unique;
+  FlatHashMap<PathKey, std::pair<int, int>> image_sizes;
+  std::vector<PathKey> keys;
+  FlatHashSet<PathKey> unique;
   keys.reserve(paths.size());
   for (const auto& path : paths) {
     if (!path.is_absolute()) {
@@ -946,8 +949,8 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
     }
     input->close();
     // Match ReadFromFile followed by CloneAsGrey: retain the complete decoder
-    // ImageSpec (including EXIF), changing only its channel count. Preserve the
-    // bitmap's existing linear_colorspace_ field, also for reused objects.
+    // ImageSpec (including EXIF), changing only its channel count. This path
+    // does not linearize the decoded pixels, including for reused bitmaps.
     auto meta_data = std::make_unique<OIIOMetaData>();
     meta_data->image_spec = image_spec;
     meta_data->image_spec.nchannels = 1;
@@ -956,12 +959,15 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
     width_ = width;
     height_ = height;
     channels_ = 1;
+    linear_colorspace_ = false;
     return true;
   }
 
   width_ = width;
   height_ = height;
   channels_ = channels;
+  // Decoding replaces the pixels before optional colorspace conversion.
+  linear_colorspace_ = false;
   data_.resize(width_ * height_ * channels_);
   // Note that OIIO supports reading a subset of channels.
   if (!input->read_image(
@@ -980,11 +986,14 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
 
   if (linearize_colorspace) {
     const std::string colorspace = image_spec["oiio:ColorSpace"];
-    if (IsEquivalentColorSpace(colorspace, "linear")) {
+    // An unspecified source space cannot establish linear pixel values.
+    THROW_CHECK(!colorspace.empty()) << "Image colorspace is unspecified";
+    if (!IsEquivalentColorSpace(colorspace, "linear")) {
       data_ = ConvertColorSpace(
           data_.data(), width_, height_, channels_, colorspace, "linear");
     }
   }
+  linear_colorspace_ = linearize_colorspace;
 
   if (as_rgb && channels_ != 3) {
     *this = CloneAsRGB();
@@ -1022,6 +1031,9 @@ bool Bitmap::Write(const std::filesystem::path& path,
     maybe_linearized_output_data = ConvertColorSpace(
         data_.data(), width_, height_, channels_, "linear", *colorspace);
     output_data_ptr = maybe_linearized_output_data.data();
+  } else if (linear_colorspace_) {
+    // The source metadata remains the destination for later inverse writes.
+    SetImageSpecColorSpace(meta_data.image_spec, "linear");
   }
 
   // OIIO writers that encode IPTC metadata (e.g. JPEG, or TIFF with
