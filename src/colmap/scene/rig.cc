@@ -12,6 +12,8 @@
 namespace colmap {
 namespace {
 
+using ImageNameToImage = NodeHashMap<std::string, const Image*>;
+
 // Update the database with extracted rig and calibrations from the given
 // reconstruction derived as follows:
 //   * Compute the sensor_from_rig poses as the average of the relative
@@ -19,7 +21,7 @@ namespace {
 //   * Set the camera calibration parameters from the first frame with an image
 //     of the camera.
 void UpdateRigAndCameraCalibsFromReconstruction(
-    const Reconstruction& reconstruction,
+    const ImageNameToImage& image_name_to_image,
     const std::map<std::string, std::vector<const Image*>>&
         frame_name_to_images,
     Rig& rig,
@@ -40,8 +42,9 @@ void UpdateRigAndCameraCalibsFromReconstruction(
       continue;
     }
 
+    const auto ref_it = image_name_to_image.find(ref_image->Name());
     const Image* rig_calib_ref_image =
-        reconstruction.FindImageWithName(ref_image->Name());
+        ref_it == image_name_to_image.end() ? nullptr : ref_it->second;
     if (rig_calib_ref_image == nullptr || !rig_calib_ref_image->HasPose()) {
       continue;
     }
@@ -55,8 +58,9 @@ void UpdateRigAndCameraCalibsFromReconstruction(
 
     for (const Image* image : images) {
       if (image->CameraId() != ref_image->CameraId()) {
+        const auto image_it = image_name_to_image.find(image->Name());
         const Image* rig_calib_image =
-            reconstruction.FindImageWithName(image->Name());
+            image_it == image_name_to_image.end() ? nullptr : image_it->second;
         if (rig_calib_image == nullptr || !rig_calib_image->HasPose()) {
           continue;
         }
@@ -108,8 +112,10 @@ void UpdateRigAndCameraCalibsFromReconstruction(
   database.UpdateRig(rig);
 }
 
-void UpdateRigsAndFramesFromDatabase(const Database& database,
-                                     Reconstruction* reconstruction) {
+void UpdateRigsAndFramesFromDatabase(
+    const Database& database,
+    Reconstruction* reconstruction,
+    const ImageNameToImage& image_name_to_image) {
   const std::vector<Frame> database_frames = database.ReadAllFrames();
 
   NodeHashMap<rig_t, Rig> database_rigs;
@@ -120,13 +126,6 @@ void UpdateRigsAndFramesFromDatabase(const Database& database,
 
   NodeHashMap<rig_t, Rig> reconstruction_rigs;
   reconstruction_rigs.reserve(database_rigs.size());
-
-  // Create O(1) lookup table from image names to images.
-  NodeHashMap<std::string, const Image*> image_name_to_image;
-  image_name_to_image.reserve(reconstruction->NumImages());
-  for (const auto& [_, image] : reconstruction->Images()) {
-    image_name_to_image.emplace(image.Name(), &image);
-  }
 
   auto visit_frame_data =
       [&database, &image_name_to_image, &database_frames](
@@ -325,12 +324,24 @@ void ApplyRigConfig(const std::vector<RigConfig>& configs,
   const std::vector<Image> images = database.ReadAllImages();
   std::set<image_t> configured_image_ids;
 
+  // Match only database images against the reconstruction's image namespace.
+  // Reuse the lookup when deriving calibration and rebuilding rig frames.
+  ImageNameToImage image_name_to_image;
+  if (reconstruction != nullptr) {
+    image_name_to_image.reserve(reconstruction->NumImages());
+    for (const auto& [_, image] : reconstruction->Images()) {
+      image_name_to_image.emplace(image.Name(), &image);
+    }
+  }
+
   for (const RigConfig& config : configs) {
     Rig rig;
 
     const size_t num_cameras = config.cameras.size();
 
     std::vector<std::optional<camera_t>> camera_ids(num_cameras);
+    std::vector<std::set<camera_t>> updated_reconstruction_camera_ids(
+        num_cameras);
     std::map<std::string, std::vector<const Image*>> frame_name_to_images;
     for (const Image& image : images) {
       for (size_t camera_idx = 0; camera_idx < num_cameras; ++camera_idx) {
@@ -353,9 +364,25 @@ void ApplyRigConfig(const std::vector<RigConfig>& configs,
               Camera database_camera = database.ReadCamera(image.CameraId());
               CopyCameraIntrinsics(*config_camera.camera, database_camera);
               database.UpdateCamera(database_camera);
-              if (reconstruction != nullptr) {
-                auto& reconstruction_camera =
-                    reconstruction->Camera(image.CameraId());
+            }
+          }
+          if (config_camera.camera.has_value() && reconstruction != nullptr) {
+            const auto reconstruction_image_it =
+                image_name_to_image.find(image.Name());
+            if (reconstruction_image_it != image_name_to_image.end()) {
+              const Image& reconstruction_image =
+                  *reconstruction_image_it->second;
+              const camera_t reconstruction_camera_id =
+                  reconstruction_image.CameraId();
+              THROW_CHECK(reconstruction->ExistsCamera(reconstruction_camera_id));
+              Camera& reconstruction_camera =
+                  reconstruction->Camera(reconstruction_camera_id);
+              THROW_CHECK(reconstruction_image.HasCameraPtr());
+              THROW_CHECK_EQ(reconstruction_image.CameraPtr(),
+                             &reconstruction_camera);
+              if (updated_reconstruction_camera_ids[camera_idx]
+                      .insert(reconstruction_camera_id)
+                      .second) {
                 CopyCameraIntrinsics(*config_camera.camera,
                                      reconstruction_camera);
               }
@@ -412,7 +439,7 @@ void ApplyRigConfig(const std::vector<RigConfig>& configs,
 
     if (reconstruction != nullptr) {
       UpdateRigAndCameraCalibsFromReconstruction(
-          *reconstruction, frame_name_to_images, rig, database);
+          image_name_to_image, frame_name_to_images, rig, database);
     }
   }
 
@@ -439,7 +466,8 @@ void ApplyRigConfig(const std::vector<RigConfig>& configs,
   }
 
   if (reconstruction != nullptr) {
-    UpdateRigsAndFramesFromDatabase(database, reconstruction);
+    UpdateRigsAndFramesFromDatabase(
+        database, reconstruction, image_name_to_image);
   }
 }
 

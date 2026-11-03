@@ -10,6 +10,7 @@
 
 #include <fstream>
 #include <locale>
+#include <utility>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -223,6 +224,38 @@ void CreateTestData(int num_frames,
   }
 }
 
+void CreateRemappedPartialReconstruction(
+    const Reconstruction& source,
+    const camera_t id_offset,
+    const std::string& omitted_image_name,
+    Reconstruction* destination) {
+  for (const auto& [_, camera] : source.Cameras()) {
+    Camera remapped_camera = camera;
+    remapped_camera.camera_id += id_offset;
+    destination->AddCameraWithTrivialRig(std::move(remapped_camera));
+  }
+  for (const auto& [_, image] : source.Images()) {
+    if (image.Name() == omitted_image_name) {
+      continue;
+    }
+    const Rigid3d cam_from_world = image.CamFromWorld();
+    Image remapped_image = image;
+    remapped_image.ResetCameraPtr();
+    remapped_image.ResetFramePtr();
+    remapped_image.SetImageId(image.ImageId() + id_offset);
+    remapped_image.SetCameraId(image.CameraId() + id_offset);
+    remapped_image.SetFrameId(remapped_image.ImageId());
+    destination->AddImageWithTrivialFrame(std::move(remapped_image),
+                                          cam_from_world);
+  }
+}
+
+void ExpectIntrinsicsEqual(const Camera& actual, const Camera& expected) {
+  EXPECT_EQ(actual.model_id, expected.model_id);
+  EXPECT_EQ(actual.params, expected.params);
+  EXPECT_EQ(actual.source, expected.source);
+}
+
 TEST(ApplyRigConfig, WithReconstruction) {
   auto database = Database::Open(kInMemorySqliteDatabasePath);
   Reconstruction reconstruction;
@@ -312,6 +345,137 @@ TEST(ApplyRigConfig, WithDifferingDatabaseAndReconstructionIds) {
   EXPECT_EQ(differing_reconstruction.NumRigs(), 1);
   EXPECT_EQ(differing_reconstruction.NumFrames(), 5);
   EXPECT_EQ(differing_reconstruction.NumRegFrames(), 5);
+}
+
+TEST(ApplyRigConfig, ExplicitIntrinsicsWithMatchingCameraIds) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  Reconstruction reconstruction;
+  CreateTestData(5, 2, database.get(), &reconstruction);
+  const Image* first_image =
+      reconstruction.FindImageWithName("camera0_frame1");
+  const Image* other_image =
+      reconstruction.FindImageWithName("camera1_frame1");
+  ASSERT_NE(first_image, nullptr);
+  ASSERT_NE(other_image, nullptr);
+  const camera_t camera_id = first_image->CameraId();
+  const Camera* camera_ptr = &reconstruction.Camera(camera_id);
+  const Camera before_other = reconstruction.Camera(other_image->CameraId());
+  const Camera specified = Camera::CreateFromModelId(
+      camera_id, CameraModelId::kOpenCV, 1200.0, 1024, 768);
+
+  RigConfig config;
+  config.cameras.emplace_back().image_prefix = "camera0_";
+  config.cameras[0].ref_sensor = true;
+  config.cameras[0].camera = specified;
+  config.cameras.emplace_back().image_prefix = "camera1_";
+
+  ApplyRigConfig({config}, *database, &reconstruction);
+  EXPECT_EQ(&reconstruction.Camera(camera_id), camera_ptr);
+  ExpectIntrinsicsEqual(database->ReadCamera(camera_id), specified);
+  ExpectIntrinsicsEqual(reconstruction.Camera(camera_id), specified);
+  ExpectIntrinsicsEqual(reconstruction.Camera(before_other.camera_id),
+                        before_other);
+  // All five database-matched images of this sensor share one camera.
+  for (int frame_idx = 1; frame_idx <= 5; ++frame_idx) {
+    const Image* image = reconstruction.FindImageWithName(
+        "camera0_frame" + std::to_string(frame_idx));
+    ASSERT_NE(image, nullptr);
+    EXPECT_EQ(image->CameraId(), camera_id);
+  }
+}
+
+TEST(ApplyRigConfig, ExplicitIntrinsicsWithCollisionAndPartialModel) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  Reconstruction source;
+  CreateTestData(5, 2, database.get(), &source);
+  const Image* first_database_image =
+      source.FindImageWithName("camera0_frame1");
+  const Image* second_sensor_image =
+      source.FindImageWithName("camera1_frame1");
+  ASSERT_NE(first_database_image, nullptr);
+  ASSERT_NE(second_sensor_image, nullptr);
+  const camera_t database_camera_id = first_database_image->CameraId();
+  const camera_t second_database_camera_id = second_sensor_image->CameraId();
+
+  Reconstruction partial;
+  constexpr camera_t kIdOffset = 10;
+  CreateRemappedPartialReconstruction(
+      source, kIdOffset, "camera0_frame1", &partial);
+  ASSERT_EQ(partial.FindImageWithName("camera0_frame1"), nullptr);
+  ASSERT_NE(partial.FindImageWithName("camera0_frame2"), nullptr);
+  Camera unrelated = source.Camera(database_camera_id);
+  partial.AddCamera(unrelated);  // Its ID collides with the database ID.
+  const Camera unrelated_before = partial.Camera(database_camera_id);
+  const camera_t matched_camera_id = database_camera_id + kIdOffset;
+  const Camera* matched_camera_ptr = &partial.Camera(matched_camera_id);
+  const Camera specified = Camera::CreateFromModelId(
+      database_camera_id, CameraModelId::kOpenCV, 1200.0, 1024, 768);
+  const Camera second_specified = Camera::CreateFromModelId(
+      second_database_camera_id, CameraModelId::kOpenCV, 900.0, 1024, 768);
+
+  RigConfig config;
+  config.cameras.emplace_back().image_prefix = "camera0_";
+  config.cameras[0].ref_sensor = true;
+  config.cameras[0].camera = specified;
+  config.cameras.emplace_back().image_prefix = "camera1_";
+  config.cameras[1].camera = second_specified;
+
+  ApplyRigConfig({config}, *database, &partial);
+  EXPECT_EQ(&partial.Camera(matched_camera_id), matched_camera_ptr);
+  ExpectIntrinsicsEqual(database->ReadCamera(database_camera_id), specified);
+  ExpectIntrinsicsEqual(partial.Camera(matched_camera_id), specified);
+  ExpectIntrinsicsEqual(database->ReadCamera(second_database_camera_id),
+                        second_specified);
+  ExpectIntrinsicsEqual(
+      partial.Camera(second_database_camera_id + kIdOffset),
+      second_specified);
+  ExpectIntrinsicsEqual(partial.Camera(database_camera_id), unrelated_before);
+  EXPECT_EQ(partial.NumImages(), 9);
+}
+
+TEST(ApplyRigConfig, ConflictingReconstructionCameraRemainsUnsupported) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  Reconstruction source;
+  CreateTestData(2, 2, database.get(), &source);
+  const Image* first_image = source.FindImageWithName("camera0_frame1");
+  const Image* second_image = source.FindImageWithName("camera1_frame1");
+  ASSERT_NE(first_image, nullptr);
+  ASSERT_NE(second_image, nullptr);
+
+  // Distinct database sensors are mapped to one reconstruction camera.
+  const camera_t shared_camera_id = first_image->CameraId() + 100;
+  Reconstruction shared;
+  Camera shared_camera = source.Camera(first_image->CameraId());
+  shared_camera.camera_id = shared_camera_id;
+  shared.AddCameraWithTrivialRig(std::move(shared_camera));
+  for (const auto& [_, source_image] : source.Images()) {
+    const Rigid3d cam_from_world = source_image.CamFromWorld();
+    Image image = source_image;
+    image.ResetCameraPtr();
+    image.ResetFramePtr();
+    image.SetImageId(source_image.ImageId() + 100);
+    image.SetCameraId(shared_camera_id);
+    image.SetFrameId(image.ImageId());
+    shared.AddImageWithTrivialFrame(std::move(image), cam_from_world);
+  }
+
+  RigConfig config;
+  config.cameras.emplace_back().image_prefix = "camera0_";
+  config.cameras[0].ref_sensor = true;
+  config.cameras[0].camera = Camera::CreateFromModelId(
+      first_image->CameraId(), CameraModelId::kOpenCV, 1200.0, 1024, 768);
+  config.cameras.emplace_back().image_prefix = "camera1_";
+  config.cameras[1].camera = Camera::CreateFromModelId(
+      second_image->CameraId(), CameraModelId::kOpenCV, 900.0, 1024, 768);
+
+  // Rig rebuild already refuses a sensor shared by distinct config sensors.
+  // This does not test or imply rollback of earlier database writes.
+  try {
+    ApplyRigConfig({config}, *database, &shared);
+    ADD_FAILURE() << "Expected a shared-sensor rig rebuild failure";
+  } catch (const std::exception& e) {
+    EXPECT_THAT(e.what(), testing::HasSubstr("inserted twice into the rig"));
+  }
 }
 
 TEST(ApplyRigConfig, WithPartialReconstruction) {
