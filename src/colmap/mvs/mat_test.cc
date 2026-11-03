@@ -2,6 +2,8 @@
 
 #include "colmap/mvs/mat.h"
 
+#include "colmap/util/endian.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -370,6 +372,50 @@ TEST_F(MatFileTest, SharedHeaderAcceptsExactByteLimit) {
       }
     }
   }
+}
+
+TEST(Mat, NativeMappingSupport) {
+#if defined(__linux__) || defined(_WIN32)
+  EXPECT_EQ(ImmutableMapRegion::Supported(), IsLittleEndian());
+#endif
+}
+
+TEST_F(MatFileTest, MappedUnicodePathCrossesAllocationBoundaries) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  path_ += std::filesystem::u8path(u8"-\u00e5\u4e2d\U0001f9ed.bin");
+  constexpr size_t width = 259, height = 131;
+  std::vector<uint32_t> bits(3 * width * height);
+  for (size_t i = 0; i < bits.size(); ++i) {
+    bits[i] = 0x3f800000u + static_cast<uint32_t>(i);
+  }
+  WriteMatFile(path_, "259&131&3&" + LittleEndianFloats(bits));
+  {
+    auto source = std::make_shared<ImmutableMapSource>(path_);
+    ImmutableMapRegion whole(source);
+    ImmutableMapRegion stripe(source, 63, 67);
+    source.reset();
+    EXPECT_EQ(stripe.GetMappingBytes(),
+              ImmutableMapRegion::GetWindowReservationBytes(path_, 63, 67));
+    Mat<float> tile;
+    tile.ReadRegion(whole, 1, 63, width - 2, 67);
+    for (size_t row = 63; row < 130; ++row) {
+      for (size_t col = 1; col < width - 1; ++col) {
+        const auto actual = stripe.ReadFloat3(row, col);
+        const auto expected = whole.ReadFloat3(row, col);
+        for (size_t channel = 0; channel < 3; ++channel) {
+          const uint32_t word = bits[(channel * height + row) * width + col];
+          EXPECT_EQ(FloatBits(actual[channel]), word);
+          EXPECT_EQ(FloatBits(expected[channel]), word);
+          EXPECT_EQ(FloatBits(tile.Get(row - 63, col - 1, channel)), word);
+        }
+      }
+    }
+  }
+  // Mapping and source owners must release native handles before replacement.
+  ASSERT_TRUE(std::filesystem::remove(path_));
+  WriteMatFile(path_, "1&1&1&" + LittleEndianFloats({0x80000000u}));
+  ImmutableMapRegion reopened(path_);
+  EXPECT_EQ(FloatBits(reopened.ReadFloat1Sample(0, 0, 1, 1)), 0x80000000u);
 }
 
 TEST_F(MatFileTest, MappedNormalRegionKeepsPlanarBitsAtOddEdge) {

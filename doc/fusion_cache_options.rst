@@ -40,7 +40,8 @@ FP32 normal tiles and exact depth
 Bounded component mode can keep normal tiles rather than decoded whole normal
 maps. The tile and mapped-owner budgets are separate. Mapped bytes describe
 file-backed address space, not an equivalent amount of resident physical RAM.
-Mapped ownership currently requires supported Linux little-endian storage.
+Mapped ownership requires little-endian Linux or Windows storage.
+Mapping charges use the platform mapping granularity.
 
 With normal tiles, ``bounded_cache_neighborhood=1`` can prefill and pin depth
 maps selected for the current image's neighborhood. Fusion can then borrow

@@ -19,7 +19,16 @@
 #include <type_traits>
 #include <vector>
 
-#if defined(__linux__)
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(__linux__)
+#include <sys/stat.h>
+#endif
+
+#if defined(__linux__) || defined(_WIN32)
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #endif
@@ -101,7 +110,7 @@ MappedFloatShape ReadMappedFloatShape(std::ifstream& file,
 struct ImmutableMapSource::Impl {
   MappedFloatShape shape;
   size_t file_bytes = 0;
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   std::unique_ptr<boost::interprocess::file_mapping> file;
 #endif
 };
@@ -112,7 +121,7 @@ struct ImmutableMapRegion::Impl {
   size_t mapped_bytes = 0;
   size_t row_begin = 0, row_count = 0;
   size_t region_count = 1;
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   std::unique_ptr<boost::interprocess::mapped_region> region;
   std::array<std::unique_ptr<boost::interprocess::mapped_region>, 3> planes;
 #endif
@@ -121,7 +130,7 @@ struct ImmutableMapRegion::Impl {
 };
 
 bool ImmutableMapRegion::Supported() {
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   return IsLittleEndian();
 #else
   return false;
@@ -137,7 +146,7 @@ size_t MappingExtentBytes(const MappedFloatShape& shape) {
 
 size_t MappingPageCharge(const std::uintmax_t bytes) {
   THROW_CHECK(ImmutableMapRegion::Supported());
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   const size_t page = boost::interprocess::mapped_region::get_page_size();
   THROW_CHECK_GT(page, 0);
   THROW_CHECK_LE(bytes, std::numeric_limits<size_t>::max() - (page - 1));
@@ -159,7 +168,7 @@ WindowPlan PlanWindow(const MappedFloatShape& shape,
   THROW_CHECK_GT(row_count, 0);
   THROW_CHECK_LT(row_begin, shape.height);
   THROW_CHECK_LE(row_count, shape.height - row_begin);
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   const size_t page = boost::interprocess::mapped_region::get_page_size();
   THROW_CHECK_GT(page, 0);
   THROW_CHECK_LE(shape.width,
@@ -231,13 +240,25 @@ ImmutableMapSource::ImmutableMapSource(const std::filesystem::path& path)
   impl_->shape = ReadMappedFloatShape(input, path);
   input.close();
   THROW_CHECK(input);
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   namespace bip = boost::interprocess;
   impl_->file =
       std::make_unique<bip::file_mapping>(path.c_str(), bip::read_only);
-  bip::offset_t file_bytes = 0;
-  THROW_CHECK(impl_->file->get_size(file_bytes));
+  // Query the same opened file, including on Boost versions before get_size().
+#if defined(_WIN32)
+  LARGE_INTEGER native_size;
+  THROW_CHECK(
+      GetFileSizeEx(impl_->file->get_mapping_handle().handle, &native_size));
+  const auto file_bytes = native_size.QuadPart;
+#else
+  struct stat native_stat{};
+  THROW_CHECK_EQ(fstat(impl_->file->get_mapping_handle().handle, &native_stat),
+                 0);
+  const auto file_bytes = native_stat.st_size;
+#endif
   THROW_CHECK_GE(file_bytes, 0);
+  THROW_CHECK_LE(static_cast<std::uintmax_t>(file_bytes),
+                 std::numeric_limits<size_t>::max());
   THROW_CHECK_GE(static_cast<size_t>(file_bytes),
                  MappingExtentBytes(impl_->shape));
   impl_->file_bytes = static_cast<size_t>(file_bytes);
@@ -269,7 +290,7 @@ ImmutableMapRegion::ImmutableMapRegion(
   const size_t start = impl_->shape.payload_start;
   const size_t mapped_bytes = MappingExtentBytes(impl_->shape);
   impl_->mapped_bytes = MappingPageCharge(mapped_bytes);
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   namespace bip = boost::interprocess;
   THROW_CHECK_LE(
       mapped_bytes,
@@ -301,7 +322,7 @@ ImmutableMapRegion::ImmutableMapRegion(
   impl_->row_begin = row_begin;
   impl_->row_count = row_count;
   impl_->region_count = 3;
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   namespace bip = boost::interprocess;
   for (size_t channel = 0; channel < 3; ++channel) {
     THROW_CHECK_GE(impl_->source->impl_->file_bytes,

@@ -2721,12 +2721,14 @@ TEST(StereoFusion, SparseDepthCancellationFailureAndReuse) {
   options.bounded_cache_normal_mapped_bytes = 1 << 20;
   options.bounded_cache_normal_mapped_files = 4;
   options.cache_size = 20000.0 / (1ULL << 30);
-  StereoFusion uncompressed(options, root, "COLMAP", "", "geometric");
-  uncompressed.Run();
-  EXPECT_FALSE(
-      StereoFusionExactDepthTestPeer::Cache(uncompressed).UsesCompactDepth());
-  EXPECT_EQ(uncompressed.GetFusedPointsVisibility(),
-            reference.GetFusedPointsVisibility());
+  {
+    StereoFusion uncompressed(options, root, "COLMAP", "", "geometric");
+    uncompressed.Run();
+    EXPECT_FALSE(
+        StereoFusionExactDepthTestPeer::Cache(uncompressed).UsesCompactDepth());
+    EXPECT_EQ(uncompressed.GetFusedPointsVisibility(),
+              reference.GetFusedPointsVisibility());
+  }
   options.bounded_cache_compact_depth = true;
   StereoFusion fusion(options, root, "COLMAP", "", "geometric");
   bool cancelled = false;
@@ -2741,19 +2743,33 @@ TEST(StereoFusion, SparseDepthCancellationFailureAndReuse) {
   EXPECT_TRUE(fusion.GetFusedPoints().empty());
   ASSERT_TRUE(fusion.GetBoundedCacheStats());
   EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  const auto path = root / "stereo/normal_maps" / (names[0] + ".geometric.bin");
+  Mat<float> saved;
+  saved.Read(path);
+  bool injected = false;
+  fusion.SetCheckIfStoppedFunc([&] {
+    // Run replaces the old workspace before this callback. Windows cannot
+    // truncate inputs while that workspace still retains their mappings.
+    if (!injected) {
+      std::ofstream file;
+      file.exceptions(std::ios::failbit | std::ios::badbit);
+      file.open(path, std::ios::binary | std::ios::trunc);
+      file << "30&20&3&";
+      file.close();
+      injected = true;
+    }
+    return false;
+  });
+  EXPECT_THROW(fusion.Run(), std::exception);
+  ASSERT_TRUE(injected);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  saved.Write(path);
   bool packed_observed = false;
   fusion.SetCheckIfStoppedFunc([&] {
     packed_observed |=
         StereoFusionExactDepthTestPeer::HasPackedResident(fusion);
     return false;
   });
-  const auto path = root / "stereo/normal_maps" / (names[0] + ".geometric.bin");
-  Mat<float> saved;
-  saved.Read(path);
-  std::ofstream(path, std::ios::binary | std::ios::trunc) << "30&20&3&";
-  EXPECT_THROW(fusion.Run(), std::exception);
-  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
-  saved.Write(path);
   for (int repeat = 0; repeat < 2; ++repeat) {
     packed_observed = false;
     fusion.Run();
