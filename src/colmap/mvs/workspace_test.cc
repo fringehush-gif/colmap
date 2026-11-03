@@ -1251,6 +1251,43 @@ TEST(BoundedWorkspaceBase, ReservationCoalescingAndPinnedEviction) {
       EXPECT_LE(mapped_stats.peak_charged_bytes, mapped_file_bytes);
     }
     {
+      // Four pinned tiles force several metadata slots to grow together.
+      Workspace::Options metadata_options = options;
+      constexpr size_t kTileBytes = 2 * 2 * 3 * sizeof(float);
+      metadata_options.cache_size =
+          static_cast<double>(4 * kTileBytes + 1) / (1024.0 * 1024.0 * 1024.0);
+      BoundedWorkspace metadata(metadata_options);
+      EXPECT_EQ(metadata.GetNormalTileReservationBytes(first, 2), kTileBytes);
+      std::vector<BoundedWorkspace::ImageLease> pins;
+      pins.reserve(4);
+      for (size_t col = 0; col < 8; col += 2) {
+        pins.push_back(metadata.AcquireNormalTile(first, 0, col, 2));
+        ASSERT_TRUE(pins.back());
+      }
+      EXPECT_EQ(metadata.GetTileMetadataStats().slot_count, 4);
+      EXPECT_EQ(metadata.GetTileMetadataStats().live, 4);
+      EXPECT_EQ(metadata.GetTileMetadataStats().free, 0);
+      EXPECT_EQ(pins[1]->GetNormal(0, 2).z(), 1.0f);
+
+      pins.front().reset();
+      metadata.FailNextTileKeyPublicationForTesting();
+      EXPECT_THROW(metadata.AcquireNormalTile(first, 0, 8, 2), std::bad_alloc);
+      EXPECT_EQ(metadata.GetTileMetadataStats().slot_count, 4);
+      EXPECT_EQ(metadata.GetTileMetadataStats().live, 3);
+      EXPECT_EQ(metadata.GetTileMetadataStats().free, 1);
+      EXPECT_EQ(metadata.GetCacheStats().reserved_bytes, 0);
+      EXPECT_EQ(pins[1]->GetNormal(0, 2).z(), 1.0f);
+
+      auto reused = metadata.AcquireNormalTile(first, 0, 8, 2);
+      ASSERT_TRUE(reused);
+      EXPECT_EQ(reused->GetNormal(0, 8).z(), 1.0f);
+      EXPECT_EQ(metadata.GetTileMetadataStats().slot_count, 4);
+      EXPECT_EQ(metadata.GetTileMetadataStats().live, 4);
+      EXPECT_EQ(metadata.GetTileMetadataStats().free, 0);
+      EXPECT_LE(metadata.GetCacheStats().peak_charged_bytes,
+                metadata.GetCacheStats().capacity_bytes);
+    }
+    {
       // A direct sample pins its owner through eviction. Releasing the only
       // file slot lets a waiting view progress without decoded tile entries.
       BoundedWorkspace mapped(options);

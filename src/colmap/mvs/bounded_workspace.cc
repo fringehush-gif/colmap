@@ -40,6 +40,18 @@ size_t CheckedAddBytes(const size_t lhs, const size_t rhs) {
   return lhs + rhs;
 }
 
+template <typename T>
+void ReserveMetadata(const size_t required, std::vector<T>& values) {
+  if (required <= values.capacity()) return;
+  if (required > values.max_size()) {
+    throw std::length_error("Workspace tile metadata exceeds vector max_size");
+  }
+  const size_t doubled = values.capacity() > values.max_size() / 2
+                             ? values.max_size()
+                             : values.capacity() * 2;
+  values.reserve(std::max(required, doubled));
+}
+
 size_t CheckedRasterBytes(const size_t width,
                           const size_t height,
                           const size_t bytes_per_pixel) {
@@ -1199,15 +1211,15 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
     // All reserves can fail before logical mutation. Retire may later return
     // any dynamic key without allocating because free_tile_keys is reserved
     // for every dynamic slot created here.
-    state->active_keys.reserve(state->active_keys.size() + 1);
+    ReserveMetadata(state->active_keys.size() + 1, state->active_keys);
     if (key < 0) {
       if (state->free_tile_keys.empty()) {
         THROW_CHECK_LT(state->entries.size(),
                        static_cast<size_t>(std::numeric_limits<int>::max()));
-        state->entries.reserve(state->entries.size() + 1);
-        state->load_bytes.reserve(state->load_bytes.size() + 1);
-        state->free_tile_keys.reserve(state->entries.size() + 1 -
-                                      state->base_keys);
+        ReserveMetadata(state->entries.size() + 1, state->entries);
+        ReserveMetadata(state->load_bytes.size() + 1, state->load_bytes);
+        ReserveMetadata(state->entries.size() + 1 - state->base_keys,
+                        state->free_tile_keys);
         key = static_cast<int>(state->entries.size());
         state->entries.emplace_back();
         state->load_bytes.push_back(0);
