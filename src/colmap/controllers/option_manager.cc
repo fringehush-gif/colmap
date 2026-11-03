@@ -1125,6 +1125,12 @@ void OptionManager::AddPatchMatchStereoOptions() {
       "Retain rotated CUDA buffers between sweeps. Increases GPU memory "
       "with image size and source count; disable for memory-limited jobs.");
   AddDefaultOption(
+      "PatchMatchStereo.normal_oct40",
+      &patch_match_stereo->normal_oct40,
+      "Store reference normals as lossy octahedral direction and magnitude "
+      "in five bytes per value before padding. Requires CUDA and may change "
+      "depth and normal results.");
+  AddDefaultOption(
       "PatchMatchStereo.checkpoint_hmm",
       &patch_match_stereo->checkpoint_hmm,
       "Reduce GPU memory by checkpointing backward HMM messages. Replays "

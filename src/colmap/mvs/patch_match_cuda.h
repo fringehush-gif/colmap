@@ -32,6 +32,9 @@ class Fixed24NccCostMap;
 struct Fixed24NccCostView;
 class Fixed20NccCostMap;
 struct Fixed20NccCostView;
+#ifndef COLMAP_HIP_ENABLED
+class OctNormalMap;
+#endif
 
 class PatchMatchCuda {
  public:
@@ -59,6 +62,7 @@ class PatchMatchCuda {
 
  private:
 #ifndef COLMAP_HIP_ENABLED
+  friend class PatchMatchCudaTestPeer;
   friend void RunPatchMatchPair(PatchMatchCuda& first,
                                 PatchMatchCuda& second,
                                 cudaStream_t first_stream,
@@ -71,9 +75,12 @@ class PatchMatchCuda {
             bool kCheckpointHmm,
             int kCostBits = 0>
   void RunWithWindowSizeAndStep();
+  void RunImpl();
 
   GpuMatView<float> GeometryView(const GpuMat<float>& owner) const;
   Mat<float> GeometryCopyToMat(const GpuMat<float>& owner) const;
+  auto NormalView() const;
+  void CheckNormalDomain() const;
 
   void ComputeCudaConfig();
 
@@ -98,6 +105,8 @@ class PatchMatchCuda {
   void EnsureGeometryRotationMemory();
   static size_t GeometryBytes(const GpuMat<float>& depth,
                               const GpuMat<float>& normal);
+  static size_t GeometryBytes(const GpuMat<float>& depth,
+                              const OctNormalMap& normal);
   void BindReusableRefImageTexture();
   void RotateWithBufferReuse(bool pack_geometry);
 #endif
@@ -170,6 +179,9 @@ class PatchMatchCuda {
   std::unique_ptr<GpuMat<float>> ref_squared_sum_image_;
   std::unique_ptr<GpuMat<float>> depth_map_;
   std::unique_ptr<GpuMat<float>> normal_map_;
+#ifndef COLMAP_HIP_ENABLED
+  std::unique_ptr<OctNormalMap> oct_normal_map_;
+#endif
   std::unique_ptr<PatchMatchStateMap> sel_prob_map_;
   std::unique_ptr<PatchMatchStateMap> prev_sel_prob_map_;
   // Exactly one previous-probability owner is allocated per reference.
@@ -185,6 +197,7 @@ class PatchMatchCuda {
   // Tail bits stay zero; source identities/order still live in problem_.
   std::unique_ptr<GpuMat<uint8_t>> consistency_mask_;
   bool consistency_mask_valid_ = false;
+  bool results_valid_ = false;
 
   // Shared memory is too small to hold local state for each thread,
   // so this is workspace memory in global memory.
@@ -194,6 +207,7 @@ class PatchMatchCuda {
   // Per-problem storage for the opposite reference-image orientation.
   std::unique_ptr<GpuMat<float>> alternate_depth_map_;
   std::unique_ptr<GpuMat<float>> alternate_normal_map_;
+  std::unique_ptr<OctNormalMap> alternate_oct_normal_map_;
   std::unique_ptr<GpuMat<uint8_t>> alternate_ref_image_;
   std::unique_ptr<GpuMat<float>> alternate_ref_sum_image_;
   std::unique_ptr<GpuMat<float>> alternate_ref_squared_sum_image_;

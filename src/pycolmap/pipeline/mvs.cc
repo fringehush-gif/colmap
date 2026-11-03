@@ -175,6 +175,12 @@ void BindMVS(py::module& m) {
               "Retain rotated GPU buffers between sweeps. CUDA only; "
               "uses additional GPU memory.")
           .def_readwrite(
+              "normal_oct40",
+              &PMOpts::normal_oct40,
+              "Store reference normals as lossy octahedral direction and "
+              "magnitude in five bytes per value before padding. Requires "
+              "CUDA and may change depth and normal results.")
+          .def_readwrite(
               "ncc_cost_unorm16",
               &PMOpts::ncc_cost_unorm16,
               "Lossy UNORM16 storage of persisted NCC costs in [0,2]; FP32 "

@@ -115,3 +115,25 @@ def test_patch_match_ncc_cost_codec_option(name: str) -> None:
     assert not options.check()
     options.window_step = 1
     assert options.check() == pycolmap.has_cuda
+
+
+def test_patch_match_normal_oct40_option() -> None:
+    options = pycolmap.PatchMatchOptions()
+    assert options.normal_oct40 is False
+    assert options.todict()["normal_oct40"] is False
+    options.normal_oct40 = True
+    options.checkpoint_hmm = False
+    options.window_radius = 4
+    options.window_step = 2
+    copied = pycolmap.PatchMatchOptions(options.todict())
+    assert copied.normal_oct40 is True
+    assert copied.check() == pycolmap.has_cuda
+
+    options.checkpoint_hmm = True
+    options.window_radius = 5
+    options.window_step = 1
+    assert options.check() == pycolmap.has_cuda
+    for name in ("ncc_cost_unorm16", "ncc_cost_fixed20", "ncc_cost_fixed24"):
+        setattr(options, name, True)
+        assert options.check() == pycolmap.has_cuda
+        setattr(options, name, False)

@@ -108,6 +108,10 @@ struct PatchMatchOptions {
   // CUDA only; leave disabled when GPU memory is limited.
   bool rotation_buffer_reuse = false;
 
+  // Store reference normals using lossy octahedral direction and magnitude.
+  // Uses five bytes per value before padding and requires CUDA.
+  bool normal_oct40 = false;
+
   // Save GPU memory by checkpointing backward HMM messages and replaying
   // each stripe. Adds recurrence work and rotation copies. CUDA enables this
   // by default; set false to retain the full probability volumes.

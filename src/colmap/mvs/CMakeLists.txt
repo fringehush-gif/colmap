@@ -131,6 +131,9 @@ if(CUDA_ENABLED)
             patch_match_source_array.h patch_match_source_array.cc
             patch_match_state_map.h
             packed_ncc_cost_map.h
+            oct_normal_state.cuh
+            oct_magnitude.cuh
+            oct_precise.cuh
             patch_match_hmm_checkpoint.h
             patch_match_rng_perimeter.h
             packed_consistency_mask.h
@@ -144,7 +147,7 @@ if(CUDA_ENABLED)
     if(NOT HIP_ENABLED)
         COLMAP_ADD_TEST(
             NAME patch_match_cuda_test
-            SRCS patch_match_cuda_test.cc
+            SRCS patch_match_cuda_test.cc oct_normal_state_test.cu patch_match_cuda_test_peer.cu
             LINK_LIBS colmap_mvs_cuda
         )
         COLMAP_ADD_TEST(

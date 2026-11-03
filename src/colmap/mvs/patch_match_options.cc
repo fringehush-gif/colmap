@@ -42,6 +42,7 @@ void PatchMatchOptions::Print() const {
   PrintOption(filter_geom_consistency_max_cost);
   PrintOption(write_consistency_graph);
   PrintOption(rotation_buffer_reuse);
+  PrintOption(normal_oct40);
   PrintOption(checkpoint_hmm);
   PrintOption(probability_unorm16);
   PrintOption(ncc_cost_unorm16);
@@ -63,6 +64,10 @@ bool PatchMatchOptions::Check() const {
     return false;
   }
 #if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+  if (normal_oct40) {
+    LOG(ERROR) << "PatchMatchStereo.normal_oct40 requires CUDA";
+    return false;
+  }
   if (NccCostBits()) {
     LOG(ERROR) << "Packed NCC costs require CUDA";
     return false;
