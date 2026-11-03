@@ -129,6 +129,12 @@ bool ImmutableMapRegion::Supported() {
 }
 
 namespace {
+size_t MappingExtentBytes(const MappedFloatShape& shape) {
+  THROW_CHECK_LE(shape.bytes,
+                 std::numeric_limits<size_t>::max() - shape.payload_start);
+  return shape.payload_start + shape.bytes;
+}
+
 size_t MappingPageCharge(const std::uintmax_t bytes) {
   THROW_CHECK(ImmutableMapRegion::Supported());
 #if defined(__linux__)
@@ -200,7 +206,10 @@ WindowPlan PlanWindow(const MappedFloatShape& shape,
 
 size_t ImmutableMapRegion::GetMappingReservationBytes(
     const std::filesystem::path& path) {
-  return MappingPageCharge(std::filesystem::file_size(path));
+  THROW_CHECK(Supported());
+  std::ifstream input(path, std::ios::binary);
+  THROW_CHECK_FILE_OPEN(input, path);
+  return MappingPageCharge(MappingExtentBytes(ReadMappedFloatShape(input, path)));
 }
 
 size_t ImmutableMapRegion::GetWindowReservationBytes(
@@ -229,10 +238,8 @@ ImmutableMapSource::ImmutableMapSource(const std::filesystem::path& path)
   bip::offset_t file_bytes = 0;
   THROW_CHECK(impl_->file->get_size(file_bytes));
   THROW_CHECK_GE(file_bytes, 0);
-  const size_t start = impl_->shape.payload_start;
-  THROW_CHECK_LE(impl_->shape.bytes,
-                 std::numeric_limits<size_t>::max() - start);
-  THROW_CHECK_GE(static_cast<size_t>(file_bytes), start + impl_->shape.bytes);
+  THROW_CHECK_GE(static_cast<size_t>(file_bytes),
+                 MappingExtentBytes(impl_->shape));
   impl_->file_bytes = static_cast<size_t>(file_bytes);
 #endif
 }
@@ -242,7 +249,7 @@ std::array<size_t, 3> ImmutableMapSource::GetShape() const {
 }
 ImmutableMapSource::~ImmutableMapSource() = default;
 size_t ImmutableMapSource::GetMappingReservationBytes() const {
-  return MappingPageCharge(impl_->file_bytes);
+  return MappingPageCharge(MappingExtentBytes(impl_->shape));
 }
 size_t ImmutableMapSource::GetWindowReservationBytes(
     const size_t row_begin, const size_t row_count) const {
@@ -260,9 +267,7 @@ ImmutableMapRegion::ImmutableMapRegion(
   impl_->shape = impl_->source->impl_->shape;
   impl_->row_count = impl_->shape.height;
   const size_t start = impl_->shape.payload_start;
-  THROW_CHECK_LE(impl_->shape.bytes,
-                 std::numeric_limits<size_t>::max() - start);
-  const size_t mapped_bytes = start + impl_->shape.bytes;
+  const size_t mapped_bytes = MappingExtentBytes(impl_->shape);
   impl_->mapped_bytes = MappingPageCharge(mapped_bytes);
 #if defined(__linux__)
   namespace bip = boost::interprocess;

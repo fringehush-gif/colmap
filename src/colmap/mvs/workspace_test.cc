@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -405,6 +406,92 @@ TEST_F(WorkspaceTests, EagerLoadSkipsMissingNormalBeforeReadingAnyInput) {
   EXPECT_EQ(reads.load(), 1);
   ExpectLoadedWorkspaceData(workspace);
   reader->Close();
+}
+
+TEST_F(WorkspaceTests, EagerLoadDrainsWorkersAfterNormalMetadataError) {
+#ifdef _WIN32
+  GTEST_SKIP() << "Self-referential symlink creation needs Windows privilege";
+#else
+  SyntheticDatasetOptions synthetic_options;
+  synthetic_options.num_rigs = 1;
+  synthetic_options.num_cameras_per_rig = 1;
+  synthetic_options.num_frames_per_rig = 3;
+  synthetic_options.camera_width = 10;
+  synthetic_options.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(synthetic_options, &reconstruction);
+  reconstruction.Write(temp_dir_ / "sparse");
+  for (const auto& [_, image] : reconstruction.Images()) {
+    if (image.Name() == image_name_) continue;
+    for (const auto& folder : {"depth_maps", "normal_maps"}) {
+      std::filesystem::copy_file(
+          temp_dir_ / "stereo" / folder / (image_name_ + ".geometric.bin"),
+          temp_dir_ / "stereo" / folder / (image.Name() + ".geometric.bin"));
+    }
+    std::filesystem::copy_file(temp_dir_ / "images" / image_name_,
+                               temp_dir_ / "images" / image.Name());
+  }
+
+  auto options = GetOptions();
+  options.num_threads = 1;
+  Workspace workspace(options);
+  std::vector<std::filesystem::path> bitmap_paths;
+  std::vector<std::string> names;
+  for (int image_idx = 0; image_idx < 3; ++image_idx) {
+    bitmap_paths.push_back(workspace.GetBitmapPath(image_idx));
+    names.push_back(workspace.GetModel().GetImageName(image_idx));
+  }
+  const auto bad_normal = workspace.GetNormalMapPath(2);
+  ASSERT_TRUE(std::filesystem::remove(bad_normal));
+  std::filesystem::create_symlink(bad_normal.filename(), bad_normal);
+  ASSERT_THROW(workspace.HasNormalMap(2), std::filesystem::filesystem_error);
+
+  std::promise<void> first_started;
+  auto started = first_started.get_future();
+  std::promise<void> release_first;
+  const auto released = release_first.get_future().share();
+  std::atomic<int> reads{0};
+  std::atomic<int> finished{0};
+  auto reader = ScopedBitmapReader::Create(
+      bitmap_paths,
+      [&](const auto&, bool, bool, Bitmap* target) {
+        if (reads.fetch_add(1) == 0) {
+          first_started.set_value();
+          released.wait_for(std::chrono::seconds(5));
+          ++finished;
+          return false;  // An earlier worker also reports a read failure.
+        }
+        *target = Bitmap(10, 5, true);
+        target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+        ++finished;
+        return true;
+      },
+      {{10, 5}, {10, 5}, {10, 5}});
+  std::atomic<bool> started_in_time{false};
+  std::thread releaser([&] {
+    started_in_time =
+        started.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    release_first.set_value();
+  });
+
+  std::exception_ptr failure;
+  try {
+    workspace.Load(names);
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  releaser.join();
+  ASSERT_TRUE(failure);
+  EXPECT_THROW(std::rethrow_exception(failure),
+               std::filesystem::filesystem_error);
+  EXPECT_TRUE(started_in_time);
+  EXPECT_EQ(reads.load(), 2);
+  EXPECT_EQ(finished.load(), 2);  // Both callbacks finished before return.
+  EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+  EXPECT_EQ(workspace.GetBitmap(1).Width(), 10);
+  EXPECT_THROW(workspace.GetBitmap(2), std::invalid_argument);
+  reader->Close();
+#endif
 }
 
 TEST_F(WorkspaceTests, EagerLoadDeduplicatesPerCall) {

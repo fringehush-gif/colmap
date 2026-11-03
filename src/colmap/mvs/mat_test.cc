@@ -392,9 +392,18 @@ TEST_F(MatFileTest, MappedNormalRegionKeepsPlanarBitsAtOddEdge) {
                                       0x40400004,
                                       0x40400005,
                                       0x40400006};
-  WriteMatFile(path_, "3&2&3&" + LittleEndianFloats(bits) + "trailing");
-  ImmutableMapRegion source(path_);
-  EXPECT_GE(source.GetMappingBytes(), std::filesystem::file_size(path_));
+  const std::string payload = "3&2&3&" + LittleEndianFloats(bits);
+  WriteMatFile(path_, payload);
+  const size_t mapped_bytes =
+      ImmutableMapRegion::GetMappingReservationBytes(path_);
+  // Suffix bytes are accepted but lie beyond the validated mapping extent.
+  WriteMatFile(path_, payload + std::string(mapped_bytes + 1, 'x'));
+  auto shared_source = std::make_shared<ImmutableMapSource>(path_);
+  ImmutableMapRegion source(shared_source);
+  EXPECT_EQ(source.GetMappingBytes(), mapped_bytes);
+  EXPECT_EQ(shared_source->GetMappingReservationBytes(), mapped_bytes);
+  EXPECT_EQ(ImmutableMapRegion::GetMappingReservationBytes(path_), mapped_bytes);
+  EXPECT_GT(std::filesystem::file_size(path_), mapped_bytes);
   for (size_t row = 0; row < 2; ++row) {
     for (size_t col = 0; col < 3; ++col) {
       const auto sample = source.ReadFloat3(row, col);
@@ -434,9 +443,13 @@ TEST_F(MatFileTest, FailedMappedNormalRegionPreservesReceiver) {
   EXPECT_EQ(receiver.GetDepth(), 1);
   EXPECT_EQ(FloatBits(receiver.Get(0, 0)), 0x80000000);
   WriteMatFile(path_, "1&1&3&" + LittleEndianFloats({1, 2}));
+  EXPECT_THROW(ImmutableMapRegion::GetMappingReservationBytes(path_),
+               std::exception);
   EXPECT_THROW(ImmutableMapRegion truncated(path_), std::exception);
   EXPECT_EQ(FloatBits(receiver.Get(0, 0)), 0x80000000);
   WriteMatFile(path_, std::string(128, '9') + "&1&3&");
+  EXPECT_THROW(ImmutableMapRegion::GetMappingReservationBytes(path_),
+               std::exception);
   EXPECT_THROW(ImmutableMapRegion invalid(path_), std::exception);
   EXPECT_EQ(FloatBits(receiver.Get(0, 0)), 0x80000000);
 }

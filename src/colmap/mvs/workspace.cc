@@ -153,18 +153,19 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
 
   LOG(INFO) << StringPrintf("Loading workspace data with %d threads...",
                             num_threads);
-  for (const int image_idx : image_indices) {
-    ReleaseFullRamImageInputs(image_idx);
-    if (HasBitmap(image_idx) && HasDepthMap(image_idx) &&
-        HasNormalMap(image_idx)) {
-      thread_pool.AddTask(LoadWorkspaceData, image_idx);
-    } else {
-      LOG(WARNING) << StringPrintf(
-          "Ignoring image %s, because input does not exist.",
-          model_.GetImageName(image_idx).c_str());
-    }
-  }
   try {
+    // Admission and submission can fail after earlier reads have started.
+    for (const int image_idx : image_indices) {
+      ReleaseFullRamImageInputs(image_idx);
+      if (HasBitmap(image_idx) && HasDepthMap(image_idx) &&
+          HasNormalMap(image_idx)) {
+        thread_pool.AddTask(LoadWorkspaceData, image_idx);
+      } else {
+        LOG(WARNING) << StringPrintf(
+            "Ignoring image %s, because input does not exist.",
+            model_.GetImageName(image_idx).c_str());
+      }
+    }
     thread_pool.Wait();
   } catch (...) {
     const auto failure = std::current_exception();

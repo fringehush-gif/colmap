@@ -1106,3 +1106,98 @@ TEST(ExactDepthScalar, LiveConsumerPreservesScratchAndLeaseLifetime) {
   if (!colmap::mvs::ImmutableMapRegion::Supported()) GTEST_SKIP();
   VerifyScalarScratchLifetime(colmap::CreateTestDir());
 }
+
+TEST(ExactDepthScalar, SuffixedMapsRespectWorkspaceByteAndFileCaps) {
+  using colmap::mvs::ImmutableMapRegion;
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  const auto fixture =
+      MakeFixture(colmap::CreateTestDir() / "suffixed-mapped", 2.0f, false);
+  const auto depth_path =
+      fixture.root / "stereo/depth_maps/seed-0.png.geometric.bin";
+  const auto normal_path =
+      fixture.root / "stereo/normal_maps/seed-0.png.geometric.bin";
+  const auto second_depth_path =
+      fixture.root / "stereo/depth_maps/seed-1.png.geometric.bin";
+  const auto second_normal_path =
+      fixture.root / "stereo/normal_maps/seed-1.png.geometric.bin";
+  const size_t depth_charge =
+      ImmutableMapRegion::GetMappingReservationBytes(depth_path);
+  const size_t normal_charge =
+      ImmutableMapRegion::GetMappingReservationBytes(normal_path);
+  Require(depth_charge > 1 && normal_charge > 1,
+          "mapping charge cannot support one-byte-short control");
+  const auto add_suffix = [](const fs::path& path, const size_t charge) {
+    const std::string suffix(charge + 1, 'x');
+    std::ofstream out(path, std::ios::binary | std::ios::app);
+    Require(out.is_open(), "suffix fixture open failed");
+    out.write(suffix.data(), suffix.size());
+    out.close();
+    Require(out.good() && fs::file_size(path) > charge,
+            "suffix fixture write failed");
+    Require(ImmutableMapRegion::GetMappingReservationBytes(path) == charge,
+            "suffix changed validated mapping extent");
+  };
+  for (const auto& path : {depth_path, second_depth_path})
+    add_suffix(path, depth_charge);
+  for (const auto& path : {normal_path, second_normal_path})
+    add_suffix(path, normal_charge);
+
+  auto options = WorkspaceOptions(fixture.root);
+  options.mapped_normal_bytes_limit = normal_charge;
+  options.mapped_normal_files_limit = 1;
+  {
+    BoundedWorkspace workspace(options);
+    Require(workspace.GetMappedNormalReservationBytes(0) == normal_charge,
+            "suffixed normal reservation differs");
+    auto first = workspace.AcquireMappedNormal(0);
+    Require(Bits(first->ReadFloat3(0, 0).z()) == Bits(-1.0f),
+            "suffixed normal bits differ");
+    first.reset();
+    auto second = workspace.AcquireMappedNormal(1);
+    Require(Bits(second->ReadFloat3(0, 0).z()) == Bits(-1.0f),
+            "second suffixed normal bits differ");
+    second.reset();
+    const auto stats = workspace.GetMappedNormalStats();
+    Require(stats.evictions >= 1 && stats.source_peak_live_files <= 1 &&
+                stats.peak_charged_bytes <= normal_charge &&
+                stats.active_copies == 0 && stats.reserved_bytes == 0 &&
+                stats.reserved_files == 0,
+            "suffixed normal file cap or release differs");
+  }
+  options.mapped_normal_bytes_limit = normal_charge - 1;
+  {
+    BoundedWorkspace denied(options);
+    Refuses([&] { (void)denied.AcquireMappedNormal(0); },
+            "one-byte-short normal budget admitted");
+    PinCap(denied, normal_charge - 1, 1, 0);
+  }
+
+  options.mapped_normal_bytes_limit = depth_charge;
+  {
+    BoundedWorkspace workspace(options);
+    Mat<float> scratch(1, 1, 1);
+    workspace.PrepareOriginalDepth(0, 8, 2);
+    Require(Bits(workspace.ReadOriginalDepth(0, 0, 2, scratch)) ==
+                Bits(fixture.depths[2]),
+            "suffixed original depth bits differ");
+    workspace.PrepareOriginalDepth(1, 8, 2);
+    Require(Bits(workspace.ReadOriginalDepth(1, 0, 2, scratch)) ==
+                Bits(fixture.depths[2]),
+            "second suffixed original depth bits differ");
+    const auto stats = workspace.GetMappedNormalStats();
+    Require(stats.evictions >= 1 && stats.source_peak_live_files <= 1 &&
+                stats.peak_charged_bytes <= depth_charge &&
+                stats.active_copies == 0 && stats.reserved_bytes == 0 &&
+                stats.reserved_files == 0,
+            "suffixed original depth file cap or release differs");
+  }
+  options.mapped_normal_bytes_limit = depth_charge - 1;
+  {
+    BoundedWorkspace denied(options);
+    Refuses([&] { denied.PrepareOriginalDepth(0, 8, 2); },
+            "one-byte-short original depth budget admitted");
+    Require(denied.GetDepthMappedNeighborhoodStats().source_admissions == 0,
+            "refused original depth published source admission");
+    PinCap(denied, depth_charge - 1, 1, 0);
+  }
+}
