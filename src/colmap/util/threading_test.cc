@@ -6,8 +6,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <future>
 #include <stdexcept>
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -853,6 +855,100 @@ TEST(ThreadPool, StopPropagatesException) {
   EXPECT_THROW(pool.Stop(), AggregateException);
   EXPECT_NO_THROW(pool.Stop());
 }
+
+// Stop must report both already published and in-flight task failures only
+// after the active worker has finished and queued tasks have been discarded.
+class ThreadPoolStopMatrix
+    : public testing::TestWithParam<std::pair<bool, bool>> {};
+
+TEST_P(ThreadPoolStopMatrix, JoinsAndConsumesFailures) {
+  const bool completed_fails = GetParam().first;
+  const bool active_fails = GetParam().second;
+  std::promise<void> marker, active_started, release;
+  auto release_future = release.get_future().share();
+  std::atomic<bool> active_finished{false};
+  std::atomic<bool> pending_ran{false};
+  ThreadPool pool(1);
+
+  pool.AddTask([completed_fails]() {
+    if (completed_fails) {
+      throw std::runtime_error("completed failure");
+    }
+  });
+  pool.AddTask([&marker]() { marker.set_value(); });
+  marker.get_future().wait();
+  pool.AddTask([&]() {
+    active_started.set_value();
+    release_future.wait();
+    active_finished = true;
+    if (active_fails) {
+      throw std::runtime_error("active failure");
+    }
+  });
+  active_started.get_future().wait();
+  auto pending = pool.AddTask([&pending_ran]() { pending_ran = true; });
+
+  std::exception_ptr stop_error;
+  bool finished_at_stop = false;
+  std::thread stopper([&]() {
+    try {
+      pool.Stop();
+    } catch (...) {
+      stop_error = std::current_exception();
+    }
+    finished_at_stop = active_finished.load();
+  });
+  const auto status = pending.wait_for(std::chrono::seconds(5));
+  release.set_value();
+  stopper.join();
+  if (status != std::future_status::ready) {
+    for (int i = 0; i < 2; ++i) {
+      try {
+        pool.Stop();
+      } catch (...) {  // NOLINT(bugprone-empty-catch)
+        // Keep defective-control cleanup from replacing the assertions below.
+      }
+    }
+  }
+
+  EXPECT_EQ(status, std::future_status::ready);
+  EXPECT_TRUE(finished_at_stop);
+  EXPECT_FALSE(pending_ran);
+  try {
+    pending.get();
+    ADD_FAILURE() << "Expected broken promise";
+  } catch (const std::future_error& e) {
+    EXPECT_EQ(e.code(), std::make_error_code(std::future_errc::broken_promise));
+  }
+  const int expected = static_cast<int>(completed_fails) +
+                       static_cast<int>(active_fails);
+  if (stop_error) {
+    try {
+      std::rethrow_exception(stop_error);
+    } catch (const AggregateException& e) {
+      EXPECT_EQ(e.exceptions().size(), expected);
+      const std::string message = e.what();
+      EXPECT_EQ(message.find("completed failure") != std::string::npos,
+                completed_fails);
+      EXPECT_EQ(message.find("active failure") != std::string::npos,
+                active_fails);
+    } catch (...) {
+      ADD_FAILURE() << "Stop returned a non-aggregate error";
+    }
+  } else {
+    EXPECT_EQ(expected, 0);
+  }
+  EXPECT_NO_THROW(pool.Stop());
+  EXPECT_NO_THROW(pool.Wait());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllOutcomes,
+    ThreadPoolStopMatrix,
+    testing::Values(std::make_pair(false, false),
+                    std::make_pair(true, false),
+                    std::make_pair(false, true),
+                    std::make_pair(true, true)));
 
 TEST(ThreadPool, FutureAndWaitPropagatesException) {
   ThreadPool pool(1);

@@ -264,6 +264,9 @@ class VocabTreePairGenerator : public PairGenerator {
       const std::vector<image_t>& query_image_ids = {},
       std::function<bool(image_t, image_t)> image_pair_filter = {});
 
+  ~VocabTreePairGenerator() override;
+
+  // Cancel pending queries before restarting retrieval from the first image.
   void Reset() override;
 
   bool HasFinished() const override;
@@ -271,6 +274,8 @@ class VocabTreePairGenerator : public PairGenerator {
   std::vector<std::pair<image_t, image_t>> Next() override;
 
  private:
+  void StopQueries();
+
   void IndexImages(const std::vector<image_t>& image_ids);
 
   struct Retrieval {
@@ -282,8 +287,7 @@ class VocabTreePairGenerator : public PairGenerator {
 
   const VocabTreePairingOptions options_;
   const std::shared_ptr<FeatureMatcherCache> cache_;
-  ThreadPool thread_pool_;
-  JobQueue<Retrieval> queue_;
+  std::unique_ptr<JobQueue<Retrieval>> queue_;
   std::unique_ptr<retrieval::VisualIndex> visual_index_;
   retrieval::VisualIndex::QueryOptions query_options_;
   std::function<bool(image_t, image_t)> image_pair_filter_;
@@ -291,6 +295,8 @@ class VocabTreePairGenerator : public PairGenerator {
   std::vector<std::pair<image_t, image_t>> image_pairs_;
   size_t query_idx_ = 0;
   size_t result_idx_ = 0;
+  // Destroy/join workers before any state borrowed by Query is destroyed.
+  std::unique_ptr<ThreadPool> thread_pool_;
 };
 
 class SequentialPairGenerator : public PairGenerator {
@@ -303,6 +309,7 @@ class SequentialPairGenerator : public PairGenerator {
   SequentialPairGenerator(const SequentialPairingOptions& options,
                           const std::shared_ptr<Database>& database);
 
+  // A failed nested Reset leaves both phases finished until a Reset succeeds.
   void Reset() override;
 
   bool HasFinished() const override;
@@ -310,6 +317,8 @@ class SequentialPairGenerator : public PairGenerator {
   std::vector<std::pair<image_t, image_t>> Next() override;
 
  private:
+  friend struct SequentialPairGeneratorTestPeer;
+
   void MaybeExpandRigImages(image_t image_id1, image_t image_id2);
 
   bool IsValidSequentialNeighbor(image_t image_id1, image_t image_id2) const;
@@ -325,9 +334,10 @@ class SequentialPairGenerator : public PairGenerator {
   // Optional mapping from frames to images and vice versa.
   NodeHashMap<frame_t, std::vector<image_t>> frame_to_image_ids_;
   NodeHashMap<image_t, frame_t> image_to_frame_id_;
-  std::unique_ptr<VocabTreePairGenerator> vocab_tree_pair_generator_;
+  std::unique_ptr<PairGenerator> vocab_tree_pair_generator_;
   std::vector<std::pair<image_t, image_t>> image_pairs_;
   size_t image_idx_ = 0;
+  bool reset_failed_ = false;
 };
 
 class SpatialPairGenerator : public PairGenerator {

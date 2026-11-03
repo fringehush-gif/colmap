@@ -9,6 +9,9 @@
 #include "colmap/util/testing.h"
 
 #include <filesystem>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -21,13 +24,17 @@ Reconstruction CreateSyntheticReconstructionWithBitmaps(
     int num_images = 2,
     int image_width = 100,
     int image_height = 100,
-    const std::string& image_extension = ".png") {
+    const std::string& image_extension = ".png",
+    const std::vector<double>& camera_params = {}) {
   SyntheticDatasetOptions synthetic_dataset_options;
   synthetic_dataset_options.num_rigs = 1;
   synthetic_dataset_options.num_cameras_per_rig = 1;
   synthetic_dataset_options.num_frames_per_rig = num_images;
   synthetic_dataset_options.camera_width = image_width;
   synthetic_dataset_options.camera_height = image_height;
+  if (!camera_params.empty()) {
+    synthetic_dataset_options.camera_params = camera_params;
+  }
   synthetic_dataset_options.image_extension = image_extension;
 
   Reconstruction reconstruction;
@@ -37,10 +44,152 @@ Reconstruction CreateSyntheticReconstructionWithBitmaps(
   for (const auto& [image_id, image] : reconstruction.Images()) {
     Bitmap bitmap(image_width, image_height, true);
     bitmap.Fill(BitmapColor<uint8_t>(128, 128, 128));
-    bitmap.Write(image_path / image.Name());
+    EXPECT_TRUE(bitmap.Write(image_path / image.Name()));
   }
 
   return reconstruction;
+}
+
+template <typename Func>
+void ExpectOutputOpenFailure(Func&& run, const std::string& filename) {
+  try {
+    run();
+    FAIL() << "Expected output open failure";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_THAT(e.what(), testing::HasSubstr("Could not open"));
+    EXPECT_THAT(e.what(), testing::HasSubstr(filename));
+  }
+}
+
+template <typename Func>
+void ExpectCopyFailure(Func&& run, const std::filesystem::path& output) {
+  try {
+    run();
+    FAIL() << "Expected copy failure";
+  } catch (const std::filesystem::filesystem_error& e) {
+    EXPECT_TRUE(std::filesystem::is_regular_file(e.path1()));
+    EXPECT_EQ(e.path2().parent_path(), output);
+    EXPECT_TRUE(std::filesystem::is_directory(e.path2()));
+  }
+}
+
+TEST(COLMAPUndistorter, PropagatesCopyFailure) {
+  const auto root = CreateTestDir();
+  const auto input = root / "input";
+  const auto output = root / "output";
+  CreateDirIfNotExists(input);
+  Reconstruction reconstruction =
+      CreateSyntheticReconstructionWithBitmaps(
+          input, 2, 16, 16, ".png", {16, 8, 8, 0.05});
+  for (const auto& [id, image] : reconstruction.Images()) {
+    Bitmap bitmap;
+    ASSERT_TRUE(bitmap.Read(input / image.Name()));
+  }
+  for (const auto& [id, image] : reconstruction.Images()) {
+    Camera& camera = reconstruction.Camera(image.CameraId());
+    camera.model_id = SimplePinholeCameraModel::model_id;
+    camera.params = {16, 8, 8};
+    CreateDirIfNotExists(output / "images" / image.Name(), /*recursive=*/true);
+  }
+  COLMAPUndistorter::Options options;
+  options.num_threads = 1;
+  COLMAPUndistorter owner(
+      options, UndistortCameraOptions(), reconstruction, input, output);
+  ExpectCopyFailure([&]() { owner.Run(); }, output / "images");
+}
+
+TEST(PMVSUndistorter, PropagatesOutputOpenFailure) {
+  const auto root = CreateTestDir();
+  const auto input = root / "input";
+  const auto output = root / "output";
+  CreateDirIfNotExists(input);
+  const Reconstruction reconstruction =
+      CreateSyntheticReconstructionWithBitmaps(
+          input, 2, 16, 16, ".png", {16, 8, 8, 0.05});
+  for (const auto& [id, image] : reconstruction.Images()) {
+    Bitmap bitmap;
+    ASSERT_TRUE(bitmap.Read(input / image.Name()));
+  }
+  CreateDirIfNotExists(output / "pmvs" / "txt" / "00000000.txt",
+                       /*recursive=*/true);
+  PMVSUndistorter::Options options;
+  options.num_threads = 1;
+  PMVSUndistorter owner(
+      options, UndistortCameraOptions(), reconstruction, input, output);
+  ExpectOutputOpenFailure([&]() { owner.Run(); }, "00000000.txt");
+}
+
+TEST(CMPMVSUndistorter, PropagatesOutputOpenFailure) {
+  const auto root = CreateTestDir();
+  const auto input = root / "input";
+  const auto output = root / "output";
+  CreateDirIfNotExists(input);
+  const Reconstruction reconstruction =
+      CreateSyntheticReconstructionWithBitmaps(
+          input, 2, 16, 16, ".png", {16, 8, 8, 0.05});
+  for (const auto& [id, image] : reconstruction.Images()) {
+    Bitmap bitmap;
+    ASSERT_TRUE(bitmap.Read(input / image.Name()));
+  }
+  CreateDirIfNotExists(output / "00001_P.txt", /*recursive=*/true);
+  CMPMVSUndistorter::Options options;
+  options.num_threads = 1;
+  CMPMVSUndistorter owner(
+      options, UndistortCameraOptions(), reconstruction, input, output);
+  ExpectOutputOpenFailure([&]() { owner.Run(); }, "00001_P.txt");
+}
+
+TEST(StandaloneImageUndistorter, PropagatesCopyFailure) {
+  const auto root = CreateTestDir();
+  const auto input = root / "input";
+  const auto output = root / "output";
+  CreateDirIfNotExists(input);
+  Reconstruction reconstruction =
+      CreateSyntheticReconstructionWithBitmaps(
+          input, 2, 16, 16, ".png", {16, 8, 8, 0.05});
+  for (const auto& [id, image] : reconstruction.Images()) {
+    Bitmap bitmap;
+    ASSERT_TRUE(bitmap.Read(input / image.Name()));
+  }
+  StandaloneImageUndistorter::Options options;
+  options.num_threads = 1;
+  for (const auto& [id, image] : reconstruction.Images()) {
+    Camera& camera = reconstruction.Camera(image.CameraId());
+    camera.model_id = SimplePinholeCameraModel::model_id;
+    camera.params = {16, 8, 8};
+    options.image_names_and_cameras.emplace_back(image.Name(),
+                                                 *image.CameraPtr());
+    CreateDirIfNotExists(output / image.Name(), /*recursive=*/true);
+  }
+  StandaloneImageUndistorter owner(
+      options, UndistortCameraOptions(), input, output);
+  ExpectCopyFailure([&]() { owner.Run(); }, output);
+}
+
+TEST(StereoImageRectifier, PropagatesOutputOpenFailure) {
+  const auto root = CreateTestDir();
+  const auto input = root / "input";
+  const auto output = root / "output";
+  CreateDirIfNotExists(input);
+  const Reconstruction reconstruction =
+      CreateSyntheticReconstructionWithBitmaps(
+          input, 2, 16, 16, ".png", {16, 8, 8, 0.05});
+  for (const auto& [id, image] : reconstruction.Images()) {
+    Bitmap bitmap;
+    ASSERT_TRUE(bitmap.Read(input / image.Name()));
+  }
+  const auto ids = reconstruction.RegImageIds();
+  ASSERT_GE(ids.size(), 2);
+  const auto pair_name =
+      StringReplace(reconstruction.Image(ids[0]).Name(), "/", "-") + "-" +
+      StringReplace(reconstruction.Image(ids[1]).Name(), "/", "-");
+  CreateDirIfNotExists(output / pair_name / "Q.txt", /*recursive=*/true);
+  StereoImageRectifier::Options options;
+  options.num_threads = 1;
+  options.stereo_pairs.emplace_back(ids[0], ids[1]);
+  StereoImageRectifier owner(
+      options, UndistortCameraOptions(), reconstruction, input, output);
+  ExpectOutputOpenFailure([&]() { owner.Run(); }, "Q.txt");
 }
 
 TEST(COLMAPUndistorter, Integration) {

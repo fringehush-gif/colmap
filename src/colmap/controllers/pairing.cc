@@ -214,9 +214,9 @@ VocabTreePairGenerator::VocabTreePairGenerator(
     std::function<bool(image_t, image_t)> image_pair_filter)
     : options_(options),
       cache_(THROW_CHECK_NOTNULL(cache)),
-      thread_pool_(options_.num_threads),
-      queue_(options_.num_threads),
-      image_pair_filter_(std::move(image_pair_filter)) {
+      queue_(std::make_unique<JobQueue<Retrieval>>(options_.num_threads)),
+      image_pair_filter_(std::move(image_pair_filter)),
+      thread_pool_(std::make_unique<ThreadPool>(options_.num_threads)) {
   THROW_CHECK(options.Check());
   LOG(INFO) << "Generating image pairs with vocabulary tree...";
 
@@ -277,7 +277,29 @@ VocabTreePairGenerator::VocabTreePairGenerator(
           query_image_ids,
           std::move(image_pair_filter)) {}
 
+VocabTreePairGenerator::~VocabTreePairGenerator() {
+  // Wake a producer blocked by a full queue before the pool destructor joins.
+  // Unhandled task errors retain ThreadPool's existing fatal destructor policy.
+  queue_->Stop();
+}
+
+void VocabTreePairGenerator::StopQueries() {
+  queue_->Stop();
+  query_idx_ = query_image_ids_.size();
+  result_idx_ = query_image_ids_.size();
+  thread_pool_->Stop();
+}
+
 void VocabTreePairGenerator::Reset() {
+  if (query_idx_ != 0) {
+    StopQueries();
+    // A stopped queue/pool cannot restart. Replace them only after joining the
+    // old queries, so no old result can enter the new retrieval pass.
+    auto queue = std::make_unique<JobQueue<Retrieval>>(options_.num_threads);
+    auto thread_pool = std::make_unique<ThreadPool>(options_.num_threads);
+    queue_ = std::move(queue);
+    thread_pool_ = std::move(thread_pool);
+  }
   query_idx_ = 0;
   result_idx_ = 0;
 }
@@ -291,40 +313,56 @@ std::vector<std::pair<image_t, image_t>> VocabTreePairGenerator::Next() {
   if (HasFinished()) {
     return {};
   }
-  if (query_idx_ == 0) {
-    // Initially, make all retrieval threads busy and continue with the
-    // matching.
-    const size_t init_num_tasks =
-        std::min(query_image_ids_.size(), 2 * thread_pool_.NumThreads());
-    for (; query_idx_ < init_num_tasks; ++query_idx_) {
-      thread_pool_.AddTask(
-          &VocabTreePairGenerator::Query, this, query_image_ids_[query_idx_]);
+  try {
+    if (query_idx_ == 0) {
+      // Initially, make all retrieval threads busy and continue with the
+      // matching.
+      const size_t init_num_tasks =
+          std::min(query_image_ids_.size(), 2 * thread_pool_->NumThreads());
+      for (; query_idx_ < init_num_tasks; ++query_idx_) {
+        thread_pool_->AddTask(
+            &VocabTreePairGenerator::Query, this, query_image_ids_[query_idx_]);
+      }
     }
+
+    LOG(INFO) << StringPrintf(
+        "Processing image [%d/%d]", result_idx_ + 1, query_image_ids_.size());
+
+    // Push the next image to the retrieval queue.
+    if (query_idx_ < query_image_ids_.size()) {
+      thread_pool_->AddTask(
+          &VocabTreePairGenerator::Query, this, query_image_ids_[query_idx_++]);
+    }
+
+    // Pop the next results from the retrieval queue.
+    auto retrieval = queue_->Pop();
+    if (!retrieval.IsValid()) {
+      // A worker stopped the queue after an unexpected query/publication error.
+      // Stop joins before reporting all worker errors, including the cause.
+      StopQueries();
+    }
+    THROW_CHECK(retrieval.IsValid());
+
+    const auto& image_id = retrieval.Data().image_id;
+    const auto& image_scores = retrieval.Data().image_scores;
+
+    // Compose the image pairs from the scores.
+    image_pairs_.reserve(image_scores.size());
+    for (const auto& image_score : image_scores) {
+      image_pairs_.emplace_back(image_id, image_score.image_id);
+    }
+    ++result_idx_;
+    return image_pairs_;
+  } catch (...) {
+    try {
+      StopQueries();
+    } catch (const std::exception& error) {
+      LOG(WARNING) << "Vocabulary query errors during cleanup: " << error.what();
+    } catch (...) {
+      LOG(WARNING) << "Unknown vocabulary query error during cleanup";
+    }
+    throw;
   }
-
-  LOG(INFO) << StringPrintf(
-      "Processing image [%d/%d]", result_idx_ + 1, query_image_ids_.size());
-
-  // Push the next image to the retrieval queue.
-  if (query_idx_ < query_image_ids_.size()) {
-    thread_pool_.AddTask(
-        &VocabTreePairGenerator::Query, this, query_image_ids_[query_idx_++]);
-  }
-
-  // Pop the next results from the retrieval queue.
-  auto retrieval = queue_.Pop();
-  THROW_CHECK(retrieval.IsValid());
-
-  const auto& image_id = retrieval.Data().image_id;
-  const auto& image_scores = retrieval.Data().image_scores;
-
-  // Compose the image pairs from the scores.
-  image_pairs_.reserve(image_scores.size());
-  for (const auto& image_score : image_scores) {
-    image_pairs_.emplace_back(image_id, image_score.image_id);
-  }
-  ++result_idx_;
-  return image_pairs_;
 }
 
 void VocabTreePairGenerator::IndexImages(
@@ -366,40 +404,48 @@ void VocabTreePairGenerator::IndexImages(
 }
 
 void VocabTreePairGenerator::Query(const image_t image_id) {
-  Retrieval retrieval;
-  retrieval.image_id = image_id;
-
-  // Each query must push exactly one result, because the consuming Next() pops
-  // exactly one result per query. If a query fails (e.g., due to corrupt
-  // features or an out-of-memory error during spatial verification), we still
-  // push an empty result and skip retrieval for this image. Otherwise, the
-  // consumer would block indefinitely waiting for a result that never arrives.
   try {
-    auto keypoints = *cache_->GetKeypoints(image_id);
-    auto descriptors = *cache_->GetDescriptors(image_id);
-    if (options_.max_num_features > 0 &&
-        descriptors.data.rows() > options_.max_num_features) {
-      ExtractTopScaleFeatures(
-          &keypoints, &descriptors, options_.max_num_features);
+    Retrieval retrieval;
+    retrieval.image_id = image_id;
+
+    // Each query must push exactly one result, because the consuming Next() pops
+    // exactly one result per query. If a query fails (e.g., due to corrupt
+    // features or an out-of-memory error during spatial verification), we still
+    // push an empty result and skip retrieval for this image. Otherwise, the
+    // consumer would block indefinitely waiting for a result that never arrives.
+    try {
+      auto keypoints = *cache_->GetKeypoints(image_id);
+      auto descriptors = *cache_->GetDescriptors(image_id);
+      if (options_.max_num_features > 0 &&
+          descriptors.data.rows() > options_.max_num_features) {
+        ExtractTopScaleFeatures(
+            &keypoints, &descriptors, options_.max_num_features);
+      }
+
+      auto query_options = query_options_;
+      if (image_pair_filter_) {
+        query_options.image_id_filter = [this, image_id](const int candidate_id) {
+          return image_pair_filter_(image_id, candidate_id);
+        };
+      }
+      visual_index_->Query(query_options,
+                           keypoints,
+                           descriptors.ToFloat(),
+                           &retrieval.image_scores);
+    } catch (const std::exception& error) {
+      LOG(ERROR) << "Failed to query image " << image_id
+                 << " against vocabulary tree, skipping: " << error.what();
+      retrieval.image_scores.clear();
     }
 
-    auto query_options = query_options_;
-    if (image_pair_filter_) {
-      query_options.image_id_filter = [this, image_id](const int candidate_id) {
-        return image_pair_filter_(image_id, candidate_id);
-      };
-    }
-    visual_index_->Query(query_options,
-                         keypoints,
-                         descriptors.ToFloat(),
-                         &retrieval.image_scores);
-  } catch (const std::exception& error) {
-    LOG(ERROR) << "Failed to query image " << image_id
-               << " against vocabulary tree, skipping: " << error.what();
-    retrieval.image_scores.clear();
+    // A false push is expected when destruction or Reset cancels this pass.
+    queue_->Push(std::move(retrieval));
+  } catch (...) {
+    // Unexpected failures must wake Next instead of leaving it waiting for a
+    // result that cannot be published. The pool retains the original error.
+    queue_->Stop();
+    throw;
   }
-
-  THROW_CHECK(queue_.Push(std::move(retrieval)));
 }
 
 SequentialPairGenerator::SequentialPairGenerator(
@@ -454,16 +500,21 @@ SequentialPairGenerator::SequentialPairGenerator(
               options.CacheSize(), THROW_CHECK_NOTNULL(database))) {}
 
 void SequentialPairGenerator::Reset() {
-  image_idx_ = 0;
+  // The nested pass may already be cancelled when Reset throws. Keep both
+  // phases terminal until a complete Reset has succeeded.
+  reset_failed_ = true;
   if (vocab_tree_pair_generator_) {
     vocab_tree_pair_generator_->Reset();
   }
+  image_idx_ = 0;
+  reset_failed_ = false;
 }
 
 bool SequentialPairGenerator::HasFinished() const {
-  return image_idx_ >= image_ids_.size() &&
-         (vocab_tree_pair_generator_ ? vocab_tree_pair_generator_->HasFinished()
-                                     : true);
+  return reset_failed_ ||
+         (image_idx_ >= image_ids_.size() &&
+          (vocab_tree_pair_generator_ ? vocab_tree_pair_generator_->HasFinished()
+                                      : true));
 }
 
 void SequentialPairGenerator::MaybeExpandRigImages(image_t image_id1,
@@ -525,6 +576,9 @@ bool SequentialPairGenerator::IsValidLoopDetectionPair(
 
 std::vector<std::pair<image_t, image_t>> SequentialPairGenerator::Next() {
   image_pairs_.clear();
+  if (reset_failed_) {
+    return {};
+  }
   if (image_idx_ >= image_ids_.size()) {
     if (vocab_tree_pair_generator_) {
       return vocab_tree_pair_generator_->Next();

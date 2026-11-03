@@ -9,12 +9,27 @@
 #include "colmap/util/eigen_matchers.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <fstream>
+#include <future>
+#include <stdexcept>
+#include <thread>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 namespace colmap {
+
+struct SequentialPairGeneratorTestPeer {
+  static void SetLoopDetectionGenerator(
+      SequentialPairGenerator& generator,
+      std::unique_ptr<PairGenerator> loop_detection_generator) {
+    generator.vocab_tree_pair_generator_ = std::move(loop_detection_generator);
+  }
+};
+
 namespace {
 
 void CreateSyntheticDatabase(int num_images, Database& database) {
@@ -133,6 +148,202 @@ TEST(VocabTreePairGenerator, DoesNotDeadlockOnFailedQuery) {
     generator.Next();
   }
   EXPECT_TRUE(generator.Next().empty());
+  EXPECT_TRUE(generator.HasFinished());
+}
+
+TEST(VocabTreePairGenerator, ResetAfterPartialConsumptionDiscardsOldResults) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  CreateSyntheticDatabase(3, *database);
+  std::vector<image_t> query_ids;
+  for (const auto& image : database->ReadAllImages()) {
+    query_ids.push_back(image.ImageId());
+  }
+  VocabTreePairingOptions options;
+  options.num_threads = 1;
+  options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
+  CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
+  VocabTreePairGenerator generator(options, database, query_ids);
+  EXPECT_FALSE(generator.Next().empty());
+  generator.Reset();
+  for (const image_t query_id : query_ids) {
+    const auto pairs = generator.Next();
+    ASSERT_FALSE(pairs.empty());
+    for (const auto& pair : pairs) {
+      EXPECT_EQ(pair.first, query_id);
+    }
+  }
+  EXPECT_TRUE(generator.HasFinished());
+}
+
+TEST(VocabTreePairGenerator, UnexpectedQueryErrorAllowsReset) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  CreateSyntheticDatabase(3, *database);
+  VocabTreePairingOptions options;
+  options.num_threads = 1;
+  options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
+  CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
+  std::atomic_bool fail = true;
+  VocabTreePairGenerator generator(
+      options, database, {}, [&](image_t, image_t) {
+        if (fail.exchange(false)) {
+          throw 17;
+        }
+        return true;
+      });
+  bool caught_original = false;
+  try {
+    generator.Next();
+  } catch (const AggregateException& error) {
+    ASSERT_EQ(error.exceptions().size(), 1);
+    try {
+      std::rethrow_exception(error.exceptions().front());
+    } catch (const int value) {
+      EXPECT_EQ(value, 17);
+      caught_original = true;
+    }
+  }
+  EXPECT_TRUE(caught_original);
+  EXPECT_TRUE(generator.HasFinished());
+  generator.Reset();
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_FALSE(generator.Next().empty());
+  }
+  EXPECT_TRUE(generator.HasFinished());
+}
+
+TEST(VocabTreePairGenerator, DestructionWithFullQueueAndActiveCallback) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  CreateSyntheticDatabase(3, *database);
+  std::vector<image_t> query_ids;
+  for (const auto& image : database->ReadAllImages()) {
+    query_ids.push_back(image.ImageId());
+  }
+  ASSERT_EQ(query_ids.size(), 3);
+  VocabTreePairingOptions options;
+  options.num_threads = 1;
+  options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
+  CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
+  std::promise<void> entered, release, destroying;
+  auto entered_future = entered.get_future();
+  const auto release_future = release.get_future().share();
+  auto destroying_future = destroying.get_future();
+  std::atomic_bool blocked = false;
+  std::atomic_bool callback_released = false;
+  std::atomic_bool filter_destroyed_after_release = false;
+  auto filter_lifetime = std::shared_ptr<void>(nullptr, [&](void*) {
+    filter_destroyed_after_release = callback_released.load();
+  });
+  auto generator = std::make_unique<VocabTreePairGenerator>(
+      options,
+      database,
+      query_ids,
+      [&, filter_lifetime](const image_t image_id, image_t) {
+        if (image_id == query_ids[2] && !blocked.exchange(true)) {
+          // With one worker, query 2 has already filled the one-slot queue.
+          // This proves an active query and a full queue, not a blocked Push.
+          entered.set_value();
+          release_future.wait();
+          callback_released = true;
+        }
+        return true;
+      });
+  filter_lifetime.reset();
+  const auto first_pairs = generator->Next();
+  const bool reached_barrier =
+      entered_future.wait_for(std::chrono::seconds(10)) ==
+      std::future_status::ready;
+  std::thread destroyer([generator = std::move(generator), &destroying]() mutable {
+    destroying.set_value();
+    generator.reset();
+  });
+  destroying_future.wait();
+  release.set_value();
+  destroyer.join();
+  EXPECT_FALSE(first_pairs.empty());
+  EXPECT_TRUE(reached_barrier);
+  EXPECT_TRUE(callback_released);
+  EXPECT_TRUE(filter_destroyed_after_release);
+}
+
+TEST(SequentialPairGenerator, NestedResetFailureRequiresSuccessfulRetry) {
+  // This interface double tests the actual composite consumer's exceptional
+  // state. The public Vocab test above separately covers its real worker error.
+  class FailingResetGenerator : public PairGenerator {
+   public:
+    explicit FailingResetGenerator(std::pair<image_t, image_t> pair)
+        : pair_(pair) {}
+
+    void Reset() override {
+      finished_ = true;
+      if (fail_reset_) {
+        fail_reset_ = false;
+        throw std::runtime_error("nested reset failed after cancellation");
+      }
+      finished_ = false;
+    }
+
+    bool HasFinished() const override { return finished_; }
+
+    std::vector<std::pair<image_t, image_t>> Next() override {
+      ++next_calls;
+      if (finished_) {
+        return {};
+      }
+      finished_ = true;
+      return {pair_};
+    }
+
+    int next_calls = 0;
+
+   private:
+    const std::pair<image_t, image_t> pair_;
+    bool fail_reset_ = true;
+    bool finished_ = false;
+  };
+
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  CreateSyntheticDatabase(3, *database);
+  auto images = database->ReadAllImages();
+  std::sort(images.begin(), images.end(), [](const Image& a, const Image& b) {
+    return a.Name() < b.Name();
+  });
+  ASSERT_EQ(images.size(), 3);
+  SequentialPairingOptions options;
+  options.overlap = 1;
+  options.quadratic_overlap = false;
+  options.loop_detection = false;
+  SequentialPairGenerator generator(options, database);
+  const auto loop_pair =
+      std::make_pair(images[2].ImageId(), images[0].ImageId());
+  auto nested = std::make_unique<FailingResetGenerator>(loop_pair);
+  const auto* nested_ptr = nested.get();
+  SequentialPairGeneratorTestPeer::SetLoopDetectionGenerator(
+      generator, std::move(nested));
+  const auto first_pairs = generator.Next();
+  ASSERT_FALSE(first_pairs.empty());
+  bool caught_original = false;
+  try {
+    generator.Reset();
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(), "nested reset failed after cancellation");
+    caught_original = true;
+  }
+  ASSERT_TRUE(caught_original);
+  EXPECT_TRUE(generator.HasFinished());
+  EXPECT_TRUE(generator.Next().empty());
+  EXPECT_TRUE(generator.Next().empty());
+  EXPECT_EQ(nested_ptr->next_calls, 0);
+
+  generator.Reset();
+  EXPECT_FALSE(generator.HasFinished());
+  EXPECT_EQ(generator.Next(), first_pairs);
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[1].ImageId(), images[2].ImageId())));
+  EXPECT_TRUE(generator.Next().empty());
+  EXPECT_FALSE(generator.HasFinished());
+  EXPECT_THAT(generator.Next(), testing::ElementsAre(loop_pair));
+  EXPECT_EQ(nested_ptr->next_calls, 1);
   EXPECT_TRUE(generator.HasFinished());
 }
 

@@ -164,7 +164,7 @@ class Thread {
 };
 
 // Exception that aggregates multiple exceptions from parallel tasks.
-// Thrown by ThreadPool::Wait() when one or more tasks threw exceptions.
+// Thrown by ThreadPool::Wait() or Stop() when tasks threw exceptions.
 class AggregateException : public std::exception {
  public:
   explicit AggregateException(std::vector<std::exception_ptr> excs)
@@ -232,7 +232,9 @@ class ThreadPool {
   auto AddTask(func_t&& f, args_t&&... args)
       -> std::shared_future<result_of_t<func_t, args_t...>>;
 
-  // Stop the execution of all workers.
+  // Discard pending tasks, join workers, and report completed task errors.
+  // Errors reported by Wait() or Stop() are consumed once. The external owner
+  // must serialize calls to Wait() and Stop(); workers must not call Stop().
   void Stop();
 
   // Wait until tasks are finished.
