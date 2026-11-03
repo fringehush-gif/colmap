@@ -120,10 +120,10 @@ TEST_F(CudaBlockingSync, AllVisibleDevicesAndCurrentDeviceRestoration) {
 }
 #endif  // CUDART_VERSION >= 12000
 
-TEST(CudaDeviceSupportsBf16, InvalidDevice) {
+TEST(CudaDeviceHasComputeCapability, InvalidDevice) {
   const int num_devices = GetNumCudaDevices();
-  EXPECT_FALSE(CudaDeviceSupportsBf16(-1));
-  EXPECT_FALSE(CudaDeviceSupportsBf16(num_devices));
+  EXPECT_FALSE(CudaDeviceHasComputeCapability(-1, /*major=*/0));
+  EXPECT_FALSE(CudaDeviceHasComputeCapability(num_devices, /*major=*/0));
   if (num_devices == 0) {
     // Without a device, the initialization error is sticky.
     GTEST_SKIP() << "No CUDA device available";
@@ -132,14 +132,27 @@ TEST(CudaDeviceSupportsBf16, InvalidDevice) {
   EXPECT_EQ(cudaGetLastError(), cudaSuccess);
 }
 
-TEST(CudaDeviceSupportsBf16, MatchesDeviceProperties) {
+TEST(CudaDeviceHasComputeCapability, ValidDevice) {
+  const int num_devices = GetNumCudaDevices();
+  if (num_devices == 0) {
+    GTEST_SKIP() << "No CUDA device available";
+  }
+  EXPECT_TRUE(CudaDeviceHasComputeCapability(0, /*major=*/0));
+  EXPECT_FALSE(CudaDeviceHasComputeCapability(0, /*major=*/100));
+  // A device with compute capability 8.x also has 7.x.
+  if (CudaDeviceHasComputeCapability(0, /*major=*/8)) {
+    EXPECT_TRUE(CudaDeviceHasComputeCapability(0, /*major=*/7));
+  }
+}
+
+TEST(CudaDeviceHasComputeCapability, MatchesDeviceProperties) {
   if (GetNumCudaDevices() == 0) GTEST_SKIP() << "CUDA device required";
 #ifdef COLMAP_HIP_ENABLED
-  EXPECT_FALSE(CudaDeviceSupportsBf16(0));
+  EXPECT_FALSE(CudaDeviceHasComputeCapability(0, /*major=*/8));
 #else
   cudaDeviceProp properties{};
   ASSERT_EQ(cudaGetDeviceProperties(&properties, 0), cudaSuccess);
-  EXPECT_EQ(CudaDeviceSupportsBf16(0), properties.major >= 8);
+  EXPECT_EQ(CudaDeviceHasComputeCapability(0, /*major=*/8), properties.major >= 8);
 #endif
 }
 
