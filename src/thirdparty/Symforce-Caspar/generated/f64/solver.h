@@ -170,12 +170,12 @@ public:
           pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max,
       int device_id = 0);
 
-  // This class is managing cuda memory and cannot be copied.
+  // CUDA allocation ownership cannot be copied or moved.
   GraphSolver(const GraphSolver &) = delete;
   GraphSolver &operator=(const GraphSolver &) = delete;
 
-  GraphSolver(GraphSolver &&) = default;
-  GraphSolver &operator=(GraphSolver &&) = default;
+  GraphSolver(GraphSolver &&) = delete;
+  GraphSolver &operator=(GraphSolver &&) = delete;
 
   ~GraphSolver();
 
