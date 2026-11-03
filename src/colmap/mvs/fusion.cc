@@ -1638,7 +1638,6 @@ void StereoFusion::Fuse(const int thread_id,
     std::vector<float> x, y, z, nx, ny, nz;
     std::vector<uint8_t> r, g, b;
     std::vector<int> visibility;
-    bool in_use = false;
 
     void Clear() {
       queue.clear();
@@ -1663,22 +1662,18 @@ void StereoFusion::Fuse(const int thread_id,
              visibility.capacity() * sizeof(int);
     }
   };
+  // Fuse runs only in row tasks; ThreadPool never executes tasks inline.
   thread_local Scratch worker_scratch;
-  // A bitmap reader can reenter Fusion; never lend its caller's scratch.
-  Scratch nested_scratch;
-  auto& scratch = worker_scratch.in_use ? nested_scratch : worker_scratch;
+  auto& scratch = worker_scratch;
   struct ScratchLease {
     Scratch& scratch;
     ~ScratchLease() {
       // Bound retained capacity without limiting the current traversal.
       if (scratch.CapacityBytes() > 256 * 1024) {
         scratch = Scratch();
-      } else {
-        scratch.in_use = false;
       }
     }
   } lease{scratch};
-  scratch.in_use = true;
   scratch.Clear();
 
   // Next points to fuse.

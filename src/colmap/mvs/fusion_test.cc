@@ -24,6 +24,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -1643,6 +1644,52 @@ TEST(StereoFusion, Integration) {
       EXPECT_EQ(a.b, b.b);
     }
   };
+
+  // A reader may start another fusion while a worker is inside Fuse. The
+  // second Run uses its own ThreadPool, so its Fuse must have another TLS
+  // scratch even though the outer worker is still waiting in the callback.
+  {
+    const auto image_path = temp_dir / "images" / image_names.front();
+    Bitmap bitmap;
+    ASSERT_TRUE(bitmap.Read(image_path, true));
+    auto cached_options = options;
+    cached_options.bounded_cache = false;
+    cached_options.use_cache = true;
+    cached_options.num_threads = 1;
+    ASSERT_TRUE(cached_options.Check());
+    std::atomic<int> callback_calls{0};
+    std::thread::id outer_worker;
+    std::thread::id nested_worker;
+    std::unique_ptr<StereoFusion> nested;
+    auto reader = ScopedBitmapReader::Create(
+        {image_path},
+        [&](const std::filesystem::path&, bool as_rgb, bool linear,
+            Bitmap* target) {
+          EXPECT_TRUE(as_rgb);
+          EXPECT_FALSE(linear);
+          const int call = ++callback_calls;
+          if (call == 1) {
+            outer_worker = std::this_thread::get_id();
+            nested = std::make_unique<StereoFusion>(
+                cached_options, temp_dir, "COLMAP", "", "geometric");
+            nested->Run();
+          } else if (call == 2) {
+            nested_worker = std::this_thread::get_id();
+          }
+          *target = bitmap;
+          return true;
+        },
+        {{30, 20}});
+    StereoFusion outer(cached_options, temp_dir, "COLMAP", "", "geometric");
+    outer.Run();
+    ASSERT_TRUE(nested);
+    EXPECT_GE(callback_calls.load(), 2);
+    EXPECT_NE(outer_worker, std::this_thread::get_id());
+    EXPECT_NE(outer_worker, nested_worker);
+    expect_same_fusion(*nested, "nested_reader_fusion");
+    expect_same_fusion(outer, "outer_reader_fusion");
+    reader->Close();
+  }
 
   options.bounded_cache_neighborhood = true;
   options.cache_size = 50000.0 / (1024.0 * 1024.0 * 1024.0);
