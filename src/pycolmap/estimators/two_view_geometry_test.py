@@ -173,3 +173,27 @@ def test_compute_squared_sampson_error_with_identity() -> None:
     residuals = pycolmap.compute_squared_sampson_error(points1, points2, matrix)
     assert isinstance(residuals, list)
     assert len(residuals) == 2
+
+
+@pytest.mark.parametrize(
+    "entry_point",
+    ["estimate_two_view_geometry", "estimate_calibrated_two_view_geometry"],
+)
+@pytest.mark.parametrize("column", [0, 1])
+def test_two_view_geometry_rejects_out_of_range_matches(
+    entry_point: str, column: int
+) -> None:
+    camera = pycolmap.Camera(
+        model="SIMPLE_PINHOLE", width=200, height=200, params=[100, 100, 100]
+    )
+    points = np.zeros((20, 2), dtype=np.float64)
+    indices = np.arange(len(points), dtype=np.uint32)
+    matches = np.column_stack((indices, indices))
+    matches[0, column] = len(points)
+    options = pycolmap.TwoViewGeometryOptions()
+    options.force_H_use = True
+
+    with pytest.raises(ValueError):
+        getattr(pycolmap, entry_point)(
+            camera, points, camera, points, matches=matches, options=options
+        )

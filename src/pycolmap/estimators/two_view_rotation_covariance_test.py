@@ -59,6 +59,15 @@ def test_estimate_two_view_rotation_covariance(
     assert cov is not None
     assert cov.shape == (3, 3)
 
+    valid_matches = geometry.inlier_matches.copy()
+    for column, num_points in ((0, len(args[1])), (1, len(args[3]))):
+        stale_matches = valid_matches.copy()
+        stale_matches[0, column] = num_points
+        geometry.inlier_matches = stale_matches
+        with pytest.raises(ValueError):
+            pycolmap.estimate_two_view_rotation_covariance(*args, geometry)
+    geometry.inlier_matches = valid_matches
+
     geometry.cam2_from_cam1 = None
     assert (
         pycolmap.estimate_two_view_rotation_covariance(*args, geometry) is None

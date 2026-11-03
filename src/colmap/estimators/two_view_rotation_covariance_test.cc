@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 #include <Eigen/Cholesky>
 #include <Eigen/Core>
@@ -392,6 +393,34 @@ TEST(EstimateTwoViewRotationCovariance, UnconstrainedAxisIsCapped) {
   ASSERT_TRUE(extreme_cov.has_value());
   EXPECT_EQ(Eigen::LLT<Eigen::Matrix3f>(extreme_cov->cast<float>()).info(),
             Eigen::Success);
+}
+
+TEST(EstimateTwoViewRotationCovariance, RejectsStaleMatchIndices) {
+  const TwoViewRotationCovarianceTestData data =
+      CreateTwoViewRotationCovarianceTestData();
+  ASSERT_FALSE(data.geometry.inlier_matches.empty());
+
+  TwoViewGeometry geometry = data.geometry;
+  geometry.inlier_matches.front().point2D_idx1 =
+      static_cast<point2D_t>(data.points1.size());
+  EXPECT_THROW(EstimateTwoViewRotationCovariance(
+                   data.camera1,
+                   data.points1,
+                   data.camera2,
+                   data.points2,
+                   geometry),
+               std::invalid_argument);
+
+  geometry = data.geometry;
+  geometry.inlier_matches.front().point2D_idx2 =
+      static_cast<point2D_t>(data.points2.size());
+  EXPECT_THROW(EstimateTwoViewRotationCovariance(
+                   data.camera1,
+                   data.points1,
+                   data.camera2,
+                   data.points2,
+                   geometry),
+               std::invalid_argument);
 }
 
 TEST(EstimateTwoViewRotationCovariance, MissingPoseOrTooFewInliers) {

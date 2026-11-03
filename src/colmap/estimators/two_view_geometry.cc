@@ -172,6 +172,8 @@ ExtractMatchedImagePoints(const std::vector<Eigen::Vector2d>& points1,
   std::vector<Eigen::Vector2d> matched_points1(matches.size());
   std::vector<Eigen::Vector2d> matched_points2(matches.size());
   for (size_t i = 0; i < matches.size(); ++i) {
+    THROW_CHECK_LT(matches[i].point2D_idx1, points1.size());
+    THROW_CHECK_LT(matches[i].point2D_idx2, points2.size());
     matched_points1[i] = points1[matches[i].point2D_idx1];
     matched_points2[i] = points2[matches[i].point2D_idx2];
   }
@@ -194,6 +196,8 @@ ExtractMatchedCamRaysWithJac(const Camera& camera1,
   for (size_t i = 0; i < matches.size(); ++i) {
     const point2D_t idx1 = matches[i].point2D_idx1;
     const point2D_t idx2 = matches[i].point2D_idx2;
+    THROW_CHECK_LT(idx1, points1.size());
+    THROW_CHECK_LT(idx2, points2.size());
     const std::optional<CamRayWithJac> ray1 =
         camera1.CamRayFromImgWithJac(points1[idx1]);
     const std::optional<CamRayWithJac> ray2 =

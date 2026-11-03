@@ -19,6 +19,8 @@
 #include <Eigen/Core>
 #include <gtest/gtest.h>
 
+#include <stdexcept>
+
 namespace colmap {
 namespace {
 
@@ -1855,6 +1857,57 @@ TEST(MaybeDecomposeRelativePoses, MissingMatrixFromOldDatabase) {
   TwoViewGeometry geometry_after = corr_graph->ExtractTwoViewGeometry(
       1, 2, /*extract_inlier_matches=*/false);
   EXPECT_TRUE(geometry_after.cam2_from_cam1.has_value());
+}
+
+TEST(EstimateTwoViewGeometry, RejectsOutOfRangeMatchIndices) {
+  const TwoViewGeometryPoseTestData data = CreateTwoViewGeometryPoseTestData(
+      TwoViewGeometry::ConfigurationType::CALIBRATED);
+  ASSERT_FALSE(data.geometry.inlier_matches.empty());
+  TwoViewGeometryOptions options;
+  options.force_H_use = true;
+
+  FeatureMatches matches = data.geometry.inlier_matches;
+  matches.front().point2D_idx1 = static_cast<point2D_t>(data.points1.size());
+  EXPECT_THROW(EstimateTwoViewGeometry(data.camera1,
+                                       data.points1,
+                                       data.camera2,
+                                       data.points2,
+                                       matches,
+                                       options),
+               std::invalid_argument);
+
+  matches = data.geometry.inlier_matches;
+  matches.front().point2D_idx2 = static_cast<point2D_t>(data.points2.size());
+  EXPECT_THROW(EstimateTwoViewGeometry(data.camera1,
+                                       data.points1,
+                                       data.camera2,
+                                       data.points2,
+                                       matches,
+                                       options),
+               std::invalid_argument);
+}
+
+TEST(ExtractMatchedCamRaysWithJac, RejectsOutOfRangeMatchIndices) {
+  const Camera camera = Camera::CreateFromModelId(
+      1, CameraModelId::kPinhole, 100.0, 200, 200);
+  const std::vector<Eigen::Vector2d> points = {{80.0, 120.0}};
+
+  for (const bool skip_invalid : {false, true}) {
+    EXPECT_THROW(ExtractMatchedCamRaysWithJac(camera,
+                                              points,
+                                              camera,
+                                              points,
+                                              FeatureMatches{{1, 0}},
+                                              skip_invalid),
+                 std::invalid_argument);
+    EXPECT_THROW(ExtractMatchedCamRaysWithJac(camera,
+                                              points,
+                                              camera,
+                                              points,
+                                              FeatureMatches{{0, 1}},
+                                              skip_invalid),
+                 std::invalid_argument);
+  }
 }
 
 TEST(ExtractMatchedCamRaysWithJac, Nominal) {
