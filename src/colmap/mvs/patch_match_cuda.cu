@@ -954,15 +954,23 @@ __global__ void PackReferenceStatistics(const GpuMatView<float> sum,
 }
 
 constexpr int kInitialCostStripeRows = 64;
+static_assert(kInitialCostStripeRows % 8 == 0,
+              "NCC20 stripes must own complete low words");
+
+template <int kCostBits>
+using NccCostView = std::conditional_t<
+    kCostBits == 24,
+    Fixed24NccCostView,
+    std::conditional_t<kCostBits == 20,
+                       Fixed20NccCostView,
+                       std::conditional_t<kCostBits == 16,
+                                          PackedNccCostView,
+                                          GpuMatView<float>>>>;
 
 template <int kWindowSize, int kWindowStep, int kCostBits = 0>
 __global__ void ComputeInitialCost(
     const RefCamera camera,
-    std::conditional_t<kCostBits == 24,
-                       Fixed24NccCostView,
-                       std::conditional_t<kCostBits == 16,
-                                          PackedNccCostView,
-                                          GpuMatView<float>>> cost_map,
+    NccCostView<kCostBits> cost_map,
     const GpuMatView<float> depth_map,
     const GpuMatView<float> normal_map,
     const cudaTextureObject_t ref_image_texture,
@@ -1093,11 +1101,7 @@ __global__ void SweepFromTopToBottom(
     GpuMatView<curandState> rand_state_map,
     const PatchMatchRngPerimeter rand_state_layout,
     const unsigned int rand_state_rotation,
-    std::conditional_t<kCostBits == 24,
-                       Fixed24NccCostView,
-                       std::conditional_t<kCostBits == 16,
-                                          PackedNccCostView,
-                                          GpuMatView<float>>> cost_map,
+    NccCostView<kCostBits> cost_map,
     GpuMatView<float> depth_map,
     GpuMatView<float> normal_map,
     PackedConsistencyMaskView consistency_mask,
@@ -2065,7 +2069,7 @@ PatchMatchCuda::PatchMatchCuda(
   THROW_CHECK(!options_.rotation_buffer_reuse)
       << "PatchMatchStereo.rotation_buffer_reuse requires CUDA";
 #endif
-  THROW_CHECK(!(options_.ncc_cost_unorm16 && options_.ncc_cost_fixed24));
+  THROW_CHECK_LE(options_.NccCostCodecCount(), 1);
   cost_bits_ = options_.NccCostBits();
   THROW_CHECK(!cost_bits_ ||
               (options_.checkpoint_hmm && options_.window_radius == 5 &&
@@ -2124,6 +2128,10 @@ void PatchMatchCuda::Run() {
 #endif
   // Only publish masks after a completed filtered sweep and final rotation.
   consistency_mask_valid_ = false;
+  if (cost_bits_ == 20) {
+    RunWithWindowSizeAndStep<11, 1, true, 20>();
+    return;
+  }
   if (cost_bits_ == 24) {
     RunWithWindowSizeAndStep<11, 1, true, 24>();
     return;
@@ -2201,30 +2209,37 @@ GpuMatView<float> PatchMatchCuda::GeometryView(
 
 size_t PatchMatchCuda::CostMapWidth() const {
   if (cost_bits_ == 24) return fixed24_cost_map_->GetWidth();
+  if (cost_bits_ == 20) return fixed20_cost_map_->GetWidth();
   if (cost_bits_ == 16) return packed_cost_map_->GetWidth();
   return cost_map_->GetWidth();
 }
 size_t PatchMatchCuda::CostMapHeight() const {
   if (cost_bits_ == 24) return fixed24_cost_map_->GetHeight();
+  if (cost_bits_ == 20) return fixed20_cost_map_->GetHeight();
   if (cost_bits_ == 16) return packed_cost_map_->GetHeight();
   return cost_map_->GetHeight();
 }
 size_t PatchMatchCuda::CostMapDepth() const {
   if (cost_bits_ == 24) return fixed24_cost_map_->GetDepth();
+  if (cost_bits_ == 20) return fixed20_cost_map_->GetDepth();
   if (cost_bits_ == 16) return packed_cost_map_->GetDepth();
   return cost_map_->GetDepth();
 }
 size_t PatchMatchCuda::CostMapCapacityBytes() const {
   if (cost_bits_ == 24) return fixed24_cost_map_->GetCapacityBytes();
+  if (cost_bits_ == 20) return fixed20_cost_map_->GetCapacityBytes();
   if (cost_bits_ == 16) return packed_cost_map_->GetCapacityBytes();
   return cost_map_->GetCapacityBytes();
 }
 template <int kCostBits>
 auto PatchMatchCuda::CostMapView() const {
-  static_assert(kCostBits == 0 || kCostBits == 16 || kCostBits == 24);
+  static_assert(kCostBits == 0 || kCostBits == 16 || kCostBits == 20 ||
+                kCostBits == 24);
   THROW_CHECK_EQ(cost_bits_, kCostBits);
   if constexpr (kCostBits == 24) {
     return fixed24_cost_map_->View();
+  } else if constexpr (kCostBits == 20) {
+    return fixed20_cost_map_->View();
   } else if constexpr (kCostBits == 16) {
     return packed_cost_map_->View();
   } else {
@@ -2234,6 +2249,7 @@ auto PatchMatchCuda::CostMapView() const {
 
 void PatchMatchCuda::CheckCostMapDomain() const {
   if (cost_bits_ == 24) fixed24_cost_map_->CheckDomain();
+  if (cost_bits_ == 20) fixed20_cost_map_->CheckDomain();
   if (cost_bits_ == 16) packed_cost_map_->CheckDomain();
 }
 
@@ -2806,7 +2822,14 @@ size_t PairResidentBlocksPerSm(bool geometric,
                                int ncc_cost_bits,
                                size_t* sm_count) {
   THROW_CHECK(!(probability_unorm16 || ncc_cost_bits) || checkpoint_hmm);
-  THROW_CHECK(ncc_cost_bits == 0 || ncc_cost_bits == 16 || ncc_cost_bits == 24);
+  THROW_CHECK(ncc_cost_bits == 0 || ncc_cost_bits == 16 ||
+              ncc_cost_bits == 20 || ncc_cost_bits == 24);
+  if (ncc_cost_bits == 20) {
+    return probability_unorm16 ? PairResidentBlocksPerSm<true, true, 20>(
+                                     geometric, final_filter, sm_count)
+                               : PairResidentBlocksPerSm<true, false, 20>(
+                                     geometric, final_filter, sm_count);
+  }
   if (ncc_cost_bits == 24) {
     return probability_unorm16 ? PairResidentBlocksPerSm<true, true, 24>(
                                      geometric, final_filter, sm_count)
@@ -3078,6 +3101,7 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     THROW_CHECK_EQ(p.cost_bits_, first.cost_bits_);
     THROW_CHECK_EQ(p.packed_cost_map_ != nullptr, p.cost_bits_ == 16);
     THROW_CHECK_EQ(p.fixed24_cost_map_ != nullptr, p.cost_bits_ == 24);
+    THROW_CHECK_EQ(p.fixed20_cost_map_ != nullptr, p.cost_bits_ == 20);
     THROW_CHECK_EQ(p.cost_map_ != nullptr, !p.cost_bits_);
     THROW_CHECK_EQ(p.options_.probability_unorm16,
                    first.options_.probability_unorm16);
@@ -3168,6 +3192,21 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
           <<<initial_cost_grid, p->sweep_block_size_>>>(
               MakeRefCamera(p->ref_K_host_[0], p->ref_inv_K_host_[0]),
               p->CostMapView<24>(),
+              p->GeometryView(*p->depth_map_),
+              p->GeometryView(*p->normal_map_),
+              p->ref_image_texture_->GetObj(),
+              p->ReferenceStatisticsView(false),
+              p->ReferenceStatisticsView(true),
+              p->src_images_texture_->GetObj(),
+              p->poses_texture_[0]->GetObj(),
+              p->options_.sigma_spatial,
+              p->options_.sigma_color,
+              p->ReferenceStatisticsTexture());
+    } else if (p->cost_bits_ == 20) {
+      ComputeInitialCost<11, 1, 20>
+          <<<initial_cost_grid, p->sweep_block_size_>>>(
+              MakeRefCamera(p->ref_K_host_[0], p->ref_inv_K_host_[0]),
+              p->CostMapView<20>(),
               p->GeometryView(*p->depth_map_),
               p->GeometryView(*p->normal_map_),
               p->ref_image_texture_->GetObj(),
@@ -3322,6 +3361,8 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     if constexpr (CHECKPOINT) {                                                \
       if (p.cost_bits_ == 24) {                                                \
         PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, UNORM, 24, SELECTED, PREVIOUS); \
+      } else if (p.cost_bits_ == 20) {                                         \
+        PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, UNORM, 20, SELECTED, PREVIOUS); \
       } else if (p.cost_bits_ == 16) {                                         \
         PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, UNORM, 16, SELECTED, PREVIOUS); \
       } else {                                                                 \
@@ -3949,6 +3990,9 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   if (cost_bits_ == 24) {
     fixed24_cost_map_ = std::make_unique<Fixed24NccCostMap>(
         ref_width_, ref_height_, problem_.src_image_idxs.size());
+  } else if (cost_bits_ == 20) {
+    fixed20_cost_map_ = std::make_unique<Fixed20NccCostMap>(
+        ref_width_, ref_height_, problem_.src_image_idxs.size());
   } else if (cost_bits_ == 16) {
     packed_cost_map_ = std::make_unique<PackedNccCostMap>(
         ref_width_, ref_height_, problem_.src_image_idxs.size());
@@ -4078,6 +4122,9 @@ void PatchMatchCuda::RotateStateMaps(size_t width, size_t height) {
     }
     if (cost_bits_ == 24) {
       fixed24_cost_map_->RotateWithPlaneScratch(
+          hmm_checkpoint_->GetPtr(), hmm_checkpoint_->GetCapacityBytes());
+    } else if (cost_bits_ == 20) {
+      fixed20_cost_map_->RotateWithPlaneScratch(
           hmm_checkpoint_->GetPtr(), hmm_checkpoint_->GetCapacityBytes());
     } else if (cost_bits_ == 16) {
       packed_cost_map_->RotateWithPlaneScratch(

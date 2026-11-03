@@ -180,6 +180,12 @@ void BindMVS(py::module& m) {
               "Lossy UNORM16 storage of persisted NCC costs in [0,2]; FP32 "
               "proposal/math. Requires CUDA, checkpoint_hmm, radius 5, step 1.")
           .def_readwrite(
+              "ncc_cost_fixed20",
+              &PMOpts::ncc_cost_fixed20,
+              "Lossy Q19 NCC costs in 2.5 bytes per value before padding. "
+              "Requires CUDA, checkpoint_hmm, radius 5 and step 1; "
+              "mutually exclusive with other NCC cost codecs.")
+          .def_readwrite(
               "ncc_cost_fixed24",
               &PMOpts::ncc_cost_fixed24,
               "Lossy Fixed24 Q23 storage of persisted NCC costs in [0,2], "
@@ -187,7 +193,7 @@ void BindMVS(py::module& m) {
               "25% less cost payload than FP32 plus a four-byte status flag. "
               "Requires CUDA, "
               "checkpoint_hmm, radius 5 and step 1; mutually exclusive with "
-              "ncc_cost_unorm16.")
+              "other NCC cost codecs.")
           .def_readwrite(
               "checkpoint_hmm",
               &PMOpts::checkpoint_hmm,

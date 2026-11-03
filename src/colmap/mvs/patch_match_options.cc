@@ -46,37 +46,25 @@ void PatchMatchOptions::Print() const {
   PrintOption(probability_unorm16);
   PrintOption(ncc_cost_unorm16);
   PrintOption(ncc_cost_fixed24);
+  PrintOption(ncc_cost_fixed20);
   PrintOption(allow_missing_files);
   PrintOption(num_threads);
 }
 
 bool PatchMatchOptions::Check() const {
-  if (ncc_cost_unorm16 && ncc_cost_fixed24) {
-    LOG(ERROR) << "PatchMatchStereo.ncc_cost_unorm16 and ncc_cost_fixed24 "
-                  "are mutually exclusive";
+  if (NccCostCodecCount() > 1) {
+    LOG(ERROR) << "NCC cost storage options are mutually exclusive";
     return false;
   }
-  if (ncc_cost_fixed24 &&
+  if (NccCostBits() &&
       (!checkpoint_hmm || window_radius != 5 || window_step != 1)) {
-    LOG(ERROR) << "PatchMatchStereo.ncc_cost_fixed24 requires checkpoint_hmm, "
+    LOG(ERROR) << "Packed NCC costs require checkpoint_hmm, "
                   "window_radius=5 and window_step=1";
     return false;
   }
 #if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
-  if (ncc_cost_fixed24) {
-    LOG(ERROR) << "PatchMatchStereo.ncc_cost_fixed24 requires CUDA";
-    return false;
-  }
-#endif
-  if (ncc_cost_unorm16 &&
-      (!checkpoint_hmm || window_radius != 5 || window_step != 1)) {
-    LOG(ERROR) << "PatchMatchStereo.ncc_cost_unorm16 requires checkpoint_hmm, "
-                  "window_radius=5 and window_step=1";
-    return false;
-  }
-#if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
-  if (ncc_cost_unorm16) {
-    LOG(ERROR) << "PatchMatchStereo.ncc_cost_unorm16 requires CUDA";
+  if (NccCostBits()) {
+    LOG(ERROR) << "Packed NCC costs require CUDA";
     return false;
   }
 #endif

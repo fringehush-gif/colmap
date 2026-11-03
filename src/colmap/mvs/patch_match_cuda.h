@@ -30,6 +30,8 @@ class PackedNccCostMap;
 struct PackedNccCostView;
 class Fixed24NccCostMap;
 struct Fixed24NccCostView;
+class Fixed20NccCostMap;
+struct Fixed20NccCostView;
 
 class PatchMatchCuda {
  public:
@@ -175,6 +177,7 @@ class PatchMatchCuda {
   std::unique_ptr<PatchMatchStateMap> cost_map_;
   std::unique_ptr<PackedNccCostMap> packed_cost_map_;
   std::unique_ptr<Fixed24NccCostMap> fixed24_cost_map_;
+  std::unique_ptr<Fixed20NccCostMap> fixed20_cost_map_;
   std::unique_ptr<PatchMatchHmmCheckpoint> hmm_checkpoint_;
   // Canonical original-image perimeter; corners retain one shared state.
   std::unique_ptr<GpuMat<curandState>> rand_state_map_;

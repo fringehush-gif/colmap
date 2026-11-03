@@ -695,3 +695,279 @@ TEST(Fixed24NccCostMap, RejectsInvalidOrOverflowingDimensions) {
 
 }  // namespace mvs
 }  // namespace colmap
+
+namespace colmap {
+namespace mvs {
+namespace ncc20_test {
+void Check(cudaError_t e) {
+  if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
+}
+void Need(bool p, const char* m) {
+  if (!p) throw std::runtime_error(m);
+}
+size_t Pitch(size_t w) { return (w + 127) / 128 * 128; }
+size_t Round8(size_t h) { return (h + 7) / 8 * 8; }
+__host__ __device__ unsigned Pattern(size_t i) {
+  return unsigned((i * 7919 + 104729) & 0xfffff);
+}
+__global__ void Fill(Fixed20NccCostView v, unsigned* bad) {
+  // Same ownership as native initialization: one thread per column, serial
+  // rows/sources within distinct aligned64-row stripes. Never pixel-parallel.
+  constexpr size_t stripe = 64;
+  static_assert(stripe % 8 == 0);
+  const size_t c = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (c >= v.width) return;
+  const size_t stripe_end = size_t(blockIdx.y + 1) * stripe;
+  const size_t end = stripe_end < v.height ? stripe_end : v.height;
+  for (size_t r = size_t(blockIdx.y) * stripe; r < end; ++r)
+    for (size_t s = 0; s < v.sources; ++s) {
+      const size_t i = (s * v.height + r) * v.width + c;
+      v.StoreCode(r, c, s, Pattern(i));
+      v.StoreCode(r, c, s, Pattern(i));
+      if (v.GetCode(r, c, s) != Pattern(i)) atomicAdd(bad, 1u);
+    }
+}
+__global__ void CooperativeRows(Fixed20NccCostView v, unsigned* bad) {
+  const size_t c = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  for (size_t r = 0; r < v.height; ++r) {
+    // Source ownership changes with row, including within one packed word.
+    // Read current/future fields before any writer. Prior-row writes completed
+    // at the preceding end-row barrier; this models HMM stripe replay too.
+    const size_t first = (threadIdx.y + r) % blockDim.y;
+    if (c < v.width)
+      for (size_t s = first; s < v.sources; s += blockDim.y)
+        for (size_t rr = r; rr < v.height && rr < r + 9; ++rr) {
+          const size_t i = (s * v.height + rr) * v.width + c;
+          if (v.GetCode(rr, c, s) != Pattern(i)) atomicAdd(bad, 1u);
+        }
+    __syncthreads();
+    if (c < v.width)
+      for (size_t s = first; s < v.sources; s += blockDim.y) {
+        const size_t i = (s * v.height + r) * v.width + c;
+        const unsigned value = Pattern(i) ^ 0x12345u;
+        v.StoreCode(r, c, s, value);
+        v.StoreCode(r, c, s, value);
+        if (v.GetCode(r, c, s) != value) atomicAdd(bad, 1u);
+      }
+    __syncthreads();
+  }
+}
+__global__ void Verify(Fixed20NccCostView v,
+                       const unsigned* expected,
+                       unsigned* bad) {
+  const size_t n = v.width * v.height * v.sources;
+  for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
+       i += size_t(blockDim.x) * gridDim.x) {
+    const size_t c = i % v.width, r = (i / v.width) % v.height,
+                 s = i / (v.width * v.height);
+    if (v.GetCode(r, c, s) != expected[i]) atomicAdd(bad, 1u);
+  }
+}
+__global__ void Invalid(Fixed20NccCostView v) { v.Set(0, 0, 0, -1.0f); }
+__global__ void InvalidRaw(Fixed20NccCostView v) {
+  v.StoreCode(0, 0, 0, ncc20::kMaxCode + 1);
+}
+std::vector<unsigned char> Snapshot(Fixed20NccCostMap& map) {
+  std::vector<unsigned char> b(map.GetCapacityBytes() - sizeof(unsigned));
+  Check(
+      cudaMemcpy(b.data(), map.View().high, b.size(), cudaMemcpyDeviceToHost));
+  return b;
+}
+template <class F>
+void Refuses(F operation) {
+  bool refused = false;
+  try {
+    operation();
+  } catch (const std::exception&) {
+    refused = true;
+  }
+  Need(refused, "expected refusal");
+}
+TEST(NccFixed20, ColumnOwnershipAndRotation) {
+  int devices = 0;
+  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) GTEST_SKIP();
+
+  size_t cases = 0, rotations = 0, alias_checks = 0;
+  const size_t shapes[][3] = {{1, 1, 1},
+                              {1, 3072, 3},
+                              {3072, 1, 3},
+                              {2, 257, 2},
+                              {257, 2, 2},
+                              {129, 127, 3},
+                              {127, 129, 3},
+                              {385, 513, 4},
+                              {513, 385, 9}};
+  for (const auto& shape : shapes) {
+    size_t w = shape[0], h = shape[1], s = shape[2];
+    Fixed20NccCostMap map(w, h, s);
+    const size_t cap = std::max(Pitch(w) * h, Pitch(h) * w) * s;
+    const size_t lowcap = std::max(w * Round8(h), h * Round8(w)) * s;
+    Need(map.GetCapacityBytes() == 2 * cap + lowcap / 2 + sizeof(unsigned),
+         "capacity charge");
+    Need(reinterpret_cast<uintptr_t>(map.View().low) % 4 == 0, "low alignment");
+    Need(map.View().low_height == Round8(h), "low stride");
+    std::vector<unsigned> low(lowcap / 8, 1);
+    Check(cudaMemcpy(
+        low.data(), map.View().low, lowcap / 2, cudaMemcpyDeviceToHost));
+    for (unsigned x : low) Need(x == 0, "initial low word");
+    Check(cudaMemset(map.View().high, 0x5a, 2 * cap));
+    GpuMat<unsigned> errors_owner(1, 1), expected_owner(w * h * s, 1);
+    unsigned* bad = errors_owner.GetPtr();
+    unsigned* expected_device = expected_owner.GetPtr();
+    Check(cudaMemset(bad, 0, 4));
+    // Qualify the real retained scratch provider, including thin dimensions.
+    colmap::mvs::PatchMatchHmmCheckpoint hmm(w, h, s);
+    void* scratch = hmm.GetPtr();
+    const size_t scratch_bytes = hmm.GetCapacityBytes();
+    Need(scratch_bytes >= 2 * cap / s, "actual HMM scratch reserve");
+    Fill<<<dim3((w + 127) / 128, (h + 63) / 64), 128>>>(map.View(), bad);
+    Check(cudaGetLastError());
+    Check(cudaDeviceSynchronize());
+    CooperativeRows<<<dim3((w + 7) / 8), dim3(8, 4)>>>(map.View(), bad);
+    Check(cudaGetLastError());
+    Check(cudaDeviceSynchronize());
+    std::vector<unsigned> expected(w * h * s);
+    for (size_t i = 0; i < expected.size(); ++i)
+      expected[i] = Pattern(i) ^ 0x12345u;
+    Check(cudaMemcpy(
+        low.data(), map.View().low, lowcap / 2, cudaMemcpyDeviceToHost));
+    for (size_t src = 0; src < s; ++src)
+      for (size_t c = 0; c < w; ++c)
+        for (size_t r = h; r < Round8(h); ++r) {
+          const size_t word = (src * (Round8(h) / 8) + r / 8) * w + c;
+          Need(((low[word] >> (4 * (r % 8))) & 15u) == 0,
+               "initial padded rows preserved");
+        }
+    const auto before = Snapshot(map);
+    Refuses(
+        [&] { map.RotateWithPlaneScratch(map.View().high, scratch_bytes); });
+    ++alias_checks;
+    Refuses([&] {
+      map.RotateWithPlaneScratch(map.View().high + 1, scratch_bytes);
+    });
+    ++alias_checks;
+    Refuses([&] { map.RotateWithPlaneScratch(map.View().low, scratch_bytes); });
+    ++alias_checks;
+    Refuses(
+        [&] { map.RotateWithPlaneScratch(map.View().error, scratch_bytes); });
+    ++alias_checks;
+    Refuses([&] {
+      map.RotateWithPlaneScratch(static_cast<unsigned char*>(scratch) + 1,
+                                 scratch_bytes);
+    });
+    ++alias_checks;
+    Refuses([&] { map.RotateWithPlaneScratch(scratch, 2 * Pitch(h) * w - 1); });
+    ++alias_checks;
+    Refuses([&] { map.RotateWithPlaneScratch(nullptr, scratch_bytes); });
+    ++alias_checks;
+    Need(before == Snapshot(map), "refused rotation changed payload");
+    Need(map.GetWidth() == w && map.GetHeight() == h,
+         "refused rotation changed shape");
+    map.CheckDomain();
+    for (unsigned turn = 0; turn < 4; ++turn) {
+      std::vector<unsigned> next(expected.size());
+      for (size_t src = 0; src < s; ++src)
+        for (size_t r = 0; r < w; ++r)
+          for (size_t c = 0; c < h; ++c)
+            next[(src * w + r) * h + c] =
+                expected[(src * h + c) * w + (w - 1 - r)];
+      map.RotateWithPlaneScratch(scratch, scratch_bytes);
+      std::swap(w, h);
+      expected.swap(next);
+      Need(map.GetWidth() == w && map.GetHeight() == h, "rotated shape");
+      Need(map.View().low_height == Round8(h), "rotated low stride");
+      Check(cudaMemcpy(expected_device,
+                       expected.data(),
+                       expected.size() * sizeof(unsigned),
+                       cudaMemcpyHostToDevice));
+      Verify<<<256, 128>>>(map.View(), expected_device, bad);
+      Check(cudaGetLastError());
+      Check(cudaDeviceSynchronize());
+      map.CheckDomain();
+      ++rotations;
+      Check(cudaMemcpy(
+          low.data(), map.View().low, lowcap / 2, cudaMemcpyDeviceToHost));
+      for (size_t src = 0; src < s; ++src)
+        for (size_t c = 0; c < w; ++c)
+          for (size_t r = h; r < Round8(h); ++r) {
+            const size_t word = (src * (Round8(h) / 8) + r / 8) * w + c;
+            Need(((low[word] >> (4 * (r % 8))) & 15u) == 0,
+                 "rotated padded rows");
+          }
+    }
+    unsigned errors = 0;
+    Check(cudaMemcpy(&errors, bad, 4, cudaMemcpyDeviceToHost));
+    Need(errors == 0, "owner code parity");
+    const auto valid = Snapshot(map);
+    Invalid<<<1, 1>>>(map.View());
+    Check(cudaGetLastError());
+    Check(cudaDeviceSynchronize());
+    Refuses([&] { map.CheckDomain(); });
+    Need(valid == Snapshot(map), "invalid scalar changed payload");
+    Check(cudaMemset(map.View().error, 0, sizeof(unsigned)));
+    InvalidRaw<<<1, 1>>>(map.View());
+    Check(cudaGetLastError());
+    Check(cudaDeviceSynchronize());
+    Refuses([&] { map.CheckDomain(); });
+    Need(valid == Snapshot(map), "invalid raw code changed payload");
+    ++cases;
+  }
+  Refuses([&] { Fixed20NccCostMap m(0, 1, 1); });
+  Refuses([&] { Fixed20NccCostMap m(1, 0, 1); });
+  Refuses([&] { Fixed20NccCostMap m(1, 1, 0); });
+  Refuses([&] { Fixed20NccCostMap m(size_t(-1), 1, 1); });
+  EXPECT_EQ(cases, 9);
+  EXPECT_EQ(rotations, 36);
+  EXPECT_EQ(alias_checks, 63);
+}
+
+__global__ void CheckCodebook(unsigned* errors) {
+  for (unsigned code = blockIdx.x * blockDim.x + threadIdx.x;
+       code <= ncc20::kMaxCode;
+       code += blockDim.x * gridDim.x) {
+    unsigned restored = 0;
+    if (!ncc20::Encode(ncc20::Decode(code), restored) || restored != code)
+      atomicAdd(errors, 1u);
+  }
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    unsigned code = 123;
+    if (ncc20::Decode(ncc20::kMaxCode) != 2.0f) atomicAdd(errors, 1u);
+    if (!ncc20::Encode(2.0f - ncc20::kStep, code) ||
+        code != ncc20::kMaxCode - 1)
+      atomicAdd(errors, 1u);
+    if (!ncc20::Encode(nextafterf(2.0f - ncc20::kStep, 2.0f), code) ||
+        code != ncc20::kMaxCode)
+      atomicAdd(errors, 1u);
+    const unsigned invalid[] = {0x80000001u,
+                                0xbf800000u,
+                                0x40000001u,
+                                0x7f800000u,
+                                0xff800000u,
+                                0x7fc00000u};
+    for (unsigned bits : invalid) {
+      code = 123;
+      if (ncc20::Encode(__uint_as_float(bits), code) || code != 123)
+        atomicAdd(errors, 1u);
+    }
+    const unsigned zeros[] = {0u, 0x80000000u, 1u};
+    for (unsigned bits : zeros)
+      if (!ncc20::Encode(__uint_as_float(bits), code) || code != 0)
+        atomicAdd(errors, 1u);
+  }
+}
+TEST(NccFixed20, CodebookAndEndpoints) {
+  int devices = 0;
+  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) GTEST_SKIP();
+  GpuMat<unsigned> errors(1, 1);
+  errors.FillWithScalar(0u);
+  CheckCodebook<<<256, 128>>>(errors.GetPtr());
+  CUDA_CHECK();
+  CUDA_SYNC_AND_CHECK();
+  unsigned count = 0;
+  errors.CopyToHost(&count, sizeof(count));
+  EXPECT_EQ(count, 0u);
+}
+
+}  // namespace ncc20_test
+}  // namespace mvs
+}  // namespace colmap

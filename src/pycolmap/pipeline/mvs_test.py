@@ -93,16 +93,18 @@ def test_stereo_fusion_bounded_prefill_threads_api() -> None:
     assert options.check()
 
 
-
-def test_patch_match_ncc_cost_unorm16_option() -> None:
+@pytest.mark.parametrize(
+    "name", ["ncc_cost_unorm16", "ncc_cost_fixed20", "ncc_cost_fixed24"]
+)
+def test_patch_match_ncc_cost_codec_option(name: str) -> None:
     options = pycolmap.PatchMatchOptions()
-    assert options.ncc_cost_unorm16 is False
-    assert options.todict()["ncc_cost_unorm16"] is False
-    options.ncc_cost_unorm16 = True
+    assert getattr(options, name) is False
+    assert options.todict()[name] is False
+    setattr(options, name, True)
     options.checkpoint_hmm = False
     assert not options.check()
     copied = pycolmap.PatchMatchOptions(options.todict())
-    assert copied.ncc_cost_unorm16 is True
+    assert getattr(copied, name) is True
     assert copied.checkpoint_hmm is False
     assert not copied.check()
     options.checkpoint_hmm = True
