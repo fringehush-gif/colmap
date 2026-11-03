@@ -134,3 +134,22 @@ COLMAP_ADD_TEST(
     NAME trim_gpu_adapter_failure_test
     SRCS trim_gpu_adapter_failure_test.cc
 )
+
+# Exercise the private graph in the owner without a production test API.
+COLMAP_ADD_TEST(
+    NAME surface_trimmer_node_test
+    SRCS surface_trimmer_node_test.cc
+    LINK_LIBS colmap_poisson_recon
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_poisson_recon_surface_trimmer_node_test
+        PRIVATE RELEASE)
+    if(MSVC)
+        target_compile_options(colmap_poisson_recon_surface_trimmer_node_test
+            PRIVATE /bigobj)
+    endif()
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_poisson_recon_surface_trimmer_node_test
+            OpenMP::OpenMP_CXX)
+    endif()
+endif()

@@ -153,6 +153,7 @@ struct ComponentGraph
 			}
 			// Clean up the node
 			polygonIndices.clear();
+			neighbors.clear();
 			area = 0;
 		}
 	};
