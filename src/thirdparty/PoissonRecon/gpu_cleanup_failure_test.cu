@@ -3,7 +3,9 @@
 #include <array>
 #include <cstdlib>
 #include <exception>
+#include <map>
 #include <new>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -24,6 +26,14 @@ struct FaultState {
   int fail_allocation = 0, fail_event = 0, fail_stream = 0, fail_free = 0,
       fail_destroy = 0, fail_stream_destroy = 0, fail_sync = 0, fail_copy = 0;
   bool fail_boundary_host_allocation = false;
+  bool fail_after_readback = false;
+  void* readback_destination = nullptr;
+  std::size_t readback_bytes = 0;
+  std::uint64_t allocated_bytes = 0;
+  std::array<const void*, 4> sort_ranges{};
+  std::array<const void*, 3> select_ranges{};
+  std::size_t sort_bytes = 0, select_bytes = 0;
+  cudaStream_t sort_stream = nullptr, select_stream = nullptr;
   bool failed_output = false, null_success = false, mismatch = false,
        fake_pending = false, tracking_error = false;
   cudaError_t pending = cudaSuccess, returned = cudaErrorMemoryAllocation;
@@ -54,6 +64,7 @@ cudaError_t FaultMalloc(void** out, std::size_t bytes) {
     auto e = cudaMalloc(out, bytes);
     if (e != cudaSuccess) return e;
     state.memory.push_back(*out);
+    state.allocated_bytes += bytes;
   }
   if (!fail) return cudaSuccess;
   if (state.null_success) return cudaSuccess;
@@ -151,6 +162,11 @@ cudaError_t FaultCopyAsync(void* to,
                            cudaStream_t stream) {
   if (++state.copies == state.fail_copy) return cudaErrorInvalidValue;
   const auto result = cudaMemcpyAsync(to, from, bytes, kind, stream);
+  if (result == cudaSuccess && kind == cudaMemcpyDeviceToHost) {
+    state.readback_destination = to;
+    state.readback_bytes = bytes;
+    if (state.fail_after_readback) return cudaErrorUnknown;
+  }
   if (result == cudaSuccess && state.fail_boundary_host_allocation &&
       state.copies == 5) {
     fail_next_host_allocation = true;
@@ -159,9 +175,65 @@ cudaError_t FaultCopyAsync(void* to,
 }
 }  // namespace
 
+namespace CleanupFailureCub {
+struct DeviceRadixSort {
+  template <class Key, class Value>
+  static cudaError_t SortPairs(void* temporary,
+                               std::size_t& bytes,
+                               const Key* keys_in,
+                               Key* keys_out,
+                               const Value* values_in,
+                               Value* values_out,
+                               int count,
+                               int begin_bit = 0,
+                               int end_bit = sizeof(Key) * 8,
+                               cudaStream_t stream = nullptr) {
+    const auto result = cub::DeviceRadixSort::SortPairs(temporary,
+                                                        bytes,
+                                                        keys_in,
+                                                        keys_out,
+                                                        values_in,
+                                                        values_out,
+                                                        count,
+                                                        begin_bit,
+                                                        end_bit,
+                                                        stream);
+    if (temporary && result == cudaSuccess) {
+      state.sort_ranges = {keys_in, keys_out, values_in, values_out};
+      state.sort_bytes = bytes;
+      state.sort_stream = stream;
+      state.order.push_back('R');
+    }
+    return result;
+  }
+};
+struct DeviceSelect {
+  template <class Input, class Output, class Count, class Predicate>
+  static cudaError_t If(void* temporary,
+                        std::size_t& bytes,
+                        Input input,
+                        Output output,
+                        Count count,
+                        int items,
+                        Predicate predicate,
+                        cudaStream_t stream = nullptr) {
+    const auto result = cub::DeviceSelect::If(
+        temporary, bytes, input, output, count, items, predicate, stream);
+    if (temporary && result == cudaSuccess) {
+      state.select_ranges = {input, output, count};
+      state.select_bytes = bytes;
+      state.select_stream = stream;
+      state.order.push_back('L');
+    }
+    return result;
+  }
+};
+}  // namespace CleanupFailureCub
+
 // Use the actual implementations with isolated symbols and allocation-helper
 // namespace. Faults return errors after real releases, without poisoning CUDA.
 #define colmap CleanupFailureColmap
+#define cub CleanupFailureCub
 #define PoissonNormalGpu CleanupFailureNormal
 #define PoissonTrimGpu CleanupFailureTrim
 #define cudaMalloc FaultMalloc
@@ -193,6 +265,7 @@ cudaError_t FaultCopyAsync(void* to,
 #undef PoissonTrimGpu
 #undef PoissonNormalGpu
 #undef colmap
+#undef cub
 
 namespace {
 class GpuCleanupFaultTest : public ::testing::TestWithParam<int> {
@@ -560,7 +633,178 @@ TEST_P(GpuHostReadbackFaultTest, HostAllocationTimingControlsRefusal) {
 }
 INSTANTIATE_TEST_SUITE_P(HostReadbackApis,
                          GpuHostReadbackFaultTest,
-                         ::testing::Values(1, 2, 3));
+                         ::testing::Values(1, 3));
+class GpuConnectedReadbackTest : public GpuCleanupFaultTest {};
+TEST_P(GpuConnectedReadbackTest, UsesCallerStorageWithoutStagingAllocation) {
+  Reset();
+  // Reserve fault-tracking storage before arming the application allocator.
+  state.memory.reserve(32);
+  state.handles.reserve(8);
+  state.stream_handles.reserve(2);
+  state.order.reserve(64);
+  bool result = false, unused_allocation_fault = false;
+  {
+    struct ResetAllocationFault {
+      ~ResetAllocationFault() { fail_next_host_allocation = false; }
+    } reset_fault;
+    fail_next_host_allocation = true;
+    result = Invoke();
+    unused_allocation_fault = fail_next_host_allocation;
+  }
+  EXPECT_TRUE(result);
+  EXPECT_TRUE(unused_allocation_fault);
+  EXPECT_EQ(state.readback_destination, roots.data());
+  EXPECT_EQ(state.readback_bytes, sizeof(roots));
+  EXPECT_EQ(roots, (std::array<std::uint32_t, 2>{1, 1}));
+  Released();
+}
+TEST_P(GpuConnectedReadbackTest,
+       QueuedReadbackFailureSynchronizesCallerStorage) {
+  Reset();
+  state.fail_after_readback = true;
+  EXPECT_THROW(Invoke(), std::runtime_error);
+  EXPECT_EQ(state.readback_destination, roots.data());
+  EXPECT_EQ(state.readback_bytes, sizeof(roots));
+  const auto sync = std::find(state.order.begin(), state.order.end(), 'S');
+  const auto free = std::find(state.order.begin(), state.order.end(), 'F');
+  EXPECT_NE(sync, state.order.end());
+  EXPECT_LT(sync, free);
+  // The real synchronization succeeds before the injected error propagates.
+  // Throwing does not promise that caller outputs remain unchanged.
+  EXPECT_EQ(roots, (std::array<std::uint32_t, 2>{1, 1}));
+  Released();
+  Reset();
+  Success();
+}
+INSTANTIATE_TEST_SUITE_P(ConnectedReadbackApi,
+                         GpuConnectedReadbackTest,
+                         ::testing::Values(2));
+class GpuBoundaryStorageTest : public GpuCleanupFaultTest {};
+TEST_P(GpuBoundaryStorageTest, RetiredSortInputsOwnSelectionStorage) {
+  Reset();
+  Success();
+  RecordProperty("entries", 6);
+  RecordProperty("device_allocation_requests", state.allocations);
+  RecordProperty("device_requested_bytes",
+                 std::to_string(state.allocated_bytes));
+  for (std::size_t i = 0; i < state.sort_ranges.size(); ++i) {
+    ASSERT_NE(state.sort_ranges[i], nullptr);
+    for (std::size_t j = 0; j < i; ++j) {
+      const auto a = reinterpret_cast<std::uintptr_t>(state.sort_ranges[i]);
+      const auto b = reinterpret_cast<std::uintptr_t>(state.sort_ranges[j]);
+      EXPECT_TRUE(a + 6 * sizeof(std::uint64_t) <= b ||
+                  b + 6 * sizeof(std::uint64_t) <= a);
+    }
+  }
+  EXPECT_EQ(state.select_ranges[0], state.sort_ranges[0]);
+  EXPECT_EQ(state.select_ranges[1], state.sort_ranges[2]);
+  EXPECT_NE(state.select_ranges[0], state.select_ranges[1]);
+  EXPECT_NE(state.select_ranges[2], state.select_ranges[0]);
+  EXPECT_NE(state.select_ranges[2], state.select_ranges[1]);
+  const auto count = reinterpret_cast<std::uintptr_t>(state.select_ranges[2]);
+  for (int i = 0; i < 2; ++i) {
+    const auto range = reinterpret_cast<std::uintptr_t>(state.select_ranges[i]);
+    EXPECT_TRUE(count + sizeof(int) <= range ||
+                range + 6 * sizeof(std::uint64_t) <= count);
+  }
+  EXPECT_EQ(state.sort_stream, state.select_stream);
+  EXPECT_NE(state.sort_stream, nullptr);
+  EXPECT_LT(std::find(state.order.begin(), state.order.end(), 'R'),
+            std::find(state.order.begin(), state.order.end(), 'L'));
+}
+TEST_P(GpuBoundaryStorageTest, VariedGraphsMatchIndependentEdgeIncidence) {
+  using Face = std::vector<std::uint32_t>;
+  struct Input {
+    std::vector<Face> faces;
+    std::vector<std::uint32_t> labels;
+  };
+  std::vector<Input> cases{
+      {{}, {}},
+      {{{}}, {0}},
+      {{{0}}, {0}},
+      {{{0, 1, 2}}, {0}},
+      {{{0, 1, 2}, {1, 0, 3}}, {0, 0}},
+      {{{0, 1, 2}, {1, 0, 3}}, {7, UINT32_MAX}},
+      {{{0, 1, 2}, {0, 1, 3}}, {0, 1}},
+      {{{0, 0, 1}, {0, 0, 2}}, {0, 1}},
+      {{{0, 1, 2}, {1, 0, 3}, {0, 1, 4}}, {0, 1, 2}},
+      {{{0, 1, 2}, {1, 0, 3}, {4, 5, 6}, {5, 4, 7}}, {0, 1, 0, 1}}};
+  for (std::uint32_t side : {2u, 17u, 257u}) {
+    Input input;
+    for (std::uint32_t y = 0; y < side; ++y)
+      for (std::uint32_t x = 0; x < side; ++x) {
+        const auto a = y * (side + 1) + x, b = a + 1, c = a + side + 1,
+                   d = c + 1;
+        input.faces.push_back({a, b, c});
+        input.faces.push_back({b, d, c});
+        input.labels.push_back((x + 3 * y) % 5);
+        input.labels.push_back((2 * x + y) % 5);
+      }
+    cases.push_back(std::move(input));
+  }
+  for (std::size_t test = 0; test < cases.size(); ++test) {
+    SCOPED_TRACE(test);
+    Reset();
+    const auto& input = cases[test];
+    std::map<std::pair<std::uint32_t, std::uint32_t>,
+             std::vector<std::pair<std::uint32_t, bool>>>
+        incidence;
+    std::vector<std::uint64_t> offsets{0};
+    std::vector<std::uint32_t> vertices;
+    for (std::size_t f = 0; f < input.faces.size(); ++f) {
+      const auto& face = input.faces[f];
+      for (std::size_t i = 0; i < face.size(); ++i) {
+        const auto a = face[i], b = face[(i + 1) % face.size()];
+        vertices.push_back(a);
+        if (a != b)
+          incidence[{std::min(a, b), std::max(a, b)}].push_back(
+              {input.labels[f], a > b});
+      }
+      offsets.push_back(vertices.size());
+    }
+    bool manifold = true;
+    std::set<std::pair<std::uint32_t, std::uint32_t>> adjacent;
+    for (const auto& item : incidence) {
+      const auto& edges = item.second;
+      if (edges.size() > 2) manifold = false;
+      if (edges.size() == 2 && edges[0].first != edges[1].first &&
+          edges[0].second != edges[1].second)
+        adjacent.emplace(std::min(edges[0].first, edges[1].first),
+                         std::max(edges[0].first, edges[1].first));
+    }
+    std::vector<std::uint64_t> expected;
+    for (const auto& edge : adjacent)
+      expected.push_back((std::uint64_t(edge.first) << 32) | edge.second);
+    CleanupFailureTrim::Stats stats;
+    const auto result = CleanupFailureTrim::BoundaryGraph(input.faces.size(),
+                                                          vertices.size(),
+                                                          offsets.data(),
+                                                          vertices.data(),
+                                                          input.labels.data(),
+                                                          graph,
+                                                          stats);
+    EXPECT_EQ(result, manifold);
+    if (manifold)
+      EXPECT_EQ(graph, expected);
+    else
+      EXPECT_EQ(graph, (std::vector<std::uint64_t>{999}));
+    if (!input.faces.empty() && !vertices.empty()) {
+      const auto fixed = (input.faces.size() + 1ull) * sizeof(std::uint64_t) +
+                         4ull * vertices.size() * sizeof(std::uint64_t) +
+                         vertices.size() * sizeof(std::uint32_t) +
+                         input.faces.size() * sizeof(std::uint32_t) +
+                         sizeof(std::uint32_t) + sizeof(int);
+      EXPECT_EQ(stats.device_bytes,
+                fixed + std::max(state.sort_bytes, state.select_bytes));
+      EXPECT_EQ(state.allocated_bytes, stats.device_bytes);
+    } else
+      EXPECT_EQ(state.allocated_bytes, 0);
+    Released();
+  }
+}
+INSTANTIATE_TEST_SUITE_P(BoundaryStorageApi,
+                         GpuBoundaryStorageTest,
+                         ::testing::Values(3));
 INSTANTIATE_TEST_SUITE_P(ActualImplementations,
                          GpuCleanupFaultTest,
                          ::testing::Values(0, 1, 2, 3));

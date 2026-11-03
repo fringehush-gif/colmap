@@ -416,17 +416,9 @@ bool ConnectedComponents(std::size_t polygons,
   stats.device_bytes = fixed_bytes + sort_bytes;
   if (!HasCapacity(stats.device_bytes, stats)) return reject(stats.reason);
 
-  // This allocation precedes all resource acquisition and queued work.
-  // Keep its known host-resource refusal distinct from postlaunch exceptions.
-  std::vector<std::uint32_t> result;
-  try {
-    result.resize(polygons);
-  } catch (const std::bad_alloc&) {
-    return reject("host-allocation");
-  }
   CleanupState cleanup;
   try {
-    // Readback storage outlives stream cleanup on exceptions.
+    // Caller-owned readback storage outlives stream cleanup on exceptions.
     Stream stream(cleanup);
     Event begin(cleanup), uploaded(cleanup), sorted(cleanup), joined(cleanup),
         downloaded(cleanup);
@@ -480,7 +472,7 @@ bool ConnectedComponents(std::size_t polygons,
         parents.value, d_roots.value, polygons);
     Check(cudaGetLastError());
     Check(cudaEventRecord(joined.value, stream.value));
-    Check(cudaMemcpyAsync(result.data(),
+    Check(cudaMemcpyAsync(roots,
                           d_roots.value,
                           d_roots.bytes,
                           cudaMemcpyDeviceToHost,
@@ -491,7 +483,6 @@ bool ConnectedComponents(std::size_t polygons,
     stats.sort_ms = Duration(uploaded.value, sorted.value);
     stats.union_ms = Duration(sorted.value, joined.value);
     stats.download_ms = Duration(joined.value, downloaded.value);
-    std::copy(result.begin(), result.end(), roots);
   } catch (...) {
     if (cleanup.error != cudaSuccess)
       std::throw_with_nested(
@@ -568,7 +559,7 @@ bool BoundaryGraph(std::size_t polygons,
   const std::size_t scratch_bytes = std::max(sort_bytes, select_bytes);
   const std::uint64_t fixed_bytes =
       (polygons + 1ull) * sizeof(std::uint64_t) +
-      6ull * entries * sizeof(std::uint64_t) + entries * sizeof(std::uint32_t) +
+      4ull * entries * sizeof(std::uint64_t) + entries * sizeof(std::uint32_t) +
       polygons * sizeof(std::uint32_t) + sizeof(std::uint32_t) + sizeof(int);
   stats.device_bytes = fixed_bytes + scratch_bytes;
   if (!HasCapacity(stats.device_bytes, stats)) return reject(stats.reason);
@@ -585,8 +576,7 @@ bool BoundaryGraph(std::size_t polygons,
         downloaded(cleanup);
     Device<std::uint64_t> d_offsets(cleanup, polygons + 1),
         keys_a(cleanup, entries), keys_b(cleanup, entries),
-        values_a(cleanup, entries), values_b(cleanup, entries),
-        pairs(cleanup, entries), d_selected(cleanup, entries);
+        values_a(cleanup, entries), values_b(cleanup, entries);
     Device<std::uint32_t> d_vertices(cleanup, entries),
         d_components(cleanup, polygons), invalid(cleanup, 1);
     Device<int> d_count(cleanup, 1);
@@ -630,13 +620,17 @@ bool BoundaryGraph(std::size_t polygons,
                                           64,
                                           stream.value));
     Check(cudaEventRecord(sorted.value, stream.value));
+    // Sort input storage is retired on this stream. Keep its sorted outputs
+    // distinct while reusing the inputs for pairs and compacted results.
+    auto* const pairs = keys_a.value;
+    auto* const selected_pairs = values_a.value;
     BoundaryPairs<<<(entries + 255) / 256, 256, 0, stream.value>>>(
-        keys_b.value, values_b.value, entries, pairs.value, invalid.value);
+        keys_b.value, values_b.value, entries, pairs, invalid.value);
     Check(cudaGetLastError());
     Check(cub::DeviceSelect::If(scratch.value,
                                 select_bytes,
-                                pairs.value,
-                                d_selected.value,
+                                pairs,
+                                selected_pairs,
                                 d_count.value,
                                 int(entries),
                                 ValidPair{},
@@ -659,7 +653,7 @@ bool BoundaryGraph(std::size_t polygons,
       result.resize(count);
       if (count)
         Check(cudaMemcpyAsync(result.data(),
-                              d_selected.value,
+                              selected_pairs,
                               count * sizeof(std::uint64_t),
                               cudaMemcpyDeviceToHost,
                               stream.value));
