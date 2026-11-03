@@ -520,8 +520,8 @@ void AutomaticReconstructionController::RunDenseMapper() {
 
     if (!ExistsFile(meshing_path)) {
       if (options_.mesher == Mesher::POISSON) {
-        mvs::PoissonMeshing(
-            *option_manager_.poisson_meshing, fused_path, meshing_path);
+        THROW_CHECK(mvs::PoissonMeshing(
+            *option_manager_.poisson_meshing, fused_path, meshing_path));
       } else if (options_.mesher == Mesher::DELAUNAY) {
 #if defined(COLMAP_CGAL_ENABLED)
         mvs::DenseDelaunayMeshing(

@@ -109,6 +109,49 @@ TEST(AutomaticReconstruction, DenseCompletionRequiresVisibility) {
     }
   }
 }
+
+TEST(AutomaticReconstruction, PoissonFailurePropagatesThroughWait) {
+  const auto dir = CreateTestDir();
+  const auto dense = dir / "dense" / "0";
+  CreateDirIfNotExists(dense / "sparse", true);
+  CreateDirIfNotExists(dense / "stereo");
+  CreateDirIfNotExists(dir / "images");
+  Reconstruction().Write(dense / "sparse");
+  std::ofstream(dense / "stereo" / "patch-match.cfg");
+  std::ofstream(dense / "fused.ply.vis") << "cached visibility";
+  // A complete PLY header without normals reaches the handled Poisson failure.
+  std::ofstream(dense / "fused.ply")
+      << "ply\nformat ascii 1.0\nelement vertex 1\n"
+         "property float x\nproperty float y\nproperty float z\n"
+         "end_header\n0 0 0\n";
+
+  AutomaticReconstructionController::Options options;
+  options.workspace_path = dir;
+  options.image_path = dir / "images";
+  options.extraction = false;
+  options.matching = false;
+  options.single_view_calibration = false;
+  options.sparse = false;
+  options.dense = true;
+  options.use_gpu = false;
+  options.num_threads = 1;
+  options.mesher = AutomaticReconstructionController::Mesher::POISSON;
+  // The empty model/configuration submits no GPU jobs. Two explicit indices
+  // avoid the single-device selection path; no device presence is assumed.
+  options.gpu_index = "0,1";
+  auto manager = std::make_shared<ReconstructionManager>();
+  manager->Add();
+  AutomaticReconstructionController controller(options, manager);
+  controller.Setup();
+  controller.Start();
+  try {
+    controller.Wait();
+    FAIL() << "Expected Poisson meshing failure";
+  } catch (const std::exception& error) {
+    EXPECT_NE(std::string(error.what()).find("mvs::PoissonMeshing"),
+              std::string::npos);
+  }
+}
 #endif
 
 // TODO: Add GLOBAL mapper test. Currently excluded because the test produces

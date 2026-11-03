@@ -130,8 +130,8 @@ void BindMeshing(py::module& m) {
       "poisson_meshing",
       [](const std::filesystem::path& input_path,
          const std::filesystem::path& output_path,
-         const PoissonMOpts& options) -> void {
-        mvs::PoissonMeshing(options, input_path, output_path);
+         const PoissonMOpts& options) -> bool {
+        return mvs::PoissonMeshing(options, input_path, output_path);
       },
       "input_path"_a,
       "output_path"_a,

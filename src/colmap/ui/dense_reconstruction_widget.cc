@@ -461,9 +461,10 @@ void DenseReconstructionWidget::PoissonMeshing() {
   if (ExistsFile(workspace_path / kFusedFileName)) {
     thread_control_widget_->StartFunction(
         "Poisson Meshing...", [this, workspace_path]() {
-          mvs::PoissonMeshing(*options_->poisson_meshing,
-                              workspace_path / kFusedFileName,
-                              workspace_path / kPoissonMeshedFileName);
+          THROW_CHECK(mvs::PoissonMeshing(
+              *options_->poisson_meshing,
+              workspace_path / kFusedFileName,
+              workspace_path / kPoissonMeshedFileName));
           LoadAndDisplayMesh(workspace_path / kPoissonMeshedFileName);
         });
   }
