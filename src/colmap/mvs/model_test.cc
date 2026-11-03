@@ -12,7 +12,9 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <map>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -64,6 +66,141 @@ std::vector<std::map<int, float>> LegacyTriangulationAngles(
   }
 
   return triangulation_angles;
+}
+
+std::vector<std::vector<int>> ReferenceOverlappingImages(
+    const Model& model, const size_t num_images,
+    const double min_triangulation_angle) {
+  std::vector<std::vector<int>> overlapping_images(model.images.size());
+
+  const float min_triangulation_angle_rad = DegToRad(min_triangulation_angle);
+
+  const auto shared_num_points = model.ComputeSharedPoints();
+
+  const float kTriangulationAnglePercentile = 75;
+  const auto triangulation_angles =
+      LegacyTriangulationAngles(model, kTriangulationAnglePercentile);
+
+  for (size_t image_idx = 0; image_idx < model.images.size(); ++image_idx) {
+    const auto& shared_images = shared_num_points.at(image_idx);
+    const auto& overlapping_triangulation_angles =
+        triangulation_angles.at(image_idx);
+
+    std::vector<std::pair<int, int>> ordered_images;
+    ordered_images.reserve(shared_images.size());
+    for (const auto& [image_idx, count] : shared_images) {
+      if (overlapping_triangulation_angles.at(image_idx) >=
+          min_triangulation_angle_rad) {
+        ordered_images.emplace_back(image_idx, count);
+      }
+    }
+
+    const size_t eff_num_images = std::min(ordered_images.size(), num_images);
+    if (eff_num_images < shared_images.size()) {
+      std::partial_sort(ordered_images.begin(),
+                        ordered_images.begin() + eff_num_images,
+                        ordered_images.end(),
+                        [](const std::pair<int, int> image1,
+                           const std::pair<int, int> image2) {
+                          return image1.second > image2.second;
+                        });
+    } else {
+      std::sort(ordered_images.begin(),
+                ordered_images.end(),
+                [](const std::pair<int, int> image1,
+                   const std::pair<int, int> image2) {
+                  return image1.second > image2.second;
+                });
+    }
+
+    overlapping_images[image_idx].reserve(eff_num_images);
+    for (size_t i = 0; i < eff_num_images; ++i) {
+      overlapping_images[image_idx].push_back(ordered_images[i].first);
+    }
+  }
+
+  return overlapping_images;
+}
+
+
+Model MakeOverlapModel() {
+  Model model;
+  const float K[9] = {100, 0, 50, 0, 100, 50, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  for (int i = 0; i < 7; ++i) {
+    const float T[3] = {-float(i), 0, 0};
+    model.images.emplace_back("img.jpg", 100, 100, K, R, T);
+  }
+  model.points = {{0, 0, 0, {0, 1, 2, 2}},
+                  {1, 0, 2, {4, 3, 2, 1, 0}},
+                  {-1, 2, 8, {0, 2, 4}},
+                  {3, 0, 0, {3, 1}},
+                  {2, 1, 4, {5, 5, 5}}};
+  return model;
+}
+
+void ExpectReferenceOverlap(const Model& model) {
+  for (const size_t limit : {size_t(0), size_t(1), size_t(3), size_t(100)}) {
+    for (const double threshold :
+         {0.0, -0.0, std::numeric_limits<double>::denorm_min(),
+          -std::numeric_limits<double>::denorm_min(), 0.01, -1.0, 180.0,
+          std::numeric_limits<double>::quiet_NaN()}) {
+      EXPECT_EQ(model.GetMaxOverlappingImages(limit, threshold),
+                ReferenceOverlappingImages(model, limit, threshold))
+          << "limit=" << limit << " threshold=" << threshold;
+    }
+  }
+}
+
+TEST(Model, OverlapThresholdRetainsOrderedNeighbors) {
+  ExpectReferenceOverlap(Model());
+  auto model = MakeOverlapModel();
+  ExpectReferenceOverlap(model);
+  for (auto& point : model.points) {
+    std::reverse(point.track.begin(), point.track.end());
+  }
+  ExpectReferenceOverlap(model);
+  model.points.push_back({std::numeric_limits<float>::max(),
+                          -std::numeric_limits<float>::max(),
+                          std::numeric_limits<float>::denorm_min(), {0, 1, 4}});
+  ExpectReferenceOverlap(model);
+}
+
+TEST(Model, OverlapMalformedGeometryRetainsFallback) {
+  for (const float value : {std::numeric_limits<float>::quiet_NaN(),
+                            std::numeric_limits<float>::infinity(),
+                            -std::numeric_limits<float>::infinity()}) {
+    auto model = MakeOverlapModel();
+    model.points = {{value, value, value, {0, 1}}};
+    ExpectReferenceOverlap(model);
+    const float K[9] = {100, 0, 50, 0, 100, 50, 0, 0, 1};
+    const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const float T[3] = {value, 0, 0};
+    model.images[0] = Image("nonfinite.jpg", 100, 100, K, R, T);
+    model.points = {{0, 1, 3, {0, 1}}};
+    ExpectReferenceOverlap(model);
+  }
+  auto model = MakeOverlapModel();
+  const float K[9] = {100, 0, 50, 0, 100, 50, 0, 0, 1};
+  const float R[9] = {2, 0, 0, 0, 2, 0, 0, 0, 2};
+  const float T[3] = {std::numeric_limits<float>::max(), 0, 0};
+  model.images[0] = Image("overflow.jpg", 100, 100, K, R, T);
+  float center[3];
+  ComputeProjectionCenter(R, T, center);
+  ASSERT_FALSE(std::isfinite(center[0]));
+  model.points = {{0, 1, 3, {0, 1}}};
+  ExpectReferenceOverlap(model);
+}
+
+TEST(Model, OverlapInvalidIndicesRetainExistingContract) {
+  for (const int invalid : {-1, 7}) {
+    auto model = MakeOverlapModel();
+    model.points = {{0, 0, 1, {0, invalid}}};
+    EXPECT_THROW(model.GetMaxOverlappingImages(3, 0), std::out_of_range);
+    EXPECT_THROW(ReferenceOverlappingImages(model, 3, 0), std::out_of_range);
+    model.points[0].track = {invalid, invalid};
+    ExpectReferenceOverlap(model);
+  }
 }
 
 TEST(Model, TriangulationAnglesRetainLegacyBitsAndDirectedMembership) {

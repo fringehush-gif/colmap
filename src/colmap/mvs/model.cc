@@ -11,6 +11,7 @@
 #include "colmap/util/string.h"
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <utility>
 
@@ -100,21 +101,38 @@ std::vector<std::vector<int>> Model::GetMaxOverlappingImages(
 
   const auto shared_num_points = ComputeSharedPoints();
 
+  // Finite float coordinates and computed centers produce finite,
+  // nonnegative double-precision angles, so zero cannot reject any pair.
+  const bool skip_triangulation_angles =
+      min_triangulation_angle_rad == 0.0f &&
+      std::all_of(points.begin(),
+                  points.end(),
+                  [](const Point& point) {
+                    return std::isfinite(point.x) && std::isfinite(point.y) &&
+                           std::isfinite(point.z);
+                  }) &&
+      std::all_of(images.begin(), images.end(), [](const Image& image) {
+        Eigen::Vector3f center;
+        ComputeProjectionCenter(image.GetR(), image.GetT(), center.data());
+        return center.allFinite();
+      });
+
   const float kTriangulationAnglePercentile = 75;
   const auto triangulation_angles =
-      ComputeTriangulationAngles(kTriangulationAnglePercentile);
+      skip_triangulation_angles
+          ? std::vector<std::map<int, float>>()
+          : ComputeTriangulationAngles(kTriangulationAnglePercentile);
 
   for (size_t image_idx = 0; image_idx < images.size(); ++image_idx) {
     const auto& shared_images = shared_num_points.at(image_idx);
-    const auto& overlapping_triangulation_angles =
-        triangulation_angles.at(image_idx);
 
     std::vector<std::pair<int, int>> ordered_images;
     ordered_images.reserve(shared_images.size());
-    for (const auto& [image_idx, count] : shared_images) {
-      if (overlapping_triangulation_angles.at(image_idx) >=
-          min_triangulation_angle_rad) {
-        ordered_images.emplace_back(image_idx, count);
+    for (const auto& [other_image_idx, count] : shared_images) {
+      if (skip_triangulation_angles ||
+          triangulation_angles.at(image_idx).at(other_image_idx) >=
+              min_triangulation_angle_rad) {
+        ordered_images.emplace_back(other_image_idx, count);
       }
     }
 
