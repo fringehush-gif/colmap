@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import numpy as np
+import pytest
 
 import pycolmap
 
@@ -36,6 +37,34 @@ def test_rigid3d_rotation_property() -> None:
     rigid = pycolmap.Rigid3d()
     rotation = rigid.rotation
     assert isinstance(rotation, pycolmap.Rotation3d)
+
+
+@pytest.mark.parametrize(
+    "rotation",
+    [
+        np.array([0.0, 9.0, 0.0, 9.0, 0.0, 9.0, 1.0])[::2],
+        np.array([1.0, 0.0, 0.0, 0.0])[::-1],
+    ],
+)
+def test_rigid3d_rotation_accepts_strided_array(rotation: np.ndarray) -> None:
+    rigid = pycolmap.Rigid3d()
+    rigid.rotation = rotation
+    np.testing.assert_array_equal(rigid.rotation.quat, [0.0, 0.0, 0.0, 1.0])
+
+
+@pytest.mark.parametrize(
+    "rotation",
+    [
+        np.arange(6.0)[::2],
+        np.broadcast_to(np.array(1.0), (5,)),
+    ],
+)
+def test_rigid3d_rotation_rejects_wrong_size_view(
+    rotation: np.ndarray,
+) -> None:
+    rigid = pycolmap.Rigid3d()
+    with pytest.raises(TypeError):
+        rigid.rotation = rotation
 
 
 def test_rigid3d_translation_readwrite() -> None:

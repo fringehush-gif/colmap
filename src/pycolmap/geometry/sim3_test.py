@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import numpy as np
+import pytest
 
 import pycolmap
 
@@ -42,6 +43,29 @@ def test_sim3d_scale_readwrite() -> None:
     assert float(np.array(similarity.scale)) == 3.0
 
 
+@pytest.mark.parametrize(
+    "value", [2.0, np.array(2.0), np.array([2.0]), np.array([[2.0]])]
+)
+def test_sim3d_scale_accepts_size_one_representations(value: object) -> None:
+    similarity = pycolmap.Sim3d()
+    similarity.scale = value
+    assert float(similarity.scale) == 2.0
+
+
+def test_sim3d_scale_self_assignment() -> None:
+    similarity = pycolmap.Sim3d()
+    similarity.scale = 3.0
+    similarity.scale = similarity.scale
+    assert float(similarity.scale) == 3.0
+
+
+def test_sim3d_scale_augmented_assignment() -> None:
+    similarity = pycolmap.Sim3d()
+    similarity.scale = 3.0
+    similarity.scale *= 2.0
+    assert float(similarity.scale) == 6.0
+
+
 def test_sim3d_rotation_readwrite() -> None:
     similarity = pycolmap.Sim3d()
     rotation = similarity.rotation
@@ -49,6 +73,21 @@ def test_sim3d_rotation_readwrite() -> None:
     new_rotation = pycolmap.Rotation3d(xyzw=np.array([0.0, 0.0, 0.0, 1.0]))
     similarity.rotation = new_rotation
     assert similarity.rotation is not None
+
+
+@pytest.mark.parametrize(
+    "rotation",
+    [
+        np.array([0.0, 9.0, 0.0, 9.0, 0.0, 9.0, 1.0])[::2],
+        np.array([1.0, 0.0, 0.0, 0.0])[::-1],
+    ],
+)
+def test_sim3d_rotation_accepts_strided_array(rotation: np.ndarray) -> None:
+    similarity = pycolmap.Sim3d()
+    similarity.rotation = rotation
+    np.testing.assert_array_equal(
+        similarity.rotation.quat, [0.0, 0.0, 0.0, 1.0]
+    )
 
 
 def test_sim3d_translation_readwrite() -> None:
