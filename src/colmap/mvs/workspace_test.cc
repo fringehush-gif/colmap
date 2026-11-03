@@ -8,6 +8,7 @@
 #include "colmap/sensor/bitmap_reader.h"
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
+#include "colmap/util/threading.h"
 
 #include <array>
 #include <atomic>
@@ -309,7 +310,9 @@ class ParameterizedWorkspaceTests
       public ::testing::WithParamInterface<std::function<
           std::unique_ptr<Workspace>(const Workspace::Options&)>> {};
 
-void ExpectLoadedWorkspaceData(Workspace& workspace) {
+void ExpectLoadedWorkspaceData(
+    Workspace& workspace,
+    const BitmapColor<uint8_t>& expected_color = BitmapColor<uint8_t>(7, 8, 9)) {
   const auto& bitmap = workspace.GetBitmap(0);
   const auto& depth = workspace.GetDepthMap(0);
   const auto& normal = workspace.GetNormalMap(0);
@@ -325,9 +328,9 @@ void ExpectLoadedWorkspaceData(Workspace& workspace) {
     for (int col = 0; col < 10; ++col) {
       const auto pixel = bitmap.GetPixel(col, row);
       ASSERT_TRUE(pixel);
-      EXPECT_EQ(pixel->r, 7);
-      EXPECT_EQ(pixel->g, 8);
-      EXPECT_EQ(pixel->b, 9);
+      EXPECT_EQ(pixel->r, expected_color.r);
+      EXPECT_EQ(pixel->g, expected_color.g);
+      EXPECT_EQ(pixel->b, expected_color.b);
       EXPECT_FLOAT_EQ(depth.Get(row, col), 1.0f);
       for (int channel = 0; channel < 3; ++channel) {
         EXPECT_FLOAT_EQ(normal.Get(row, col, channel), 1.0f);
@@ -503,6 +506,18 @@ TEST_F(WorkspaceTests, EagerLoadPreservesFirstOccurrenceOrderWithOneWorker) {
                                           workspace.GetModel().GetImageName(1)};
   workspace.Load({names[0], names[1], names[0], names[2], names[1]});
   EXPECT_EQ(read_names, names);
+  const auto* bitmap = &workspace.GetBitmap(0);
+  const auto* depth = &workspace.GetDepthMap(0);
+  const auto* normal = &workspace.GetNormalMap(0);
+  ASSERT_TRUE(std::filesystem::remove(workspace.GetNormalMapPath(2)));
+  EXPECT_NO_THROW(workspace.Load({names[0]}));
+  EXPECT_THROW(workspace.GetBitmap(2), std::invalid_argument);
+  EXPECT_THROW(workspace.GetDepthMap(2), std::invalid_argument);
+  EXPECT_THROW(workspace.GetNormalMap(2), std::invalid_argument);
+  EXPECT_EQ(&workspace.GetBitmap(0), bitmap);
+  EXPECT_EQ(&workspace.GetDepthMap(0), depth);
+  EXPECT_EQ(&workspace.GetNormalMap(0), normal);
+  EXPECT_FLOAT_EQ(workspace.GetDepthMap(0).Get(0, 0), 1.0f);
   reader->Close();
 }
 
@@ -636,6 +651,81 @@ TEST_F(WorkspaceTests, EagerBitmapReadFailureCanBeRetried) {
   EXPECT_EQ(reads.load(), 2);
   ExpectLoadedWorkspaceData(workspace);
   reader->Close();
+}
+
+TEST_F(WorkspaceTests, EagerReloadBitmapFailureRetiresCompleteTriplet) {
+  Workspace workspace(GetOptions());
+  bool fail = false;
+  auto reader = ScopedBitmapReader::Create(
+      {workspace.GetBitmapPath(0)},
+      [&](const auto&, bool, bool, Bitmap* target) {
+        if (fail) return false;
+        *target = Bitmap(10, 5, true);
+        target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+        return true;
+      },
+      {{10, 5}});
+  ASSERT_NO_THROW(workspace.Load({image_name_}));
+  fail = true;
+  EXPECT_THROW(workspace.Load({image_name_}), AggregateException);
+  EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+  EXPECT_THROW(workspace.GetDepthMap(0), std::invalid_argument);
+  EXPECT_THROW(workspace.GetNormalMap(0), std::invalid_argument);
+  fail = false;
+  ASSERT_NO_THROW(workspace.Load({image_name_}));
+  ExpectLoadedWorkspaceData(workspace);
+  reader->Close();
+}
+
+TEST_F(WorkspaceTests, EagerReloadMissingInputRetiresCompleteTriplet) {
+  Workspace workspace(GetOptions());
+  for (const auto& path : {workspace.GetBitmapPath(0),
+                           workspace.GetDepthMapPath(0),
+                           workspace.GetNormalMapPath(0)}) {
+    ASSERT_NO_THROW(workspace.Load({image_name_}));
+    const std::filesystem::path saved = path.string() + ".saved";
+    std::filesystem::rename(path, saved);
+    EXPECT_NO_THROW(workspace.Load({image_name_}));
+    EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+    EXPECT_THROW(workspace.GetDepthMap(0), std::invalid_argument);
+    EXPECT_THROW(workspace.GetNormalMap(0), std::invalid_argument);
+    std::filesystem::rename(saved, path);
+    ASSERT_NO_THROW(workspace.Load({image_name_}));
+    ExpectLoadedWorkspaceData(workspace, BitmapColor<uint8_t>(0, 0, 0));
+  }
+}
+
+TEST_F(WorkspaceTests, EagerReloadReadFailurePublishesNoPartialTriplet) {
+  Workspace workspace(GetOptions());
+  for (const auto& path : {workspace.GetDepthMapPath(0),
+                           workspace.GetNormalMapPath(0)}) {
+    ASSERT_NO_THROW(workspace.Load({image_name_}));
+    const std::filesystem::path saved = path.string() + ".saved";
+    std::filesystem::rename(path, saved);
+    { std::ofstream truncated(path, std::ios::binary); }
+    EXPECT_THROW(workspace.Load({image_name_}), AggregateException);
+    EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+    EXPECT_THROW(workspace.GetDepthMap(0), std::invalid_argument);
+    EXPECT_THROW(workspace.GetNormalMap(0), std::invalid_argument);
+    std::filesystem::remove(path);
+    std::filesystem::rename(saved, path);
+    ASSERT_NO_THROW(workspace.Load({image_name_}));
+    ExpectLoadedWorkspaceData(workspace, BitmapColor<uint8_t>(0, 0, 0));
+  }
+}
+
+TEST_F(WorkspaceTests, EagerReloadInvalidOrEmptyRosterPreservesResidentData) {
+  Workspace workspace(GetOptions());
+  ASSERT_NO_THROW(workspace.Load({image_name_}));
+  const auto* bitmap = &workspace.GetBitmap(0);
+  const auto* depth = &workspace.GetDepthMap(0);
+  const auto* normal = &workspace.GetNormalMap(0);
+  EXPECT_THROW(workspace.Load({image_name_, "unknown-image"}),
+               std::invalid_argument);
+  EXPECT_NO_THROW(workspace.Load({}));
+  EXPECT_EQ(&workspace.GetBitmap(0), bitmap);
+  EXPECT_EQ(&workspace.GetDepthMap(0), depth);
+  EXPECT_EQ(&workspace.GetNormalMap(0), normal);
 }
 
 TEST_F(WorkspaceTests, EagerLoadMissingInputCanBeRestored) {

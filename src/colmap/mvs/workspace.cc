@@ -113,7 +113,6 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
         bitmap->Height() != static_cast<int>(height)) {
       bitmap->Rescale(static_cast<int>(width), static_cast<int>(height));
     }
-    bitmaps_[image_idx] = std::move(bitmap);
 
     // Read and rescale depth map
     auto depth_map = std::make_unique<DepthMap>();
@@ -121,13 +120,15 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
     if (depth_map->GetWidth() != width || depth_map->GetHeight() != height) {
       depth_map->Downsize(width, height);
     }
-    depth_maps_[image_idx] = std::move(depth_map);
 
     auto normal = std::make_unique<NormalMap>();
     normal->Read(GetNormalMapPath(image_idx));
     if (normal->GetWidth() != width || normal->GetHeight() != height) {
       normal->Downsize(width, height);
     }
+    // Publish only a complete replacement after every read succeeds.
+    bitmaps_[image_idx] = std::move(bitmap);
+    depth_maps_[image_idx] = std::move(depth_map);
     normal_maps_[image_idx] = std::move(normal);
   };
 
@@ -153,6 +154,7 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
   LOG(INFO) << StringPrintf("Loading workspace data with %d threads...",
                             num_threads);
   for (const int image_idx : image_indices) {
+    ReleaseFullRamImageInputs(image_idx);
     if (HasBitmap(image_idx) && HasDepthMap(image_idx) &&
         HasNormalMap(image_idx)) {
       thread_pool.AddTask(LoadWorkspaceData, image_idx);
