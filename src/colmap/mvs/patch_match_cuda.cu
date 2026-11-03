@@ -1071,6 +1071,64 @@ struct CooperativeNccJob<true, kBlockWidth, kSampleWindowSize> {
   int best_idx[kBlockWidth];
 };
 
+namespace {
+
+template <int kSampleWindowSize, int kBlockWidth>
+__device__ __forceinline__ int AppendSampledSource(
+    const int source,
+    const bool use_source_mask,
+    uint32_t& sampled_sources,
+    int& num_unique_sources,
+    int (&sources)[kSampleWindowSize][kBlockWidth],
+    const int lane) {
+  int job_slot = -1;
+  if (use_source_mask) {
+    job_slot = source;
+    if (job_slot >= 0) sampled_sources |= uint32_t{1} << job_slot;
+  } else if (source >= 0) {
+    job_slot = 0;
+    while (job_slot < num_unique_sources && sources[job_slot][lane] != source) {
+      ++job_slot;
+    }
+    if (job_slot == num_unique_sources) {
+      sources[job_slot][lane] = source;
+      ++num_unique_sources;
+    }
+  }
+  return job_slot;
+}
+
+template <int kSampleWindowSize, int kBlockWidth>
+__device__ __forceinline__ void PackSampledSources(
+    const bool use_source_mask,
+    const uint32_t sampled_sources,
+    int num_unique_sources,
+    const int sample_count,
+    int (&sources)[kSampleWindowSize][kBlockWidth],
+    int (&aliases)[kSampleWindowSize][kBlockWidth],
+    const int lane) {
+  if (use_source_mask) {
+    uint32_t remaining_sources = sampled_sources;
+    while (remaining_sources != 0) {
+      const int source = __ffs(remaining_sources) - 1;
+      sources[num_unique_sources++][lane] = source;
+      remaining_sources &= remaining_sources - 1;
+    }
+    for (int slot = 0; slot < sample_count; ++slot) {
+      const int source = aliases[slot][lane];
+      if (source >= 0) {
+        aliases[slot][lane] =
+            __popc(sampled_sources & ((uint32_t{1} << source) - 1));
+      }
+    }
+  }
+  for (int slot = num_unique_sources; slot < kSampleWindowSize; ++slot) {
+    sources[slot][lane] = -1;
+  }
+}
+
+}  // namespace
+
 template <int kWindowSize,
           int kWindowStep,
           bool kGeomConsistencyTerm = false,
@@ -1504,25 +1562,13 @@ __global__ void SweepFromTopToBottom(
           }
           if constexpr (kCooperative) {
             if constexpr (kSampleWindowSize > 1) {
-              int job_slot = -1;
-              if (use_source_mask) {
-                // Keep source IDs until the complete window mask is known.
-                job_slot = pcc_computer.src_image_idx;
-                if (job_slot >= 0) sampled_sources |= uint32_t{1} << job_slot;
-              } else if (pcc_computer.src_image_idx >= 0) {
-                job_slot = 0;
-                while (job_slot < num_unique_sources &&
-                       cooperative_job.source[job_slot][threadIdx.x] !=
-                           pcc_computer.src_image_idx) {
-                  ++job_slot;
-                }
-                if (job_slot == num_unique_sources) {
-                  cooperative_job.source[job_slot][threadIdx.x] =
-                      pcc_computer.src_image_idx;
-                  ++num_unique_sources;
-                }
-              }
-              cooperative_sample_alias[slot][threadIdx.x] = job_slot;
+              cooperative_sample_alias[slot][threadIdx.x] =
+                  AppendSampledSource(pcc_computer.src_image_idx,
+                                      use_source_mask,
+                                      sampled_sources,
+                                      num_unique_sources,
+                                      cooperative_job.source,
+                                      threadIdx.x);
             } else {
               cooperative_job.source[slot][threadIdx.x] =
                   pcc_computer.src_image_idx;
@@ -1549,28 +1595,13 @@ __global__ void SweepFromTopToBottom(
           }
         }
         if constexpr (kCooperative && kSampleWindowSize > 1) {
-          if (use_source_mask) {
-            uint32_t remaining_sources = sampled_sources;
-            while (remaining_sources != 0) {
-              const int source = __ffs(remaining_sources) - 1;
-              cooperative_job.source[num_unique_sources++][threadIdx.x] =
-                  source;
-              remaining_sources &= remaining_sources - 1;
-            }
-            for (int slot = 0; slot < sample_count; ++slot) {
-              const int source = cooperative_sample_alias[slot][threadIdx.x];
-              if (source >= 0) {
-                // Rank in source order, retaining every original draw alias.
-                cooperative_sample_alias[slot][threadIdx.x] =
-                    __popc(sampled_sources & ((uint32_t{1} << source) - 1));
-              }
-            }
-          }
-          // Pack unique jobs first; aliases retain every original sample.
-          for (int slot = num_unique_sources; slot < kSampleWindowSize;
-               ++slot) {
-            cooperative_job.source[slot][threadIdx.x] = -1;
-          }
+          PackSampledSources<kSampleWindowSize>(use_source_mask,
+                                                sampled_sources,
+                                                num_unique_sources,
+                                                sample_count,
+                                                cooperative_job.source,
+                                                cooperative_sample_alias,
+                                                threadIdx.x);
         }
       }
 
@@ -1659,17 +1690,6 @@ __global__ void SweepFromTopToBottom(
                             geometric_costs[i == 3 ? 0 : (i == 4 ? 2 : i)];
               }
             }
-          }
-          if constexpr (kSampleWindowSize > 1) {
-            // Workers may overwrite their local source; restore the last draw.
-            const int last_job =
-                cooperative_sample_alias[sample_count - 1][threadIdx.x];
-            pcc_computer.src_image_idx =
-                last_job >= 0 ? cooperative_job.source[last_job][threadIdx.x]
-                              : -1;
-          } else {
-            pcc_computer.src_image_idx =
-                cooperative_job.source[sample_count - 1][threadIdx.x];
           }
         }
       } else {
@@ -1917,6 +1937,131 @@ cudaArray_t BorrowRotationRefArray(
 }
 
 }  // namespace
+#endif
+
+#ifndef COLMAP_HIP_ENABLED
+namespace {
+
+template <bool kCooperative, int kSampleWindowSize>
+__global__ void ProbeSampledSourcesKernel(const GpuMatView<int> draws,
+                                          const GpuMatView<float> values,
+                                          GpuMatView<int> restored,
+                                          GpuMatView<float> folded) {
+  constexpr int kLanes = 8;
+  const int lane = threadIdx.x;
+  float sum = 0.0f;
+  if constexpr (!kCooperative) {
+    for (int sample = 0; sample < draws.width; ++sample) {
+      const int source = draws.Get(lane, sample);
+      restored.Set(lane, sample, source);
+      if (source >= 0) sum += values.Get(0, source);
+    }
+  } else {
+    __shared__ int sources[kSampleWindowSize][kLanes];
+    __shared__ int aliases[kSampleWindowSize][kLanes];
+    __shared__ float results[kSampleWindowSize][kLanes];
+    for (int begin = 0; begin < draws.width; begin += kSampleWindowSize) {
+      const int sample_count =
+          min(kSampleWindowSize, static_cast<int>(draws.width) - begin);
+      if constexpr (kSampleWindowSize > 1) {
+        int num_unique_sources = 0;
+        uint32_t sampled_sources = 0;
+        const bool use_source_mask = values.width <= 32;
+        for (int slot = 0; slot < kSampleWindowSize; ++slot) {
+          const int source =
+              slot < sample_count ? draws.Get(lane, begin + slot) : -1;
+          aliases[slot][lane] = AppendSampledSource(source,
+                                                    use_source_mask,
+                                                    sampled_sources,
+                                                    num_unique_sources,
+                                                    sources,
+                                                    lane);
+        }
+        PackSampledSources<kSampleWindowSize>(use_source_mask,
+                                              sampled_sources,
+                                              num_unique_sources,
+                                              sample_count,
+                                              sources,
+                                              aliases,
+                                              lane);
+      } else {
+        sources[0][lane] = draws.Get(lane, begin);
+      }
+      for (int slot = 0; slot < kSampleWindowSize; ++slot) {
+        const int source = sources[slot][lane];
+        if (source >= 0) results[slot][lane] = values.Get(0, source);
+      }
+      for (int slot = 0; slot < sample_count; ++slot) {
+        const int job = kSampleWindowSize > 1 ? aliases[slot][lane] : slot;
+        const int source = job >= 0 ? sources[job][lane] : -1;
+        restored.Set(lane, begin + slot, source);
+        if (source >= 0) sum += results[job][lane];
+      }
+    }
+  }
+  folded.Set(0, lane, sum);
+}
+
+}  // namespace
+
+namespace internal {
+
+// Private test bridge; no public option or header API. The scalar path folds
+// raw draws directly, while cooperative paths use the production pack helpers.
+std::pair<std::vector<int>, std::vector<float>> ProbeSampledSources(
+    const std::vector<int>& draws,
+    const std::vector<float>& values,
+    const int sample_window_size,
+    const bool cooperative) {
+  constexpr int kLanes = 8;
+  THROW_CHECK(!draws.empty() && draws.size() % kLanes == 0);
+  THROW_CHECK(!values.empty());
+  THROW_CHECK_LE(draws.size(),
+                 static_cast<size_t>(std::numeric_limits<int>::max()));
+  THROW_CHECK_LE(values.size(),
+                 static_cast<size_t>(std::numeric_limits<int>::max()));
+  THROW_CHECK(sample_window_size == 1 || sample_window_size == 16);
+  for (const int source : draws) {
+    THROW_CHECK_GE(source, -1);
+    THROW_CHECK(source < 0 || static_cast<size_t>(source) < values.size());
+  }
+  const size_t count = draws.size() / kLanes;
+  GpuMat<int> device_draws(count, kLanes);
+  GpuMat<float> device_values(values.size(), 1);
+  GpuMat<int> restored(count, kLanes);
+  GpuMat<float> folded(kLanes, 1);
+  CUDA_SAFE_CALL(cudaMemcpy2D(device_draws.GetPtr(),
+                              device_draws.GetPitch(),
+                              draws.data(),
+                              count * sizeof(int),
+                              count * sizeof(int),
+                              kLanes,
+                              cudaMemcpyHostToDevice));
+  CUDA_SAFE_CALL(cudaMemcpy(device_values.GetPtr(),
+                            values.data(),
+                            values.size() * sizeof(float),
+                            cudaMemcpyHostToDevice));
+  if (!cooperative) {
+    ProbeSampledSourcesKernel<false, 1><<<1, kLanes>>>(device_draws.View(),
+                                                       device_values.View(),
+                                                       restored.View(),
+                                                       folded.View());
+  } else if (sample_window_size == 1) {
+    ProbeSampledSourcesKernel<true, 1><<<1, kLanes>>>(device_draws.View(),
+                                                      device_values.View(),
+                                                      restored.View(),
+                                                      folded.View());
+  } else {
+    ProbeSampledSourcesKernel<true, 16><<<1, kLanes>>>(device_draws.View(),
+                                                       device_values.View(),
+                                                       restored.View(),
+                                                       folded.View());
+  }
+  CUDA_SYNC_AND_CHECK();
+  return {restored.CopyToMat().GetData(), folded.CopyToMat().GetData()};
+}
+
+}  // namespace internal
 #endif
 
 PatchMatchCuda::PatchMatchCuda(

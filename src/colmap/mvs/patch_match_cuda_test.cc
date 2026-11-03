@@ -168,6 +168,15 @@ extern "C" cudaError_t __wrap_cudaFreeArray(cudaArray_t ptr) {
 
 namespace colmap {
 namespace mvs {
+#ifndef COLMAP_HIP_ENABLED
+namespace internal {
+std::pair<std::vector<int>, std::vector<float>> ProbeSampledSources(
+    const std::vector<int>& draws,
+    const std::vector<float>& values,
+    int sample_window_size,
+    bool cooperative);
+}  // namespace internal
+#endif
 class PatchMatchControllerTestAccess {
  public:
   using Hooks = PatchMatchController::SparseTestHooks;
@@ -2183,12 +2192,72 @@ TEST_F(CudaTest, EvenSampleGroupsPreserveOutputs) {
   }
 }
 
+TEST_F(CudaTest, SourcePackingPreservesDrawIdentityAndOrderedFold) {
+  constexpr int kLanes = 8;
+  for (const int sources : {32, 33}) {
+    std::vector<float> values(sources);
+    for (int source = 0; source < sources; ++source) {
+      values[source] = (source % 7 + 1) * 0.125f;
+    }
+    values[0] = 1.0f;
+    values[31] = std::ldexp(1.0f, -24);
+    values[17] = 0.125f;
+    values[1] = 0.75f;
+    const auto check = [&](const std::vector<int>& pattern) {
+      const size_t count = pattern.size();
+      std::vector<int> draws(count * kLanes);
+      std::vector<float> expected(kLanes, 0.0f);
+      for (int lane = 0; lane < kLanes; ++lane) {
+        for (size_t sample = 0; sample < count; ++sample) {
+          const int original = pattern[sample];
+          const int source = original < 0 ? -1 : (original + lane) % sources;
+          draws[lane * count + sample] = source;
+          // Independent scalar oracle: no packing, deduplication, ranking,
+          // masks or alias mapping, and no production fold helper.
+          if (source >= 0) expected[lane] += values[source];
+        }
+      }
+      for (const auto& config :
+           {std::pair{false, 1}, std::pair{true, 1}, std::pair{true, 16}}) {
+        SCOPED_TRACE(::testing::Message()
+                     << "sources=" << sources << " samples=" << count
+                     << " cooperative=" << config.first
+                     << " window=" << config.second);
+        const auto actual = internal::ProbeSampledSources(
+            draws, values, config.second, config.first);
+        ASSERT_EQ(actual.first, draws);
+        ASSERT_EQ(actual.second.size(), expected.size());
+        for (int lane = 0; lane < kLanes; ++lane) {
+          EXPECT_EQ(actual.second[lane], expected[lane]) << lane;
+        }
+      }
+    };
+    const std::array<int, 6> seed = {31, 0, 31, 17, -1, 1};
+    for (const size_t samples : {15, 16, 17}) {
+      std::vector<int> pattern(samples);
+      for (size_t i = 0; i < samples; ++i) pattern[i] = seed[i % seed.size()];
+      if (sources == 33) pattern[7] = 32;
+      pattern.back() = -1;
+      check(pattern);
+    }
+    check(std::vector<int>(17, -1));
+    // Confirm that this fixture detects addition reordering in the valid,
+    // finite nonnegative cost range instead of using only exact sums.
+    float ordered = 0;
+    for (const int source : {0, 31, 31}) ordered += values[source];
+    float reordered = 0;
+    for (const int source : {31, 31, 0}) reordered += values[source];
+    ASSERT_NE(ordered, reordered);
+    check({0, 31, 31});
+  }
+}
+
 TEST_F(CudaTest, SampleWindowBoundariesPreserveOutputs) {
   // Cover source-mask capacity and its larger-source fallback.
   for (const int num_sources : {1, 17, 32, 33}) {
     SCOPED_TRACE(num_sources);
     Inputs inputs = MakeInputs(0, num_sources);
-    for (const int num_samples : {16, 17}) {
+    for (const int num_samples : {15, 16, 17}) {
       SCOPED_TRACE(num_samples);
       PatchMatchOptions options = MakeOptions(true, true, false);
       options.num_iterations = 1;
