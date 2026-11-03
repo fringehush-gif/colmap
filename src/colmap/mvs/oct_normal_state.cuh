@@ -382,8 +382,7 @@ class OctNormalMap {
                static_cast<int>(output.pixel_pitch_));
     CUDA_SYNC_AND_CHECK();
     output.frame_ = (frame_ + 1) & 3u;
-    CheckDomain();
-    output.CheckDomain();
+    // Raw plane copies cannot change either prechecked domain status.
   }
 #else
   OctNormalView View() const;

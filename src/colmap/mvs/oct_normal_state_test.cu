@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 namespace colmap::mvs {
@@ -196,6 +197,29 @@ TEST_F(OctNormalCodec, RefusalAndSentinels) {
     CUDA_SYNC_AND_CHECK();
     EXPECT_ANY_THROW(map.CheckDomain());
     EXPECT_ANY_THROW(map.CopyToMat());
+  }
+}
+
+TEST_F(OctNormalCodec, RotationRejectsEitherPoisonedOwnerBeforeCopy) {
+  constexpr size_t width = 7, height = 5, count = width * height;
+  std::vector<float> xyz(3 * count, 0.0f);
+  std::fill(xyz.begin() + 2 * count, xyz.end(), -1.0f);
+  for (const bool poison_source : {false, true}) {
+    SCOPED_TRACE(poison_source);
+    OctNormalMap source(width, height), target(height, width);
+    source.CopyFromCPU(xyz.data(), width * sizeof(float));
+    target.CopyFromCPU(xyz.data(), height * sizeof(float));
+    auto& poisoned = poison_source ? source : target;
+    auto& healthy = poison_source ? target : source;
+    const auto before = healthy.CopyToMat().GetData();
+    InvalidOwnerOperations<<<1, 1>>>(poisoned.View(), 2);
+    CUDA_SYNC_AND_CHECK();
+    EXPECT_THROW(source.RotateTo(target), std::invalid_argument);
+    EXPECT_EQ(source.GetFrame(), 0u);
+    EXPECT_EQ(target.GetFrame(), 0u);
+    EXPECT_EQ(healthy.CopyToMat().GetData(), before);
+    EXPECT_NO_THROW(healthy.CheckDomain());
+    EXPECT_THROW(poisoned.CheckDomain(), std::invalid_argument);
   }
 }
 
