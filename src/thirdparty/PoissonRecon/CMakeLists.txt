@@ -37,6 +37,15 @@ endif()
 set(FOLDER_NAME "poisson_recon")
 if(TESTS_ENABLED AND CUDA_ENABLED AND NOT HIP_ENABLED)
     COLMAP_ADD_TEST(
+        NAME gpu_cleanup_failure_test
+        SRCS gpu_cleanup_failure_test.cu gpu_cleanup_host_allocation_test.cc
+        LINK_LIBS CUDA::cudart
+    )
+    target_include_directories(colmap_poisson_recon_gpu_cleanup_failure_test
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+    target_compile_options(colmap_poisson_recon_gpu_cleanup_failure_test
+        PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>)
+    COLMAP_ADD_TEST(
         NAME aux_gpu_failure_test
         SRCS aux_gpu_failure_test.cu
         LINK_LIBS CUDA::cudart
@@ -119,3 +128,9 @@ if(TESTS_ENABLED)
             OpenMP::OpenMP_CXX)
     endif()
 endif()
+
+# Host adapter failure boundaries do not require a CUDA runtime or device.
+COLMAP_ADD_TEST(
+    NAME trim_gpu_adapter_failure_test
+    SRCS trim_gpu_adapter_failure_test.cc
+)

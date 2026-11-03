@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -81,18 +82,29 @@ bool TryConnectedComponents(const std::vector<std::vector<Index>>& polygons,
     return false;
   } else {
     if (!Requested(polygons.size()) || !Available(stats)) return false;
+    const std::size_t count = polygons.size();
+    std::optional<FlatPolygons<Index>> flat;
+    std::vector<std::uint32_t> roots;
     try {
-      FlatPolygons<Index> flat(polygons);
-      const std::size_t count = polygons.size();
-      std::vector<std::uint32_t> roots(count);
-      if (!ConnectedComponents(count,
-                               flat.vertices.size(),
-                               flat.offsets.data(),
-                               flat.vertices.data(),
-                               roots.data(),
-                               stats)) {
-        return false;
-      }
+      flat.emplace(polygons);
+      roots.resize(count);
+    } catch (const UnsupportedSize&) {
+      stats.reason = "host-index-cap";
+      return false;
+    } catch (const std::bad_alloc&) {
+      stats.reason = "host-allocation";
+      return false;
+    }
+    // Backend exceptions are terminal, including failures after GPU work.
+    if (!ConnectedComponents(count,
+                             flat->vertices.size(),
+                             flat->offsets.data(),
+                             flat->vertices.data(),
+                             roots.data(),
+                             stats)) {
+      return false;
+    }
+    try {
       constexpr auto kMissing = std::numeric_limits<std::uint32_t>::max();
       std::vector<std::uint32_t> component_ids(count, kMissing);
       std::size_t component_count = 0;
@@ -114,9 +126,6 @@ bool TryConnectedComponents(const std::vector<std::vector<Index>>& polygons,
       }
       components.swap(result);
       return true;
-    } catch (const UnsupportedSize&) {
-      stats.reason = "host-index-cap";
-      return false;
     } catch (const std::bad_alloc&) {
       stats.reason = "host-allocation";
       return false;
@@ -133,10 +142,12 @@ bool TryBoundaryGraph(const std::vector<std::vector<Index>>& polygons,
     return false;
   } else {
     if (!Requested(polygons.size()) || !Available(stats)) return false;
+    std::optional<FlatPolygons<Index>> flat;
+    std::vector<std::uint32_t> labels;
     try {
-      FlatPolygons<Index> flat(polygons);
+      flat.emplace(polygons);
       constexpr auto kMissing = std::numeric_limits<std::uint32_t>::max();
-      std::vector<std::uint32_t> labels(polygons.size(), kMissing);
+      labels.assign(polygons.size(), kMissing);
       for (std::size_t component = 0; component < components.size();
            ++component) {
         if (component >= kMissing) throw UnsupportedSize{};
@@ -155,30 +166,6 @@ bool TryBoundaryGraph(const std::vector<std::vector<Index>>& polygons,
       if (std::find(labels.begin(), labels.end(), kMissing) != labels.end()) {
         throw std::invalid_argument("incomplete component polygon partition");
       }
-      std::vector<std::uint64_t> result;
-      if (!BoundaryGraph(polygons.size(),
-                         flat.vertices.size(),
-                         flat.offsets.data(),
-                         flat.vertices.data(),
-                         labels.data(),
-                         result,
-                         stats)) {
-        return false;
-      }
-      for (const auto edge : result) {
-        const auto left = std::uint32_t(edge >> 32);
-        const auto right = std::uint32_t(edge);
-        if (left >= right || right >= components.size()) {
-          throw std::runtime_error("invalid GPU boundary component edge");
-        }
-      }
-      if (!std::is_sorted(result.begin(), result.end()) ||
-          std::adjacent_find(result.begin(), result.end()) != result.end()) {
-        throw std::runtime_error(
-            "GPU boundary edges are not unique and sorted");
-      }
-      graph.swap(result);
-      return true;
     } catch (const UnsupportedSize&) {
       stats.reason = "host-index-cap";
       return false;
@@ -186,6 +173,30 @@ bool TryBoundaryGraph(const std::vector<std::vector<Index>>& polygons,
       stats.reason = "host-allocation";
       return false;
     }
+    std::vector<std::uint64_t> result;
+    // Do not classify an allocation exception from GPU execution as fallback.
+    if (!BoundaryGraph(polygons.size(),
+                       flat->vertices.size(),
+                       flat->offsets.data(),
+                       flat->vertices.data(),
+                       labels.data(),
+                       result,
+                       stats)) {
+      return false;
+    }
+    for (const auto edge : result) {
+      const auto left = std::uint32_t(edge >> 32);
+      const auto right = std::uint32_t(edge);
+      if (left >= right || right >= components.size()) {
+        throw std::runtime_error("invalid GPU boundary component edge");
+      }
+    }
+    if (!std::is_sorted(result.begin(), result.end()) ||
+        std::adjacent_find(result.begin(), result.end()) != result.end()) {
+      throw std::runtime_error("GPU boundary edges are not unique and sorted");
+    }
+    graph.swap(result);
+    return true;
   }
 }
 
