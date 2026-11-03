@@ -10,7 +10,6 @@
 #include "colmap/util/logging.h"
 
 #include <algorithm>
-#include <cmath>
 
 #include <Eigen/Geometry>
 
@@ -146,9 +145,7 @@ bool EstimateTriangulation(const EstimateTriangulationOptions& options,
   size_t num_valid = 0;
   for (size_t i = 0; i < points.size(); ++i) {
     const auto cam_ray = cameras[i]->CamRayFromImg(points[i]);
-    const double squared_norm = cam_ray ? cam_ray->squaredNorm() : 0.0;
-    if (!cam_ray || !cam_ray->allFinite() || !std::isfinite(squared_norm) ||
-        squared_norm <= 0.0) {
+    if (!cam_ray) {
       if (!skipped_observation) {
         skipped_observation = true;
         original_indices.reserve(points.size());

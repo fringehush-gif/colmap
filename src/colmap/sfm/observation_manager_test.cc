@@ -7,6 +7,8 @@
 
 #include <memory>
 
+#include <limits>
+
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -254,6 +256,53 @@ TEST(ObservationManager, FilterPoints3DSphericalSeam) {
   EXPECT_EQ(obs_manager.FilterPoints3DWithLargeReprojectionError(
                 /*max_error=*/1.0, {id}, ReprojectionErrorType::PIXEL),
             0);
+}
+
+TEST(ObservationManager, FiltersInvalidSphericalRuntimeBearings) {
+  for (const auto error_type :
+       {ReprojectionErrorType::NORMALIZED, ReprojectionErrorType::ANGULAR}) {
+    Reconstruction reconstruction;
+    const Camera camera = Camera::CreateFromModelId(
+        1, CameraModelId::kEquirectangular, 0, 1000, 500);
+    reconstruction.AddCamera(camera);
+    Rig rig;
+    rig.SetRigId(1);
+    rig.AddRefSensor(camera.SensorId());
+    reconstruction.AddRig(rig);
+    for (image_t image_id = 1; image_id <= 3; ++image_id) {
+      Frame frame;
+      frame.SetFrameId(image_id);
+      frame.SetRigId(rig.RigId());
+      frame.AddDataId(data_t(camera.SensorId(), image_id));
+      frame.SetRigFromWorld(Rigid3d());
+      reconstruction.AddFrame(frame);
+      Image image;
+      image.SetImageId(image_id);
+      image.SetCameraId(camera.camera_id);
+      image.SetFrameId(frame.FrameId());
+      image.SetPoints2D({Eigen::Vector2d(
+          image_id == 3 ? std::numeric_limits<double>::quiet_NaN() : 0, 250)});
+      reconstruction.AddImage(image);
+    }
+    // Two valid observations face backward across the spherical image seam.
+    const Eigen::Vector3d xyz(0, 0, -2);
+    const point3D_t point_id = reconstruction.AddPoint3D(xyz, Track());
+    for (image_t image_id = 1; image_id <= 3; ++image_id) {
+      reconstruction.AddObservation(point_id, TrackElement(image_id, 0));
+    }
+    ObservationManager manager(reconstruction);
+    const double threshold =
+        error_type == ReprojectionErrorType::NORMALIZED ? 1e-3 : 1.0;
+    EXPECT_EQ(manager.FilterPoints3DWithLargeReprojectionError(
+                  threshold, {point_id}, error_type),
+              1);
+    ASSERT_TRUE(reconstruction.ExistsPoint3D(point_id));
+    EXPECT_EQ(reconstruction.Point3D(point_id).track.Length(), 2);
+    EXPECT_EQ(reconstruction.Point3D(point_id).xyz, xyz);
+    EXPECT_TRUE(reconstruction.Image(1).Point2D(0).HasPoint3D());
+    EXPECT_TRUE(reconstruction.Image(2).Point2D(0).HasPoint3D());
+    EXPECT_FALSE(reconstruction.Image(3).Point2D(0).HasPoint3D());
+  }
 }
 
 TEST(ObservationManager, FilterPoints3DInImages) {

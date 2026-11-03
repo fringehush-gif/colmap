@@ -14,6 +14,8 @@
 #include <map>
 #include <utility>
 
+#include <cmath>
+
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -223,6 +225,87 @@ TEST(GlobalPositioning, ComposableProblem) {
       GlobalPositioner::CreateDefault(options, PoseGraph(), reconstruction);
   EXPECT_EQ(unordered->SolverOptions().linear_solver_ordering, nullptr);
   EXPECT_TRUE(unordered->Solve().IsSolutionUsable());
+}
+
+TEST(GlobalPositioning, IgnoresInvalidRuntimeBearingsInBothObservationModes) {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  const double huge = std::numeric_limits<double>::max();
+  for (const bool use_covariance : {false, true}) {
+    for (const Eigen::Vector2d& pixel : {Eigen::Vector2d(nan, 0),
+                                         Eigen::Vector2d(inf, 0),
+                                         Eigen::Vector2d(huge, 0)}) {
+      SyntheticDatasetOptions dataset_options;
+      dataset_options.num_rigs = 1;
+      dataset_options.num_cameras_per_rig = 1;
+      dataset_options.num_frames_per_rig = 4;
+      dataset_options.num_points3D = 30;
+      dataset_options.camera_model_id = CameraModelId::kSimplePinhole;
+      dataset_options.camera_params =
+          CameraModelInitializeParams(dataset_options.camera_model_id,
+                                      1280,
+                                      dataset_options.camera_width,
+                                      dataset_options.camera_height);
+      Reconstruction reconstruction;
+      SynthesizeDataset(dataset_options, &reconstruction);
+      for (const auto& [camera_id, _] : reconstruction.Cameras()) {
+        reconstruction.Camera(camera_id).source = CameraSource::USER;
+      }
+      GlobalPositionerOptions options;
+      options.use_gpu = false;
+      options.generate_random_positions = false;
+      options.generate_random_points = false;
+      if (use_covariance) options.experimental_observation_stddev = 1.0;
+      const auto selected = std::find_if(
+          reconstruction.Points3D().begin(),
+          reconstruction.Points3D().end(),
+          [&](const auto& entry) {
+            return entry.second.track.Length() >=
+                   static_cast<size_t>(options.min_num_view_per_track);
+          });
+      ASSERT_NE(selected, reconstruction.Points3D().end());
+      const auto observation = selected->second.track.Element(0);
+      auto& image = reconstruction.Image(observation.image_id);
+      ASSERT_TRUE(image.HasPose());
+      ASSERT_EQ(image.CameraPtr()->model_id, CameraModelId::kSimplePinhole);
+      ASSERT_TRUE(image.CameraPtr()
+                      ->CamRayFromImg(image.Point2D(observation.point2D_idx).xy)
+                      .has_value());
+      if (use_covariance) {
+        ASSERT_TRUE(image.CameraPtr()
+                        ->CamRayFromImgWithJac(
+                            image.Point2D(observation.point2D_idx).xy)
+                        .has_value());
+      }
+      // Pinhole succeeds for these invalid rays; rejection belongs to the
+      // runtime owner. The covariance path can also reject in its Jacobian.
+      Eigen::Vector3d primitive_ray;
+      ASSERT_TRUE(SimplePinholeCameraModel::CamRayFromImg(
+          image.CameraPtr()->params.data(),
+          pixel.x(),
+          pixel.y(),
+          &primitive_ray.x(),
+          &primitive_ray.y(),
+          &primitive_ray.z()));
+      const double squared_norm = primitive_ray.squaredNorm();
+      EXPECT_FALSE(std::isfinite(squared_norm) && squared_norm > 0);
+      auto baseline =
+          GlobalPositioner::CreateDefault(options, PoseGraph(), reconstruction);
+      ASSERT_TRUE(baseline->Problem().HasParameterBlock(
+          reconstruction.Point3D(selected->first).xyz.data()));
+      const int expected_blocks = baseline->Problem().NumResidualBlocks();
+      ASSERT_GT(expected_blocks, 0);
+      baseline.reset();
+      image.Point2D(observation.point2D_idx).xy = pixel;
+      auto positioner =
+          GlobalPositioner::CreateDefault(options, PoseGraph(), reconstruction);
+      EXPECT_EQ(positioner->Problem().NumResidualBlocks(), expected_blocks - 1);
+      double cost = 0;
+      ASSERT_TRUE(positioner->Problem().Evaluate(
+          ceres::Problem::EvaluateOptions(), &cost, nullptr, nullptr, nullptr));
+      EXPECT_TRUE(std::isfinite(cost));
+    }
+  }
 }
 
 TEST(GlobalPositioning, ObservationUncertainty) {

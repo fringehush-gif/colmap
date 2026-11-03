@@ -19,6 +19,8 @@
 #include "colmap/sensor/models/spherical.h"
 #include "colmap/sensor/models/thin_prism.h"
 
+#include <cmath>
+
 namespace colmap {
 
 // Check whether camera model with given name or identifier exists.
@@ -212,7 +214,8 @@ inline std::optional<Eigen::Vector2d> CameraModelCamFromImg(
 // @param xy            Image coordinates in pixels.
 //
 // @return              Unit bearing vector in camera frame, or std::nullopt
-//                      if unprojection fails.
+//                      if unprojection fails or returns a nonfinite or
+//                      zero-length bearing.
 inline std::optional<Eigen::Vector3d> CameraModelCamRayFromImg(
     CameraModelId model_id,
     const std::vector<double>& params,
@@ -402,7 +405,10 @@ std::optional<Eigen::Vector3d> CameraModelCamRayFromImg(
   case CameraModel::model_id:                                               \
     if (CameraModel::CamRayFromImg(                                         \
             params.data(), xy.x(), xy.y(), &ray.x(), &ray.y(), &ray.z())) { \
-      return ray;                                                           \
+      const double squared_norm = ray.squaredNorm();                        \
+      if (std::isfinite(squared_norm) && squared_norm > 0.0) {              \
+        return ray;                                                         \
+      }                                                                     \
     }                                                                       \
     break;
 

@@ -71,7 +71,7 @@ bool IsValidCalibration(const Camera& camera) {
           camera.height * (static_cast<double>(y) + 0.5) / (kNumGridSteps + 1));
       const std::optional<Eigen::Vector3d> cam_ray =
           camera.CamRayFromImg(image_point);
-      if (!cam_ray.has_value() || !cam_ray->allFinite()) {
+      if (!cam_ray.has_value()) {
         return false;
       }
       const std::optional<Eigen::Vector2d> projected =
