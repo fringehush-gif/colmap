@@ -207,62 +207,118 @@ TEST(PoissonRegularTreeTest, ConcurrentCreatorsObservePublishedBrood) {
   root.cleanChildren(true);
 }
 
+TEST(PoissonThreadPoolTest, AsyncSchedulesPreserveTypedAndErasedCallbacks) {
+  using Pool = PoissonRecon::ThreadPool;
+  constexpr size_t kBegin = 7;
+  constexpr size_t kEnd = 30;
+  struct StatefulCallback {
+    std::array<std::atomic<size_t>, 30> visits;
+    std::atomic<size_t> calls{0};
+    StatefulCallback() {
+      for (auto& value : visits) value.store(0, std::memory_order_relaxed);
+    }
+    StatefulCallback(const StatefulCallback& other) {
+      for (size_t i = 0; i < visits.size(); ++i)
+        visits[i].store(other.visits[i].load(std::memory_order_relaxed),
+                        std::memory_order_relaxed);
+      calls.store(other.calls.load(std::memory_order_relaxed),
+                  std::memory_order_relaxed);
+    }
+    void operator()(unsigned int thread, size_t i) {
+      EXPECT_LT(thread, 3u);
+      ++visits.at(i);
+      ++calls;
+    }
+  };
+  for (const auto schedule : {Pool::STATIC, Pool::DYNAMIC}) {
+    SCOPED_TRACE(static_cast<int>(schedule));
+    std::array<std::atomic<size_t>, kEnd> visits;
+    for (auto& value : visits) value.store(0, std::memory_order_relaxed);
+    Pool::ParallelFor(
+        kBegin,
+        kEnd,
+        [&](unsigned int thread, size_t i) {
+          EXPECT_LT(thread, 3u);
+          ++visits.at(i);
+        },
+        3,
+        Pool::ASYNC,
+        schedule,
+        5);
+    std::function<void(unsigned int, size_t)> erased = StatefulCallback{};
+    Pool::ParallelFor(kBegin, kEnd, erased, 3, Pool::ASYNC, schedule, 5);
+    const auto* state = erased.target<StatefulCallback>();
+    ASSERT_NE(state, nullptr);
+    EXPECT_EQ(state->calls.load(), kEnd - kBegin);
+    for (size_t i = 0; i < kEnd; ++i) {
+      EXPECT_EQ(visits[i].load(), i >= kBegin ? 1u : 0u);
+      EXPECT_EQ(state->visits[i].load(), visits[i].load());
+    }
+  }
+}
+
 TEST(PoissonThreadPoolTest, AsyncExceptionsJoinOutstandingWorkers) {
   using Pool = PoissonRecon::ThreadPool;
   using namespace std::chrono_literals;
-  for (const bool throw_on_caller : {true, false}) {
-    SCOPED_TRACE(throw_on_caller);
-    std::promise<void> blocked;
-    std::promise<void> throwing;
-    std::promise<void> release;
-    auto blocked_future = blocked.get_future();
-    auto throwing_future = throwing.get_future();
-    auto release_future = release.get_future().share();
-    std::atomic<bool> worker_finished{false};
-    auto result = std::async(std::launch::async, [&] {
+  for (const auto schedule : {Pool::STATIC, Pool::DYNAMIC}) {
+    SCOPED_TRACE(static_cast<int>(schedule));
+    for (const bool throw_on_caller : {true, false}) {
+      SCOPED_TRACE(throw_on_caller);
+      std::promise<void> blocked;
+      std::promise<void> throwing;
+      std::promise<void> release;
+      auto blocked_future = blocked.get_future().share();
+      auto throwing_future = throwing.get_future();
+      auto release_future = release.get_future().share();
+      std::atomic<bool> worker_finished{false};
+      auto result = std::async(std::launch::async, [&] {
+        Pool::ParallelFor(
+            0,
+            3,
+            [&](unsigned int thread, size_t) {
+              if (thread == 2) {
+                blocked.set_value();
+                if (release_future.wait_for(5s) != std::future_status::ready) {
+                  throw std::runtime_error("worker release timed out");
+                }
+                worker_finished = true;
+              } else if (thread == (throw_on_caller ? 0u : 1u)) {
+                if (blocked_future.wait_for(5s) != std::future_status::ready) {
+                  throw std::runtime_error("worker did not start");
+                }
+                throwing.set_value();
+                throw std::runtime_error("injected worker failure");
+              } else if (blocked_future.wait_for(5s) !=
+                         std::future_status::ready) {
+                throw std::runtime_error("blocked worker did not start");
+              }
+            },
+            3,
+            Pool::ASYNC,
+            schedule,
+            1);
+      });
+      const auto started = throwing_future.wait_for(5s);
+      const bool returned_early =
+          started == std::future_status::ready &&
+          result.wait_for(100ms) == std::future_status::ready;
+      release.set_value();
+      EXPECT_EQ(started, std::future_status::ready);
+      EXPECT_FALSE(returned_early);
+      EXPECT_THROW(result.get(), std::runtime_error);
+      EXPECT_TRUE(worker_finished.load());
+
+      std::atomic<size_t> completed{0};
       Pool::ParallelFor(
           0,
           3,
-          [&](unsigned int thread, size_t) {
-            if (thread == 2) {
-              blocked.set_value();
-              if (release_future.wait_for(5s) != std::future_status::ready) {
-                throw std::runtime_error("worker release timed out");
-              }
-              worker_finished = true;
-            } else if (thread == (throw_on_caller ? 0u : 1u)) {
-              if (blocked_future.wait_for(5s) != std::future_status::ready) {
-                throw std::runtime_error("worker did not start");
-              }
-              throwing.set_value();
-              throw std::runtime_error("injected worker failure");
-            }
-          },
+          [&](unsigned int, size_t) { ++completed; },
           3,
           Pool::ASYNC,
-          Pool::STATIC,
+          schedule,
           1);
-    });
-    const auto started = throwing_future.wait_for(5s);
-    const bool returned_early =
-        started == std::future_status::ready &&
-        result.wait_for(100ms) == std::future_status::ready;
-    release.set_value();
-    EXPECT_EQ(started, std::future_status::ready);
-    EXPECT_FALSE(returned_early);
-    EXPECT_THROW(result.get(), std::runtime_error);
-    EXPECT_TRUE(worker_finished.load());
-
-    std::atomic<size_t> completed{0};
-    Pool::ParallelFor(
-        0,
-        3,
-        [&](unsigned int, size_t) { ++completed; },
-        3,
-        Pool::ASYNC,
-        Pool::STATIC,
-        1);
-    EXPECT_EQ(completed.load(), 3);
+      EXPECT_EQ(completed.load(), 3);
+    }
   }
 }
 

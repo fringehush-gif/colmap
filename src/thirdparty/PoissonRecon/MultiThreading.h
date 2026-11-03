@@ -111,8 +111,6 @@ namespace PoissonRecon
 			if( begin>=end ) return;
 			size_t range = end - begin;
 			size_t chunks = ( range + chunkSize - 1 ) / chunkSize;
-			std::atomic< size_t > index;
-			index.store( 0 );
 
 			// If the computation is serial, go ahead and run it
 			if( pType==ParallelType::NONE || numThreads<=1 )
@@ -160,30 +158,34 @@ namespace PoissonRecon
 				if( exception ) std::rethrow_exception( exception );
 			}
 #endif // _OPENMP
-			else if( pType==ParallelType::ASYNC )
-			{
-				std::function< void (unsigned int ) > _StaticThreadFunction = [ &_ChunkFunction , chunks , numThreads ]( unsigned int thread )
-					{
-						for( size_t chunk=thread ; chunk<chunks ; chunk+=numThreads ) _ChunkFunction( thread , chunk );
-					};
+			else if( pType==ParallelType::ASYNC ) _ParallelForAsync( _ChunkFunction , chunks , numThreads , schedule );
+		}
 
-				std::function< void (unsigned int ) > _DynamicThreadFunction = [ &_ChunkFunction , chunks , &index ]( unsigned int thread )
-					{
-						size_t chunk;
-						while( ( chunk=index.fetch_add(1) )<chunks ) _ChunkFunction( thread , chunk );
-					};
+		// Share async dispatch while preserving the typed OpenMP chunk loop.
+		static void _ParallelForAsync( const std::function< void ( unsigned int , size_t ) >& chunkFunction , size_t chunks , unsigned int numThreads , ScheduleType schedule )
+		{
+			std::atomic< size_t > index{0};
+			std::function< void (unsigned int ) > _StaticThreadFunction = [ &chunkFunction , chunks , numThreads ]( unsigned int thread )
+				{
+					for( size_t chunk=thread ; chunk<chunks ; chunk+=numThreads ) chunkFunction( thread , chunk );
+				};
 
-				std::function< void (unsigned int ) > ThreadFunction;
-				if     ( schedule==ScheduleType::STATIC  ) ThreadFunction = _StaticThreadFunction;
-				else if( schedule==ScheduleType::DYNAMIC ) ThreadFunction = _DynamicThreadFunction;
+			std::function< void (unsigned int ) > _DynamicThreadFunction = [ &chunkFunction , chunks , &index ]( unsigned int thread )
+				{
+					size_t chunk;
+					while( ( chunk=index.fetch_add(1) )<chunks ) chunkFunction( thread , chunk );
+				};
 
-				// Join outstanding tasks before their stack-bound callbacks die.
-				std::vector< std::future< void > > futures;
-				futures.resize( numThreads-1 );
-				for( unsigned int t=1 ; t<numThreads ; t++ ) futures[t-1] = std::async( std::launch::async , ThreadFunction , t );
-				ThreadFunction( 0 );
-				for( unsigned int t=1 ; t<numThreads ; t++ ) futures[t-1].get();
-			}
+			std::function< void (unsigned int ) > ThreadFunction;
+			if     ( schedule==ScheduleType::STATIC  ) ThreadFunction = _StaticThreadFunction;
+			else if( schedule==ScheduleType::DYNAMIC ) ThreadFunction = _DynamicThreadFunction;
+
+			// Join outstanding tasks before their stack-bound callbacks die.
+			std::vector< std::future< void > > futures;
+			futures.resize( numThreads-1 );
+			for( unsigned int t=1 ; t<numThreads ; t++ ) futures[t-1] = std::async( std::launch::async , ThreadFunction , t );
+			ThreadFunction( 0 );
+			for( unsigned int t=1 ; t<numThreads ; t++ ) futures[t-1].get();
 		}
 
 		static unsigned int _NumThreads;
