@@ -95,18 +95,18 @@ _vl_imconvcol_vf_avx_block32
  float const *filt, vl_index filt_begin, vl_index filt_end,
  int step, unsigned int flags, vl_index x)
 {
-  vl_index y ;
+  vl_index y, output_y ;
   vl_bool const transp = flags & VL_TRANSPOSE ;
   vl_bool const zeropad = (flags & VL_PAD_MASK) == VL_PAD_BY_ZERO ;
   /* filt already points at the last tap, as in the baseline SSE2 body. */
-  for (y = 0 ; y < (signed)src_height ; y += step) {
+  for (y = 0, output_y = 0 ; y < (signed)src_height ; y += step, ++output_y) {
     __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps() ;
     __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps() ;
     __m256 v0 = _mm256_setzero_ps(), v1 = _mm256_setzero_ps() ;
     __m256 v2 = _mm256_setzero_ps(), v3 = _mm256_setzero_ps(), c ;
-    float const *filti = filt ;
-    vl_index stop = filt_end - y ;
-    float const *srci = src + x - stop * src_stride ;
+    vl_index tap = 0 ;
+    vl_index stop = VL_MIN(filt_end - y, filt_end - filt_begin + 1) ;
+    vl_index source_y = VL_MAX(0, y - filt_end) ;
 
     if (stop > 0) {
       if (!zeropad) {
@@ -115,112 +115,118 @@ _vl_imconvcol_vf_avx_block32
         v2 = _mm256_loadu_ps(src + x + 16) ;
         v3 = _mm256_loadu_ps(src + x + 24) ;
       }
-      while (filti > filt - stop) {
-        c = _mm256_broadcast_ss(filti--) ;
+      while (tap < stop) {
+        c = _mm256_broadcast_ss(filt - tap++) ;
         a0 = _mm256_add_ps(a0, _mm256_mul_ps(v0, c)) ;
         a1 = _mm256_add_ps(a1, _mm256_mul_ps(v1, c)) ;
         a2 = _mm256_add_ps(a2, _mm256_mul_ps(v2, c)) ;
         a3 = _mm256_add_ps(a3, _mm256_mul_ps(v3, c)) ;
-        srci += src_stride ;
       }
     }
     stop = filt_end - VL_MAX(filt_begin, y - (signed)src_height + 1) + 1 ;
-    while (filti > filt - stop) {
-      v0 = _mm256_loadu_ps(srci) ;
-      v1 = _mm256_loadu_ps(srci + 8) ;
-      v2 = _mm256_loadu_ps(srci + 16) ;
-      v3 = _mm256_loadu_ps(srci + 24) ;
-      c = _mm256_broadcast_ss(filti--) ;
+    while (tap < stop) {
+      v0 = _mm256_loadu_ps((src + x + source_y * src_stride)) ;
+      v1 = _mm256_loadu_ps((src + x + source_y * src_stride) + 8) ;
+      v2 = _mm256_loadu_ps((src + x + source_y * src_stride) + 16) ;
+      v3 = _mm256_loadu_ps((src + x + source_y * src_stride) + 24) ;
+      c = _mm256_broadcast_ss(filt - tap++) ;
       a0 = _mm256_add_ps(a0, _mm256_mul_ps(v0, c)) ;
       a1 = _mm256_add_ps(a1, _mm256_mul_ps(v1, c)) ;
       a2 = _mm256_add_ps(a2, _mm256_mul_ps(v2, c)) ;
       a3 = _mm256_add_ps(a3, _mm256_mul_ps(v3, c)) ;
-      srci += src_stride ;
+      ++source_y ;
     }
     if (zeropad) v0 = v1 = v2 = v3 = _mm256_setzero_ps() ;
+    else if (tap == 0) {
+      float const *edge = src + x + (src_height - 1) * src_stride ;
+      v0 = _mm256_loadu_ps(edge) ;
+      v1 = _mm256_loadu_ps(edge + 8) ;
+      v2 = _mm256_loadu_ps(edge + 16) ;
+      v3 = _mm256_loadu_ps(edge + 24) ;
+    }
     stop = filt_end - filt_begin + 1 ;
-    while (filti > filt - stop) {
-      c = _mm256_broadcast_ss(filti--) ;
+    while (tap < stop) {
+      c = _mm256_broadcast_ss(filt - tap++) ;
       a0 = _mm256_add_ps(a0, _mm256_mul_ps(v0, c)) ;
       a1 = _mm256_add_ps(a1, _mm256_mul_ps(v1, c)) ;
       a2 = _mm256_add_ps(a2, _mm256_mul_ps(v2, c)) ;
       a3 = _mm256_add_ps(a3, _mm256_mul_ps(v3, c)) ;
     }
+    float *dsti = dst + output_y * (transp ? 1 : dst_stride) ;
     if (transp) {
       __m128 part ;
       /* Keep the original ascending column stores, extracting each lane
          directly from registers without the values[32] stack round-trip. */
       part = _mm256_castps256_ps128(a0) ;
-      _mm_store_ss(dst + 0 * dst_stride, part) ;
-      _mm_store_ss(dst + 1 * dst_stride,
+      _mm_store_ss(dsti + 0 * dst_stride, part) ;
+      _mm_store_ss(dsti + 1 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
-      _mm_store_ss(dst + 2 * dst_stride,
+      _mm_store_ss(dsti + 2 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
-      _mm_store_ss(dst + 3 * dst_stride,
+      _mm_store_ss(dsti + 3 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
       part = _mm256_extractf128_ps(a0, 1) ;
-      _mm_store_ss(dst + 4 * dst_stride, part) ;
-      _mm_store_ss(dst + 5 * dst_stride,
+      _mm_store_ss(dsti + 4 * dst_stride, part) ;
+      _mm_store_ss(dsti + 5 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
-      _mm_store_ss(dst + 6 * dst_stride,
+      _mm_store_ss(dsti + 6 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
-      _mm_store_ss(dst + 7 * dst_stride,
+      _mm_store_ss(dsti + 7 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
       part = _mm256_castps256_ps128(a1) ;
-      _mm_store_ss(dst + 8 * dst_stride, part) ;
-      _mm_store_ss(dst + 9 * dst_stride,
+      _mm_store_ss(dsti + 8 * dst_stride, part) ;
+      _mm_store_ss(dsti + 9 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
-      _mm_store_ss(dst + 10 * dst_stride,
+      _mm_store_ss(dsti + 10 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
-      _mm_store_ss(dst + 11 * dst_stride,
+      _mm_store_ss(dsti + 11 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
       part = _mm256_extractf128_ps(a1, 1) ;
-      _mm_store_ss(dst + 12 * dst_stride, part) ;
-      _mm_store_ss(dst + 13 * dst_stride,
+      _mm_store_ss(dsti + 12 * dst_stride, part) ;
+      _mm_store_ss(dsti + 13 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
-      _mm_store_ss(dst + 14 * dst_stride,
+      _mm_store_ss(dsti + 14 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
-      _mm_store_ss(dst + 15 * dst_stride,
+      _mm_store_ss(dsti + 15 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
       part = _mm256_castps256_ps128(a2) ;
-      _mm_store_ss(dst + 16 * dst_stride, part) ;
-      _mm_store_ss(dst + 17 * dst_stride,
+      _mm_store_ss(dsti + 16 * dst_stride, part) ;
+      _mm_store_ss(dsti + 17 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
-      _mm_store_ss(dst + 18 * dst_stride,
+      _mm_store_ss(dsti + 18 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
-      _mm_store_ss(dst + 19 * dst_stride,
+      _mm_store_ss(dsti + 19 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
       part = _mm256_extractf128_ps(a2, 1) ;
-      _mm_store_ss(dst + 20 * dst_stride, part) ;
-      _mm_store_ss(dst + 21 * dst_stride,
+      _mm_store_ss(dsti + 20 * dst_stride, part) ;
+      _mm_store_ss(dsti + 21 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
-      _mm_store_ss(dst + 22 * dst_stride,
+      _mm_store_ss(dsti + 22 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
-      _mm_store_ss(dst + 23 * dst_stride,
+      _mm_store_ss(dsti + 23 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
       part = _mm256_castps256_ps128(a3) ;
-      _mm_store_ss(dst + 24 * dst_stride, part) ;
-      _mm_store_ss(dst + 25 * dst_stride,
+      _mm_store_ss(dsti + 24 * dst_stride, part) ;
+      _mm_store_ss(dsti + 25 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
-      _mm_store_ss(dst + 26 * dst_stride,
+      _mm_store_ss(dsti + 26 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
-      _mm_store_ss(dst + 27 * dst_stride,
+      _mm_store_ss(dsti + 27 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
       part = _mm256_extractf128_ps(a3, 1) ;
-      _mm_store_ss(dst + 28 * dst_stride, part) ;
-      _mm_store_ss(dst + 29 * dst_stride,
+      _mm_store_ss(dsti + 28 * dst_stride, part) ;
+      _mm_store_ss(dsti + 29 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(1, 1, 1, 1))) ;
-      _mm_store_ss(dst + 30 * dst_stride,
+      _mm_store_ss(dsti + 30 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(2, 2, 2, 2))) ;
-      _mm_store_ss(dst + 31 * dst_stride,
+      _mm_store_ss(dsti + 31 * dst_stride,
                    _mm_shuffle_ps(part, part, _MM_SHUFFLE(3, 3, 3, 3))) ;
     } else {
-      _mm256_storeu_ps(dst, a0) ;
-      _mm256_storeu_ps(dst + 8, a1) ;
-      _mm256_storeu_ps(dst + 16, a2) ;
-      _mm256_storeu_ps(dst + 24, a3) ;
+      _mm256_storeu_ps(dsti, a0) ;
+      _mm256_storeu_ps(dsti + 8, a1) ;
+      _mm256_storeu_ps(dsti + 16, a2) ;
+      _mm256_storeu_ps(dsti + 24, a3) ;
     }
-    dst += transp ? 1 : dst_stride ;
   }
   _mm256_zeroupper() ;
 }
@@ -250,7 +256,7 @@ VL_XCAT3(_vl_imconvcol_v, SFX, _sse2)
  int step, unsigned int flags)
 {
   vl_index x = 0 ;
-  vl_index y ;
+  vl_index y, output_y ;
   vl_index dheight = (src_height - 1) / step + 1 ;
   vl_bool use_simd  = VALIGNED(src_stride) ;
   vl_bool transp    = flags & VL_TRANSPOSE ;
@@ -326,12 +332,12 @@ VL_XCAT3(_vl_imconvcol_v, SFX, _sse2)
        the original vector/scalar path for small images and the remainder. */
     if (separate_buffers && src_width >= 128 && src_height >= 32 && use_simd &&
         x + 4 * VSIZE < (signed)src_width && VALIGNED(src + x)) {
-      for (y = 0 ; y < (signed)src_height ; y += step) {
+      for (y = 0, output_y = 0 ; y < (signed)src_height ; y += step, ++output_y) {
         union {VTYPE v ; T x[VSIZE] ;} a0, a1, a2, a3 ;
         VTYPE v0 = VSTZ(), v1 = VSTZ(), v2 = VSTZ(), v3 = VSTZ(), c ;
-        T const *filti = filt ;
-        vl_index stop = filt_end - y ;
-        T const *srci = src + x - stop * src_stride ;
+        vl_index tap = 0 ;
+        vl_index stop = VL_MIN(filt_end - y, filt_end - filt_begin + 1) ;
+        vl_index source_y = VL_MAX(0, y - filt_end) ;
         int b, lane ;
         a0.v = a1.v = a2.v = a3.v = VSTZ() ;
 
@@ -342,48 +348,54 @@ VL_XCAT3(_vl_imconvcol_v, SFX, _sse2)
             v2 = *(VTYPE*)(src + x + 2 * VSIZE) ;
             v3 = *(VTYPE*)(src + x + 3 * VSIZE) ;
           }
-          while (filti > filt - stop) {
-            c = VLD1(filti--) ;
+          while (tap < stop) {
+            c = VLD1(filt - tap++) ;
             a0.v = VADD(a0.v, VMUL(v0, c)) ;
             a1.v = VADD(a1.v, VMUL(v1, c)) ;
             a2.v = VADD(a2.v, VMUL(v2, c)) ;
             a3.v = VADD(a3.v, VMUL(v3, c)) ;
-            srci += src_stride ;
           }
         }
         stop = filt_end - VL_MAX(filt_begin, y - (signed)src_height + 1) + 1 ;
-        while (filti > filt - stop) {
-          v0 = *(VTYPE*)srci ;
-          v1 = *(VTYPE*)(srci + VSIZE) ;
-          v2 = *(VTYPE*)(srci + 2 * VSIZE) ;
-          v3 = *(VTYPE*)(srci + 3 * VSIZE) ;
-          c = VLD1(filti--) ;
+        while (tap < stop) {
+          v0 = *(VTYPE*)(src + x + source_y * src_stride) ;
+          v1 = *(VTYPE*)((src + x + source_y * src_stride) + VSIZE) ;
+          v2 = *(VTYPE*)((src + x + source_y * src_stride) + 2 * VSIZE) ;
+          v3 = *(VTYPE*)((src + x + source_y * src_stride) + 3 * VSIZE) ;
+          c = VLD1(filt - tap++) ;
           a0.v = VADD(a0.v, VMUL(v0, c)) ;
           a1.v = VADD(a1.v, VMUL(v1, c)) ;
           a2.v = VADD(a2.v, VMUL(v2, c)) ;
           a3.v = VADD(a3.v, VMUL(v3, c)) ;
-          srci += src_stride ;
+          ++source_y ;
         }
         if (zeropad) v0 = v1 = v2 = v3 = VSTZ() ;
+        else if (tap == 0) {
+          T const *edge = src + x + (src_height - 1) * src_stride ;
+          v0 = *(VTYPE*)edge ;
+          v1 = *(VTYPE*)(edge + VSIZE) ;
+          v2 = *(VTYPE*)(edge + 2 * VSIZE) ;
+          v3 = *(VTYPE*)(edge + 3 * VSIZE) ;
+        }
         stop = filt_end - filt_begin + 1 ;
-        while (filti > filt - stop) {
-          c = VLD1(filti--) ;
+        while (tap < stop) {
+          c = VLD1(filt - tap++) ;
           a0.v = VADD(a0.v, VMUL(v0, c)) ;
           a1.v = VADD(a1.v, VMUL(v1, c)) ;
           a2.v = VADD(a2.v, VMUL(v2, c)) ;
           a3.v = VADD(a3.v, VMUL(v3, c)) ;
         }
+        T *dsti = dst + output_y * (transp ? 1 : dst_stride) ;
         for (b = 0 ; b < 4 ; ++b) {
           T const *values = b == 0 ? a0.x : b == 1 ? a1.x : b == 2 ? a2.x : a3.x ;
           for (lane = 0 ; lane < VSIZE ; ++lane) {
-            if (transp) dst[(b * VSIZE + lane) * dst_stride] = values[lane] ;
-            else dst[b * VSIZE + lane] = values[lane] ;
+            if (transp) dsti[(b * VSIZE + lane) * dst_stride] = values[lane] ;
+            else dsti[b * VSIZE + lane] = values[lane] ;
           }
         }
-        dst += transp ? 1 : dst_stride ;
       }
-      if (transp) dst += 4 * VSIZE * dst_stride - dheight ;
-      else dst += 4 * VSIZE - dheight * dst_stride ;
+      if (transp) dst += 4 * VSIZE * dst_stride ;
+      else dst += 4 * VSIZE ;
       x += 4 * VSIZE ;
       simdcol += 4 * VSIZE ;
       totcol += 4 * VSIZE ;
@@ -393,30 +405,28 @@ VL_XCAT3(_vl_imconvcol_v, SFX, _sse2)
     /* Calculate dest[x,y] = sum_p image[x,p] filt[y - p]
      * where supp(filt) = [filt_begin, filt_end] = [fb,fe].
      *
-     * CHUNK_A: y - fe <= p < 0
-     *          completes VL_MAX(fe - y, 0) samples
-     * CHUNK_B: VL_MAX(y - fe, 0) <= p < VL_MIN(y - fb, height - 1)
-     *          completes fe - VL_MAX(fb, height - y) + 1 samples
-     * CHUNK_C: completes all samples
+     * Count taps in descending filter order. Clip the upper padding
+     * to the actual filter length, address only in-range source rows, and
+     * use the last edge for lower padding even without a central sample.
      */
 
-    T const *filti ;
+    vl_index tap = 0 ;
     vl_index stop ;
 
     if ((x + VSIZE < (signed)src_width) &
         VALIGNED(src + x) & use_simd)
     {
       /* ----------------------------------------------  Vectorized */
-      for (y = 0 ; y < (signed)src_height ; y += step)  {
+      for (y = 0, output_y = 0 ; y < (signed)src_height ; y += step, ++output_y)  {
         union {VTYPE v ; T x [VSIZE] ; } acc ;
         VTYPE v, c ;
-        T const *srci ;
+        vl_index source_y ;
         acc.v = VSTZ () ;
         v = VSTZ() ;
 
-        filti = filt ;
-        stop = filt_end - y ;
-        srci = src + x - stop * src_stride ;
+        tap = 0 ;
+        stop = VL_MIN(filt_end - y, filt_end - filt_begin + 1) ;
+        source_y = VL_MAX(0, y - filt_end) ;
 
         if (stop > 0) {
           if (zeropad) {
@@ -424,65 +434,64 @@ VL_XCAT3(_vl_imconvcol_v, SFX, _sse2)
           } else {
             v = * (VTYPE*) (src + x) ;
           }
-          while (filti > filt - stop) {
-            c = VLD1 (filti--) ;
+          while (tap < stop) {
+            c = VLD1 (filt - tap++) ;
             acc.v = VADD (acc.v,  VMUL (v, c)) ;
-            srci += src_stride ;
           }
         }
 
         stop = filt_end - VL_MAX(filt_begin, y - (signed)src_height + 1) + 1 ;
-        while (filti > filt - stop) {
-          v = * (VTYPE*) srci ;
-          c = VLD1 (filti--) ;
+        while (tap < stop) {
+          v = * (VTYPE*) (src + x + source_y * src_stride) ;
+          c = VLD1 (filt - tap++) ;
           acc.v = VADD (acc.v, VMUL (v, c)) ;
-          srci += src_stride ;
+          ++source_y ;
         }
 
         if (zeropad) v = VSTZ () ;
+        else if (tap == 0) v = *(VTYPE*)(src + x + (src_height - 1) * src_stride) ;
 
         stop = filt_end - filt_begin + 1;
-        while (filti > filt - stop) {
-          c = VLD1 (filti--) ;
+        while (tap < stop) {
+          c = VLD1 (filt - tap++) ;
           acc.v = VADD (acc.v, VMUL (v, c)) ;
         }
 
+        T *dsti = dst + output_y * (transp ? 1 : dst_stride) ;
         if (transp) {
-          *dst = acc.x[0] ; dst += dst_stride ;
-          *dst = acc.x[1] ; dst += dst_stride ;
+          dsti[0 * dst_stride] = acc.x[0] ;
+          dsti[1 * dst_stride] = acc.x[1] ;
 #if(VSIZE == 4)
-          *dst = acc.x[2] ; dst += dst_stride ;
-          *dst = acc.x[3] ; dst += dst_stride ;
+          dsti[2 * dst_stride] = acc.x[2] ;
+          dsti[3 * dst_stride] = acc.x[3] ;
 #endif
-          dst += 1 * 1 - VSIZE * dst_stride ;
         } else {
-          *dst = acc.x[0] ; dst += 1 ;
-          *dst = acc.x[1] ; dst += 1 ;
+          dsti[0] = acc.x[0] ;
+          dsti[1] = acc.x[1] ;
 #if(VSIZE == 4)
-          *dst = acc.x[2] ; dst += 1 ;
-          *dst = acc.x[3] ; dst += 1 ;
+          dsti[2] = acc.x[2] ;
+          dsti[3] = acc.x[3] ;
 #endif
-          dst += 1 * dst_stride - VSIZE * 1 ;
         }
       } /* next y */
       if (transp) {
-        dst += VSIZE * dst_stride - dheight * 1 ;
+        dst += VSIZE * dst_stride ;
       } else {
-        dst += VSIZE * 1 - dheight * dst_stride ;
+        dst += VSIZE ;
       }
       x       += VSIZE ;
       simdcol += VSIZE ;
       totcol  += VSIZE ;
     } else {
       /* -------------------------------------------------  Vanilla */
-      for (y = 0 ; y < (signed)src_height ; y += step) {
+      for (y = 0, output_y = 0 ; y < (signed)src_height ; y += step, ++output_y) {
         T acc = 0 ;
         T v = 0, c ;
-        T const* srci ;
+        vl_index source_y ;
 
-        filti = filt ;
-        stop = filt_end - y ;
-        srci = src + x - stop * src_stride ;
+        tap = 0 ;
+        stop = VL_MIN(filt_end - y, filt_end - filt_begin + 1) ;
+        source_y = VL_MAX(0, y - filt_end) ;
 
         if (stop > 0) {
           if (zeropad) {
@@ -490,39 +499,39 @@ VL_XCAT3(_vl_imconvcol_v, SFX, _sse2)
           } else {
             v = *(src + x) ;
           }
-          while (filti > filt - stop) {
-            c = *filti-- ;
+          while (tap < stop) {
+            c = filt[-tap++] ;
             acc += v * c ;
-            srci += src_stride ;
           }
         }
 
         stop = filt_end - VL_MAX(filt_begin, y - (signed)src_height + 1) + 1 ;
-        while (filti > filt - (signed)stop) {
-          v = *srci ;
-          c = *filti-- ;
+        while (tap < stop) {
+          v = *(src + x + source_y * src_stride) ;
+          c = filt[-tap++] ;
           acc += v * c ;
-          srci += src_stride ;
+          ++source_y ;
         }
 
         if (zeropad) v = 0 ;
+        else if (tap == 0) v = src[x + (src_height - 1) * src_stride] ;
 
         stop = filt_end - filt_begin + 1 ;
-        while (filti > filt - stop) {
-          c = *filti-- ;
+        while (tap < stop) {
+          c = filt[-tap++] ;
           acc += v * c ;
         }
 
         if (transp) {
-          *dst = acc ; dst += 1 ;
+          dst[output_y] = acc ;
         } else {
-          *dst = acc ; dst += dst_stride ;
+          dst[output_y * dst_stride] = acc ;
         }
       } /* next y */
       if (transp) {
-        dst += 1 * dst_stride - dheight * 1 ;
+        if (x + 1 < (signed)src_width) dst += dst_stride ;
       } else {
-        dst += 1 * 1 - dheight * dst_stride ;
+        if (x + 1 < (signed)src_width) dst += 1 ;
       }
       x      += 1 ;
       totcol += 1 ;
