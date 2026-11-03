@@ -1195,7 +1195,10 @@ void OptionManager::AddStereoFusionOptions() {
   AddDefaultOption("StereoFusion.use_cache", &stereo_fusion->use_cache);
   AddDefaultOption("StereoFusion.full_ram_load_threads",
                    &stereo_fusion->full_ram_load_threads);
-  AddDefaultOption("StereoFusion.bounded_cache", &stereo_fusion->bounded_cache);
+  AddDefaultOption("StereoFusion.bounded_cache",
+                   &stereo_fusion->bounded_cache,
+                   "Experimental byte-bounded Fusion cache; disabled by "
+                   "default.");
   AddDefaultOption("StereoFusion.bounded_cache_components",
                    &stereo_fusion->bounded_cache_components);
   AddDefaultOption("StereoFusion.bounded_cache_diagnostics",
@@ -1223,6 +1226,11 @@ void OptionManager::AddStereoFusionOptions() {
                    &stereo_fusion->bounded_cache_prefill_threads);
   AddDefaultOption("StereoFusion.bounded_cache_compact_rgb",
                    &stereo_fusion->bounded_cache_compact_rgb);
+  AddDefaultOption("StereoFusion.bounded_cache_compact_depth",
+                   &stereo_fusion->bounded_cache_compact_depth,
+                   "Experimental in-memory lossless depth compaction. Requires "
+                   "bounded components, neighborhood pinning and normal "
+                   "tiles; stored depth maps remain FP32.");
 }
 
 void OptionManager::AddPoissonMeshingOptions() {

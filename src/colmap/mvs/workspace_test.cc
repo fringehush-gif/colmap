@@ -99,6 +99,117 @@ class WorkspaceTests : public ::testing::Test {
   std::string image_name_;
 };
 
+TEST_F(WorkspaceTests, SparseDepthChargesConstructionAndReloadsAfterEviction) {
+  auto options = GetOptions();
+  options.cache_size = 700.0 / (1ULL << 30);
+  using Component = BoundedWorkspace::Component;
+  BoundedWorkspace raw(options);
+  Mat<float> depth(10, 5, 1);
+  depth.Fill(0.0f);
+  depth.Set(4, 9, 0, 5.0f);
+  depth.Write(raw.GetDepthMapPath(0));
+  BoundedWorkspace workspace(options, true);
+  ASSERT_TRUE(workspace.UsesCompactDepth());
+  const size_t raw_bytes = raw.GetLoadReservationBytes(0, Component::kDepth);
+  const size_t reserved =
+      workspace.GetLoadReservationBytes(0, Component::kDepth);
+  EXPECT_GE(reserved, 2 * raw_bytes);
+  auto lease = workspace.AcquireComponent(0, Component::kDepth);
+  ASSERT_TRUE(lease->sparse_depth);
+  EXPECT_TRUE(lease->depth_map.GetData().empty());
+  EXPECT_FLOAT_EQ(lease->GetDepth(4, 9), 5.0f);
+  EXPECT_FLOAT_EQ(lease->GetDepth(0, 0), 0.0f);
+  EXPECT_EQ(workspace.GetCacheStats().resident_bytes, lease->NumBytes());
+  EXPECT_EQ(workspace.GetResidentBytesEstimate(0, Component::kDepth),
+            lease->NumBytes());
+  EXPECT_LT(lease->NumBytes(), raw_bytes);
+  auto handle = lease.GetHandle();
+  const auto payload = BoundedWorkspaceTransientPinTestPeer::Payload(handle);
+  lease.reset();
+  auto borrowed = handle.TryBorrow();
+  ASSERT_TRUE(borrowed);
+  bool released = false;
+  BoundedWorkspaceTransientPinTestPeer::BeforeArm(workspace, [&] {
+    released = true;
+    borrowed.reset();
+  });
+  auto normal = workspace.AcquireComponent(0, Component::kNormal);
+  EXPECT_TRUE(released);
+  EXPECT_TRUE(payload.expired());
+  EXPECT_FALSE(handle.TryBorrow());
+  normal.reset();
+  auto reloaded = workspace.AcquireComponent(0, Component::kDepth);
+  ASSERT_TRUE(reloaded->sparse_depth);
+  EXPECT_FLOAT_EQ(reloaded->GetDepth(4, 9), 5.0f);
+  EXPECT_EQ(workspace.GetLoadReservationBytes(0, Component::kDepth), reserved);
+  EXPECT_EQ(workspace.GetCacheStats().reserved_bytes, 0);
+  EXPECT_LE(workspace.GetCacheStats().peak_charged_bytes, 700);
+}
+
+TEST_F(WorkspaceTests, SparseDepthFailureRetriesAndLeaseOutlivesWorkspace) {
+  auto options = GetOptions();
+  options.cache_size = 1.0;
+  using Component = BoundedWorkspace::Component;
+  BoundedWorkspace::ImageLease survivor;
+  {
+    BoundedWorkspace workspace(options, true);
+    const auto path = workspace.GetDepthMapPath(0);
+    workspace.GetLoadReservationBytes(0, Component::kDepth);
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << "10&5&1&";
+    EXPECT_THROW(workspace.AcquireComponent(0, Component::kDepth),
+                 std::exception);
+    EXPECT_EQ(workspace.GetCacheStats().reserved_bytes, 0);
+    Mat<float> depth(10, 5, 1);
+    depth.Fill(0.0f);
+    depth.Set(1, 1, 0, 7.0f);
+    depth.Write(path);
+    survivor = workspace.AcquireComponent(0, Component::kDepth);
+    ASSERT_TRUE(survivor->sparse_depth);
+  }
+  EXPECT_FLOAT_EQ(survivor->GetDepth(1, 1), 7.0f);
+  EXPECT_FLOAT_EQ(survivor->GetDepth(0, 0), 0.0f);
+  survivor.reset();
+}
+
+TEST_F(WorkspaceTests, DenseDepthFallsBackWithinRawLoadReservation) {
+  auto options = GetOptions();
+  Mat<float> depth(10, 5, 1);
+  depth.Fill(1.0f);
+  using Component = BoundedWorkspace::Component;
+  size_t reservation = 0;
+  {
+    BoundedWorkspace planning(options, true);
+    depth.Write(planning.GetDepthMapPath(0));
+    reservation = planning.GetLoadReservationBytes(0, Component::kDepth);
+  }
+  options.cache_size = static_cast<double>(reservation) / (1ULL << 30);
+  BoundedWorkspace workspace(options, true);
+  EXPECT_EQ(workspace.GetLoadReservationBytes(0, Component::kDepth),
+            reservation);
+  auto lease = workspace.AcquireComponent(0, Component::kDepth);
+  ASSERT_TRUE(lease);
+  EXPECT_FALSE(lease->sparse_depth);
+  EXPECT_EQ(lease->depth_map.GetData().size(), depth.GetData().size());
+  EXPECT_FLOAT_EQ(lease->GetDepth(0, 0), 1.0f);
+  EXPECT_EQ(workspace.GetCacheStats().resident_bytes, lease->NumBytes());
+  EXPECT_EQ(workspace.GetCacheStats().reserved_bytes, 0);
+  EXPECT_LE(workspace.GetCacheStats().peak_charged_bytes, reservation);
+}
+
+TEST_F(WorkspaceTests, ExactDepthDoesNotReserveSparseConstruction) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  auto options = GetOptions();
+  options.exact_depth_state = true;
+  options.mapped_normal_bytes_limit = 1 << 20;
+  options.mapped_normal_files_limit = 2;
+  BoundedWorkspace raw(options);
+  BoundedWorkspace compact(options, true);
+  EXPECT_FALSE(compact.UsesCompactDepth());
+  EXPECT_EQ(
+      raw.GetLoadReservationBytes(0, BoundedWorkspace::Component::kDepth),
+      compact.GetLoadReservationBytes(0, BoundedWorkspace::Component::kDepth));
+}
+
 TEST_F(WorkspaceTests, SoftBorrowExcludesEvictionAndRejectsStaleGeneration) {
   auto options = GetOptions();
   options.image_as_rgb = true;

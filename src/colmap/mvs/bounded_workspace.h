@@ -3,6 +3,7 @@
 #pragma once
 
 #include "colmap/mvs/immutable_map_pool.h"
+#include "colmap/mvs/sparse_depth.h"
 #include "colmap/mvs/workspace.h"
 
 #include <array>
@@ -25,6 +26,9 @@ namespace mvs {
 // are charged before loading; decoder-private scratch is outside this budget.
 class BoundedWorkspace : public Workspace {
  private:
+  friend class StereoFusion;
+  // Single-threaded, with no active payload or header loads.
+  void DisableCompactDepthBeforeLoading();
   struct CacheEntry;
   struct CacheState;
 
@@ -39,11 +43,18 @@ class BoundedWorkspace : public Workspace {
       return samples / 8 + (samples % 8 != 0);
     }
     bool HasPositiveDepth(size_t row, size_t col) const;
-    float GetDepth(size_t row, size_t col) const;
+    // Packed depth components have no raw depth_map; use this accessor.
+    float GetDepth(const size_t row, const size_t col) const {
+      THROW_CHECK(positive_depth_mask.empty())
+          << "Exact-state mask has no decoded depth; read original FP32";
+      return sparse_depth ? sparse_depth->Get(row, col)
+                          : depth_map.Get(row, col);
+    }
     NormalMap normal_map;
     bool bitmap_on_depth_grid = false;
     size_t normal_origin_x = 0;
     size_t normal_origin_y = 0;
+    std::unique_ptr<const internal::SparseDepth> sparse_depth;
     size_t NumBytes() const;
     Eigen::Vector3f GetNormal(size_t row, size_t col) const;
   };
@@ -138,6 +149,9 @@ class BoundedWorkspace : public Workspace {
   };
 
   explicit BoundedWorkspace(const Options& options);
+  // Explicit Fusion-only packed-component contract; ordinary callers stay raw.
+  BoundedWorkspace(const Options& options, bool compact_depth);
+  bool UsesCompactDepth() const { return compact_depth_; }
   ~BoundedWorkspace() override;
   void Load(const std::vector<std::string>&) override {}
   ImageLease AcquireImage(int image_idx);
@@ -227,6 +241,7 @@ class BoundedWorkspace : public Workspace {
   // both validated shapes together; failed first admission remains retryable.
   mutable std::vector<std::once_flag> normal_tile_grid_once_;
   mutable std::vector<std::pair<size_t, size_t>> normal_tile_grids_;
+  bool compact_depth_;
 };
 
 }  // namespace mvs

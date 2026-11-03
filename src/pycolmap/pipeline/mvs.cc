@@ -264,7 +264,10 @@ void BindMVS(py::module& m) {
           .def_readwrite("cache_size",
                          &SFOpts::cache_size,
                          "Cache size in gigabytes for fusion.")
-          .def_readwrite("bounded_cache", &SFOpts::bounded_cache)
+          .def_readwrite(
+              "bounded_cache",
+              &SFOpts::bounded_cache,
+              "Experimental byte-bounded Fusion cache; disabled by default.")
           .def_readwrite("bounded_cache_components",
                          &SFOpts::bounded_cache_components)
           .def_readwrite("bounded_cache_neighborhood",
@@ -273,6 +276,11 @@ void BindMVS(py::module& m) {
               "bounded_cache_compact_rgb",
               &SFOpts::bounded_cache_compact_rgb,
               "Keep RGB8 colors at the depth-map grid in bounded mode.")
+          .def_readwrite(
+              "bounded_cache_compact_depth",
+              &SFOpts::bounded_cache_compact_depth,
+              "Experimental in-memory lossless depth compaction for bounded "
+              "component neighborhoods with normal tiles; disabled by default.")
           .def_readwrite("bounded_cache_diagnostics",
                          &SFOpts::bounded_cache_diagnostics)
           .def_readwrite(

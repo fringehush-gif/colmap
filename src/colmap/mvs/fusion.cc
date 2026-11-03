@@ -75,19 +75,23 @@ void FusionPixelMask::ExcludeNonpositiveDepth(const FusionFloatMapView& depth) {
     for (size_t bit = 0; bit < count; ++bit) {
       uint32_t bits;
       std::memcpy(&bits, depth.data + first + bit, sizeof(bits));
-      const uint32_t magnitude = bits & 0x7fffffffu;
-      // Leave NaNs and subnormals to the original worker-local comparison.
-      // In particular, classification must not depend on the initializer's
-      // floating-point flags or denormals-are-zero setting.
-      const bool nonpositive = magnitude == 0 || ((bits & 0x80000000u) != 0 &&
-                                                  magnitude >= 0x00800000u &&
-                                                  magnitude <= 0x7f800000u);
+      const bool nonpositive = IsDefinitelyNonpositiveDepth(bits);
       excluded |= static_cast<uint64_t>(nonpositive) << bit;
     }
     auto& word = data_[first / kWordBits];
     word.store(word.load(std::memory_order_relaxed) | excluded,
                std::memory_order_relaxed);
     first += count;
+  }
+}
+
+void FusionPixelMask::ExcludeNonpositiveDepth(const SparseDepth& depth) {
+  if (depth.Width() != width_ || depth.Size() != size_) return;
+  for (size_t word = 0; word < size_ / kWordBits + (size_ % kWordBits != 0);
+       ++word) {
+    data_[word].store(data_[word].load(std::memory_order_relaxed) |
+                          depth.NonpositiveWord(word),
+                      std::memory_order_relaxed);
   }
 }
 
@@ -281,6 +285,7 @@ void StereoFusionOptions::Print() const {
   PrintOption(bounded_cache_neighborhood);
   PrintOption(bounded_cache_prefill_threads);
   PrintOption(bounded_cache_compact_rgb);
+  PrintOption(bounded_cache_compact_depth);
   PrintOption(cache_size);
   const auto& bbox_min = bounding_box.first.transpose().eval();
   const auto& bbox_max = bounding_box.second.transpose().eval();
@@ -299,6 +304,12 @@ bool StereoFusionOptions::Check() const {
   CHECK_OPTION_GT(check_num_images, 0);
   CHECK_OPTION_GT(cache_size, 0);
   CHECK_OPTION_EQ((bounded_cache_compact_rgb && !bounded_cache), false);
+  CHECK_OPTION_EQ(
+      (bounded_cache_compact_depth &&
+       (!bounded_cache || !bounded_cache_components ||
+        !bounded_cache_neighborhood || bounded_cache_normal_tile_size == 0 ||
+        bounded_cache_exact_depth)),
+      false);
   CHECK_OPTION_EQ((bounded_cache_components && !bounded_cache), false);
   CHECK_OPTION_EQ((bounded_cache_diagnostics && !bounded_cache), false);
   CHECK_OPTION_GE(bounded_cache_normal_tile_size, 0);
@@ -567,7 +578,9 @@ void StereoFusion::Run() {
   int num_threads = 1;
   bounded_workspace_ = nullptr;
   if (options_.bounded_cache) {
-    auto workspace = std::make_unique<BoundedWorkspace>(workspace_options);
+    const bool compact_depth = options_.bounded_cache_compact_depth;
+    auto workspace =
+        std::make_unique<BoundedWorkspace>(workspace_options, compact_depth);
     bounded_workspace_ = workspace.get();
     workspace_ = std::move(workspace);
     num_threads = GetEffectiveNumThreads(options_.num_threads);
@@ -730,29 +743,38 @@ void StereoFusion::Run() {
   if (options_.bounded_cache_normal_tile_size > 0) {
     size_t largest_component = 0, largest_tile = 0;
     using Component = BoundedWorkspace::Component;
-    for (size_t index = 0; index < used_images_.size(); ++index) {
-      if (!used_images_[index]) continue;
-      const int view = static_cast<int>(index);
-      largest_tile =
-          std::max(largest_tile,
-                   bounded_workspace_->GetNormalTileResidentBytes(
-                       view, options_.bounded_cache_normal_tile_size));
-      largest_component = std::max(
-          {largest_component,
-           bounded_workspace_->GetNormalTileReservationBytes(
-               view, options_.bounded_cache_normal_tile_size),
-           bounded_workspace_->GetLoadReservationBytes(view, Component::kDepth),
-           bounded_workspace_->GetLoadReservationBytes(view,
-                                                       Component::kBitmap)});
-    }
     const size_t per_worker =
         bounded_workspace_->GetCacheStats().capacity_bytes /
         static_cast<size_t>(num_threads);
     const size_t slots =
         static_cast<size_t>(options_.bounded_cache_normal_tile_slots);
-    const bool tile_fallback_fits =
-        largest_component <= per_worker &&
-        largest_tile <= (per_worker - largest_component) / slots;
+    bool tile_fallback_fits = false;
+    for (;;) {
+      for (size_t index = 0; index < used_images_.size(); ++index) {
+        if (!used_images_[index]) continue;
+        const int view = static_cast<int>(index);
+        largest_tile =
+            std::max(largest_tile,
+                     bounded_workspace_->GetNormalTileResidentBytes(
+                         view, options_.bounded_cache_normal_tile_size));
+        largest_component =
+            std::max({largest_component,
+                      bounded_workspace_->GetNormalTileReservationBytes(
+                          view, options_.bounded_cache_normal_tile_size),
+                      bounded_workspace_->GetLoadReservationBytes(
+                          view, Component::kDepth),
+                      bounded_workspace_->GetLoadReservationBytes(
+                          view, Component::kBitmap)});
+      }
+      tile_fallback_fits =
+          largest_component <= per_worker &&
+          largest_tile <= (per_worker - largest_component) / slots;
+      if (tile_fallback_fits || !bounded_workspace_->UsesCompactDepth()) break;
+      // Packing must not make an otherwise valid raw-cache recipe inadmissible.
+      // Before workers start, discard header-only reservations.
+      bounded_workspace_->DisableCompactDepthBeforeLoading();
+      largest_component = largest_tile = 0;
+    }
     // A complete neighborhood borrows whole-image owners and needs no tile
     // fallback. Check fallback admission at each actual partial root.
     THROW_CHECK(options_.bounded_cache_neighborhood || tile_fallback_fits)
@@ -882,8 +904,13 @@ void StereoFusion::Run() {
           for (size_t view = 0; view < neighborhood_data_.size(); ++view) {
             const auto* data = neighborhood_data_[view];
             if (!seeded_depth_masks[view] && data) {
-              fused_pixel_masks_[view].ExcludeNonpositiveDepth(
-                  internal::FusionFloatMapView(data->depth_map));
+              if (data->sparse_depth) {
+                fused_pixel_masks_[view].ExcludeNonpositiveDepth(
+                    *data->sparse_depth);
+              } else {
+                fused_pixel_masks_[view].ExcludeNonpositiveDepth(
+                    internal::FusionFloatMapView(data->depth_map));
+              }
               seeded_depth_masks[view] = 1;
             }
           }
@@ -1755,7 +1782,7 @@ void StereoFusion::Fuse(const int thread_id,
         const bool exact_nonpositive =
             exact_depth && !image_data->HasPositiveDepth(row, col);
         depth = exact_depth ? 0.0f
-                            : (image_data ? image_data->depth_map.Get(row, col)
+                            : (image_data ? image_data->GetDepth(row, col)
                                           : depth_map->Get(row, col));
         if (options_.bounded_cache_components && image_lease && *image_lease) {
           image_lease.reset();

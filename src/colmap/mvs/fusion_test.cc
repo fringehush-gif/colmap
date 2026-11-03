@@ -532,6 +532,12 @@ struct StereoFusionExactDepthTestPeer {
   static BoundedWorkspace& Cache(StereoFusion& fusion) {
     return *fusion.bounded_workspace_;
   }
+  static bool HasPackedResident(const StereoFusion& fusion) {
+    return std::any_of(
+        fusion.neighborhood_data_.begin(),
+        fusion.neighborhood_data_.end(),
+        [](const auto* data) { return data && data->sparse_depth; });
+  }
   static void PrepareNormalWindow(StereoFusion& fusion, size_t root = 0) {
     auto& cache = *fusion.bounded_workspace_;
     const size_t count = cache.GetModel().images.size();
@@ -1211,6 +1217,27 @@ TEST(StereoFusionOptions, BoundedDiagnosticPolicy) {
   EXPECT_FALSE(options.Check());
   options.bounded_cache = true;
   EXPECT_TRUE(options.Check());
+}
+
+TEST(StereoFusionOptions, ExperimentalDepthCompactionPolicy) {
+  StereoFusionOptions options;
+  EXPECT_FALSE(options.bounded_cache_compact_depth);
+  options.bounded_cache_compact_depth = true;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 2;
+  EXPECT_TRUE(options.Check());
+  options.bounded_cache_neighborhood = false;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 0;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_exact_depth = true;
+  EXPECT_FALSE(options.Check());
 }
 
 TEST(StereoFusion, MappedNormalRingIndexReplacementAndClear) {
@@ -2668,6 +2695,151 @@ std::filesystem::path CreateTwoViewNormalDecisionFixture() {
     for (const auto& name : names) config << name << '\n';
   }
   return root;
+}
+
+TEST(StereoFusion, SparseDepthCancellationFailureAndReuse) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  const auto names = ReadTextFileLines(root / "stereo/fusion.cfg");
+  for (const auto& name : names) {
+    Mat<float> depth(30, 20, 1);
+    depth.Fill(0.0f);
+    depth.Set(10, 15, 0, 5.0f);
+    depth.Write(root / "stereo/depth_maps" / (name + ".geometric.bin"));
+  }
+  StereoFusionOptions options;
+  options.num_threads = 1;
+  options.use_cache = false;
+  options.min_num_pixels = options.max_num_pixels = 2;
+  StereoFusion reference(options, root, "COLMAP", "", "geometric");
+  reference.Run();
+  ASSERT_EQ(reference.GetFusedPoints().size(), 1);
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = 4;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 4;
+  options.cache_size = 20000.0 / (1ULL << 30);
+  StereoFusion uncompressed(options, root, "COLMAP", "", "geometric");
+  uncompressed.Run();
+  EXPECT_FALSE(
+      StereoFusionExactDepthTestPeer::Cache(uncompressed).UsesCompactDepth());
+  EXPECT_EQ(uncompressed.GetFusedPointsVisibility(),
+            reference.GetFusedPointsVisibility());
+  options.bounded_cache_compact_depth = true;
+  StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+  bool cancelled = false;
+  fusion.SetCheckIfStoppedFunc([&] {
+    const auto stats = fusion.GetBoundedCacheStats();
+    cancelled |=
+        stats && stats->component_loads[1] > 0 && stats->reserved_bytes == 0;
+    return cancelled;
+  });
+  fusion.Run();
+  EXPECT_TRUE(cancelled);
+  EXPECT_TRUE(fusion.GetFusedPoints().empty());
+  ASSERT_TRUE(fusion.GetBoundedCacheStats());
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  bool packed_observed = false;
+  fusion.SetCheckIfStoppedFunc([&] {
+    packed_observed |=
+        StereoFusionExactDepthTestPeer::HasPackedResident(fusion);
+    return false;
+  });
+  const auto path = root / "stereo/normal_maps" / (names[0] + ".geometric.bin");
+  Mat<float> saved;
+  saved.Read(path);
+  std::ofstream(path, std::ios::binary | std::ios::trunc) << "30&20&3&";
+  EXPECT_THROW(fusion.Run(), std::exception);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  saved.Write(path);
+  for (int repeat = 0; repeat < 2; ++repeat) {
+    packed_observed = false;
+    fusion.Run();
+    EXPECT_TRUE(packed_observed);
+    ASSERT_EQ(fusion.GetFusedPoints().size(), 1);
+    EXPECT_EQ(fusion.GetFusedPointsVisibility(),
+              reference.GetFusedPointsVisibility());
+    const auto& actual = fusion.GetFusedPoints()[0];
+    const auto& expected = reference.GetFusedPoints()[0];
+    EXPECT_EQ(actual.x, expected.x);
+    EXPECT_EQ(actual.y, expected.y);
+    EXPECT_EQ(actual.z, expected.z);
+    EXPECT_EQ(actual.nx, expected.nx);
+    EXPECT_EQ(actual.ny, expected.ny);
+    EXPECT_EQ(actual.nz, expected.nz);
+    EXPECT_EQ(actual.r, expected.r);
+    EXPECT_EQ(actual.g, expected.g);
+    EXPECT_EQ(actual.b, expected.b);
+    EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  }
+}
+
+TEST(StereoFusion, SparseDepthKeepsWholeViewFallbackWithoutTileHeadroom) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  Workspace::Options workspace_options;
+  workspace_options.workspace_path = root;
+  workspace_options.workspace_format = "COLMAP";
+  workspace_options.input_type = "geometric";
+  BoundedWorkspace estimates(workspace_options);
+  using Component = BoundedWorkspace::Component;
+  size_t total = 0, extra = 0;
+  for (const int view : {0, 1}) {
+    const size_t resident = estimates.GetResidentBytesEstimate(view);
+    total += resident;
+    extra = std::max(extra, estimates.GetLoadReservationBytes(view) - resident);
+  }
+  StereoFusionOptions options;
+  options.num_threads = 24;
+  options.min_num_pixels = options.max_num_pixels = 2;
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_compact_depth = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = 4;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 2;
+  const size_t capacity = total + extra + 64;
+  options.cache_size = static_cast<double>(capacity) / (1ULL << 30);
+  ASSERT_GT(estimates.GetLoadReservationBytes(0, Component::kDepth),
+            capacity / 24);
+  StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+  ASSERT_NO_THROW(fusion.Run());
+  EXPECT_FALSE(fusion.GetFusedPoints().empty());
+  ASSERT_TRUE(fusion.GetBoundedCacheStats());
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->component_loads[0], 2);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->normal_tile_loads, 0);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+}
+
+TEST(StereoFusion, SparseDepthKeepsRawPartialFallbackAtTightAdmission) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  StereoFusionOptions options;
+  options.num_threads = 2;
+  options.min_num_pixels = options.max_num_pixels = 2;
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_compact_depth = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = 4;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 2;
+  options.cache_size = 14000.0 / (1ULL << 30);
+  StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+  ASSERT_NO_THROW(fusion.Run());
+  EXPECT_FALSE(fusion.GetFusedPoints().empty());
+  EXPECT_FALSE(
+      StereoFusionExactDepthTestPeer::Cache(fusion).UsesCompactDepth());
+  const auto stats = fusion.GetBoundedCacheStats();
+  ASSERT_TRUE(stats);
+  // The last remaining view fits whole after the initial partial root.
+  EXPECT_EQ(stats->component_loads[0], 1);
+  EXPECT_GT(stats->component_loads[1], 0);
+  EXPECT_EQ(stats->reserved_bytes, 0);
+  EXPECT_LE(stats->peak_charged_bytes, 14000);
 }
 
 TEST(StereoFusion, ZeroMinimumSkipsEmptySamples) {

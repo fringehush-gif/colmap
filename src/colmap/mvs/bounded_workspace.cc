@@ -120,12 +120,93 @@ RasterShape ReadMapShape(const std::filesystem::path& path,
 
 }  // namespace
 
+std::unique_ptr<const internal::SparseDepth> internal::SparseDepth::Pack(
+    const std::vector<float>& source, const size_t width, const size_t height) {
+  if constexpr (sizeof(float) != sizeof(uint32_t) ||
+                !std::numeric_limits<float>::is_iec559) {
+    return nullptr;
+  } else {
+    const auto bits_of = [](const float& value) {
+      uint32_t bits;
+      std::memcpy(&bits, &value, sizeof(bits));
+      return bits;
+    };
+    if (bits_of(0x1.2468acp0f) != 0x3f923456u || width == 0 || height == 0 ||
+        width > UINT32_MAX || height > UINT32_MAX / width ||
+        source.size() != width * height ||
+        source.size() > std::numeric_limits<size_t>::max() / sizeof(float)) {
+      return nullptr;
+    }
+    const size_t words = source.size() / 64 + (source.size() % 64 != 0);
+    size_t nonzero = 0;
+    for (const float& value : source) nonzero += bits_of(value) != 0;
+    const size_t raw_bytes = source.size() * sizeof(float);
+    const size_t limit = raw_bytes - raw_bytes / 10 - (raw_bytes % 10 != 0);
+    constexpr size_t kBaseBytes = sizeof(SparseDepth) + 64;
+    if (words > (std::numeric_limits<size_t>::max() - kBaseBytes) / 12) {
+      return nullptr;
+    }
+    const size_t overhead = kBaseBytes + words * 12;
+    if (overhead >= limit || nonzero > (limit - overhead) / sizeof(uint32_t)) {
+      return nullptr;
+    }
+    auto packed = std::unique_ptr<SparseDepth>(new SparseDepth());
+    packed->width_ = width;
+    packed->height_ = height;
+    packed->word_count_ = words;
+    packed->value_count_ = nonzero;
+    packed->occupancy_.reset(new uint64_t[words]);
+    packed->prefix_.reset(new uint32_t[words]);
+    if (nonzero != 0) packed->values_.reset(new uint32_t[nonzero]);
+    size_t next = 0;
+    for (size_t word = 0; word < words; ++word) {
+      packed->prefix_[word] = static_cast<uint32_t>(next);
+      const size_t first = word * 64;
+      const size_t count = std::min(size_t{64}, source.size() - first);
+      uint64_t occupied = 0;
+      for (size_t bit = 0; bit < count; ++bit) {
+        const uint32_t bits = bits_of(source[first + bit]);
+        if (bits != 0) {
+          occupied |= uint64_t{1} << bit;
+          packed->values_[next++] = bits;
+        }
+      }
+      packed->occupancy_[word] = occupied;
+    }
+    return packed;
+  }
+}
+
+size_t internal::SparseDepth::NumBytes() const {
+  return sizeof(*this) + 64 +
+         word_count_ * (sizeof(uint64_t) + sizeof(uint32_t)) +
+         value_count_ * sizeof(uint32_t);
+}
+
+uint64_t internal::SparseDepth::NonpositiveWord(const size_t word) const {
+  if (word >= word_count_) {
+    throw std::out_of_range("Depth word outside raster");
+  }
+  uint64_t occupied = occupancy_[word];
+  uint64_t excluded = ~occupied;
+  size_t next = prefix_[word];
+  while (occupied != 0) {
+    const uint64_t bit = occupied & (~occupied + 1);
+    if (IsDefinitelyNonpositiveDepth(values_[next++])) excluded |= bit;
+    occupied &= occupied - 1;
+  }
+  const size_t count = std::min(size_t{64}, Size() - word * 64);
+  return excluded & (count == 64 ? ~uint64_t{0} : (uint64_t{1} << count) - 1);
+}
+
 size_t BoundedWorkspace::ImageData::NumBytes() const {
   return CheckedAddBytes(
       CheckedAddBytes(bitmap.NumBytes(),
                       positive_depth_mask.capacity() * sizeof(uint8_t)),
-      CheckedAddBytes(depth_map.GetData().capacity() * sizeof(float),
-                      normal_map.GetData().capacity() * sizeof(float)));
+      CheckedAddBytes(
+          depth_map.GetData().capacity() * sizeof(float),
+          CheckedAddBytes(normal_map.GetData().capacity() * sizeof(float),
+                          sparse_depth ? sparse_depth->NumBytes() : 0)));
 }
 
 bool BoundedWorkspace::ImageData::HasPositiveDepth(const size_t row,
@@ -134,13 +215,6 @@ bool BoundedWorkspace::ImageData::HasPositiveDepth(const size_t row,
   THROW_CHECK_LT(col, exact_depth_width);
   const size_t index = row * exact_depth_width + col;
   return (positive_depth_mask.at(index / 8) & (uint8_t{1} << (index % 8))) != 0;
-}
-
-float BoundedWorkspace::ImageData::GetDepth(const size_t row,
-                                            const size_t col) const {
-  THROW_CHECK(positive_depth_mask.empty())
-      << "Exact-state mask has no decoded depth; read original FP32";
-  return depth_map.Get(row, col);
 }
 
 Eigen::Vector3f BoundedWorkspace::ImageData::GetNormal(const size_t row,
@@ -170,8 +244,13 @@ struct BoundedWorkspace::CacheEntry {
 
 struct BoundedWorkspace::CacheState
     : std::enable_shared_from_this<BoundedWorkspace::CacheState> {
-  CacheState(const size_t capacity, const size_t num_images)
-      : entries(num_images), load_bytes(num_images, 0), base_keys(num_images) {
+  CacheState(const size_t capacity,
+             const size_t num_images,
+             const bool compact_depth)
+      : entries(num_images),
+        load_bytes(num_images, 0),
+        depth_resident_bytes(compact_depth ? num_images : 0, 0),
+        base_keys(num_images) {
     stats.capacity_bytes = capacity;
   }
 
@@ -179,6 +258,7 @@ struct BoundedWorkspace::CacheState
   std::condition_variable changed;
   std::vector<std::shared_ptr<CacheEntry>> entries;
   std::vector<size_t> load_bytes;
+  std::vector<size_t> depth_resident_bytes;
   std::vector<int> active_keys;
   std::map<std::tuple<int, size_t, size_t, size_t>, int> tile_keys;
   std::vector<int> free_tile_keys;
@@ -683,9 +763,14 @@ MappedNormalPool::Lease MappedNormalPool::AcquireImpl(
 }
 
 BoundedWorkspace::BoundedWorkspace(const Options& options)
+    : BoundedWorkspace(options, false) {}
+
+BoundedWorkspace::BoundedWorkspace(const Options& options,
+                                   const bool compact_depth)
     : Workspace(options),
       normal_tile_grid_once_(model_.images.size()),
-      normal_tile_grids_(model_.images.size()) {
+      normal_tile_grids_(model_.images.size()),
+      compact_depth_(compact_depth && !options.exact_depth_state) {
   THROW_CHECK(!options.compact_rgb_to_depth_grid || options.image_as_rgb);
   THROW_CHECK(!options.exact_depth_state ||
               (options.mapped_normal_bytes_limit > 0 &&
@@ -705,10 +790,19 @@ BoundedWorkspace::BoundedWorkspace(const Options& options)
         options.mapped_normal_bytes_limit, options.mapped_normal_files_limit);
   }
   cache_state_ = std::make_shared<CacheState>(static_cast<size_t>(bytes),
-                                              model_.images.size() * 4);
+                                              model_.images.size() * 4,
+                                              compact_depth_);
 }
 
 BoundedWorkspace::~BoundedWorkspace() { ReleaseOriginalDepthNeighborhood(); }
+
+void BoundedWorkspace::DisableCompactDepthBeforeLoading() {
+  std::lock_guard<std::mutex> lock(cache_state_->mutex);
+  THROW_CHECK_EQ(cache_state_->stats.loads, 0);
+  compact_depth_ = false;
+  std::fill(
+      cache_state_->load_bytes.begin(), cache_state_->load_bytes.end(), 0);
+}
 
 int BoundedWorkspace::ComponentKey(const int image_idx,
                                    const Component component) const {
@@ -798,6 +892,10 @@ size_t BoundedWorkspace::RequiredLoadBytes(const int image_idx,
       bytes = CheckedAddBytes(bytes, CheckedAddBytes(scratch, scratch));
     }
   }
+  if (component == Component::kDepth && compact_depth_) {
+    // Raw input remains live until the smaller representation is complete.
+    bytes = CheckedAddBytes(bytes, CheckedAddBytes(depth.bytes, 256));
+  }
   if (read_depth && options_.exact_depth_state) {
     bytes =
         CheckedAddBytes(bytes,
@@ -848,6 +946,12 @@ std::pair<size_t, size_t> BoundedWorkspace::GetDepthMapDimensions(
 
 size_t BoundedWorkspace::GetResidentBytesEstimate(
     const int image_idx, const Component component) const {
+  if (component == Component::kDepth && compact_depth_) {
+    std::lock_guard<std::mutex> lock(cache_state_->mutex);
+    const size_t known = cache_state_->depth_resident_bytes.at(
+        ComponentKey(image_idx, component));
+    if (known) return known;
+  }
   const auto& image = model_.images.at(image_idx);
   const auto grid =
       component == Component::kBitmap && !options_.compact_rgb_to_depth_grid
@@ -1253,6 +1357,7 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
 
   lock.unlock();
   std::shared_ptr<ImageData> data;
+  size_t resident_bytes = 0;
   try {
     data = std::make_shared<ImageData>();
     const auto& image = model_.images.at(image_idx);
@@ -1295,6 +1400,13 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
         data->depth_map = DepthMap();
       } else {
         data->depth_map.Downsize(width, height);
+        if (component == Component::kDepth && compact_depth_) {
+          data->sparse_depth =
+              internal::SparseDepth::Pack(data->depth_map.GetData(),
+                                          data->depth_map.GetWidth(),
+                                          data->depth_map.GetHeight());
+          if (data->sparse_depth) data->depth_map = DepthMap();
+        }
       }
     }
     if (component == Component::kImage || component == Component::kNormal) {
@@ -1348,9 +1460,10 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
         data->bitmap_on_depth_grid = true;
       }
     }
-    THROW_CHECK_LE(data->NumBytes(), required_bytes);
+    resident_bytes = data->NumBytes();
+    THROW_CHECK_LE(resident_bytes, required_bytes);
     THROW_CHECK_LE(
-        data->NumBytes(),
+        resident_bytes,
         region ? GetNormalTileResidentBytes(image_idx, region->tile_size)
                : GetResidentBytesEstimate(image_idx, component));
   } catch (...) {
@@ -1365,10 +1478,13 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
     throw;
   }
   lock.lock();
+  if (component == Component::kDepth && compact_depth_) {
+    state->depth_resident_bytes[key] = resident_bytes;
+  }
   entry->image = std::move(data);
   entry->loading = false;
   state->stats.reserved_bytes -= required_bytes;
-  state->stats.resident_bytes += entry->image->NumBytes();
+  state->stats.resident_bytes += resident_bytes;
   state->changed.notify_all();
   return state->MakeLease(entry);
 }

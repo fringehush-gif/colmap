@@ -5,6 +5,7 @@
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
 #include <array>
 #include <cfenv>
 #include <cmath>
@@ -61,6 +62,96 @@ uint32_t Bits(float value) {
   static_assert(sizeof(bits) == sizeof(value));
   std::memcpy(&bits, &value, sizeof(bits));
   return bits;
+}
+
+TEST(SparseDepth, PreservesOpaqueWordsAndMaskClassification) {
+  constexpr size_t kWidth = 129, kHeight = 7;
+  Mat<float> source(kWidth, kHeight, 1);
+  source.Fill(0.0f);
+  const std::array<uint32_t, 14> patterns = {0x80000000u,
+                                             0x3f800000u,
+                                             0xbf800000u,
+                                             0x7f800000u,
+                                             0xff800000u,
+                                             0x00000001u,
+                                             0x80000001u,
+                                             0x00800000u,
+                                             0x80800000u,
+                                             0x7fc12345u,
+                                             0xffc12345u,
+                                             0x7f812345u,
+                                             0xff812345u,
+                                             0x7f7fffffu};
+  for (size_t index = 0; index < patterns.size(); ++index) {
+    // Include the first/last bits of occupancy words and a short final word.
+    const size_t offset = index == 0 ? 0 : index * 64 - 1;
+    std::memcpy(source.GetPtr() + offset, &patterns[index], sizeof(float));
+  }
+  const auto packed = colmap::mvs::internal::SparseDepth::Pack(
+      source.GetData(), kWidth, kHeight);
+  ASSERT_TRUE(packed);
+  EXPECT_LT(packed->NumBytes(), source.GetData().size() * sizeof(float));
+  for (size_t row = 0; row < kHeight; ++row) {
+    for (size_t col = 0; col < kWidth; ++col) {
+      EXPECT_EQ(Bits(packed->Get(row, col)), Bits(source.Get(row, col)));
+    }
+  }
+  colmap::mvs::internal::FusionPixelMask raw_mask(kWidth, kHeight);
+  colmap::mvs::internal::FusionPixelMask sparse_mask(kWidth, kHeight);
+  raw_mask.ExcludeNonpositiveDepth(
+      colmap::mvs::internal::FusionFloatMapView(source));
+  sparse_mask.ExcludeNonpositiveDepth(*packed);
+  for (size_t row = 0; row < kHeight; ++row) {
+    for (size_t col = 0; col < kWidth; ++col) {
+      EXPECT_EQ(raw_mask.Get(row, col), sparse_mask.Get(row, col));
+    }
+  }
+  EXPECT_THROW(packed->Get(kHeight, 0), std::out_of_range);
+  EXPECT_THROW(packed->Get(0, kWidth), std::out_of_range);
+  EXPECT_THROW(packed->NonpositiveWord(15), std::out_of_range);
+  EXPECT_EQ(packed->NonpositiveWord(14), (uint64_t{1} << 7) - 1);
+}
+
+TEST(SparseDepth, DeclinesDenseAndInvalidRasters) {
+  using colmap::mvs::internal::SparseDepth;
+  std::vector<float> source(1024, 1.0f);
+  EXPECT_FALSE(SparseDepth::Pack(source, 32, 32));
+  EXPECT_FALSE(SparseDepth::Pack(source, 0, 32));
+  EXPECT_FALSE(SparseDepth::Pack(source, 31, 32));
+  EXPECT_FALSE(SparseDepth::Pack(source, UINT32_MAX, 2));
+  source.assign(1024, 0.0f);
+  const auto packed = SparseDepth::Pack(source, 32, 32);
+  ASSERT_TRUE(packed);
+  EXPECT_EQ(packed->NonpositiveWord(0), ~uint64_t{0});
+  EXPECT_EQ(packed->NonpositiveWord(15), ~uint64_t{0});
+  EXPECT_EQ(Bits(packed->Get(31, 31)), 0);
+}
+
+TEST(SparseDepth, AcceptsOnlyRepresentationsSavingAtLeastTenPercent) {
+  using colmap::mvs::internal::SparseDepth;
+  std::vector<float> source(1024, 0.0f);
+  const size_t raw_bytes = source.size() * sizeof(float);
+  const size_t largest_allowed = raw_bytes - (raw_bytes + 9) / 10;
+  size_t accepted = 0;
+  size_t declined = source.size() + 1;
+  while (declined - accepted > 1) {
+    const size_t middle = accepted + (declined - accepted) / 2;
+    std::fill(source.begin(), source.end(), 0.0f);
+    std::fill_n(source.begin(), middle, 1.0f);
+    const auto packed = SparseDepth::Pack(source, 32, 32);
+    if (packed) {
+      EXPECT_LE(packed->NumBytes(), largest_allowed);
+      accepted = middle;
+    } else {
+      declined = middle;
+    }
+  }
+  ASSERT_LT(accepted, source.size());
+  std::fill(source.begin(), source.end(), 0.0f);
+  std::fill_n(source.begin(), accepted, 1.0f);
+  ASSERT_TRUE(SparseDepth::Pack(source, 32, 32));
+  source[accepted] = 1.0f;
+  EXPECT_FALSE(SparseDepth::Pack(source, 32, 32));
 }
 template <class F>
 void Refuses(F action, const char* message) {

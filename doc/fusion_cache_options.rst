@@ -18,8 +18,9 @@ Choose a loading policy
   of ``-1`` follows ``num_threads``. This mode needs enough RAM for the workspace.
 * **Legacy LRU:** ``use_cache=1``. Inputs are loaded on demand. This path uses one
   Fusion worker. ``cache_size`` sets the cache's size in GiB.
-* **Byte-bounded cache:** ``bounded_cache=1``. Pinned inputs cannot be evicted
-  while a worker uses them. The budget must accommodate the live working set;
+* **Experimental byte-bounded cache:** ``bounded_cache=1``. It is opt-in;
+  pinned inputs cannot be evicted while a worker uses them. The budget must
+  accommodate the live working set;
   this is not a hard process-RSS limit. ``bounded_cache_components=1`` loads
   depth, normal and RGB components separately. Neighborhood pinning and prefill
   are additional options, not prerequisites for ordinary bounded operation.
@@ -60,3 +61,17 @@ Every source depth sample must be finite, including invalid-depth sentinels;
 non-finite samples are rejected before exact-depth reads.
 
 Check available combinations with ``StereoFusionOptions::Check()``.
+
+Experimental depth compaction
+-----------------------------
+
+``bounded_cache_compact_depth=1`` opts into lossless in-memory sparse depth
+storage for bounded component neighborhoods with normal tiles. It is disabled
+by default and requires ``bounded_cache=1``,
+``bounded_cache_components=1``, ``bounded_cache_neighborhood=1``, and a
+positive ``bounded_cache_normal_tile_size``. It cannot be combined with
+``bounded_cache_exact_depth``. A dense or inadmissible raster stays raw; a
+tile-fallback admission that cannot accommodate packing reverts to the raw
+bounded path before loading. The setting does not change stored FP32 depth
+maps or the default Fusion result format. Check output parity for the intended
+workspace before using this experimental mode for a production result.
