@@ -4,6 +4,7 @@
 #include "colmap/mvs/packed_consistency_mask.h"
 #include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/patch_match_hmm_checkpoint.h"
+#include "colmap/mvs/patch_match_io.h"
 #include "colmap/mvs/patch_match_rng_perimeter.h"
 #include "colmap/mvs/patch_match_source_array.h"
 #include "colmap/mvs/workspace.h"
@@ -20,6 +21,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -31,6 +34,8 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -186,6 +191,15 @@ class PatchMatchControllerTestAccess {
     controller.sparse_test_hooks_ = nullptr;
   }
 #ifndef COLMAP_HIP_ENABLED
+  static ThreadPool& InitializeScheduler(PatchMatchController& controller) {
+    controller.problems_.resize(1);
+    controller.problems_.front().ref_image_idx = 42;
+    controller.thread_pool_ = std::make_unique<ThreadPool>(2);
+    return *controller.thread_pool_;
+  }
+  static int ScheduledReference(const PatchMatchController& controller) {
+    return controller.problems_.front().ref_image_idx;
+  }
   static void RunPair(PatchMatchController& controller,
                       Hooks& hooks,
                       const PatchMatchOptions& options,
@@ -257,6 +271,83 @@ TEST(PatchMatchCuda, RotationBufferReuseRequiresCuda) {
   GTEST_SKIP() << "The rotation-buffer option is CUDA-only";
 }
 #else
+
+TEST(PatchMatchController, SubmissionFailureDrainsBorrowingWorkers) {
+  struct FailingSubmission {
+    explicit FailingSubmission(std::promise<void>& fault) : fault(&fault) {}
+    FailingSubmission(const FailingSubmission& other) : fault(other.fault) {
+      fault->set_value();
+      throw std::bad_alloc();
+    }
+    void operator()() const {}
+    std::promise<void>* fault;
+  };
+  std::promise<void> borrower_started, worker_failed, submission_failed;
+  auto started = borrower_started.get_future();
+  auto failed_worker = worker_failed.get_future();
+  auto failed_submission = submission_failed.get_future();
+  std::promise<void> release_borrower;
+  const auto release = release_borrower.get_future().share();
+  std::atomic<bool> saw_live_controller{false}, borrower_completed{false};
+  std::atomic<bool> completed_before_rethrow{false};
+
+  auto caller = std::async(std::launch::async, [&]() {
+    auto controller = std::make_shared<PatchMatchController>(
+        PatchMatchOptions{}, "", "COLMAP", "");
+    auto& pool = PatchMatchControllerTestAccess::InitializeScheduler(*controller);
+    std::weak_ptr<PatchMatchController> borrowed = controller;
+    try {
+      // Exercise the real controller's borrowed state and the shared owning
+      // drain, without invoking GPU work or Run's scheduling decisions.
+      RunPatchMatchTasks(pool, [&](auto&) {
+        pool.AddTask([&, borrowed]() {
+          borrower_started.set_value();
+          release.wait();
+          const auto owner = borrowed.lock();
+          saw_live_controller =
+              owner &&
+              PatchMatchControllerTestAccess::ScheduledReference(*owner) == 42;
+          borrower_completed = true;
+        });
+        pool.AddTask([&]() {
+          worker_failed.set_value();
+          throw std::runtime_error("independent worker failure");
+        });
+        if (started.wait_for(std::chrono::seconds(5)) !=
+                std::future_status::ready ||
+            failed_worker.wait_for(std::chrono::seconds(5)) !=
+                std::future_status::ready) {
+          throw std::runtime_error("accepted workers did not start");
+        }
+        FailingSubmission task(submission_failed);
+        pool.AddTask(task);
+      });
+    } catch (const std::bad_alloc&) {
+      completed_before_rethrow = borrower_completed.load();
+      // Also keep a regressed helper safe to test: record its premature
+      // rethrow before draining anything the helper may have left behind.
+      try {
+        pool.Wait();
+      } catch (...) {
+        return false;
+      }
+      return true;
+    }
+    return false;
+  });
+
+  const auto fault_status =
+      failed_submission.wait_for(std::chrono::seconds(5));
+  EXPECT_EQ(fault_status, std::future_status::ready);
+  if (fault_status == std::future_status::ready) {
+    EXPECT_EQ(caller.wait_for(std::chrono::milliseconds(20)),
+              std::future_status::timeout);
+  }
+  release_borrower.set_value();
+  EXPECT_TRUE(caller.get());
+  EXPECT_TRUE(saw_live_controller);
+  EXPECT_TRUE(completed_before_rethrow);
+}
 
 TEST(PatchMatchCuda, PackedConsistencyMaskDepthCoversSourceTails) {
   for (const auto& [sources, expected] :

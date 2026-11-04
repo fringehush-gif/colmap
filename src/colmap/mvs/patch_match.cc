@@ -248,112 +248,110 @@ void PatchMatchController::Run() {
   io_thread_pool_ = std::make_unique<ThreadPool>(
       GetEffectiveNumThreads(options_.num_threads));
 
+  RunPatchMatchTasks(*thread_pool_, [&](auto&) {
 #ifndef COLMAP_HIP_ENABLED
-  if (gpu_indices_.size() == 1 && DefaultReferencePairSettings(options_)) {
-    SetBestCudaDevice(gpu_indices_.front());
-    const auto& model = workspace_->GetModel();
-    const auto shape = [&](size_t index) {
-      const auto& problem = problems_.at(index);
-      const auto& ref = model.images.at(problem.ref_image_idx);
-      size_t source_width = 0, source_height = 0;
-      for (const int source : problem.src_image_idxs) {
-        const auto& image = model.images.at(source);
-        source_width = std::max(source_width, image.GetWidth());
-        source_height = std::max(source_height, image.GetHeight());
-      }
-      return std::make_tuple(ref.GetWidth(),
-                             ref.GetHeight(),
-                             problem.src_image_idxs.size(),
-                             source_width,
-                             source_height);
-    };
-    const auto run_phase = [&](const PatchMatchOptions& phase) {
-      for (size_t index = 0; index < problems_.size();) {
-        // Batch only adjacent matching default-path references. A rejected
-        // group falls through to the unchanged pair/single scheduler below.
-        size_t batch_end = index;
-        const auto first_shape = shape(index);
-        while (batch_end < problems_.size() && batch_end < index + 5 &&
-               shape(batch_end) == first_shape)
-          ++batch_end;
-        std::vector<std::pair<size_t, size_t>> batch_shapes;
-        for (size_t next = index; next < batch_end; ++next)
-          batch_shapes.emplace_back(std::get<0>(shape(next)),
-                                    std::get<1>(shape(next)));
-        if (CanBatchPatchMatchViews(
-                batch_shapes, phase.geom_consistency, phase.checkpoint_hmm)) {
-          std::vector<size_t> indices;
-          for (size_t next = index; next < batch_end; ++next)
-            indices.push_back(next);
-          thread_pool_->AddTask(&PatchMatchController::ProcessProblemBatch,
-                                this,
-                                phase,
-                                std::move(indices));
-          index = batch_end;
-          continue;
+    if (gpu_indices_.size() == 1 && DefaultReferencePairSettings(options_)) {
+      SetBestCudaDevice(gpu_indices_.front());
+      const auto& model = workspace_->GetModel();
+      const auto shape = [&](size_t index) {
+        const auto& problem = problems_.at(index);
+        const auto& ref = model.images.at(problem.ref_image_idx);
+        size_t source_width = 0, source_height = 0;
+        for (const int source : problem.src_image_idxs) {
+          const auto& image = model.images.at(source);
+          source_width = std::max(source_width, image.GetWidth());
+          source_height = std::max(source_height, image.GetHeight());
         }
-        if (index + 1 < problems_.size()) {
+        return std::make_tuple(ref.GetWidth(),
+                               ref.GetHeight(),
+                               problem.src_image_idxs.size(),
+                               source_width,
+                               source_height);
+      };
+      const auto run_phase = [&](const PatchMatchOptions& phase) {
+        for (size_t index = 0; index < problems_.size();) {
+          // Batch only adjacent matching default-path references. A rejected
+          // group falls through to the unchanged pair/single scheduler below.
+          size_t batch_end = index;
           const auto first_shape = shape(index);
-          const auto second_shape = shape(index + 1);
-          if (first_shape == second_shape &&
-              CanPairPatchMatchViews(std::get<0>(first_shape),
-                                     std::get<1>(first_shape),
-                                     std::get<0>(second_shape),
-                                     std::get<1>(second_shape),
-                                     phase.geom_consistency,
-                                     phase.checkpoint_hmm)) {
-            thread_pool_->AddTask(&PatchMatchController::ProcessProblemPair,
+          while (batch_end < problems_.size() && batch_end < index + 5 &&
+                 shape(batch_end) == first_shape)
+            ++batch_end;
+          std::vector<std::pair<size_t, size_t>> batch_shapes;
+          for (size_t next = index; next < batch_end; ++next)
+            batch_shapes.emplace_back(std::get<0>(shape(next)),
+                                      std::get<1>(shape(next)));
+          if (CanBatchPatchMatchViews(
+                  batch_shapes, phase.geom_consistency, phase.checkpoint_hmm)) {
+            std::vector<size_t> indices;
+            for (size_t next = index; next < batch_end; ++next)
+              indices.push_back(next);
+            thread_pool_->AddTask(&PatchMatchController::ProcessProblemBatch,
                                   this,
                                   phase,
-                                  index,
-                                  index + 1);
-            index += 2;
+                                  std::move(indices));
+            index = batch_end;
             continue;
           }
+          if (index + 1 < problems_.size()) {
+            const auto first_shape = shape(index);
+            const auto second_shape = shape(index + 1);
+            if (first_shape == second_shape &&
+                CanPairPatchMatchViews(std::get<0>(first_shape),
+                                       std::get<1>(first_shape),
+                                       std::get<0>(second_shape),
+                                       std::get<1>(second_shape),
+                                       phase.geom_consistency,
+                                       phase.checkpoint_hmm)) {
+              thread_pool_->AddTask(&PatchMatchController::ProcessProblemPair,
+                                    this,
+                                    phase,
+                                    index,
+                                    index + 1);
+              index += 2;
+              continue;
+            }
+          }
+          thread_pool_->AddTask(
+              &PatchMatchController::ProcessProblem, this, phase, index);
+          ++index;
         }
-        thread_pool_->AddTask(
-            &PatchMatchController::ProcessProblem, this, phase, index);
-        ++index;
+      };
+      if (options_.geom_consistency) {
+        auto photo_options = options_;
+        photo_options.geom_consistency = false;
+        photo_options.filter = false;
+        run_phase(photo_options);
+        thread_pool_->Wait();
       }
-      thread_pool_->Wait();
-    };
-    if (options_.geom_consistency) {
-      auto photo_options = options_;
-      photo_options.geom_consistency = false;
-      photo_options.filter = false;
-      run_phase(photo_options);
+      run_phase(options_);
+      return;
     }
-    run_phase(options_);
-    run_timer.PrintMinutes();
-    return;
-  }
 #endif
 
-  // If geometric consistency is enabled, then photometric output must be
-  // computed first for all images without filtering.
-  if (options_.geom_consistency) {
-    auto photometric_options = options_;
-    photometric_options.geom_consistency = false;
-    photometric_options.filter = false;
+    // If geometric consistency is enabled, then photometric output must be
+    // computed first for all images without filtering.
+    if (options_.geom_consistency) {
+      auto photometric_options = options_;
+      photometric_options.geom_consistency = false;
+      photometric_options.filter = false;
 
-    for (size_t problem_idx = 0; problem_idx < problems_.size();
-         ++problem_idx) {
-      thread_pool_->AddTask(&PatchMatchController::ProcessProblem,
-                            this,
-                            photometric_options,
-                            problem_idx);
+      for (size_t problem_idx = 0; problem_idx < problems_.size();
+           ++problem_idx) {
+        thread_pool_->AddTask(&PatchMatchController::ProcessProblem,
+                              this,
+                              photometric_options,
+                              problem_idx);
+      }
+
+      thread_pool_->Wait();
     }
 
-    thread_pool_->Wait();
-  }
-
-  for (size_t problem_idx = 0; problem_idx < problems_.size(); ++problem_idx) {
-    thread_pool_->AddTask(
-        &PatchMatchController::ProcessProblem, this, options_, problem_idx);
-  }
-
-  thread_pool_->Wait();
-
+    for (size_t problem_idx = 0; problem_idx < problems_.size(); ++problem_idx) {
+      thread_pool_->AddTask(
+          &PatchMatchController::ProcessProblem, this, options_, problem_idx);
+    }
+  });
   run_timer.PrintMinutes();
 }
 
@@ -656,7 +654,7 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
     }
 
     // Read images in parallel using the shared I/O thread pool.
-    RunPatchMatchInputReads(*io_thread_pool_, [&](auto& futures) {
+    RunPatchMatchTasks(*io_thread_pool_, [&](auto& futures) {
       futures.reserve(valid_image_idxs.size());
       for (const auto image_idx : valid_image_idxs) {
         futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
