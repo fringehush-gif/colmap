@@ -4233,6 +4233,7 @@ void PatchMatchCuda::InitAlternateOrientationMemory(
   add_state(cost_map_);
   add_state(packed_cost_map_);
   add_state(fixed24_cost_map_);
+  add_state(fixed20_cost_map_);
   add_state(hmm_checkpoint_);
   add(consistency_mask_);
   add(alternate_consistency_mask_);
