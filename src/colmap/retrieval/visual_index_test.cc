@@ -2,6 +2,8 @@
 
 #include "colmap/retrieval/visual_index.h"
 
+#include "colmap/retrieval/inverted_index.h"
+
 #include "colmap/feature/types.h"
 #include "colmap/math/random_eigen.h"
 #include "colmap/util/file.h"
@@ -21,6 +23,116 @@ FeatureDescriptorsFloat CreateRandomDescriptors(int num_rows,
                                                 FeatureExtractorType type) {
   return FeatureDescriptorsFloat(
       type, FeatureDescriptorsFloatData::Random(num_rows, desc_dim));
+}
+
+TEST(InvertedFile, ReadinessRequiresEmbeddingAndSortedEntries) {
+  for (const bool trained : {false, true}) {
+    for (const bool sorted : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "trained=" << trained
+                                      << " sorted=" << sorted);
+      InvertedFile<16> file;
+      EXPECT_FALSE(file.IsUsable());
+      if (trained) {
+        Eigen::Matrix<float, Eigen::Dynamic, 16> training(2, 16);
+        training.row(0).setZero();
+        training.row(1).setOnes();
+        file.ComputeHammingEmbedding(training);
+      }
+      const Eigen::VectorXf descriptor = Eigen::VectorXf::Zero(16);
+      file.AddEntry(2, 0, descriptor, FeatureGeometry());
+      file.AddEntry(1, 0, descriptor, FeatureGeometry());
+      if (sorted) {
+        file.SortEntries();
+      }
+      file.ComputeIDFWeight(3);
+      EXPECT_EQ(file.HasHammingEmbedding(), trained);
+      EXPECT_EQ(file.EntriesSorted(), sorted);
+      EXPECT_EQ(file.IsUsable(), trained && sorted);
+
+      std::stringstream stream;
+      file.Write(&stream);
+      InvertedFile<16> restored;
+      restored.Read(&stream);
+      EXPECT_EQ(restored.HasHammingEmbedding(), trained);
+      EXPECT_EQ(restored.EntriesSorted(), sorted);
+      EXPECT_EQ(restored.IsUsable(), trained && sorted);
+      std::vector<ImageScore> scores(1);
+      restored.ScoreFeature(descriptor, &scores);
+      if (trained && sorted) {
+        ASSERT_EQ(scores.size(), 2);
+        EXPECT_EQ(scores[0].image_id, 1);
+        EXPECT_EQ(scores[1].image_id, 2);
+        EXPECT_GT(scores[0].score, 0);
+        EXPECT_FLOAT_EQ(scores[0].score, scores[1].score);
+      } else {
+        EXPECT_TRUE(scores.empty());
+      }
+
+      restored.AddEntry(3, 0, descriptor, FeatureGeometry());
+      EXPECT_FALSE(restored.IsUsable());
+      restored.SortEntries();
+      EXPECT_EQ(restored.IsUsable(), trained);
+      restored.ClearEntries();
+      EXPECT_FALSE(restored.IsUsable());
+      EXPECT_EQ(restored.HasHammingEmbedding(), trained);
+      restored.Reset();
+      EXPECT_FALSE(restored.HasHammingEmbedding());
+      EXPECT_FALSE(restored.EntriesSorted());
+    }
+  }
+}
+
+TEST(InvertedIndex, SparseWordsDoNotSupplySpatialMatches) {
+  using Index = InvertedIndex<float, 16, 16>;
+  Index index;
+  index.Initialize(2);
+  index.GenerateHammingEmbeddingProjection();
+  const Index::DescType training = Index::DescType::Zero(9, 16);
+  Index::WordIds word_ids(9, 1);
+  word_ids.topRows(5).setZero();
+  word_ids.bottomRows(4).setOnes();
+  index.ComputeHammingEmbedding(training, word_ids);
+  const Index::DescType descriptor = Index::DescType::Zero(1, 16);
+  index.AddEntry(1, 0, 0, descriptor, FeatureGeometry());
+  index.AddEntry(2, 1, 0, descriptor, FeatureGeometry());
+  const FlatHashSet<int> image_ids{1, 2};
+  std::vector<const Index::EntryType*> matches(1, nullptr);
+  index.FindMatches(0, image_ids, &matches);
+  EXPECT_TRUE(matches.empty());
+  index.Finalize();
+  index.FindMatches(0, image_ids, &matches);
+  ASSERT_EQ(matches.size(), 1);
+  EXPECT_EQ(matches[0]->image_id, 1);
+  index.FindMatches(1, image_ids, &matches);
+  EXPECT_TRUE(matches.empty());
+  Index::WordIds query_words(1, 1);
+  query_words(0, 0) = 1;
+  std::vector<ImageScore> scores(1);
+  index.Query(descriptor, query_words, &scores);
+  EXPECT_TRUE(scores.empty());
+  query_words(0, 0) = 0;
+  index.Query(descriptor, query_words, &scores);
+  ASSERT_EQ(scores.size(), 1);
+  EXPECT_EQ(scores[0].image_id, 1);
+  EXPECT_GT(scores[0].score, 0);
+
+  std::stringstream stream;
+  index.Write(&stream);
+  Index restored;
+  restored.Read(&stream);
+  restored.FindMatches(0, image_ids, &matches);
+  ASSERT_EQ(matches.size(), 1);
+  restored.FindMatches(1, image_ids, &matches);
+  EXPECT_TRUE(matches.empty());
+  restored.AddEntry(3, 0, 0, descriptor, FeatureGeometry());
+  restored.FindMatches(0, FlatHashSet<int>{1, 3}, &matches);
+  EXPECT_TRUE(matches.empty());
+  restored.Finalize();
+  restored.FindMatches(0, FlatHashSet<int>{1, 3}, &matches);
+  EXPECT_EQ(matches.size(), 2);
+  restored.ClearEntries();
+  restored.FindMatches(0, image_ids, &matches);
+  EXPECT_TRUE(matches.empty());
 }
 
 class ParameterizedVisualIndexTests
@@ -175,8 +287,12 @@ TEST_P(ParameterizedVisualIndexTests, SpatialVerification) {
   // Use a single thread for deterministic results.
   build_options.num_threads = 1;
 
-  auto train_descriptors =
+  const auto training_samples =
       CreateRandomDescriptors(1000, desc_dim, FeatureExtractorType::SIFT);
+  // Every descriptor used below appears at least five times during training,
+  // so its assigned word can learn the embedding required for verification.
+  const FeatureDescriptorsFloat train_descriptors(
+      FeatureExtractorType::SIFT, training_samples.data.replicate(5, 1));
   auto visual_index = VisualIndex::Create(desc_dim, embedding_dim);
   visual_index->Build(build_options, train_descriptors);
   EXPECT_EQ(visual_index->NumVisualWords(), build_options.num_visual_words);
@@ -194,8 +310,8 @@ TEST_P(ParameterizedVisualIndexTests, SpatialVerification) {
   }
 
   // Use the same descriptors for all images.
-  const auto descriptors = CreateRandomDescriptors(
-      kNumFeatures, desc_dim, FeatureExtractorType::SIFT);
+  const FeatureDescriptorsFloat descriptors(
+      FeatureExtractorType::SIFT, training_samples.data.topRows(kNumFeatures));
 
   for (int i = 0; i < kNumImages; ++i) {
     FeatureKeypoints keypoints(kNumFeatures);
@@ -225,6 +341,15 @@ TEST_P(ParameterizedVisualIndexTests, SpatialVerification) {
   visual_index->Prepare();
 
   VisualIndex::QueryOptions query_options;
+  // Use the same word assignment for indexing and geometric verification.
+  query_options.num_neighbors = index_options.num_neighbors;
+  for (int feature_idx = 0; feature_idx < kNumFeatures; ++feature_idx) {
+    const FeatureDescriptorsFloat descriptor(
+        descriptors.type, descriptors.data.middleRows(feature_idx, 1));
+    std::vector<ImageScore> scores;
+    visual_index->Query(query_options, descriptor, &scores);
+    ASSERT_EQ(scores.size(), kNumImages);
+  }
 
   std::vector<ImageScore> image_scores_without_verification;
   visual_index->Query(query_options,
