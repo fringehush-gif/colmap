@@ -1059,8 +1059,6 @@ __global__ void ComputeInitialCost(
 
 struct SweepOptions {
   float perturbation = 1.0f;
-  float depth_min = 0.0f;
-  float depth_max = 1.0f;
   int num_samples = 15;
   float sigma_spatial = 3.0f;
   float sigma_color = 0.3f;
@@ -1075,6 +1073,29 @@ struct SweepOptions {
   int filter_min_num_consistent = 2;
   float filter_geom_consistency_max_cost = 1.0f;
 };
+
+namespace {
+
+SweepOptions MakeSweepOptions(const PatchMatchOptions& options) {
+  SweepOptions result;
+  result.sigma_spatial = options.sigma_spatial;
+  result.sigma_color = options.sigma_color;
+  result.num_samples = options.num_samples;
+  result.ncc_sigma = options.ncc_sigma;
+  result.min_triangulation_angle = DEG2RAD(options.min_triangulation_angle);
+  result.incident_angle_sigma = options.incident_angle_sigma;
+  result.geom_consistency_regularizer = options.geom_consistency_regularizer;
+  result.geom_consistency_max_cost = options.geom_consistency_max_cost;
+  result.filter_min_ncc = options.filter_min_ncc;
+  result.filter_min_triangulation_angle =
+      DEG2RAD(options.filter_min_triangulation_angle);
+  result.filter_min_num_consistent = options.filter_min_num_consistent;
+  result.filter_geom_consistency_max_cost =
+      options.filter_geom_consistency_max_cost;
+  return result;
+}
+
+}  // namespace
 
 constexpr int kCooperativeSampleBatchSize = 4;
 constexpr int kCooperativeSampleWindowSize = 16;
@@ -2505,25 +2526,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
   const float total_num_steps = options_.num_iterations * 4;
 
-  SweepOptions sweep_options;
-  sweep_options.depth_min = options_.depth_min;
-  sweep_options.depth_max = options_.depth_max;
-  sweep_options.sigma_spatial = options_.sigma_spatial;
-  sweep_options.sigma_color = options_.sigma_color;
-  sweep_options.num_samples = options_.num_samples;
-  sweep_options.ncc_sigma = options_.ncc_sigma;
-  sweep_options.min_triangulation_angle =
-      DEG2RAD(options_.min_triangulation_angle);
-  sweep_options.incident_angle_sigma = options_.incident_angle_sigma;
-  sweep_options.geom_consistency_regularizer =
-      options_.geom_consistency_regularizer;
-  sweep_options.geom_consistency_max_cost = options_.geom_consistency_max_cost;
-  sweep_options.filter_min_ncc = options_.filter_min_ncc;
-  sweep_options.filter_min_triangulation_angle =
-      DEG2RAD(options_.filter_min_triangulation_angle);
-  sweep_options.filter_min_num_consistent = options_.filter_min_num_consistent;
-  sweep_options.filter_geom_consistency_max_cost =
-      options_.filter_geom_consistency_max_cost;
+  SweepOptions sweep_options = MakeSweepOptions(options_);
 
 #ifdef COLMAP_HIP_ENABLED
   constexpr bool kCooperative = false;
@@ -3408,23 +3411,7 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     THROW_CHECK_EQ(
         p.CostMapHeight(),
         p.rotation_in_half_pi_ % 2 == 0 ? p.ref_height_ : p.ref_width_);
-    SweepOptions o;
-    o.depth_min = p.options_.depth_min;
-    o.depth_max = p.options_.depth_max;
-    o.sigma_spatial = p.options_.sigma_spatial;
-    o.sigma_color = p.options_.sigma_color;
-    o.num_samples = p.options_.num_samples;
-    o.ncc_sigma = p.options_.ncc_sigma;
-    o.min_triangulation_angle = DEG2RAD(p.options_.min_triangulation_angle);
-    o.incident_angle_sigma = p.options_.incident_angle_sigma;
-    o.geom_consistency_regularizer = p.options_.geom_consistency_regularizer;
-    o.geom_consistency_max_cost = p.options_.geom_consistency_max_cost;
-    o.filter_min_ncc = p.options_.filter_min_ncc;
-    o.filter_min_triangulation_angle =
-        DEG2RAD(p.options_.filter_min_triangulation_angle);
-    o.filter_min_num_consistent = p.options_.filter_min_num_consistent;
-    o.filter_geom_consistency_max_cost =
-        p.options_.filter_geom_consistency_max_cost;
+    SweepOptions o = MakeSweepOptions(p.options_);
     o.perturbation = 1.0f / std::pow(2.0f, iter + sweep / 4.0f);
     o.prev_sel_prob_weight = static_cast<float>(iter * 4 + sweep) /
                              static_cast<float>(p.options_.num_iterations * 4);
