@@ -29,6 +29,36 @@ namespace mvs {
 
 #ifndef COLMAP_HIP_ENABLED
 namespace {
+template <typename Cleanup>
+void CheckedCudaCleanup(Cleanup&& cleanup) {
+  CudaCleanupScope scope;
+  try {
+    cleanup();
+  } catch (...) {
+    scope.Check();
+    throw;
+  }
+  scope.Check();
+}
+
+std::unique_ptr<PatchMatchCuda> CreateCudaOwner(
+    const PatchMatchOptions& options,
+    const PatchMatch::Problem& problem,
+    std::shared_ptr<const PatchMatchSparseSources> shared = {},
+    const PatchMatchCuda* donor = nullptr) {
+  CudaCleanupScope scope;
+  std::unique_ptr<PatchMatchCuda> owner;
+  try {
+    owner = std::make_unique<PatchMatchCuda>(
+        options, problem, std::move(shared), donor);
+  } catch (...) {
+    scope.Check();
+    throw;
+  }
+  scope.Check();
+  return owner;
+}
+
 struct PairStreams {
   cudaStream_t first = nullptr, second = nullptr;
   PairStreams() {
@@ -873,8 +903,7 @@ void PatchMatchController::ProcessProblemBatch(
                                    options.probability_unorm16,
                                    options.NccCostBits())) {
           if (!owners[i])
-            owners[i] = std::make_unique<PatchMatchCuda>(input[i]->options,
-                                                         input[i]->problem);
+            owners[i] = CreateCudaOwner(input[i]->options, input[i]->problem);
           CUDA_SYNC_AND_CHECK();
           const size_t owned_peak = owners[i]->PairPeakBytes();
           size_t free_bytes = 0, total_bytes = 0;
@@ -883,8 +912,8 @@ void PatchMatchController::ProcessProblemBatch(
               owned_peak <=
                   std::numeric_limits<size_t>::max() - kExternalMargin &&
               free_bytes >= owned_peak + kExternalMargin) {
-            owners[i + 1] = std::make_unique<PatchMatchCuda>(
-                input[i + 1]->options, input[i + 1]->problem);
+            owners[i + 1] =
+                CreateCudaOwner(input[i + 1]->options, input[i + 1]->problem);
             CUDA_SYNC_AND_CHECK();
           }
           if (owners[i + 1]) {
@@ -901,22 +930,24 @@ void PatchMatchController::ProcessProblemBatch(
                   *owners[i], *owners[i + 1], streams.first, streams.second);
               write_cuda(*input[i], *owners[i]);
               write_cuda(*input[i + 1], *owners[i + 1]);
-              owners[i].reset();
-              owners[i + 1].reset();
+              CheckedCudaCleanup([&] {
+                owners[i].reset();
+                owners[i + 1].reset();
+              });
               i += 2;
               continue;
             }
             // Match the incumbent pair's low-memory fallback: the first
             // constructed owner is retained, the second is released before
             // running the first view singly.
-            owners[i + 1].reset();
+            CheckedCudaCleanup([&] { owners[i + 1].reset(); });
           }
         }
       }
       if (owners[i]) {
         owners[i]->Run();
         write_cuda(*input[i], *owners[i]);
-        owners[i].reset();
+        CheckedCudaCleanup([&] { owners[i].reset(); });
       } else {
         run_native(*input[i]);
       }
@@ -946,8 +977,7 @@ void PatchMatchController::ProcessProblemBatch(
     pair_or_single_fallback();
     return;
   }
-  owners[0] =
-      std::make_unique<PatchMatchCuda>(input[0]->options, input[0]->problem);
+  owners[0] = CreateCudaOwner(input[0]->options, input[0]->problem);
   CUDA_SYNC_AND_CHECK();
   const size_t first_peak = owners[0]->PairPeakBytes();
   bool shared_geometry = owners[0]->CanShareGeometryRotation();
@@ -955,21 +985,38 @@ void PatchMatchController::ProcessProblemBatch(
   for (const auto& prepared : input)
     source_problems.push_back(&prepared->problem);
   std::shared_ptr<const PatchMatchSparseSources> shared;
-  const size_t union_budget = PatchMatchSparseSources::Budget(
-      source_problems, options.geom_consistency);
   size_t free_bytes = 0, total_bytes = 0;
-  CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
-  // The first independent owner stays intact during union construction.
-  // Reserve the full remaining independent peaks plus the incumbent extra
-  // transient peak. Rejecting sharing retains the exact old batch path.
-  const size_t maximum = std::numeric_limits<size_t>::max();
-  if (union_budget && union_budget <= maximum - kExternalMargin &&
-      first_peak <= (maximum - kExternalMargin - union_budget) / input.size() &&
-      free_bytes >=
-          union_budget + input.size() * first_peak + kExternalMargin) {
-    shared = PatchMatchSparseSources::Create(source_problems,
-                                             options.geom_consistency);
-    if (shared) owners[0]->UseSparseSources(shared);
+  try {
+    const size_t union_budget = PatchMatchSparseSources::Budget(
+        source_problems, options.geom_consistency);
+    CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+    // The first independent owner stays intact during union construction.
+    // Reserve the full remaining independent peaks plus the incumbent extra
+    // transient peak. Rejecting sharing retains the exact old batch path.
+    const size_t maximum = std::numeric_limits<size_t>::max();
+    if (union_budget && union_budget <= maximum - kExternalMargin &&
+        first_peak <=
+            (maximum - kExternalMargin - union_budget) / input.size() &&
+        free_bytes >=
+            union_budget + input.size() * first_peak + kExternalMargin) {
+      CheckedCudaCleanup([&] {
+        shared = PatchMatchSparseSources::Create(source_problems,
+                                                 options.geom_consistency);
+        if (shared) owners[0]->UseSparseSources(shared);
+      });
+    }
+  } catch (const SparseSourceResourceRefused& error) {
+    // Close must succeed before a fresh memory query or smaller admission.
+    CheckedCudaCleanup([&] {
+      if (shared) shared->Close();
+      shared.reset();
+    });
+    CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+    LOG(WARNING)
+        << "Sparse source setup refused; readmitting pairs/singletons: "
+        << error.what();
+    pair_or_single_fallback();
+    return;
   }
   const auto admit_remaining = [&]() {
     bool memory_admitted = true;
@@ -983,15 +1030,14 @@ void PatchMatchController::ProcessProblemBatch(
         memory_admitted = false;
         break;
       }
-      owners[i] = std::make_unique<PatchMatchCuda>(
-          input[i]->options,
-          input[i]->problem,
-          shared,
-          shared_geometry ? owners[0].get() : nullptr);
+      owners[i] = CreateCudaOwner(input[i]->options,
+                                  input[i]->problem,
+                                  shared,
+                                  shared_geometry ? owners[0].get() : nullptr);
       CUDA_SYNC_AND_CHECK();
       if (owners[i]->PairPeakBytes() > first_peak ||
           (shared_geometry && !owners[i]->CanShareGeometryRotation())) {
-        owners[i].reset();
+        CheckedCudaCleanup([&] { owners[i].reset(); });
         memory_admitted = false;
         break;
       }
@@ -1003,67 +1049,94 @@ void PatchMatchController::ProcessProblemBatch(
       memory_admitted = false;
     return memory_admitted;
   };
-  bool memory_admitted = admit_remaining();
-  if (!memory_admitted && shared_geometry) {
-    // Reject geometry sharing independently: keep any qualified source bank
-    // while restoring the parent's private alternate geometry owners.
-    for (auto& owner : owners) owner.reset();
-    shared_geometry = false;
-    owners[0] = std::make_unique<PatchMatchCuda>(
-        input[0]->options, input[0]->problem, shared);
-    CUDA_SYNC_AND_CHECK();
-    memory_admitted =
-        owners[0]->PairPeakBytes() <= first_peak && admit_remaining();
-  }
-  if (!memory_admitted && shared) {
-    // Do not lower concurrency because the optional source bank was rejected.
-    // Restore the incumbent independent-source closure only after its parent
-    // source-sharing admission has also failed.
-    for (auto& owner : owners) owner.reset();
-    shared.reset();
-    owners[0] =
-        std::make_unique<PatchMatchCuda>(input[0]->options, input[0]->problem);
-    CUDA_SYNC_AND_CHECK();
-    memory_admitted =
-        owners[0]->PairPeakBytes() <= first_peak && admit_remaining();
+  bool memory_admitted = false;
+  try {
+    memory_admitted = admit_remaining();
+    if (!memory_admitted && shared_geometry) {
+      // Reject geometry sharing independently: retain any qualified source
+      // bank.
+      CheckedCudaCleanup([&] {
+        for (auto& owner : owners) owner.reset();
+      });
+      shared_geometry = false;
+      owners[0] = CreateCudaOwner(input[0]->options, input[0]->problem, shared);
+      CUDA_SYNC_AND_CHECK();
+      memory_admitted =
+          owners[0]->PairPeakBytes() <= first_peak && admit_remaining();
+    }
+    if (!memory_admitted && shared) {
+      // Restore independent storage only after source-bank admission failed.
+      CheckedCudaCleanup([&] {
+        for (auto& owner : owners) owner.reset();
+        shared->Close();
+        shared.reset();
+      });
+      owners[0] = CreateCudaOwner(input[0]->options, input[0]->problem);
+      CUDA_SYNC_AND_CHECK();
+      memory_admitted =
+          owners[0]->PairPeakBytes() <= first_peak && admit_remaining();
+    }
+  } catch (const SparseSourceResourceRefused& error) {
+    // An earlier owner may already use sparse views. Retain none before retry.
+    CheckedCudaCleanup([&] {
+      for (auto& owner : owners) owner.reset();
+      if (shared) shared->Close();
+      shared.reset();
+    });
+    CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+    LOG(WARNING) << "Later sparse source attachment refused; readmitting "
+                    "pairs/singletons: "
+                 << error.what();
+    pair_or_single_fallback();
+    return;
   }
   CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
   if (!memory_admitted) {
     if (first_peak > std::numeric_limits<size_t>::max() - kExternalMargin ||
         free_bytes < first_peak + kExternalMargin)
-      for (size_t i = 1; i < owners.size(); ++i) owners[i].reset();
+      CheckedCudaCleanup([&] {
+        for (size_t i = 1; i < owners.size(); ++i) owners[i].reset();
+      });
     pair_or_single_fallback();
     return;
   }
   std::vector<PatchMatchCuda*> views;
   for (auto& owner : owners) views.push_back(owner.get());
-  struct BatchStreams {
-    std::vector<cudaStream_t> values;
-    explicit BatchStreams(size_t count) : values(count, nullptr) {
-      try {
-        for (auto& stream : values)
-          CUDA_SAFE_CALL(
-              cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-      } catch (...) {
-        for (auto stream : values)
-          if (stream) (void)cudaStreamDestroy(stream);
-        throw;
-      }
-    }
-    ~BatchStreams() {
-      for (auto stream : values) {
-        if (stream) {
-          (void)cudaStreamSynchronize(stream);
-          (void)cudaStreamDestroy(stream);
+  {
+    struct BatchStreams {
+      std::vector<cudaStream_t> values;
+      explicit BatchStreams(size_t count) : values(count, nullptr) {
+        try {
+          for (auto& stream : values)
+            CUDA_SAFE_CALL(
+                cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        } catch (...) {
+          for (auto stream : values)
+            if (stream) (void)cudaStreamDestroy(stream);
+          throw;
         }
       }
-    }
-  } streams(input.size());
-  LOG(INFO) << "Running " << input.size() << " reference PatchMatch batch"
-            << (shared ? " (sparse source aliases)" : "");
-  RunPatchMatchBatch(views, streams.values);
-  for (size_t i = 0; i < input.size(); ++i) write_cuda(*input[i], *owners[i]);
-  for (auto& owner : owners) owner.reset();
+      ~BatchStreams() {
+        for (auto stream : values) {
+          if (stream) {
+            (void)cudaStreamSynchronize(stream);
+            (void)cudaStreamDestroy(stream);
+          }
+        }
+      }
+    } streams(input.size());
+    LOG(INFO) << "Running " << input.size() << " reference PatchMatch batch"
+              << (shared ? " (sparse source aliases)" : "");
+    RunPatchMatchBatch(views, streams.values);
+    for (size_t i = 0; i < input.size(); ++i) write_cuda(*input[i], *owners[i]);
+    CheckedCudaCleanup([&] {
+      for (auto& owner : owners) owner.reset();
+    });
+  }  // Batch streams are destroyed before the shared bank.
+  CheckedCudaCleanup([&] {
+    if (shared) shared->Close();
+    shared.reset();
+  });
 #endif
 }
 

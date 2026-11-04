@@ -5,6 +5,9 @@
 #include "colmap/util/logging.h"
 #include "colmap/util/string.h"
 
+#include <exception>
+#include <stdexcept>
+
 namespace colmap {
 
 CudaTimer::CudaTimer(cudaStream_t stream) : stream_(stream) {
@@ -34,6 +37,41 @@ void CudaSafeCall(const cudaError_t error,
                                      file.c_str(),
                                      line,
                                      cudaGetErrorString(error));
+  }
+}
+
+thread_local CudaCleanupScope* CudaCleanupScope::current_ = nullptr;
+
+CudaCleanupScope::CudaCleanupScope() noexcept : previous_(current_) {
+  current_ = this;
+}
+CudaCleanupScope::~CudaCleanupScope() noexcept {
+  if (current_ != this) std::terminate();
+  current_ = previous_;
+}
+bool CudaCleanupScope::ObserveCleanup(const char* operation,
+                                      int code,
+                                      bool driver) noexcept {
+  const bool active = current_ != nullptr;
+  if (code != 0) {
+    for (auto* scope = current_; scope != nullptr; scope = scope->previous_) {
+      if (scope->operation_ == nullptr) {
+        scope->operation_ =
+            operation != nullptr ? operation : "unknown operation";
+        scope->code_ = code;
+        scope->driver_ = driver;
+      }
+    }
+  }
+  return active;
+}
+void CudaCleanupScope::Check() const {
+  if (operation_ != nullptr) {
+    std::throw_with_nested(
+        std::runtime_error(StringPrintf("CUDA %s cleanup %s failed (code %d)",
+                                        driver_ ? "driver" : "runtime",
+                                        operation_,
+                                        code_)));
   }
 }
 

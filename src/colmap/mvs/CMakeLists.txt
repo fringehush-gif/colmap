@@ -145,6 +145,73 @@ if(CUDA_ENABLED)
     )
 
     if(NOT HIP_ENABLED)
+        include(CheckCXXSourceCompiles)
+        include(CMakePushCheckState)
+        cmake_push_check_state(RESET)
+        set(CMAKE_REQUIRED_LIBRARIES CUDA::cudart)
+        set(_colmap_try_compile_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+        set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
+        # Refresh on reconfiguration so a changed toolkit cannot retain admission.
+        unset(COLMAP_CUDA_SPARSE_ARRAY_API CACHE)
+        check_cxx_source_compiles([=[
+            #define CUDA_API_PER_THREAD_DEFAULT_STREAM 1
+            #include <cuda_runtime_api.h>
+            #include <cuda.h>
+            #include <cudaTypedefs.h>
+            static_assert(sizeof(PFN_cuMemCreate_v10020) +
+                          sizeof(PFN_cuMemRelease_v10020) +
+                          sizeof(PFN_cuMemGetAllocationGranularity_v10020) +
+                          sizeof(PFN_cuMemMapArrayAsync_v11010) > 0, "Sparse APIs");
+            int main() {
+                CUmemAllocationProp allocation = {};
+                allocation.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+                allocation.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+                allocation.location.id = 0;
+                allocation.allocFlags.usage = CU_MEM_CREATE_USAGE_TILE_POOL;
+                CUarrayMapInfo mapping = {};
+                mapping.resourceType = CU_RESOURCE_TYPE_ARRAY;
+                mapping.resource.array = nullptr;
+                mapping.subresourceType = CU_ARRAY_SPARSE_SUBRESOURCE_TYPE_SPARSE_LEVEL;
+                mapping.subresource.sparseLevel.layer = 0;
+                mapping.subresource.sparseLevel.extentWidth = 1;
+                mapping.subresource.sparseLevel.extentHeight = 1;
+                mapping.subresource.sparseLevel.extentDepth = 1;
+                mapping.memOperationType = CU_MEM_OPERATION_TYPE_MAP;
+                mapping.memOperationType = CU_MEM_OPERATION_TYPE_UNMAP;
+                mapping.memHandleType = CU_MEM_HANDLE_TYPE_GENERIC;
+                mapping.memHandle.memHandle = 0;
+                mapping.offset = 0;
+                mapping.deviceBitMask = 1;
+                (void)CU_MEM_ALLOC_GRANULARITY_MINIMUM;
+                cudaDeviceProp device = {};
+                (void)allocation;
+                (void)mapping;
+                (void)device.sparseCudaArraySupported;
+                (void)(cudaArrayLayered | cudaArraySparse);
+                cudaArraySparseProperties sparse = {};
+                sparse.tileExtent.width = 1;
+                sparse.tileExtent.height = 1;
+                sparse.tileExtent.depth = 1;
+                sparse.miptailSize = 0;
+                void* address = nullptr;
+                cudaDriverEntryPointQueryResult query = cudaDriverEntryPointSymbolNotFound;
+                if (cudaGetDriverEntryPointByVersion("cuMemMapArrayAsync", &address,
+                        11010, cudaEnableLegacyStream, &query) != cudaSuccess) return 1;
+                return static_cast<int>(cudaArrayGetSparseProperties(&sparse, nullptr));
+            }
+        ]=] COLMAP_CUDA_SPARSE_ARRAY_API)
+        if(_colmap_try_compile_type)
+            set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_colmap_try_compile_type}")
+        else()
+            unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+        endif()
+        unset(_colmap_try_compile_type)
+        cmake_pop_check_state()
+        if(COLMAP_CUDA_SPARSE_ARRAY_API)
+            set_property(SOURCE patch_match_source_array.cc APPEND PROPERTY
+                COMPILE_DEFINITIONS COLMAP_SPARSE_SOURCE_RUNTIME=1)
+        endif()
+
         COLMAP_ADD_TEST(
             NAME patch_match_cuda_test
             SRCS patch_match_cuda_test.cc oct_normal_state_test.cu patch_match_cuda_test_peer.cu
@@ -162,6 +229,10 @@ if(CUDA_ENABLED)
         # GNU --wrap must reach CudaSafeCall in the static utility library.
         if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
            AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT BUILD_SHARED_LIBS)
+            target_compile_definitions(colmap_mvs_patch_match_cuda_test PRIVATE
+                COLMAP_TEST_CUDA_FREE_WRAPPING=1)
+            target_link_options(colmap_mvs_patch_match_cuda_test PRIVATE
+                "LINKER:--wrap=cudaFree")
             COLMAP_ADD_TEST(
                 NAME cuda_texture_constructor_test
                 SRCS cuda_texture_constructor_test.cc

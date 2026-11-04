@@ -164,9 +164,10 @@ GpuMat<T>::GpuMat(const size_t width, const size_t height, const size_t depth)
 
 template <typename T>
 GpuMat<T>::~GpuMat() {
-  // Errors during destruction would be invisible to callers anyway; explicitly
-  // discard the return value so HIP's [[nodiscard]] cudaFree does not warn.
-  (void)cudaFree(array_ptr_);
+  // Optional construction observes release failures; ordinary destruction
+  // retains best-effort cleanup.
+  const auto status = cudaFree(array_ptr_);
+  (void)CudaCleanupScope::ObserveCleanup("cudaFree", static_cast<int>(status));
 }
 
 template <typename T>

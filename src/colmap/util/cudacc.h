@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "colmap/util/cuda_allocation.h"
 #include "colmap/util/cuda_to_hip.h"
 
 #include <string>
@@ -40,6 +41,27 @@ class CudaTimer {
 void CudaSafeCall(const cudaError_t error,
                   const std::string& file,
                   const int line);
+
+// Stack-bound observer. It owns and frees nothing. Operation names must be
+// static literals and all construction/destruction must occur on one thread.
+class CudaCleanupScope {
+ public:
+  CudaCleanupScope() noexcept;
+  ~CudaCleanupScope() noexcept;
+  CudaCleanupScope(const CudaCleanupScope&) = delete;
+  CudaCleanupScope& operator=(const CudaCleanupScope&) = delete;
+  static bool ObserveCleanup(const char* operation,
+                             int code,
+                             bool driver = false) noexcept;
+  void Check() const;
+
+ private:
+  static thread_local CudaCleanupScope* current_;
+  CudaCleanupScope* previous_;
+  const char* operation_ = nullptr;
+  int code_ = 0;
+  bool driver_ = false;
+};
 
 void CudaCheck(const char* file, const int line);
 void CudaSyncAndCheck(const char* file,

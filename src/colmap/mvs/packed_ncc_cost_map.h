@@ -71,8 +71,12 @@ class PackedNccCostMap {
   }
 
   ~PackedNccCostMap() {
-    (void)cudaFree(domain_error_);
-    (void)cudaFree(ptr_);
+    const auto error_status = cudaFree(domain_error_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                           static_cast<int>(error_status));
+    const auto data_status = cudaFree(ptr_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                           static_cast<int>(data_status));
   }
   PackedNccCostMap(const PackedNccCostMap&) = delete;
   PackedNccCostMap& operator=(const PackedNccCostMap&) = delete;

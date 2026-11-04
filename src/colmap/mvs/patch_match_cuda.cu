@@ -2170,16 +2170,23 @@ PatchMatchCuda::PatchMatchCuda(
 PatchMatchCuda::~PatchMatchCuda() = default;
 #ifndef COLMAP_HIP_ENABLED
 void PatchMatchCuda::UseSparseSources(
-    std::shared_ptr<const PatchMatchSparseSources> shared) {
+    std::shared_ptr<const PatchMatchSparseSources> shared,
+    const SparseSourceTestFailure* failure) {
   THROW_CHECK(shared && shared->Matches(problem_, options_.geom_consistency));
   // Create both views before replacing either dense owner. Inputs and state
   // remain untouched; no consuming kernel may have run before this attachment.
   auto images = PatchMatchSourceArray<uint8_t>::FromSparse(
-      shared, problem_.ref_image_idx);
-  auto depths = options_.geom_consistency
-                    ? PatchMatchSourceArray<float>::FromSparse(
-                          shared, problem_.ref_image_idx)
-                    : nullptr;
+      shared, problem_.ref_image_idx, failure);
+  std::unique_ptr<PatchMatchSourceArray<float>> depths;
+  try {
+    if (options_.geom_consistency) {
+      depths = PatchMatchSourceArray<float>::FromSparse(
+          shared, problem_.ref_image_idx, failure);
+    }
+  } catch (const SparseSourceResourceRefused&) {
+    if (images) images->Close();
+    throw;
+  }
   THROW_CHECK(images && (!options_.geom_consistency || depths));
   src_images_texture_ = std::move(images);
   src_depth_maps_texture_ = std::move(depths);

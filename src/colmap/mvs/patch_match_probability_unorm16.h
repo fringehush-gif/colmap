@@ -85,7 +85,11 @@ class PatchMatchProbabilityUnorm16 {
       throw;
     }
   }
-  ~PatchMatchProbabilityUnorm16() { (void)cudaFree(ptr_); }
+  ~PatchMatchProbabilityUnorm16() {
+    const auto status = cudaFree(ptr_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                           static_cast<int>(status));
+  }
   PatchMatchProbabilityUnorm16(const PatchMatchProbabilityUnorm16&) = delete;
   PatchMatchProbabilityUnorm16& operator=(const PatchMatchProbabilityUnorm16&) =
       delete;

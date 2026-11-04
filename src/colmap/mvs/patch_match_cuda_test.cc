@@ -12,13 +12,18 @@
 #include <gtest/gtest.h>
 
 #ifndef COLMAP_HIP_ENABLED
+#include "colmap/mvs/oct_normal_state.cuh"
+#include "colmap/mvs/packed_ncc_cost_map.h"
 #include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/mvs/patch_match_cuda_test_peer.h"
+#include "colmap/mvs/patch_match_probability_unorm16.h"
+#include "colmap/mvs/patch_match_state_map.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <limits>
@@ -29,7 +34,29 @@
 #include <utility>
 #include <vector>
 
+#include <cuda.h>
 #include <cuda_runtime_api.h>
+#endif
+
+#ifdef COLMAP_TEST_CUDA_FREE_WRAPPING
+namespace {
+thread_local int scoped_frees_until_refusal = 0;
+thread_local int injected_free_errors = 0;
+}  // namespace
+extern "C" cudaError_t __real_cudaFree(void*);
+extern "C" cudaError_t __wrap_cudaFree(void* pointer) {
+  const auto status = __real_cudaFree(pointer);
+  if (pointer != nullptr && status == cudaSuccess &&
+      scoped_frees_until_refusal > 0 &&
+      colmap::CudaCleanupScope::ObserveCleanup("test probe", 0) &&
+      --scoped_frees_until_refusal == 0) {
+    ++injected_free_errors;
+    // Real storage was released. Only its reported status is injected; no
+    // CUDA error/context is manufactured or cleared by this test mechanism.
+    return cudaErrorUnknown;
+  }
+  return status;
+}
 #endif
 
 namespace colmap {
@@ -886,6 +913,307 @@ TEST_F(CudaTest, InvalidBitmapLeasesUseBothIndependentDenseUploadPaths) {
   }
 }
 
+#ifdef COLMAP_TEST_CUDA_FREE_WRAPPING
+template <typename Owner, typename... Args>
+void ExpectOwnerReportsCleanup(const char* name,
+                               int free_ordinal,
+                               Args&&... args) {
+  SCOPED_TRACE(name);
+  auto owner = std::make_unique<Owner>(std::forward<Args>(args)...);
+  CudaCleanupScope cleanup;
+  injected_free_errors = 0;
+  scoped_frees_until_refusal = free_ordinal;
+  owner.reset();
+  EXPECT_EQ(scoped_frees_until_refusal, 0);
+  EXPECT_EQ(injected_free_errors, 1);
+  EXPECT_THROW(cleanup.Check(), std::runtime_error);
+}
+
+TEST_F(CudaTest, EveryPersistentOwnerReportsCleanupFailure) {
+  ExpectOwnerReportsCleanup<GpuMat<float> >("GpuMat", 1, 7, 5);
+  ExpectOwnerReportsCleanup<PatchMatchStateMap>("state", 1, 7, 5, 2);
+  ExpectOwnerReportsCleanup<PatchMatchHmmCheckpoint>("checkpoint", 1, 7, 5, 2);
+  ExpectOwnerReportsCleanup<PatchMatchProbabilityUnorm16>(
+      "probability U16", 1, 7, 5, 2);
+  for (const int ordinal : {1, 2}) {
+    SCOPED_TRACE(ordinal);
+    ExpectOwnerReportsCleanup<PackedNccCostMap>("NCC U16", ordinal, 7, 5, 2);
+    ExpectOwnerReportsCleanup<Fixed20NccCostMap>("NCC20", ordinal, 7, 5, 2);
+    ExpectOwnerReportsCleanup<Fixed24NccCostMap>("NCC24", ordinal, 7, 5, 2);
+    ExpectOwnerReportsCleanup<OctNormalMap>("Oct40", ordinal, 7, 5);
+  }
+}
+
+TEST_F(CudaTest, InitializedOwnerCleanupPreventsReadmission) {
+  // Match the later-source-refusal cleanup boundary with an already fully
+  // constructed owner. Re-exec and exit after the terminal injected failure.
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  for (const int bits : {0, 16, 20, 24}) {
+    SCOPED_TRACE(bits);
+    EXPECT_EXIT(
+        ([&] {
+          Inputs input = MakeInputs(0);
+          auto options = MakeOptions(false, false, false);
+          const PatchMatchOptions defaults;
+          options.window_radius = defaults.window_radius;
+          options.num_samples = defaults.num_samples;
+          options.num_iterations = defaults.num_iterations;
+          options.checkpoint_hmm = true;
+          options.probability_unorm16 = bits != 0;
+          options.normal_oct40 = bits != 0;
+          options.ncc_cost_unorm16 = bits == 16;
+          options.ncc_cost_fixed20 = bits == 20;
+          options.ncc_cost_fixed24 = bits == 24;
+          PatchMatch::Problem problem;
+          problem.ref_image_idx = 0;
+          problem.images = &input.images;
+          problem.src_image_idxs = {1, 2};
+          auto owner = std::make_unique<PatchMatchCuda>(options, problem);
+          int queries = 0, admissions = 0, runs = 0;
+          injected_free_errors = 0;
+          try {
+            try {
+              throw SparseSourceResourceRefused("later source attachment", 2);
+            } catch (const SparseSourceResourceRefused&) {
+              CudaCleanupScope cleanup;
+              scoped_frees_until_refusal = 1;
+              owner.reset();
+              cleanup.Check();
+              // Stand-ins for the controller's next query/admission/run:
+              // none may be reached after an unresolved release result.
+              ++queries;
+              ++admissions;
+              ++runs;
+            }
+          } catch (const std::runtime_error& error) {
+            const bool correct = std::string(error.what()).find("cleanup") !=
+                                     std::string::npos &&
+                                 injected_free_errors == 1 && queries == 0 &&
+                                 admissions == 0 && runs == 0;
+            std::_Exit(correct ? 0 : 3);
+          }
+          std::_Exit(4);
+        }()),
+        ::testing::ExitedWithCode(0),
+        "");
+  }
+}
+#else
+TEST_F(CudaTest, InitializedOwnerCleanupPreventsReadmission) {
+  GTEST_SKIP() << "Requires Linux GNU static cudaFree interposition";
+}
+#endif
+
+TEST_F(CudaTest, SparseSourceCapabilityAndUnavailableContract) {
+  Inputs input = MakeInputs(0, 9, 257, 513);
+  std::vector<std::shared_ptr<const Bitmap> > bitmap_leases;
+  std::vector<std::shared_ptr<const DepthMap> > depth_leases;
+  for (const auto& image : input.images)
+    bitmap_leases.push_back(std::make_shared<Bitmap>(image.GetBitmap()));
+  for (const auto& depth : input.depths)
+    depth_leases.push_back(std::make_shared<DepthMap>(depth));
+  std::vector<PatchMatch::Problem> problems(3);
+  std::vector<const PatchMatch::Problem*> pointers;
+  for (int ref = 0; ref < 3; ++ref) {
+    auto& problem = problems[ref];
+    problem.ref_image_idx = ref;
+    problem.images = &input.images;
+    problem.depth_maps = &input.depths;
+    problem.source_bitmap_leases = &bitmap_leases;
+    problem.source_depth_leases = &depth_leases;
+    problem.normal_maps = &input.normals;
+    for (int id = 0; id < static_cast<int>(input.images.size()); ++id) {
+      if (id != ref) problem.src_image_idxs.push_back(id);
+    }
+    pointers.push_back(&problem);
+  }
+  const bool supported = PatchMatchSparseSources::IsSupported();
+  if (!supported) {
+    EXPECT_EQ(PatchMatchSparseSources::Budget(pointers, true), 0);
+    EXPECT_FALSE(PatchMatchSparseSources::Create(pointers, true));
+  } else {
+    // A supported lane must still admit this known-profitable fixture;
+    // Budget==0 must not turn a regression into a capability skip.
+    EXPECT_GT(PatchMatchSparseSources::Budget(pointers, true), 0);
+  }
+}
+
+TEST_F(CudaTest, SparseSourceCleanRefusalsReleasePartialSetup) {
+  if (!PatchMatchSparseSources::IsSupported()) {
+    GTEST_SKIP() << "Sparse source arrays are unavailable on this CUDA "
+                 << "runtime/device";
+  }
+  Inputs input = MakeInputs(0, 9, 257, 513);
+  std::vector<std::shared_ptr<const Bitmap> > bitmaps;
+  std::vector<std::shared_ptr<const DepthMap> > depths;
+  for (const auto& image : input.images)
+    bitmaps.push_back(std::make_shared<Bitmap>(image.GetBitmap()));
+  for (const auto& depth : input.depths)
+    depths.push_back(std::make_shared<DepthMap>(depth));
+  std::vector<PatchMatch::Problem> problems(3);
+  std::vector<const PatchMatch::Problem*> pointers;
+  for (int ref = 0; ref < 3; ++ref) {
+    auto& p = problems[ref];
+    p.ref_image_idx = ref;
+    p.images = &input.images;
+    p.depth_maps = &input.depths;
+    p.normal_maps = &input.normals;
+    p.source_bitmap_leases = &bitmaps;
+    p.source_depth_leases = &depths;
+    for (int id = 0; id < static_cast<int>(input.images.size()); ++id)
+      if (id != ref) p.src_image_idxs.push_back(id);
+    pointers.push_back(&p);
+  }
+  ASSERT_GT(PatchMatchSparseSources::Budget(pointers, true), 0);
+  SparseSourceTestFailure probe{"cudaMalloc3DArray probe",
+                                cudaErrorMemoryAllocation};
+  EXPECT_THROW(PatchMatchSparseSources::Budget(pointers, true, &probe),
+               SparseSourceResourceRefused);
+  SparseSourceTestFailure unsupported{"cudaArrayGetSparseProperties",
+                                      cudaErrorNotSupported};
+  EXPECT_EQ(PatchMatchSparseSources::Budget(pointers, true, &unsupported), 0);
+  struct Case {
+    const char* operation;
+    int code;
+    size_t occurrence, arrays_released, pools_released;
+  };
+  std::vector<Case> cases{
+      {"cudaStreamCreateWithFlags", cudaErrorMemoryAllocation, 1, 0, 0},
+      {"cuMemCreate", CUDA_ERROR_OUT_OF_MEMORY, 1, 0, 0},
+      {"cuMemCreate", CUDA_ERROR_OUT_OF_MEMORY, 2, 3, 1},
+      {"host source staging", 1, 1, 3, 1},
+      {"host source staging", 1, 2, 6, 2}};
+  for (size_t i = 1; i <= 6; ++i)
+    cases.push_back({"cudaMalloc3DArray source",
+                     cudaErrorMemoryAllocation,
+                     i,
+                     i - 1,
+                     i <= 3 ? 1u : 2u});
+  for (const auto& test : cases) {
+    SCOPED_TRACE(::testing::Message()
+                 << test.operation << " #" << test.occurrence);
+    SparseSourceTestFailure released_pools{"cuMemRelease", 0};
+    SparseSourceTestFailure released_arrays{"cudaFreeArray cleanup", 0};
+    released_arrays.next = &released_pools;
+    SparseSourceTestFailure failure{test.operation, test.code, test.occurrence};
+    failure.next = &released_arrays;
+    EXPECT_THROW(PatchMatchSparseSources::Create(pointers, true, &failure),
+                 SparseSourceResourceRefused);
+    EXPECT_EQ(released_arrays.calls, test.arrays_released);
+    EXPECT_EQ(released_pools.calls, test.pools_released);
+    // A successful fresh construction exercises the same device after cleanup.
+    auto next = PatchMatchSparseSources::Create(pointers, true);
+    ASSERT_TRUE(next);
+    next->Close();
+  }
+  for (const auto& test : std::vector<Case>{
+           {"cudaGetDevice", cudaErrorUnknown, 1, 0, 0},
+           {"cudaGetDeviceProperties", cudaErrorUnknown, 1, 0, 0},
+           {"cudaArrayGetSparseProperties", cudaErrorUnknown, 1, 0, 0},
+           {"cuMemMapArrayAsync", CUDA_ERROR_INVALID_VALUE, 1, 3, 1},
+           {"cudaStreamSynchronize map", cudaErrorUnknown, 1, 3, 1},
+           {"cudaMemcpy3DAsync source", cudaErrorInvalidValue, 1, 3, 1}}) {
+    SparseSourceTestFailure released_pools{"cuMemRelease", 0};
+    SparseSourceTestFailure released_arrays{"cudaFreeArray cleanup", 0};
+    released_arrays.next = &released_pools;
+    SparseSourceTestFailure failure{test.operation, test.code, test.occurrence};
+    failure.next = &released_arrays;
+    try {
+      (void)PatchMatchSparseSources::Create(pointers, true, &failure);
+      FAIL() << "Expected terminal sparse operation failure";
+    } catch (const SparseSourceResourceRefused&) {
+      FAIL() << "Unexpected fallback permission for " << test.operation;
+    } catch (const std::exception& error) {
+      EXPECT_NE(std::string(error.what()).find(test.operation),
+                std::string::npos);
+    }
+    EXPECT_EQ(released_arrays.calls, test.arrays_released);
+    EXPECT_EQ(released_pools.calls, test.pools_released);
+  }
+  auto shared = PatchMatchSparseSources::Create(pointers, true);
+  ASSERT_TRUE(shared);
+  {
+    auto live_view = PatchMatchSourceArray<uint8_t>::FromSparse(
+        shared, problems[0].ref_image_idx);
+    ASSERT_TRUE(live_view);
+    EXPECT_THROW(shared->Close(), std::exception);
+    EXPECT_TRUE(shared->Matches(problems[0], true));
+    live_view->Close();
+  }
+  auto options = MakeOptions(true, true, false);
+  PatchMatchCuda expected(options, problems[0]);
+  expected.Run();
+  for (size_t texture = 1; texture <= 2; ++texture) {
+    PatchMatchCuda retained(options, problems[0]);
+    SparseSourceTestFailure failure{
+        "cudaCreateTextureObject sparse", cudaErrorMemoryAllocation, texture};
+    EXPECT_THROW(retained.UseSparseSources(shared, &failure),
+                 SparseSourceResourceRefused);
+    retained.Run();
+    ExpectExactlyEqual(expected.GetDepthMap(), retained.GetDepthMap());
+    ExpectExactlyEqual(expected.GetNormalMap(), retained.GetNormalMap());
+    ExpectExactlyEqual(expected.GetSelProbMap(), retained.GetSelProbMap());
+    EXPECT_EQ(expected.GetConsistentImageIdxs(),
+              retained.GetConsistentImageIdxs());
+  }
+  std::weak_ptr<const Bitmap> retained_bitmap = bitmaps[7];
+  bitmaps[7].reset();
+  EXPECT_FALSE(retained_bitmap.expired());
+  shared->Close();
+  shared.reset();
+  EXPECT_TRUE(retained_bitmap.expired());
+}
+
+TEST_F(CudaTest, SparseSourceCleanupFailureNeverPermitsReadmission) {
+  if (!PatchMatchSparseSources::IsSupported()) {
+    GTEST_SKIP() << "Sparse source arrays are unavailable on this CUDA "
+                 << "runtime/device";
+  }
+  // Re-exec a fresh process: do not resume a CUDA context after fork or after
+  // unresolved ownership. This test exits immediately on its terminal error.
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      ([] {
+        Inputs input = MakeInputs(0, 9, 257, 513);
+        std::vector<std::shared_ptr<const Bitmap> > bitmaps;
+        std::vector<std::shared_ptr<const DepthMap> > depths;
+        for (const auto& image : input.images)
+          bitmaps.push_back(std::make_shared<Bitmap>(image.GetBitmap()));
+        for (const auto& depth : input.depths)
+          depths.push_back(std::make_shared<DepthMap>(depth));
+        std::vector<PatchMatch::Problem> problems(3);
+        std::vector<const PatchMatch::Problem*> pointers;
+        for (int ref = 0; ref < 3; ++ref) {
+          auto& p = problems[ref];
+          p.ref_image_idx = ref;
+          p.images = &input.images;
+          p.depth_maps = &input.depths;
+          p.source_bitmap_leases = &bitmaps;
+          p.source_depth_leases = &depths;
+          for (int id = 0; id < static_cast<int>(input.images.size()); ++id)
+            if (id != ref) p.src_image_idxs.push_back(id);
+          pointers.push_back(&p);
+        }
+        SparseSourceTestFailure cleanup{"cudaFreeArray cleanup",
+                                        cudaErrorUnknown};
+        SparseSourceTestFailure staging{"host source staging", 1};
+        staging.next = &cleanup;
+        try {
+          (void)PatchMatchSparseSources::Create(pointers, true, &staging);
+        } catch (const SparseSourceResourceRefused&) {
+          std::_Exit(3);
+        } catch (const std::exception& error) {
+          std::_Exit(std::string(error.what()).find("cleanup") !=
+                             std::string::npos
+                         ? 0
+                         : 4);
+        }
+        std::_Exit(5);
+      }()),
+      ::testing::ExitedWithCode(0),
+      "");
+}
+
 TEST_F(CudaTest, SparseSourceProvenanceRejectsUnknownOrChangedOwners) {
   Inputs input = MakeInputs(0, 9, 257, 513);
   std::vector<std::shared_ptr<const Bitmap> > bitmaps;
@@ -1007,6 +1335,11 @@ TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
         EXPECT_TRUE(std::any_of(depth.begin(), depth.end(), [](float value) {
           return value > 0.0f;
         }));
+      }
+      if (!PatchMatchSparseSources::IsSupported()) {
+        EXPECT_EQ(PatchMatchSparseSources::Budget(pointers, geometry), 0);
+        EXPECT_FALSE(PatchMatchSparseSources::Create(pointers, geometry));
+        continue;
       }
       ASSERT_GT(PatchMatchSparseSources::Budget(pointers, geometry), 0);
       auto shared = PatchMatchSparseSources::Create(pointers, geometry);
@@ -1130,6 +1463,11 @@ TEST_F(CudaTest, ImmutableSourceDepthLeasesPreserveThreeViewGeoOutput) {
     ExpectExactlyEqual(std::get<1>(expected[ref]), std::get<1>(actual));
     ExpectExactlyEqual(std::get<2>(expected[ref]), std::get<2>(actual));
     EXPECT_EQ(std::get<3>(expected[ref]), std::get<3>(actual));
+  }
+  if (!PatchMatchSparseSources::IsSupported()) {
+    EXPECT_EQ(PatchMatchSparseSources::Budget(new_pointers, true), 0);
+    EXPECT_FALSE(PatchMatchSparseSources::Create(new_pointers, true));
+    return;
   }
   ASSERT_GT(PatchMatchSparseSources::Budget(new_pointers, true), 0);
   auto shared = PatchMatchSparseSources::Create(new_pointers, true);

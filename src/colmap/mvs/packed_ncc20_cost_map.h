@@ -291,8 +291,12 @@ class Fixed20NccCostMap {
 #endif
  private:
   void Release() noexcept {
-    (void)cudaFree(error_);
-    (void)cudaFree(ptr_);
+    const auto error_status = cudaFree(error_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                           static_cast<int>(error_status));
+    const auto data_status = cudaFree(ptr_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                           static_cast<int>(data_status));
     error_ = nullptr;
     ptr_ = nullptr;
   }

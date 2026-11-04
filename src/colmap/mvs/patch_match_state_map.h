@@ -26,7 +26,11 @@ class PatchMatchStateMap {
       CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_));
     Reorient(width, height);
   }
-  ~PatchMatchStateMap() { (void)cudaFree(ptr_); }
+  ~PatchMatchStateMap() {
+    const auto status = cudaFree(ptr_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                           static_cast<int>(status));
+  }
   PatchMatchStateMap(const PatchMatchStateMap&) = delete;
   PatchMatchStateMap& operator=(const PatchMatchStateMap&) = delete;
 

@@ -215,8 +215,16 @@ CudaArrayLayeredTexture<T>::CudaArrayLayeredTexture(
 
 template <typename T>
 CudaArrayLayeredTexture<T>::~CudaArrayLayeredTexture() {
-  CUDA_SAFE_CALL(cudaDestroyTextureObject(texture_));
-  CUDA_SAFE_CALL(cudaFreeArray(array_));
+  const auto texture_status = cudaDestroyTextureObject(texture_);
+  if (CudaCleanupScope::ObserveCleanup("cudaDestroyTextureObject",
+                                       static_cast<int>(texture_status))) {
+    const auto array_status = cudaFreeArray(array_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFreeArray",
+                                           static_cast<int>(array_status));
+  } else {
+    CUDA_SAFE_CALL(texture_status);
+    CUDA_SAFE_CALL(cudaFreeArray(array_));
+  }
 }
 
 template <typename T>

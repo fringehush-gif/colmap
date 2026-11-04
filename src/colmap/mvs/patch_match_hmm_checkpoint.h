@@ -25,7 +25,11 @@ class PatchMatchHmmCheckpoint {
                           Multiply(Pitch(height), width)});
     CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_));
   }
-  ~PatchMatchHmmCheckpoint() { (void)cudaFree(ptr_); }
+  ~PatchMatchHmmCheckpoint() {
+    const auto status = cudaFree(ptr_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                           static_cast<int>(status));
+  }
   PatchMatchHmmCheckpoint(const PatchMatchHmmCheckpoint&) = delete;
   PatchMatchHmmCheckpoint& operator=(const PatchMatchHmmCheckpoint&) = delete;
 

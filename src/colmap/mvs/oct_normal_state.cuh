@@ -408,12 +408,14 @@ class OctNormalMap {
   void Release() noexcept {
     if (error_ != nullptr) {
       const auto status = cudaFree(error_);
-      (void)status;
+      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                             static_cast<int>(status));
       error_ = nullptr;
     }
     if (data_ != nullptr) {
       const auto status = cudaFree(data_);
-      (void)status;
+      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                             static_cast<int>(status));
       data_ = nullptr;
     }
   }

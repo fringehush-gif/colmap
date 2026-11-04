@@ -71,7 +71,7 @@ if(CUDA_ENABLED)
         NAME colmap_util_cuda
         SRCS
             cuda.h cuda.cc
-            cudacc.h cudacc.cc
+            cudacc.h cudacc.cc cuda_allocation.h
         PUBLIC_LINK_LIBS
             colmap_util
             CUDA::cudart
@@ -81,6 +81,20 @@ if(CUDA_ENABLED)
         SRCS cuda_test.cc
         LINK_LIBS colmap_util_cuda
     )
+    if(TESTS_ENABLED AND NOT HIP_ENABLED
+       AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+       AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT BUILD_SHARED_LIBS)
+        COLMAP_ADD_TEST(
+            NAME cudacc_origin_test
+            SRCS cudacc_origin_test.cc
+            LINK_LIBS colmap_util_cuda
+        )
+        target_link_options(colmap_util_cudacc_origin_test PRIVATE
+            "LINKER:--wrap=cudaPeekAtLastError"
+            "LINKER:--wrap=cudaGetLastError"
+        )
+        set_tests_properties(util/cudacc_origin_test PROPERTIES TIMEOUT 15)
+    endif()
 endif()
 
 if(TESTS_ENABLED)
@@ -283,7 +297,7 @@ if(HIP_ENABLED)
         NAME colmap_util_cuda
         SRCS
             cuda.h cuda.cc
-            cudacc.h cudacc.cc
+            cudacc.h cudacc.cc cuda_allocation.h
             cuda_to_hip.h
         PUBLIC_LINK_LIBS
             colmap_util
