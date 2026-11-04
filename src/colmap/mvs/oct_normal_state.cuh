@@ -354,7 +354,6 @@ class OctNormalMap {
   }
   void RotateTo(OctNormalMap& output) const {
     THROW_CHECK_NE(this, &output);
-    output.SetShape(height_, width_);
     CheckDomain();
     output.CheckDomain();
     // The pinned ROT2 CudaRotate uses a two-dimensional 32-pixel tile grid.
@@ -368,6 +367,7 @@ class OctNormalMap {
                    static_cast<size_t>(properties.maxGridSize[1]));
     THROW_CHECK_LE((width_ + 31) / 32,
                    static_cast<size_t>(properties.maxGridSize[0]));
+    output.SetShape(height_, width_);
     CudaRotate(static_cast<const oct_revisit::Code*>(data_),
                static_cast<oct_revisit::Code*>(output.data_),
                static_cast<int>(width_),

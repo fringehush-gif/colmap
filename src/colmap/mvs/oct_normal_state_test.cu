@@ -206,15 +206,24 @@ TEST_F(OctNormalCodec, RotationRejectsEitherPoisonedOwnerBeforeCopy) {
   std::fill(xyz.begin() + 2 * count, xyz.end(), -1.0f);
   for (const bool poison_source : {false, true}) {
     SCOPED_TRACE(poison_source);
-    OctNormalMap source(width, height), target(height, width);
+    constexpr size_t target_width = 9, target_height = 11;
+    OctNormalMap source(width, height), target(target_width, target_height);
     source.CopyFromCPU(xyz.data(), width * sizeof(float));
-    target.CopyFromCPU(xyz.data(), height * sizeof(float));
+    std::vector<float> target_xyz(3 * target_width * target_height, 0.0f);
+    std::fill(target_xyz.begin() + 2 * target_width * target_height,
+              target_xyz.end(),
+              -1.0f);
+    target.CopyFromCPU(target_xyz.data(), target_width * sizeof(float));
     auto& poisoned = poison_source ? source : target;
     auto& healthy = poison_source ? target : source;
     const auto before = healthy.CopyToMat().GetData();
     InvalidOwnerOperations<<<1, 1>>>(poisoned.View(), 2);
     CUDA_SYNC_AND_CHECK();
     EXPECT_THROW(source.RotateTo(target), std::invalid_argument);
+    EXPECT_EQ(source.GetWidth(), width);
+    EXPECT_EQ(source.GetHeight(), height);
+    EXPECT_EQ(target.GetWidth(), target_width);
+    EXPECT_EQ(target.GetHeight(), target_height);
     EXPECT_EQ(source.GetFrame(), 0u);
     EXPECT_EQ(target.GetFrame(), 0u);
     EXPECT_EQ(healthy.CopyToMat().GetData(), before);
