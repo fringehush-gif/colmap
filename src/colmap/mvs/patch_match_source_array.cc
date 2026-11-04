@@ -26,6 +26,7 @@
 namespace colmap {
 namespace mvs {
 namespace {
+#ifdef COLMAP_SPARSE_SOURCE_RUNTIME
 bool InjectSparseFailure(const SparseSourceTestFailure* failure,
                          const char* operation,
                          int* code) {
@@ -49,6 +50,7 @@ auto SparseOperation(const SparseSourceTestFailure* failure,
     return static_cast<decltype(call())>(code);
   return call();
 }
+#endif
 enum class SparseFailureKind { kUnsupported, kResource, kFatal };
 struct SparseCallFailure : std::exception {
   SparseCallFailure(const char* operation,
@@ -70,17 +72,12 @@ struct SparseCallFailure : std::exception {
   SparseFailureKind kind;
   bool driver;
 };
-void SparseRuntime(cudaError_t status,
-                   const char* operation,
-                   bool allow_resource = false) {
+void SparseRuntime(cudaError_t status, const char* operation) {
   if (status == cudaSuccess) return;
-  const auto kind = allow_resource && status == cudaErrorNotSupported
-                        ? SparseFailureKind::kUnsupported
-                    : allow_resource && status == cudaErrorMemoryAllocation
-                        ? SparseFailureKind::kResource
-                        : SparseFailureKind::kFatal;
-  throw SparseCallFailure(operation, static_cast<int>(status), kind);
+  throw SparseCallFailure(
+      operation, static_cast<int>(status), SparseFailureKind::kFatal);
 }
+#ifdef COLMAP_SPARSE_SOURCE_RUNTIME
 void ConsumeOwnRefusal(cudaError_t status) {
   const auto recorded = cudaGetLastError();
   if (recorded != cudaSuccess && recorded != status)
@@ -125,7 +122,6 @@ void SparseAllocation(const char* operation,
   throw SparseCallFailure(
       "unrecognized sparse allocation result", -1, SparseFailureKind::kFatal);
 }
-#ifdef COLMAP_SPARSE_SOURCE_RUNTIME
 void SparseDriver(CUresult status,
                   const char* operation,
                   bool allow_resource = false) {
