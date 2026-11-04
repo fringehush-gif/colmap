@@ -2,13 +2,22 @@
 
 #include "colmap/mvs/delaunay_meshing.h"
 
+#include "colmap/geometry/sim3.h"
+#include "colmap/math/random.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/file.h"
 #include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <fstream>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -33,6 +42,95 @@ Reconstruction CreateAndWriteSyntheticReconstruction(
 }
 
 #if defined(COLMAP_CGAL_ENABLED)
+
+TEST(SparseDelaunayMeshing, ScaleInvariantWeights) {
+  const auto test_dir = CreateTestDir();
+  SetPRNGSeed(0);
+  const Reconstruction original =
+      CreateAndWriteSyntheticReconstruction(test_dir / "original");
+
+  using PointKey = std::array<double, 3>;
+  using FaceKey = std::array<PointKey, 3>;
+  const std::array<double, 3> scales = {0.125, 1.0, 8.0};
+  std::array<std::vector<PointKey>, 3> vertices;
+  std::array<std::vector<FaceKey>, 3> faces;
+
+  for (size_t scale_idx = 0; scale_idx < scales.size(); ++scale_idx) {
+    const double scale = scales[scale_idx];
+    SCOPED_TRACE(scale);
+    Reconstruction scaled = original;
+    scaled.Transform(
+        Sim3d(scale, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero()));
+
+    if (scale_idx == 0) {
+      std::vector<Eigen::Vector3f> points;
+      for (const auto& item : scaled.Points3D()) {
+        points.push_back(item.second.xyz.cast<float>());
+      }
+      ASSERT_GT(points.size(), 1);
+      double min_pair_distance = std::numeric_limits<double>::infinity();
+      for (size_t i = 0; i < points.size(); ++i) {
+        for (size_t j = i + 1; j < points.size(); ++j) {
+          const double distance =
+              (points[i].cast<double>() - points[j].cast<double>()).norm();
+          min_pair_distance = std::min(min_pair_distance, distance);
+        }
+      }
+      std::ostringstream formatted_distance;
+      formatted_distance << std::setprecision(17) << min_pair_distance;
+      RecordProperty("min_pair_distance_scale_0", formatted_distance.str());
+      ASSERT_GT(min_pair_distance, 1e-7);
+    }
+
+    const auto sparse_path = test_dir / ("sparse_" + std::to_string(scale_idx));
+    const auto output_path =
+        test_dir / ("mesh_" + std::to_string(scale_idx) + ".ply");
+    CreateDirIfNotExists(sparse_path);
+    scaled.Write(sparse_path);
+    DelaunayMeshingOptions options;
+    options.num_threads = 1;
+    SetPRNGSeed(0);
+    SparseDelaunayMeshing(options, sparse_path, output_path);
+    const PlyMesh mesh = ReadPlyMesh(output_path).mesh;
+    ASSERT_FALSE(mesh.vertices.empty());
+    ASSERT_FALSE(mesh.faces.empty());
+
+    std::vector<PointKey> ordered_vertices;
+    ordered_vertices.reserve(mesh.vertices.size());
+    for (const auto& vertex : mesh.vertices) {
+      const PointKey point = {
+          vertex.x / scale, vertex.y / scale, vertex.z / scale};
+      ASSERT_TRUE(std::isfinite(point[0]) && std::isfinite(point[1]) &&
+                  std::isfinite(point[2]));
+      ordered_vertices.push_back(point);
+    }
+    vertices[scale_idx] = ordered_vertices;
+    std::sort(vertices[scale_idx].begin(), vertices[scale_idx].end());
+    for (const auto& face : mesh.faces) {
+      ASSERT_LT(face.vertex_idx1, ordered_vertices.size());
+      ASSERT_LT(face.vertex_idx2, ordered_vertices.size());
+      ASSERT_LT(face.vertex_idx3, ordered_vertices.size());
+      ASSERT_NE(face.vertex_idx1, face.vertex_idx2);
+      ASSERT_NE(face.vertex_idx2, face.vertex_idx3);
+      ASSERT_NE(face.vertex_idx3, face.vertex_idx1);
+      const PointKey& a = ordered_vertices[face.vertex_idx1];
+      const PointKey& b = ordered_vertices[face.vertex_idx2];
+      const PointKey& c = ordered_vertices[face.vertex_idx3];
+      faces[scale_idx].push_back(
+          std::min({FaceKey{a, b, c}, FaceKey{b, c, a}, FaceKey{c, a, b}}));
+    }
+    std::sort(faces[scale_idx].begin(), faces[scale_idx].end());
+    RecordProperty("valid_scale_" + std::to_string(scale_idx), "true");
+  }
+
+  for (const size_t scale_idx : {size_t{0}, size_t{2}}) {
+    EXPECT_TRUE(vertices[scale_idx] == vertices[1])
+        << "scale normalized vertices mismatch for scale " << scales[scale_idx];
+    EXPECT_TRUE(faces[scale_idx] == faces[1])
+        << "scale normalized oriented faces mismatch for scale "
+        << scales[scale_idx];
+  }
+}
 
 class DelaunayMeshingTest : public ::testing::TestWithParam<int> {};
 
