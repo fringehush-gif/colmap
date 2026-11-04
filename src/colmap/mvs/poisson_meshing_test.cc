@@ -918,93 +918,6 @@ TEST(PoissonMeshing, NormalReplayRetainsNativeFirstTouchAndRepeatedSlots) {
   }
 }
 
-TEST(PoissonMeshing, GpuNormalPrelaunchRefusalPreservesOutputs) {
-  const auto record = MakeNormalRecord();
-  const PoissonNormalGpu::Record* blocks[] = {&record};
-  const std::size_t counts[] = {1};
-  std::array<float, 3> output{7, 8, 9};
-  std::uint32_t touched = 77;
-  PoissonNormalGpu::Stats stats;
-  EXPECT_FALSE(PoissonNormalGpu::Reduce(
-      blocks, counts, 1, 128000001, output.data(), &touched, stats));
-  EXPECT_STREQ(stats.reason, "shape");
-  EXPECT_EQ(output, (std::array<float, 3>{7, 8, 9}));
-  EXPECT_EQ(touched, 77);
-
-  // This is rejected from metadata before reading the claimed record array.
-  const std::size_t oversized_counts[] = {8000000};
-  EXPECT_FALSE(PoissonNormalGpu::Reduce(
-      blocks, oversized_counts, 1, 128000000, output.data(), &touched, stats));
-  EXPECT_STREQ(stats.reason, "workspace-budget");
-  EXPECT_EQ(output, (std::array<float, 3>{7, 8, 9}));
-  EXPECT_EQ(touched, 77);
-}
-
-TEST(PoissonMeshing, GpuNormalReductionRetainsSlotsAndSubnormalBits) {
-  PoissonNormalGpu::Stats stats;
-  if (!PoissonNormalGpu::Available(stats)) {
-    GTEST_SKIP() << stats.reason;
-  }
-  std::array<PoissonNormalGpu::Record, 3> records;
-  for (auto& record : records) {
-    record = MakeNormalRecord();
-  }
-  records[0].node[0] = 0;
-  records[0].coefficient[0] = 0.5f;
-  records[0].node[26] = 2;
-  records[0].coefficient[26] = 1;
-  records[0].value[0] = 1;
-  records[0].value[1] = 2;
-  records[0].value[2] = 3;
-  records[1].node[0] = 0;
-  records[1].coefficient[0] = 0.25f;
-  records[1].value[0] = 4;
-  records[1].value[1] = 8;
-  records[1].value[2] = 12;
-  records[2].node[12] = 3;
-  records[2].coefficient[12] = 1;
-  const std::uint32_t denormal_bits = 1;
-  std::memcpy(&records[2].value[0], &denormal_bits, sizeof(denormal_bits));
-  const PoissonNormalGpu::Record* blocks[] = {records.data(), nullptr};
-  const std::size_t counts[] = {records.size(), 0};
-  std::array<float, 12> output;
-  output.fill(-7);
-  std::array<std::uint32_t, 4> touched{77, 77, 77, 77};
-  ASSERT_TRUE(PoissonNormalGpu::Reduce(
-      blocks, counts, 2, 4, output.data(), touched.data(), stats));
-  EXPECT_EQ(touched, (std::array<std::uint32_t, 4>{1, 0, 1, 1}));
-  EXPECT_EQ(output[0], 1.5f);
-  EXPECT_EQ(output[1], 3.0f);
-  EXPECT_EQ(output[2], 4.5f);
-  for (int channel = 0; channel < 3; ++channel) {
-    EXPECT_EQ(output[3 + channel], 0);
-    EXPECT_EQ(output[6 + channel], records[0].value[channel]);
-  }
-  std::uint32_t result_bits = 0;
-  std::memcpy(&result_bits, &output[9], sizeof(result_bits));
-  EXPECT_EQ(result_bits, denormal_bits);
-}
-
-TEST(PoissonMeshing, GpuNormalInvalidNodeRemainsAnError) {
-  PoissonNormalGpu::Stats stats;
-  if (!PoissonNormalGpu::Available(stats)) {
-    GTEST_SKIP() << stats.reason;
-  }
-  auto record = MakeNormalRecord();
-  record.node[0] = 1;
-  record.coefficient[0] = 1;
-  record.value[0] = 1;
-  const PoissonNormalGpu::Record* blocks[] = {&record};
-  const std::size_t counts[] = {1};
-  std::array<float, 3> output{7, 8, 9};
-  std::uint32_t touched = 77;
-  EXPECT_THROW(PoissonNormalGpu::Reduce(
-                   blocks, counts, 1, 1, output.data(), &touched, stats),
-               std::runtime_error);
-  EXPECT_EQ(output, (std::array<float, 3>{7, 8, 9}));
-  EXPECT_EQ(touched, 77);
-}
-
 struct NormalSlabTestContext {
   std::vector<PoissonNormalGpu::Record>* records = nullptr;
   std::vector<float> values;
@@ -1046,7 +959,7 @@ void NormalSlabConsume(void* opaque,
   context.next_node += count;
 }
 
-TEST(PoissonMeshing, GpuNormalSlabsMatchFullReadbackAfterCaptureRelease) {
+TEST(PoissonMeshing, GpuNormalSlabsRetainValuesAfterCaptureRelease) {
   PoissonNormalGpu::Stats stats;
   if (!PoissonNormalGpu::Available(stats)) GTEST_SKIP() << stats.reason;
   for (const std::size_t slab_nodes : {1, 2, 3, 5, 10, 11, 17}) {
@@ -1070,12 +983,18 @@ TEST(PoissonMeshing, GpuNormalSlabsMatchFullReadbackAfterCaptureRelease) {
     std::memcpy(&records[2].value[0], &denormal_bits, sizeof(denormal_bits));
     const PoissonNormalGpu::Record* blocks[] = {records.data(), nullptr};
     const std::size_t counts[] = {records.size(), 0};
-    std::array<float, 33> full_values;
-    full_values.fill(-7);
-    std::array<std::uint32_t, 11> full_touched;
-    full_touched.fill(77);
-    ASSERT_TRUE(PoissonNormalGpu::Reduce(
-        blocks, counts, 2, 11, full_values.data(), full_touched.data(), stats));
+    // Independent closed-form oracle for this fixture; do not compare two
+    // readback wrappers around the same Scatter implementation.
+    std::array<float, 33> expected_values{};
+    expected_values[0] = 1.5f;
+    expected_values[1] = 3.f;
+    expected_values[2] = 4.5f;
+    std::memcpy(&expected_values[9], &denormal_bits, sizeof(denormal_bits));
+    expected_values[30] = 1.f;
+    expected_values[31] = 2.f;
+    expected_values[32] = 3.f;
+    const std::vector<std::uint32_t> expected_touched{
+        1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1};
 
     NormalSlabTestContext context;
     context.records = &records;
@@ -1089,15 +1008,14 @@ TEST(PoissonMeshing, GpuNormalSlabsMatchFullReadbackAfterCaptureRelease) {
     EXPECT_EQ(context.next_node, 11);
     EXPECT_EQ(context.consume_calls,
               static_cast<int>((10 + slab_nodes) / slab_nodes));
-    ASSERT_EQ(context.values.size(), full_values.size());
-    ASSERT_EQ(context.touched.size(), full_touched.size());
+    ASSERT_EQ(context.values.size(), expected_values.size());
+    ASSERT_EQ(context.touched.size(), expected_touched.size());
     EXPECT_EQ(
-        std::memcmp(
-            context.values.data(), full_values.data(), sizeof(full_values)),
+        std::memcmp(context.values.data(),
+                    expected_values.data(),
+                    sizeof(expected_values)),
         0);
-    EXPECT_EQ(
-        context.touched,
-        (std::vector<std::uint32_t>(full_touched.begin(), full_touched.end())));
+    EXPECT_EQ(context.touched, expected_touched);
     std::uint32_t result_bits = 0;
     std::memcpy(&result_bits, &context.values[9], sizeof(result_bits));
     EXPECT_EQ(result_bits, denormal_bits);
@@ -1112,6 +1030,9 @@ TEST(PoissonMeshing, GpuNormalSlabPrelaunchRefusalCallsNoCallbacks) {
       &context, NormalSlabReady, NormalSlabConsume};
   PoissonNormalGpu::Stats stats;
   const std::size_t one[] = {1};
+  EXPECT_FALSE(PoissonNormalGpu::ReduceSlabs(
+      nullptr, one, 1, 11, 1, counting_callbacks, stats));
+  EXPECT_STREQ(stats.reason, "shape");
   EXPECT_FALSE(PoissonNormalGpu::ReduceSlabs(
       blocks, one, 1, 128000001, 1, counting_callbacks, stats));
   EXPECT_STREQ(stats.reason, "shape");

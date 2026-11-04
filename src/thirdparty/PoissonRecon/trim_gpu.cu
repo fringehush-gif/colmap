@@ -2,7 +2,6 @@
 #include "colmap/util/cuda_allocation.h"
 
 #include <algorithm>
-#include <chrono>
 #include <climits>
 #include <exception>
 #include <limits>
@@ -17,13 +16,7 @@
 namespace PoissonTrimGpu {
 namespace {
 
-using Clock = std::chrono::steady_clock;
 constexpr std::uint64_t kWorkspaceLimit = 3ull * 1024 * 1024 * 1024;
-
-double ElapsedMs(Clock::time_point start) {
-  return std::chrono::duration<double, std::milli>(Clock::now() - start)
-      .count();
-}
 
 void Check(cudaError_t error) {
   if (error != cudaSuccess)
@@ -113,26 +106,6 @@ struct Stream {
   Stream& operator=(const Stream&) = delete;
 };
 
-struct Event {
-  cudaEvent_t value = nullptr;
-  CleanupState& cleanup;
-  explicit Event(CleanupState& state) : cleanup(state) {
-    const auto result =
-        colmap::CudaTryAllocation([&] { return cudaEventCreate(&value); },
-                                  [&] { return value == nullptr; });
-    if (result.origin != colmap::CudaAllocationOrigin::kSuccess && value) {
-      cleanup.Record(cudaEventDestroy(value));
-      value = nullptr;
-    }
-    CheckAllocation(result, value != nullptr);
-  }
-  ~Event() noexcept {
-    if (value) cleanup.Record(cudaEventDestroy(value));
-  }
-  Event(const Event&) = delete;
-  Event& operator=(const Event&) = delete;
-};
-
 template <class T>
 struct Device {
   T* value = nullptr;
@@ -173,12 +146,6 @@ struct ScopedStreamSync {
   ScopedStreamSync(const ScopedStreamSync&) = delete;
   ScopedStreamSync& operator=(const ScopedStreamSync&) = delete;
 };
-
-double Duration(cudaEvent_t first, cudaEvent_t last) {
-  float ms = 0;
-  Check(cudaEventElapsedTime(&ms, first, last));
-  return ms;
-}
 
 bool HasCapacity(std::uint64_t bytes, Stats& stats) {
   if (bytes > kWorkspaceLimit) {
@@ -341,12 +308,10 @@ void ValidateShape(std::size_t polygons,
 }  // namespace
 
 bool Available(Stats& stats) {
-  const auto began = Clock::now();
   const cudaError_t pending = cudaPeekAtLastError();
   if (DeviceUnavailable(pending)) {
     ClearExpected(pending);
     stats.reason = "device-unavailable";
-    stats.total_ms = ElapsedMs(began);
     return false;
   }
   Check(pending);
@@ -354,11 +319,9 @@ bool Available(Stats& stats) {
       !PreflightKernel(Flatten, stats) ||
       !PreflightKernel(BoundaryEdges, stats) ||
       !PreflightKernel(BoundaryPairs, stats)) {
-    stats.total_ms = ElapsedMs(began);
     return false;
   }
   stats.reason = "available";
-  stats.total_ms = ElapsedMs(began);
   return true;
 }
 
@@ -369,17 +332,14 @@ bool ConnectedComponents(std::size_t polygons,
                          std::uint32_t* roots,
                          Stats& stats) {
   stats = Stats{};
-  const auto began = Clock::now();
   auto reject = [&](const char* reason) {
     stats.reason = reason;
-    stats.total_ms = ElapsedMs(began);
     return false;
   };
   ValidateShape(polygons, entries, offsets, vertices);
   if (polygons && !roots) throw std::runtime_error("GPU component null output");
   if (!polygons) {
     stats.reason = "complete";
-    stats.total_ms = ElapsedMs(began);
     return true;
   }
   if (!Available(stats)) return reject(stats.reason);
@@ -420,8 +380,6 @@ bool ConnectedComponents(std::size_t polygons,
   try {
     // Caller-owned readback storage outlives stream cleanup on exceptions.
     Stream stream(cleanup);
-    Event begin(cleanup), uploaded(cleanup), sorted(cleanup), joined(cleanup),
-        downloaded(cleanup);
     Device<std::uint64_t> d_offsets(cleanup, polygons + 1),
         keys_a(cleanup, entries), keys_b(cleanup, entries);
     Device<std::uint32_t> d_vertices(cleanup, entries),
@@ -431,7 +389,6 @@ bool ConnectedComponents(std::size_t polygons,
     ScopedStreamSync stream_sync(stream);
 
     // From here, all CUDA failures are execution failures and remain visible.
-    Check(cudaEventRecord(begin.value, stream.value));
     Check(cudaMemcpyAsync(d_offsets.value,
                           offsets,
                           d_offsets.bytes,
@@ -450,7 +407,6 @@ bool ConnectedComponents(std::size_t polygons,
                                                             faces_a.value,
                                                             parents.value);
     Check(cudaGetLastError());
-    Check(cudaEventRecord(uploaded.value, stream.value));
     if (entries)
       Check(cub::DeviceRadixSort::SortPairs(scratch.value,
                                             sort_bytes,
@@ -462,7 +418,6 @@ bool ConnectedComponents(std::size_t polygons,
                                             0,
                                             64,
                                             stream.value));
-    Check(cudaEventRecord(sorted.value, stream.value));
     if (entries) {
       Unite<<<(entries + 255) / 256, 256, 0, stream.value>>>(
           keys_b.value, faces_b.value, entries, parents.value);
@@ -471,18 +426,12 @@ bool ConnectedComponents(std::size_t polygons,
     Flatten<<<(polygons + 255) / 256, 256, 0, stream.value>>>(
         parents.value, d_roots.value, polygons);
     Check(cudaGetLastError());
-    Check(cudaEventRecord(joined.value, stream.value));
     Check(cudaMemcpyAsync(roots,
                           d_roots.value,
                           d_roots.bytes,
                           cudaMemcpyDeviceToHost,
                           stream.value));
-    Check(cudaEventRecord(downloaded.value, stream.value));
     stream_sync.Synchronize();
-    stats.upload_ms = Duration(begin.value, uploaded.value);
-    stats.sort_ms = Duration(uploaded.value, sorted.value);
-    stats.union_ms = Duration(sorted.value, joined.value);
-    stats.download_ms = Duration(joined.value, downloaded.value);
   } catch (...) {
     if (cleanup.error != cudaSuccess)
       std::throw_with_nested(
@@ -499,7 +448,6 @@ bool ConnectedComponents(std::size_t polygons,
   }
   Check(cleanup.error);
   stats.reason = "complete";
-  stats.total_ms = ElapsedMs(began);
   return true;
 }
 
@@ -511,10 +459,8 @@ bool BoundaryGraph(std::size_t polygons,
                    std::vector<std::uint64_t>& graph,
                    Stats& stats) {
   stats = Stats{};
-  const auto began = Clock::now();
   auto reject = [&](const char* reason) {
     stats.reason = reason;
-    stats.total_ms = ElapsedMs(began);
     return false;
   };
   ValidateShape(polygons, entries, offsets, vertices);
@@ -523,7 +469,6 @@ bool BoundaryGraph(std::size_t polygons,
   if (!polygons || !entries) {
     graph.clear();
     stats.reason = "complete";
-    stats.total_ms = ElapsedMs(began);
     return true;
   }
   if (!Available(stats)) return reject(stats.reason);
@@ -572,8 +517,6 @@ bool BoundaryGraph(std::size_t polygons,
     int count = 0;
     std::uint32_t rejected = 0;
     Stream stream(cleanup);
-    Event start(cleanup), uploaded(cleanup), sorted(cleanup), joined(cleanup),
-        downloaded(cleanup);
     Device<std::uint64_t> d_offsets(cleanup, polygons + 1),
         keys_a(cleanup, entries), keys_b(cleanup, entries),
         values_a(cleanup, entries), values_b(cleanup, entries);
@@ -583,7 +526,6 @@ bool BoundaryGraph(std::size_t polygons,
     Device<unsigned char> scratch(cleanup, scratch_bytes);
     ScopedStreamSync stream_sync(stream);
 
-    Check(cudaEventRecord(start.value, stream.value));
     Check(cudaMemcpyAsync(d_offsets.value,
                           offsets,
                           d_offsets.bytes,
@@ -608,7 +550,6 @@ bool BoundaryGraph(std::size_t polygons,
         keys_a.value,
         values_a.value);
     Check(cudaGetLastError());
-    Check(cudaEventRecord(uploaded.value, stream.value));
     Check(cub::DeviceRadixSort::SortPairs(scratch.value,
                                           sort_bytes,
                                           keys_a.value,
@@ -619,7 +560,6 @@ bool BoundaryGraph(std::size_t polygons,
                                           0,
                                           64,
                                           stream.value));
-    Check(cudaEventRecord(sorted.value, stream.value));
     // Sort input storage is retired on this stream. Keep its sorted outputs
     // distinct while reusing the inputs for pairs and compacted results.
     auto* const pairs = keys_a.value;
@@ -635,7 +575,6 @@ bool BoundaryGraph(std::size_t polygons,
                                 int(entries),
                                 ValidPair{},
                                 stream.value));
-    Check(cudaEventRecord(joined.value, stream.value));
     Check(cudaMemcpyAsync(&count,
                           d_count.value,
                           sizeof(count),
@@ -658,16 +597,11 @@ bool BoundaryGraph(std::size_t polygons,
                               cudaMemcpyDeviceToHost,
                               stream.value));
     }
-    Check(cudaEventRecord(downloaded.value, stream.value));
     stream_sync.Synchronize();
     nonmanifold = rejected != 0;
     if (!nonmanifold) {
       std::sort(result.begin(), result.end());
       result.erase(std::unique(result.begin(), result.end()), result.end());
-      stats.upload_ms = Duration(start.value, uploaded.value);
-      stats.sort_ms = Duration(uploaded.value, sorted.value);
-      stats.union_ms = Duration(sorted.value, joined.value);
-      stats.download_ms = Duration(joined.value, downloaded.value);
       graph.swap(result);
     }
   } catch (...) {
@@ -687,7 +621,6 @@ bool BoundaryGraph(std::size_t polygons,
   Check(cleanup.error);
   if (nonmanifold) return reject("nonmanifold");
   stats.reason = "complete";
-  stats.total_ms = ElapsedMs(began);
   return true;
 }
 

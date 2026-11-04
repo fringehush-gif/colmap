@@ -9,11 +9,6 @@ namespace PoissonTrimGpu {
 
 struct Stats {
   const char* reason = nullptr;
-  double upload_ms = 0;
-  double sort_ms = 0;
-  double union_ms = 0;
-  double download_ms = 0;
-  double total_ms = 0;
   std::uint64_t device_bytes = 0;
 };
 

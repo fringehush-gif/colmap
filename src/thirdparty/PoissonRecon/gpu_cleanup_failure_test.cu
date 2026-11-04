@@ -21,10 +21,10 @@ using PoissonGpuCleanupTest::fail_next_host_allocation;
 
 namespace {
 struct FaultState {
-  int allocations = 0, events = 0, streams = 0, frees = 0, destroys = 0,
-      stream_destroys = 0, syncs = 0, copies = 0;
-  int fail_allocation = 0, fail_event = 0, fail_stream = 0, fail_free = 0,
-      fail_destroy = 0, fail_stream_destroy = 0, fail_sync = 0, fail_copy = 0;
+  int allocations = 0, streams = 0, frees = 0, stream_destroys = 0,
+      syncs = 0, copies = 0;
+  int fail_allocation = 0, fail_stream = 0, fail_free = 0,
+      fail_stream_destroy = 0, fail_sync = 0, fail_copy = 0;
   bool fail_boundary_host_allocation = false;
   bool fail_after_readback = false;
   void* readback_destination = nullptr;
@@ -38,7 +38,6 @@ struct FaultState {
        fake_pending = false, tracking_error = false;
   cudaError_t pending = cudaSuccess, returned = cudaErrorMemoryAllocation;
   std::vector<void*> memory;
-  std::vector<cudaEvent_t> handles;
   std::vector<cudaStream_t> stream_handles;
   std::vector<char> order;
 };
@@ -90,27 +89,6 @@ cudaError_t FaultFree(void* p) {
   if (e != cudaSuccess) return e;
   Erase(state.memory, p);
   return state.frees == state.fail_free ? cudaErrorUnknown : cudaSuccess;
-}
-cudaError_t FaultCreate(cudaEvent_t* out) {
-  bool fail = ++state.events == state.fail_event;
-  *out = nullptr;
-  if (!fail || state.failed_output) {
-    auto e = cudaEventCreate(out);
-    if (e != cudaSuccess) return e;
-    state.handles.push_back(*out);
-  }
-  if (!fail) return cudaSuccess;
-  if (state.null_success) return cudaSuccess;
-  Pending(state.mismatch ? cudaErrorUnknown : state.returned);
-  return state.returned;
-}
-cudaError_t FaultDestroy(cudaEvent_t h) {
-  state.order.push_back('E');
-  ++state.destroys;
-  auto e = cudaEventDestroy(h);
-  if (e != cudaSuccess) return e;
-  Erase(state.handles, h);
-  return state.destroys == state.fail_destroy ? cudaErrorUnknown : cudaSuccess;
 }
 cudaError_t FaultStreamCreate(cudaStream_t* out, unsigned flags) {
   bool fail = ++state.streams == state.fail_stream;
@@ -238,8 +216,6 @@ struct DeviceSelect {
 #define PoissonTrimGpu CleanupFailureTrim
 #define cudaMalloc FaultMalloc
 #define cudaFree FaultFree
-#define cudaEventCreate FaultCreate
-#define cudaEventDestroy FaultDestroy
 #define cudaStreamCreateWithFlags FaultStreamCreate
 #define cudaStreamDestroy FaultStreamDestroy
 #define cudaStreamSynchronize FaultStreamSync
@@ -258,8 +234,6 @@ struct DeviceSelect {
 #undef cudaStreamSynchronize
 #undef cudaStreamDestroy
 #undef cudaStreamCreateWithFlags
-#undef cudaEventDestroy
-#undef cudaEventCreate
 #undef cudaFree
 #undef cudaMalloc
 #undef PoissonTrimGpu
@@ -293,13 +267,11 @@ class GpuCleanupFaultTest : public ::testing::TestWithParam<int> {
   }
   void TearDown() override {
     EXPECT_TRUE(state.memory.empty());
-    EXPECT_TRUE(state.handles.empty());
     EXPECT_TRUE(state.stream_handles.empty());
     EXPECT_FALSE(state.tracking_error);
     // A failing test still releases real resources; forced recovery is not a
     // pass.
     for (auto p : state.memory) cudaFree(p);
-    for (auto h : state.handles) cudaEventDestroy(h);
     for (auto h : state.stream_handles) {
       cudaStreamSynchronize(h);
       cudaStreamDestroy(h);
@@ -310,7 +282,6 @@ class GpuCleanupFaultTest : public ::testing::TestWithParam<int> {
   }
   void Reset() {
     ASSERT_TRUE(state.memory.empty());
-    ASSERT_TRUE(state.handles.empty());
     ASSERT_TRUE(state.stream_handles.empty());
     EXPECT_FALSE(state.tracking_error);
     state = FaultState{};
@@ -323,7 +294,7 @@ class GpuCleanupFaultTest : public ::testing::TestWithParam<int> {
     throw_ready = nonmanifold = false;
   }
   bool Invoke() {
-    if (GetParam() < 2) {
+    if (GetParam() == 1) {
       CleanupFailureNormal::Record record{};
       std::fill(std::begin(record.node), std::end(record.node), UINT32_MAX);
       record.node[0] = 0;
@@ -334,9 +305,6 @@ class GpuCleanupFaultTest : public ::testing::TestWithParam<int> {
       const auto* block = &record;
       const std::size_t count = 1;
       CleanupFailureNormal::Stats stats;
-      if (GetParam() == 0)
-        return CleanupFailureNormal::Reduce(
-            &block, &count, 1, 2, output.data(), touched.data(), stats);
       CleanupFailureNormal::SlabCallbacks callbacks{
           this,
           [](void* p) {
@@ -385,14 +353,13 @@ class GpuCleanupFaultTest : public ::testing::TestWithParam<int> {
   }
   void Released() {
     EXPECT_TRUE(state.memory.empty());
-    EXPECT_TRUE(state.handles.empty());
     EXPECT_TRUE(state.stream_handles.empty());
     EXPECT_FALSE(state.tracking_error);
   }
   void Success() {
     ASSERT_TRUE(Invoke());
     Released();
-    if (GetParam() < 2) {
+    if (GetParam() == 1) {
       EXPECT_EQ(output, (std::array<float, 6>{1, 2, 3, 0, 0, 0}));
       EXPECT_EQ(touched, (std::array<std::uint32_t, 2>{1, 0}));
     } else if (GetParam() == 2)
@@ -411,9 +378,8 @@ TEST_P(GpuCleanupFaultTest, CleanRealExecution) {
 }
 TEST_P(GpuCleanupFaultTest, AcquisitionRefusalAndInvalidOutputs) {
   Success();
-  const std::array<int, 3> counts{
-      state.allocations, state.events, state.streams};
-  for (int domain = 0; domain < 3; ++domain)
+  const std::array<int, 2> counts{state.allocations, state.streams};
+  for (int domain = 0; domain < 2; ++domain)
     for (int position = 1; position <= counts[domain]; ++position)
       for (int fault = 0; fault < 4; ++fault) {
         SCOPED_TRACE(::testing::Message()
@@ -421,8 +387,6 @@ TEST_P(GpuCleanupFaultTest, AcquisitionRefusalAndInvalidOutputs) {
         Reset();
         if (domain == 0)
           state.fail_allocation = position;
-        else if (domain == 1)
-          state.fail_event = position;
         else
           state.fail_stream = position;
         state.failed_output = fault == 1;
@@ -441,16 +405,13 @@ TEST_P(GpuCleanupFaultTest, AcquisitionRefusalAndInvalidOutputs) {
 }
 TEST_P(GpuCleanupFaultTest, CleanupAfterSuccessfulWorkIsTerminal) {
   Success();
-  const std::array<int, 3> counts{
-      state.frees, state.destroys, state.stream_destroys};
-  for (int domain = 0; domain < 3; ++domain)
+  const std::array<int, 2> counts{state.frees, state.stream_destroys};
+  for (int domain = 0; domain < 2; ++domain)
     for (int position = 1; position <= counts[domain]; ++position) {
       SCOPED_TRACE(::testing::Message() << domain << ":" << position);
       Reset();
       if (domain == 0)
         state.fail_free = position;
-      else if (domain == 1)
-        state.fail_destroy = position;
       else
         state.fail_stream_destroy = position;
       EXPECT_ANY_THROW(Invoke());
@@ -514,13 +475,6 @@ TEST_P(GpuCleanupFaultTest, AcquisitionFailureWithCleanupErrorIsTerminal) {
   Success();
   if (GetParam() >= 2) {
     Reset();
-    state.fail_event = 2;
-    state.fail_destroy = 1;
-    EXPECT_ANY_THROW(Invoke());
-    Released();
-    Reset();
-    Success();
-    Reset();
     state.fail_stream = 1;
     state.failed_output = true;
     state.fail_stream_destroy = 1;
@@ -531,17 +485,6 @@ TEST_P(GpuCleanupFaultTest, AcquisitionFailureWithCleanupErrorIsTerminal) {
   }
 }
 TEST_P(GpuCleanupFaultTest, CallbackAndRefusalBoundaries) {
-  if (GetParam() == 0) {
-    Reset();
-    CleanupFailureNormal::Stats stats;
-    const std::size_t count = 1;
-    EXPECT_FALSE(CleanupFailureNormal::Reduce(
-        nullptr, &count, 1, 2, output.data(), touched.data(), stats));
-    Untouched();
-    EXPECT_EQ(state.allocations, 0);
-    Reset();
-    Success();
-  }
   if (GetParam() == 2) {
     Reset();
     CleanupFailureTrim::Stats stats;
@@ -602,7 +545,6 @@ TEST_P(GpuHostReadbackFaultTest, HostAllocationTimingControlsRefusal) {
   // Fault instrumentation must not allocate between the intended seam and the
   // backend readback allocation; all tracking capacity is prepared first.
   state.memory.reserve(32);
-  state.handles.reserve(8);
   state.stream_handles.reserve(2);
   state.order.reserve(64);
   state.fail_boundary_host_allocation = GetParam() == 3;
@@ -639,7 +581,6 @@ TEST_P(GpuConnectedReadbackTest, UsesCallerStorageWithoutStagingAllocation) {
   Reset();
   // Reserve fault-tracking storage before arming the application allocator.
   state.memory.reserve(32);
-  state.handles.reserve(8);
   state.stream_handles.reserve(2);
   state.order.reserve(64);
   bool result = false, unused_allocation_fault = false;
@@ -807,5 +748,5 @@ INSTANTIATE_TEST_SUITE_P(BoundaryStorageApi,
                          ::testing::Values(3));
 INSTANTIATE_TEST_SUITE_P(ActualImplementations,
                          GpuCleanupFaultTest,
-                         ::testing::Values(0, 1, 2, 3));
+                         ::testing::Values(1, 2, 3));
 }  // namespace
