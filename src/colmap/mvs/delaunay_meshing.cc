@@ -11,8 +11,11 @@
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/logging.h"
 
+#include <atomic>
 #include <cmath>
+#include <exception>
 #include <fstream>
+#include <mutex>
 #include <vector>
 
 #include <omp.h>
@@ -627,13 +630,13 @@ PlyMesh DelaunayMeshing(const DelaunayMeshingOptions& options,
     cell_graph_data.emplace(it, DelaunayCellData(cell_graph_data.size()));
   }
 
-  // Spawn threads for parallelized integration of images.
-  const int num_threads = GetEffectiveNumThreads(options.num_threads);
-  ThreadPool thread_pool(num_threads);
-  JobQueue<CellGraphData> result_queue(num_threads);
+  // Merge one completed image at a time. Each worker retains at most one
+  // image's sparse weights; no separate result transport or queue is needed.
+  std::mutex integration_mutex;
+  size_t num_integrated_images = 0;
 
   // Function that accumulates edge weights in the s-t graph for a single image.
-  auto IntegreateImage = [&](const size_t image_idx) {
+  auto IntegrateImage = [&](const size_t image_idx) {
     // Accumulated weights for the current image only.
     CellGraphData image_cell_graph_data;
 
@@ -742,40 +745,7 @@ PlyMesh DelaunayMeshing(const DelaunayMeshingOptions& options,
       }
     }
 
-    THROW_CHECK(result_queue.Push(std::move(image_cell_graph_data)));
-  };
-
-  // Add first batch of images to the thread job queue.
-  size_t image_idx = 0;
-  const size_t init_num_tasks =
-      std::min(input_data.images.size(), 2 * thread_pool.NumThreads());
-  for (; image_idx < init_num_tasks; ++image_idx) {
-    thread_pool.AddTask(IntegreateImage, image_idx);
-  }
-
-  // Pop the integrated images from the thread job queue and integrate their
-  // accumulated weights into the global graph.
-  for (size_t i = 0; i < input_data.images.size(); ++i) {
-    Timer timer;
-    timer.Start();
-
-    LOG(INFO) << StringPrintf("Integrating image [%d/%d]",
-                              i + 1,
-                              input_data.images.size())
-              << std::flush;
-
-    // Push the next image to the queue.
-    if (image_idx < input_data.images.size()) {
-      thread_pool.AddTask(IntegreateImage, image_idx);
-      image_idx += 1;
-    }
-
-    // Pop the next results from the queue.
-    auto result = result_queue.Pop();
-    THROW_CHECK(result.IsValid());
-
-    // Accumulate the weights of the image into the global graph.
-    const auto& image_cell_graph_data = result.Data();
+    std::lock_guard<std::mutex> lock(integration_mutex);
     for (const auto& [cell_handle, cell_data] : image_cell_graph_data) {
       auto& global_cell_data = cell_graph_data.at(cell_handle);
       global_cell_data.sink_weight += cell_data.sink_weight;
@@ -784,8 +754,48 @@ PlyMesh DelaunayMeshing(const DelaunayMeshingOptions& options,
         global_cell_data.edge_weights[j] += cell_data.edge_weights[j];
       }
     }
+    ++num_integrated_images;
+    LOG(INFO) << StringPrintf("Integrated image [%zu/%zu]",
+                             num_integrated_images,
+                             input_data.images.size());
+  };
 
-    LOG(INFO) << StringPrintf(" in %.3fs", timer.ElapsedSeconds());
+  // A fixed number of tasks dynamically claim images. An exception stops new
+  // claims; Wait joins all current images and reports the worker failures.
+  std::atomic<size_t> next_image_idx{0};
+  auto IntegrateImages = [&]() {
+    try {
+      while (true) {
+        const size_t image_idx =
+            next_image_idx.fetch_add(1, std::memory_order_relaxed);
+        if (image_idx >= input_data.images.size()) return;
+        IntegrateImage(image_idx);
+      }
+    } catch (...) {
+      next_image_idx.store(input_data.images.size(), std::memory_order_relaxed);
+      throw;
+    }
+  };
+
+  // The pool dies before the state and lambdas referenced by its tasks.
+  ThreadPool thread_pool(GetEffectiveNumThreads(options.num_threads));
+  try {
+    const size_t num_tasks =
+        std::min(input_data.images.size(), thread_pool.NumThreads());
+    for (size_t i = 0; i < num_tasks; ++i) {
+      thread_pool.AddTask(IntegrateImages);
+    }
+    thread_pool.Wait();
+  } catch (...) {
+    const auto error = std::current_exception();
+    next_image_idx.store(input_data.images.size(), std::memory_order_relaxed);
+    // Also join after an enqueue failure, before releasing captured state.
+    try {
+      thread_pool.Wait();
+    } catch (...) {
+      // Preserve the original failure; Wait has consumed task exceptions.
+    }
+    std::rethrow_exception(error);
   }
 
   // Setup the min-cut (max-flow) graph optimization.

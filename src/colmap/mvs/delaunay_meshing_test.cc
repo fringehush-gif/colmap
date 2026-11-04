@@ -34,14 +34,21 @@ Reconstruction CreateAndWriteSyntheticReconstruction(
 
 #if defined(COLMAP_CGAL_ENABLED)
 
-TEST(SparseDelaunayMeshing, Integration) {
+class DelaunayMeshingTest : public ::testing::TestWithParam<int> {};
+
+// Include more workers than images to cover the bounded worker count.
+INSTANTIATE_TEST_SUITE_P(NumThreads,
+                        DelaunayMeshingTest,
+                        ::testing::Values(1, 2, 8));
+
+TEST_P(DelaunayMeshingTest, SparseIntegration) {
   const auto test_dir = CreateTestDir();
   const auto sparse_path = test_dir / "sparse";
   const auto output_path = test_dir / "mesh.ply";
   CreateAndWriteSyntheticReconstruction(sparse_path);
 
   DelaunayMeshingOptions options;
-  options.num_threads = 1;
+  options.num_threads = GetParam();
   SparseDelaunayMeshing(options, sparse_path, output_path);
 
   EXPECT_TRUE(ExistsFile(output_path));
@@ -49,7 +56,7 @@ TEST(SparseDelaunayMeshing, Integration) {
   EXPECT_GE(mesh_vertices.size(), 3);
 }
 
-TEST(SparseDelaunayMeshing, NonSubsampled) {
+TEST_P(DelaunayMeshingTest, NonSubsampled) {
   const auto test_dir = CreateTestDir();
   const auto sparse_path = test_dir / "sparse";
   const auto output_path = test_dir / "mesh.ply";
@@ -60,7 +67,7 @@ TEST(SparseDelaunayMeshing, NonSubsampled) {
   // CreateSubSampledDelaunayTriangulation().
   DelaunayMeshingOptions options;
   options.max_proj_dist = 0;
-  options.num_threads = 1;
+  options.num_threads = GetParam();
   SparseDelaunayMeshing(options, sparse_path, output_path);
 
   EXPECT_TRUE(ExistsFile(output_path));
@@ -68,7 +75,7 @@ TEST(SparseDelaunayMeshing, NonSubsampled) {
   EXPECT_GE(mesh_vertices.size(), 3);
 }
 
-TEST(SparseDelaunayMeshing, PointAtCameraCenter) {
+TEST_P(DelaunayMeshingTest, PointAtCameraCenter) {
   const auto test_dir = CreateTestDir();
   const auto sparse_path = test_dir / "sparse";
   const auto output_path = test_dir / "mesh.ply";
@@ -85,7 +92,7 @@ TEST(SparseDelaunayMeshing, PointAtCameraCenter) {
   reconstruction.Write(sparse_path);
 
   DelaunayMeshingOptions options;
-  options.num_threads = 1;
+  options.num_threads = GetParam();
   SparseDelaunayMeshing(options, sparse_path, output_path);
 
   EXPECT_TRUE(ExistsFile(output_path));
@@ -93,7 +100,7 @@ TEST(SparseDelaunayMeshing, PointAtCameraCenter) {
   EXPECT_GE(mesh_vertices.size(), 3);
 }
 
-TEST(DenseDelaunayMeshing, Integration) {
+TEST_P(DelaunayMeshingTest, DenseIntegration) {
   const auto test_dir = CreateTestDir();
   const auto sparse_path = test_dir / "sparse";
   const auto output_path = test_dir / "mesh.ply";
@@ -140,7 +147,7 @@ TEST(DenseDelaunayMeshing, Integration) {
   vis_file.close();
 
   DelaunayMeshingOptions options;
-  options.num_threads = 1;
+  options.num_threads = GetParam();
   DenseDelaunayMeshing(options, test_dir, output_path);
 
   EXPECT_TRUE(ExistsFile(output_path));
