@@ -81,7 +81,15 @@ void ObservationManager::AddImage(const image_t image_id) {
         << " must be added to the CorrespondenceGraph first";
   }
   const Image& image = reconstruction_.Image(image_id);
-  image_stats_.emplace(image_id, InitImageStat(image_id, image));
+  ImageStat image_stat = InitImageStat(image_id, image);
+  if (correspondence_graph_ && image_stat.num_observations > 0) {
+    for (const image_t reg_image_id : reconstruction_.RegImageIds()) {
+      image_stat.num_visible_correspondences +=
+          correspondence_graph_->NumMatchesBetweenImages(image_id,
+                                                         reg_image_id);
+    }
+  }
+  image_stats_.emplace(image_id, std::move(image_stat));
 
   if (correspondence_graph_) {
     // Add image pair stats for all pairs involving the new image and refresh

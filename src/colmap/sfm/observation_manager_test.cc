@@ -782,6 +782,7 @@ TEST(ObservationManager, AddImage) {
   obs_manager.AddImage(3);
 
   // Image 3 sees the triangulated point via retroactive visibility.
+  EXPECT_EQ(obs_manager.NumVisibleCorrespondences(3), 3);
   EXPECT_EQ(obs_manager.NumVisiblePoints3D(3), 1);
   EXPECT_EQ(obs_manager.NumObservations(3), 2);
   EXPECT_EQ(obs_manager.NumCorrespondences(3), 3);
@@ -804,6 +805,93 @@ TEST(ObservationManager, AddImage) {
   track2.AddElement(1, 2);
   track2.AddElement(3, 1);
   obs_manager.AddPoint3D(Eigen::Vector3d(1, 0, 1), track2);
+
+  EXPECT_NO_THROW(obs_manager.DeRegisterFrame(1));
+  EXPECT_EQ(obs_manager.NumVisibleCorrespondences(3), 1);
+}
+
+TEST(ObservationManager, AddImageVisibilityAcrossNeighborRegistration) {
+  for (const bool pose_before_registration : {false, true}) {
+    SCOPED_TRACE(pose_before_registration);
+    auto graph = std::make_shared<CorrespondenceGraph>();
+    for (image_t image_id = 1; image_id <= 3; ++image_id) {
+      graph->AddImage(image_id, 10);
+    }
+    Reconstruction reconstruction;
+    GenerateReconstruction(3, reconstruction);
+    reconstruction.DeRegisterFrame(3);
+    ASSERT_FALSE(reconstruction.Image(3).HasPose());
+    ObservationManager obs_manager(reconstruction, graph);
+
+    graph->AddImage(4, 10);
+    TwoViewGeometry geometry;
+    geometry.inlier_matches = {{0, 0}, {1, 1}};
+    graph->AddTwoViewGeometry(1, 4, geometry);
+    graph->AddTwoViewGeometry(3, 4, geometry);
+    geometry.inlier_matches = {{0, 0}};
+    graph->AddTwoViewGeometry(2, 4, geometry);
+
+    const Camera& camera = reconstruction.Camera(1);
+    Frame frame;
+    frame.SetFrameId(4);
+    frame.SetRigId(1);
+    frame.AddDataId(data_t(camera.SensorId(), 4));
+    reconstruction.AddFrame(frame);
+    Image image;
+    image.SetImageId(4);
+    image.SetCameraId(camera.camera_id);
+    image.SetFrameId(4);
+    image.SetName("image4");
+    image.SetPoints2D(
+        std::vector<Eigen::Vector2d>(10, Eigen::Vector2d::Zero()));
+    reconstruction.AddImage(image);
+    ASSERT_FALSE(reconstruction.Image(4).HasPose());
+    if (pose_before_registration) {
+      reconstruction.Frame(3).SetRigFromWorld(Rigid3d());
+    }
+    ASSERT_EQ(reconstruction.NumRegImages(), 2);
+    obs_manager.AddImage(4);
+
+    // The two registered neighbors contribute three matches, including two
+    // matches to the same incoming point. No match has a triangulated point.
+    ASSERT_EQ(obs_manager.NumVisibleCorrespondences(4), 3);
+    EXPECT_EQ(obs_manager.NumVisiblePoints3D(4), 0);
+    EXPECT_EQ(obs_manager.NumObservations(4), 2);
+    EXPECT_EQ(obs_manager.NumCorrespondences(4), 5);
+    EXPECT_ANY_THROW(obs_manager.AddImage(4));
+    EXPECT_EQ(obs_manager.NumVisibleCorrespondences(4), 3);
+
+    reconstruction.Frame(3).SetRigFromWorld(Rigid3d());
+    obs_manager.RegisterFrame(3);
+    EXPECT_EQ(obs_manager.NumVisibleCorrespondences(4), 5);
+    obs_manager.DeRegisterFrame(3);
+    EXPECT_EQ(obs_manager.NumVisibleCorrespondences(4), 3);
+    obs_manager.DeRegisterFrame(1);
+    EXPECT_EQ(obs_manager.NumVisibleCorrespondences(4), 1);
+    obs_manager.DeRegisterFrame(2);
+    EXPECT_EQ(obs_manager.NumVisibleCorrespondences(4), 0);
+  }
+}
+
+TEST(ObservationManager, AddImageWithoutCorrespondences) {
+  auto graph = std::make_shared<CorrespondenceGraph>();
+  graph->AddImage(1, 10);
+  Reconstruction reconstruction;
+  GenerateReconstruction(1, reconstruction);
+  ObservationManager obs_manager(reconstruction, graph);
+
+  Image image;
+  image.SetImageId(2);
+  image.SetCameraId(1);
+  image.SetName("image2");
+  image.SetPoints2D(std::vector<Eigen::Vector2d>(10, Eigen::Vector2d::Zero()));
+  reconstruction.AddImageWithTrivialFrame(image);
+  graph->AddImage(2, 10);
+  obs_manager.AddImage(2);
+  EXPECT_EQ(obs_manager.NumVisibleCorrespondences(2), 0);
+  EXPECT_EQ(obs_manager.NumVisiblePoints3D(2), 0);
+  EXPECT_EQ(obs_manager.NumObservations(2), 0);
+  EXPECT_EQ(obs_manager.NumCorrespondences(2), 0);
 }
 
 }  // namespace
