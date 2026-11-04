@@ -142,7 +142,7 @@ void CudaCleanupScope::Check() const {
 
 void CudaCheck(const char* file, const int line) {
   const cudaError_t error = cudaGetLastError();
-  while (error != cudaSuccess) {
+  if (error != cudaSuccess) {
     LOG(FATAL_THROW) << StringPrintf("CUDA error at %s:%i - %s",
                                      file,
                                      line,
