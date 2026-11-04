@@ -5,6 +5,7 @@
 #include "colmap/mvs/cuda_rotate.h"
 #include "colmap/mvs/gpu_mat.h"
 #include "colmap/mvs/packed_ncc20_cost_map.h"
+#include "colmap/mvs/unorm16.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -27,18 +28,18 @@ struct PackedNccCostView {
 
 #if defined(__CUDACC__) || defined(__HIPCC__)
   __device__ float Get(size_t row, size_t col, size_t source) const {
-    return static_cast<float>(codes.Get(row, col, source)) * (2.0f / 65535.0f);
+    return __fmul_rn(static_cast<float>(codes.Get(row, col, source)),
+                     2.0f / 65535.0f);
   }
 
   __device__ void Set(size_t row, size_t col, size_t source, float cost) {
-    if (!isfinite(cost) || cost < 0.0f || cost > 2.0f) {
+    // Bit-domain admission also rejects negative subnormals under CUDA FTZ.
+    const uint32_t bits = __float_as_uint(cost);
+    if (bits > 0x40000000u && bits != 0x80000000u) {
       atomicExch(domain_error, 1u);
       return;
     }
-    codes.Set(row,
-              col,
-              source,
-              static_cast<uint16_t>(nearbyintf(cost * (65535.0f / 2.0f))));
+    codes.Set(row, col, source, unorm16::RoundScaled(cost, 32767.5f));
   }
 #endif
 };
@@ -247,8 +248,12 @@ class Fixed24NccCostMap {
   }
 
   ~Fixed24NccCostMap() {
-    (void)cudaFree(domain_error_);
-    (void)cudaFree(ptr_);
+    const auto error_status = cudaFree(domain_error_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                           static_cast<int>(error_status));
+    const auto data_status = cudaFree(ptr_);
+    (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                           static_cast<int>(data_status));
   }
   Fixed24NccCostMap(const Fixed24NccCostMap&) = delete;
   Fixed24NccCostMap& operator=(const Fixed24NccCostMap&) = delete;

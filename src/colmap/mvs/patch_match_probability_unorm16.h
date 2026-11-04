@@ -2,6 +2,7 @@
 // Persistent PatchMatch selection-probability storage for CUDA checkpoint mode.
 #pragma once
 #include "colmap/mvs/gpu_mat.h"
+#include "colmap/mvs/unorm16.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -41,8 +42,7 @@ struct ProbabilityUnorm16View {
     // so this error is <=2^-21, below the unchanged interior quantization
     // bound.
     const float bounded = value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
-    line[col] =
-        static_cast<uint16_t>(__float2uint_rn(__fmul_rn(bounded, 65535.0f)));
+    line[col] = unorm16::RoundScaled(bounded, 65535.0f);
   }
 #endif
 };

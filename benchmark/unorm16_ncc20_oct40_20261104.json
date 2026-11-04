@@ -1,0 +1,341 @@
+{
+  "configuration": "Existing probability UNORM16 + NCC20 + Oct40 opt-ins versus FP32 storage in the same optimized executable",
+  "hardware": {
+    "cpu": "AMD Ryzen 9 3900X",
+    "gpu": "NVIDIA GeForce RTX 3080 Ti",
+    "os": "WSL2 Linux",
+    "cuda": "13.2"
+  },
+  "settings": {
+    "photo_references": 5,
+    "sources_per_reference": 20,
+    "iterations": 5,
+    "cpu_threads": 12,
+    "checkpoint_hmm": true,
+    "rotation_buffer_reuse": true,
+    "warmups_per_arm_and_resolution": 1,
+    "timed_order": [
+      "C",
+      "T",
+      "T",
+      "C"
+    ],
+    "probability_unorm16": true,
+    "ncc_cost_fixed20": true,
+    "normal_oct40": true
+  },
+  "measurement": {
+    "vram": "Whole-device NVML samples, 1 second cadence",
+    "ram": "Native process wait4 peak RSS and sampled RSS",
+    "cpu_counters": "perf PID attachment, partial process lifetime; user-mode hardware events"
+  },
+  "photo": [
+    {
+      "resolution": 1536,
+      "fp32": {
+        "observations": 2,
+        "wall_s_mean": 7.626039,
+        "cpu_s_mean": 8.142272,
+        "peak_rss_mib_mean": 1178.041016,
+        "sampled_rss_mib_mean": 919.544531,
+        "peak_vram_mib": 3527.566406,
+        "sampled_vram_mib_mean": 3109.400879,
+        "cpu_counters": {
+          "cycles:u": 27150489419.0,
+          "instructions:u": 32453373868.5,
+          "cache-references:u": 259465524.0,
+          "cache-misses:u": 37119684.0
+        },
+        "counter_running_percent_min": 100.0
+      },
+      "combined": {
+        "observations": 2,
+        "wall_s_mean": 7.932508,
+        "cpu_s_mean": 8.471092,
+        "peak_rss_mib_mean": 1179.324219,
+        "sampled_rss_mib_mean": 920.416748,
+        "peak_vram_mib": 2957.566406,
+        "sampled_vram_mib_mean": 2681.900879,
+        "cpu_counters": {
+          "cycles:u": 28048194863.0,
+          "instructions:u": 33170113289.5,
+          "cache-references:u": 273255990.0,
+          "cache-misses:u": 38882803.0
+        },
+        "counter_running_percent_min": 100.0
+      },
+      "delta": {
+        "peak_vram_mib": -570.0,
+        "peak_vram_percent": -16.158448,
+        "wall_percent": 4.018718
+      }
+    },
+    {
+      "resolution": 3072,
+      "fp32": {
+        "observations": 2,
+        "wall_s_mean": 23.7886,
+        "cpu_s_mean": 26.509194,
+        "peak_rss_mib_mean": 1452.205078,
+        "sampled_rss_mib_mean": 1211.695028,
+        "peak_vram_mib": 8079.566406,
+        "sampled_vram_mib_mean": 7341.469564,
+        "cpu_counters": {
+          "cycles:u": 96029899246.5,
+          "instructions:u": 112192726075.5,
+          "cache-references:u": 520604863.5,
+          "cache-misses:u": 56391733.5
+        },
+        "counter_running_percent_min": 100.0
+      },
+      "combined": {
+        "observations": 2,
+        "wall_s_mean": 24.481867,
+        "cpu_s_mean": 27.177127,
+        "peak_rss_mib_mean": 1452.439453,
+        "sampled_rss_mib_mean": 1212.954321,
+        "peak_vram_mib": 5737.566406,
+        "sampled_vram_mib_mean": 5314.073438,
+        "cpu_counters": {
+          "cycles:u": 98944166867.5,
+          "instructions:u": 115424915616.5,
+          "cache-references:u": 523167652.5,
+          "cache-misses:u": 56588698.5
+        },
+        "counter_running_percent_min": 100.0
+      },
+      "delta": {
+        "peak_vram_mib": -2342.0,
+        "peak_vram_percent": -28.986704,
+        "wall_percent": 2.91428
+      }
+    }
+  ],
+  "quality_scope": "One filtered GEO reference per resolution: five arm-matched PHOTO source pairs; other fifteen sources and reference PHOTO frozen",
+  "geo": [
+    {
+      "resolution": 1536,
+      "fp32": {
+        "positive_pixels": 344243,
+        "metrics": {
+          "observations": 1,
+          "wall_s_mean": 3.753239,
+          "cpu_s_mean": 4.280486,
+          "peak_rss_mib_mean": 1329.472656,
+          "sampled_rss_mib_mean": 901.09082,
+          "peak_vram_mib": 2461.566406,
+          "sampled_vram_mib_mean": 2165.235352,
+          "cpu_counters": {
+            "cycles:u": 10024344580.0,
+            "instructions:u": 13130285078.0,
+            "cache-references:u": 209119912.0,
+            "cache-misses:u": 31748189.0
+          },
+          "counter_running_percent_min": 100.0
+        },
+        "tolerances_m": [
+          0.01,
+          0.02,
+          0.05,
+          0.1,
+          0.2,
+          0.5
+        ],
+        "completeness": [
+          0.0174468,
+          0.0606227,
+          0.165058,
+          0.212656,
+          0.235419,
+          0.266515
+        ],
+        "accuracy": [
+          0.482801,
+          0.625017,
+          0.843344,
+          0.957255,
+          0.979933,
+          0.99261
+        ],
+        "f1": [
+          0.0336767,
+          0.110525,
+          0.276082,
+          0.348003,
+          0.379634,
+          0.420205
+        ]
+      },
+      "combined": {
+        "positive_pixels": 343710,
+        "metrics": {
+          "observations": 1,
+          "wall_s_mean": 3.653327,
+          "cpu_s_mean": 4.322926,
+          "peak_rss_mib_mean": 1330.179688,
+          "sampled_rss_mib_mean": 823.551897,
+          "peak_vram_mib": 2339.566406,
+          "sampled_vram_mib_mean": 2097.235352,
+          "cpu_counters": {
+            "cycles:u": 10092749111.0,
+            "instructions:u": 13478351323.0,
+            "cache-references:u": 200098633.0,
+            "cache-misses:u": 27788833.0
+          },
+          "counter_running_percent_min": 100.0
+        },
+        "tolerances_m": [
+          0.01,
+          0.02,
+          0.05,
+          0.1,
+          0.2,
+          0.5
+        ],
+        "completeness": [
+          0.0174277,
+          0.0605522,
+          0.165125,
+          0.212651,
+          0.235431,
+          0.266592
+        ],
+        "accuracy": [
+          0.48276,
+          0.625415,
+          0.844168,
+          0.956822,
+          0.980282,
+          0.992361
+        ],
+        "f1": [
+          0.033641,
+          0.110414,
+          0.27622,
+          0.347968,
+          0.379676,
+          0.420278
+        ]
+      }
+    },
+    {
+      "resolution": 3072,
+      "fp32": {
+        "positive_pixels": 1232672,
+        "metrics": {
+          "observations": 1,
+          "wall_s_mean": 7.871142,
+          "cpu_s_mean": 10.521435,
+          "peak_rss_mib_mean": 2389.390625,
+          "sampled_rss_mib_mean": 1646.144531,
+          "peak_vram_mib": 3869.566406,
+          "sampled_vram_mib_mean": 3152.400879,
+          "cpu_counters": {
+            "cycles:u": 28498622458.0,
+            "instructions:u": 36145818016.0,
+            "cache-references:u": 391072077.0,
+            "cache-misses:u": 41650720.0
+          },
+          "counter_running_percent_min": 100.0
+        },
+        "tolerances_m": [
+          0.01,
+          0.02,
+          0.05,
+          0.1,
+          0.2,
+          0.5
+        ],
+        "completeness": [
+          0.0490305,
+          0.0953504,
+          0.186369,
+          0.216385,
+          0.236691,
+          0.269953
+        ],
+        "accuracy": [
+          0.530656,
+          0.65889,
+          0.876687,
+          0.983012,
+          0.992765,
+          0.996674
+        ],
+        "f1": [
+          0.0897669,
+          0.166593,
+          0.307392,
+          0.354694,
+          0.382248,
+          0.424837
+        ]
+      },
+      "combined": {
+        "positive_pixels": 1236574,
+        "metrics": {
+          "observations": 1,
+          "wall_s_mean": 8.104294,
+          "cpu_s_mean": 10.761447,
+          "peak_rss_mib_mean": 2388.691406,
+          "sampled_rss_mib_mean": 1632.952881,
+          "peak_vram_mib": 3367.566406,
+          "sampled_vram_mib_mean": 2743.419271,
+          "cpu_counters": {
+            "cycles:u": 29035465961.0,
+            "instructions:u": 37251074187.0,
+            "cache-references:u": 370975734.0,
+            "cache-misses:u": 38529451.0
+          },
+          "counter_running_percent_min": 100.0
+        },
+        "tolerances_m": [
+          0.01,
+          0.02,
+          0.05,
+          0.1,
+          0.2,
+          0.5
+        ],
+        "completeness": [
+          0.049009,
+          0.0952532,
+          0.18641,
+          0.216603,
+          0.237073,
+          0.269104
+        ],
+        "accuracy": [
+          0.530066,
+          0.658029,
+          0.876973,
+          0.983329,
+          0.992919,
+          0.996762
+        ],
+        "f1": [
+          0.0897224,
+          0.166417,
+          0.307466,
+          0.355007,
+          0.382758,
+          0.423793
+        ]
+      }
+    }
+  ],
+  "validation": {
+    "linux_gpu_mvs_passed": 91,
+    "linux_utility_passed": 7,
+    "windows_passed": 89,
+    "windows_skipped": [
+      "Linux-only cleanup-error interposition"
+    ],
+    "sanitizer_tests_per_tool": 5,
+    "memcheck_errors": 0,
+    "memcheck_leaked_bytes": 0,
+    "initcheck_errors": 0,
+    "within_arm_photo_repeats": "exact complete depth/normal map identities",
+    "clang_tidy": "Eight inherited baseline diagnostics triaged; no new candidate blocker"
+  }
+}
