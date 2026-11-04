@@ -333,6 +333,11 @@ bool Bitmap::SetPixel(const int x,
 
 std::optional<BitmapColor<uint8_t>> Bitmap::InterpolateNearestNeighbor(
     const double x, const double y) const {
+  // Check the floating-point domain before converting to integer indices.
+  // The strict half-pixel bounds preserve round's ties-away-from-zero rule.
+  if (!(x > -0.5 && x < width_ - 0.5 && y > -0.5 && y < height_ - 0.5)) {
+    return std::nullopt;
+  }
   const int xx = static_cast<int>(std::round(x));
   const int yy = static_cast<int>(std::round(y));
   return GetPixel(xx, yy);
@@ -340,14 +345,15 @@ std::optional<BitmapColor<uint8_t>> Bitmap::InterpolateNearestNeighbor(
 
 std::optional<BitmapColor<float>> Bitmap::InterpolateBilinear(
     const double x, const double y) const {
+  // A full 2x2 neighborhood must exist. This also rejects NaN, infinity,
+  // and out-of-range finite values before the floating-to-integer casts.
+  if (!(x >= 0.0 && x < width_ - 1.0 && y >= 0.0 && y < height_ - 1.0)) {
+    return std::nullopt;
+  }
   const int x0 = static_cast<int>(std::floor(x));
   const int x1 = x0 + 1;
   const int y0 = static_cast<int>(std::floor(y));
   const int y1 = y0 + 1;
-
-  if (x0 < 0 || x1 >= width_ || y0 < 0 || y1 >= height_) {
-    return std::nullopt;
-  }
 
   const double dx = x - x0;
   const double dy = y - y0;

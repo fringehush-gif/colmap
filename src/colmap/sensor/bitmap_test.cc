@@ -7,9 +7,11 @@
 #include "colmap/util/testing.h"
 
 #include <array>
+#include <cmath>
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <random>
 #include <stdexcept>
@@ -415,6 +417,47 @@ TEST(Bitmap, InterpolateBilinearGrey) {
   color = bitmap.InterpolateBilinear(5.5, 4.5);
   ASSERT_TRUE(color.has_value());
   EXPECT_NEAR(color->r, 25.0f, 1e-5);
+}
+
+TEST(Bitmap, InterpolationRejectsNonfiniteAndHugeCoordinates) {
+  const std::vector<double> invalid_coordinates = {
+      std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::infinity(),
+      -std::numeric_limits<double>::infinity(),
+      std::numeric_limits<double>::max(),
+      -std::numeric_limits<double>::max(),
+      static_cast<double>(std::numeric_limits<int>::max()),
+      static_cast<double>(std::numeric_limits<int>::min())};
+  for (const bool as_rgb : {false, true}) {
+    const Bitmap bitmap(10, 9, as_rgb);
+    for (const double value : invalid_coordinates) {
+      EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(value, 0.0));
+      EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(0.0, value));
+      EXPECT_FALSE(bitmap.InterpolateBilinear(value, 0.0));
+      EXPECT_FALSE(bitmap.InterpolateBilinear(0.0, value));
+    }
+  }
+}
+
+TEST(Bitmap, InterpolationPreservesBorderConventions) {
+  const Bitmap bitmap(10, 9, false);
+  EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(-0.5, 0.0));
+  EXPECT_TRUE(bitmap.InterpolateNearestNeighbor(std::nextafter(-0.5, 0.0), 0.0));
+  EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(9.5, 0.0));
+  EXPECT_TRUE(bitmap.InterpolateNearestNeighbor(std::nextafter(9.5, 0.0), 0.0));
+  EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(0.0, 8.5));
+  EXPECT_TRUE(bitmap.InterpolateNearestNeighbor(0.0, std::nextafter(8.5, 0.0)));
+  EXPECT_TRUE(bitmap.InterpolateBilinear(0.0, 0.0));
+  EXPECT_FALSE(bitmap.InterpolateBilinear(9.0, 0.0));
+  EXPECT_TRUE(bitmap.InterpolateBilinear(std::nextafter(9.0, 0.0), 0.0));
+  EXPECT_FALSE(bitmap.InterpolateBilinear(0.0, 8.0));
+  EXPECT_TRUE(bitmap.InterpolateBilinear(0.0, std::nextafter(8.0, 0.0)));
+  const Bitmap empty;
+  EXPECT_FALSE(empty.InterpolateNearestNeighbor(0.0, 0.0));
+  EXPECT_FALSE(empty.InterpolateBilinear(0.0, 0.0));
+  const Bitmap single(1, 1, false);
+  EXPECT_TRUE(single.InterpolateNearestNeighbor(0.0, 0.0));
+  EXPECT_FALSE(single.InterpolateBilinear(0.0, 0.0));
 }
 
 TEST(Bitmap, InterpolateBilinearOutOfBounds) {
