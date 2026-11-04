@@ -710,7 +710,7 @@ TEST(ThreadPool, NoArgReturn) {
   }
 
   for (auto& future : futures) {
-    future.get();
+    (void)future.get();
   }
 }
 
@@ -730,7 +730,7 @@ TEST(ThreadPool, ArgReturn) {
   }
 
   for (auto& future : futures) {
-    future.get();
+    (void)future.get();
   }
 }
 
@@ -830,6 +830,13 @@ TEST(ThreadPool, FuturePropagatesException) {
 TEST(ThreadPool, WaitPropagatesException) {
   ThreadPool pool(1);
   pool.AddTask([]() { throw std::runtime_error("Error"); });
+  EXPECT_THROW(pool.Wait(), AggregateException);
+  EXPECT_NO_THROW(pool.Wait());
+}
+
+TEST(ThreadPool, WaitPropagatesExceptionWithReturnValue) {
+  ThreadPool pool(1);
+  pool.AddTask([]() -> int { throw std::runtime_error("Error"); });
   EXPECT_THROW(pool.Wait(), AggregateException);
   EXPECT_NO_THROW(pool.Wait());
 }
