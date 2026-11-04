@@ -339,11 +339,13 @@ namespace PLY
 				polygons.resize( num_elems );
 				for( size_t j=0 ; j<num_elems ; j++ )
 				{
-					Face< Index > ply_face;
+					Face< Index > ply_face{};
+					auto dispose = []( Face< Index > *face ){ free( face->vertices ); };
+					// The guard frees only the parser-owned vertices, never the stack face.
+					std::unique_ptr< Face< Index > , decltype(dispose) > faceGuard( &ply_face , dispose );
 					ply->get_element( (void *)&ply_face );
 					polygons[j].resize( ply_face.nr_vertices );
 					for( unsigned int k=0 ; k<ply_face.nr_vertices ; k++ ) polygons[j][k] = ply_face.vertices[k];
-					free( ply_face.vertices );
 				}  // for, read faces
 			}  // if face
 			else ply->get_other_element( elem_name , num_elems );
