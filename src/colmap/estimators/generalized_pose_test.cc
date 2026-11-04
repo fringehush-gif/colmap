@@ -181,6 +181,49 @@ TEST(EstimateGeneralizedAbsolutePose, Nominal) {
       Rigid3dNear(problem.gt_rig_from_world, /*rtol=*/1e-6, /*ttol=*/1e-6));
 }
 
+TEST(EstimateGeneralizedAbsolutePose, TranslationPreservesPointIdentity) {
+  const auto check_translated = [](auto problem, auto estimate) {
+    // Repeated observations contain exact copies of a landmark's coordinates.
+    // A world translation must not merge distinct landmarks into one inlier.
+    const Eigen::Vector3d world_offset(1e6, 1e6, 1e6);
+    for (Eigen::Vector3d& point : problem.points3D) {
+      point += world_offset;
+    }
+    const FlatHashSet<size_t> unique_ids(
+        problem.point3D_ids.begin(), problem.point3D_ids.end());
+    RANSACOptions options;
+    options.max_error = 2;
+    options.random_seed = 0;
+    decltype(problem.gt_rig_from_world) rig_from_world;
+    size_t num_inliers = 0;
+    std::vector<char> inlier_mask;
+    ASSERT_TRUE(estimate(options,
+                         problem.points2D,
+                         problem.points3D,
+                         problem.camera_idxs,
+                         problem.cams_from_rig,
+                         problem.cameras,
+                         &rig_from_world,
+                         &num_inliers,
+                         &inlier_mask));
+    EXPECT_EQ(num_inliers, unique_ids.size());
+    EXPECT_EQ(inlier_mask, std::vector<char>(problem.points3D.size(), true));
+    // Undo the world translation before applying the original ground truth.
+    // Compare rig coordinates so the check covers both rigid and scaled poses.
+    for (const Eigen::Vector3d& point : problem.points3D) {
+      const Eigen::Vector3d expected =
+          problem.gt_rig_from_world * (point - world_offset);
+      EXPECT_LT((rig_from_world * point - expected).norm(), 1e-4);
+    }
+  };
+  SetPRNGSeed(0);
+  check_translated(BuildGeneralizedAbsolutePoseProblem(),
+                   EstimateGeneralizedAbsolutePose);
+  SetPRNGSeed(0);
+  check_translated(BuildScaledGeneralizedAbsolutePoseProblem(),
+                   EstimateScaledGeneralizedAbsolutePose);
+}
+
 TEST(EstimateGeneralizedAbsolutePose, EmptyInputsFail) {
   GeneralizedAbsolutePoseProblem problem =
       BuildGeneralizedAbsolutePoseProblem();
