@@ -840,10 +840,114 @@ TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {
   }
 }
 
+TEST_F(CudaTest, InvalidBitmapLeasesUseBothIndependentDenseUploadPaths) {
+  Inputs input = MakeInputs(0, 9, 257, 513);
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  problem.images = &input.images;
+  for (int id = 1; id < static_cast<int>(input.images.size()); ++id)
+    problem.src_image_idxs.push_back(id);
+  for (const bool direct : {false, true}) {
+    auto options = MakeOptions(false, false, false);
+    options.direct_source_upload = direct;
+    problem.source_bitmap_leases = nullptr;
+    PatchMatchCuda control(options, problem);
+    control.Run();
+    for (int invalid = 0; invalid < 3; ++invalid) {
+      SCOPED_TRACE(::testing::Message()
+                   << "direct " << direct << " invalid " << invalid);
+      std::vector<std::shared_ptr<const Bitmap> > leases(input.images.size());
+      const int source = 7;
+      if (invalid == 0) {
+        auto owner = std::make_shared<Bitmap>(input.images[source].GetBitmap());
+        std::weak_ptr<const Bitmap> weak = owner;
+        leases[source] = std::shared_ptr<const Bitmap>(
+            std::shared_ptr<const Bitmap>{}, owner.get());
+        owner.reset();
+        ASSERT_TRUE(weak.expired());
+      } else {
+        leases[source] = std::make_shared<Bitmap>(
+            input.images[source].GetWidth() + (invalid == 1 ? 1 : 0),
+            input.images[source].GetHeight(),
+            invalid == 2);
+      }
+      problem.source_bitmap_leases = &leases;
+      ASSERT_EQ(&problem.InputBitmap(source),
+                &input.images[source].GetBitmap());
+      PatchMatchCuda fallback(options, problem);
+      fallback.Run();
+      ExpectExactlyEqual(control.GetDepthMap(), fallback.GetDepthMap());
+      ExpectExactlyEqual(control.GetNormalMap(), fallback.GetNormalMap());
+      ExpectExactlyEqual(control.GetSelProbMap(), fallback.GetSelProbMap());
+      EXPECT_EQ(control.GetConsistentImageIdxs(),
+                fallback.GetConsistentImageIdxs());
+      problem.source_bitmap_leases = nullptr;
+    }
+  }
+}
+
+TEST_F(CudaTest, SparseSourceProvenanceRejectsUnknownOrChangedOwners) {
+  Inputs input = MakeInputs(0, 9, 257, 513);
+  std::vector<std::shared_ptr<const Bitmap> > bitmaps;
+  std::vector<std::shared_ptr<const DepthMap> > depths;
+  for (const auto& image : input.images)
+    bitmaps.push_back(std::make_shared<Bitmap>(image.GetBitmap()));
+  for (const auto& depth : input.depths)
+    depths.push_back(std::make_shared<DepthMap>(depth));
+  std::vector<std::vector<std::shared_ptr<const Bitmap> > > bitmap_leases(
+      3, bitmaps);
+  std::vector<std::vector<std::shared_ptr<const DepthMap> > > depth_leases(
+      3, depths);
+  std::vector<PatchMatch::Problem> problems(3);
+  std::vector<const PatchMatch::Problem*> pointers;
+  for (int ref = 0; ref < 3; ++ref) {
+    auto& p = problems[ref];
+    p.ref_image_idx = ref;
+    p.images = &input.images;
+    p.depth_maps = &input.depths;
+    p.source_bitmap_leases = &bitmap_leases[ref];
+    p.source_depth_leases = &depth_leases[ref];
+    for (int id = 0; id < static_cast<int>(input.images.size()); ++id)
+      if (id != ref) p.src_image_idxs.push_back(id);
+    pointers.push_back(&p);
+  }
+  ASSERT_TRUE(PatchMatchSparseSources::HasConsistentInputs(pointers, true));
+  const int source = 7;
+  auto changed_bitmap = std::make_shared<Bitmap>(*bitmaps[source]);
+  changed_bitmap->RowMajorData()[0] ^= 1;
+  bitmap_leases[1][source] = changed_bitmap;
+  EXPECT_FALSE(PatchMatchSparseSources::HasConsistentInputs(pointers, false));
+  bitmap_leases[1][source] = std::shared_ptr<const Bitmap>(
+      std::shared_ptr<const Bitmap>{}, bitmaps[source].get());
+  EXPECT_FALSE(PatchMatchSparseSources::HasConsistentInputs(pointers, false));
+  // Even equal contents after eviction/reload are not a common retained owner.
+  bitmap_leases[1][source] = std::make_shared<Bitmap>(*bitmaps[source]);
+  EXPECT_FALSE(PatchMatchSparseSources::HasConsistentInputs(pointers, false));
+  bitmap_leases[1][source] = bitmaps[source];
+  auto changed_depth = std::make_shared<DepthMap>(*depths[source]);
+  changed_depth->Set(0, 0, 123.0f);
+  depth_leases[1][source] = changed_depth;
+  EXPECT_FALSE(PatchMatchSparseSources::HasConsistentInputs(pointers, true));
+  depth_leases[1][source] = depths[source];
+  problems[1].source_bitmap_leases = nullptr;
+  EXPECT_FALSE(PatchMatchSparseSources::HasConsistentInputs(pointers, false));
+  problems[1].source_bitmap_leases = &bitmap_leases[1];
+  problems[1].source_depth_leases = nullptr;
+  EXPECT_FALSE(PatchMatchSparseSources::HasConsistentInputs(pointers, true));
+  problems[1].source_depth_leases = &depth_leases[1];
+  EXPECT_TRUE(PatchMatchSparseSources::HasConsistentInputs(pointers, true));
+}
+
 TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
   // One workspace identity; five references reuse differently ordered subsets.
   // Varying source dimensions exercise the original zero-padded layer extent.
   Inputs input = MakeInputs(0, 9, 257, 513);
+  std::vector<std::shared_ptr<const Bitmap> > bitmap_leases;
+  std::vector<std::shared_ptr<const DepthMap> > depth_leases;
+  for (const auto& image : input.images)
+    bitmap_leases.push_back(std::make_shared<Bitmap>(image.GetBitmap()));
+  for (const auto& depth : input.depths)
+    depth_leases.push_back(std::make_shared<DepthMap>(depth));
   for (const bool geometry : {false, true}) {
     for (const bool reuse : {false, true}) {
       auto options = MakeOptions(geometry, geometry, reuse);
@@ -863,6 +967,8 @@ TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
         problem.ref_image_idx = ref;
         problem.images = &images[ref];
         problem.depth_maps = &depths[ref];
+        problem.source_bitmap_leases = &bitmap_leases;
+        problem.source_depth_leases = &depth_leases;
         problem.normal_maps = &input.normals;
         for (int source = 0; source < 10; ++source)
           if (source != ref) problem.src_image_idxs.push_back(source);
@@ -905,6 +1011,20 @@ TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
       ASSERT_GT(PatchMatchSparseSources::Budget(pointers, geometry), 0);
       auto shared = PatchMatchSparseSources::Create(pointers, geometry);
       ASSERT_TRUE(shared);
+      const auto bitmap_generation = bitmap_leases[7];
+      bitmap_leases[7] = std::make_shared<Bitmap>(*bitmap_generation);
+      EXPECT_FALSE(shared->Matches(problems[0], geometry));
+      bitmap_leases[7] = bitmap_generation;
+      EXPECT_TRUE(shared->Matches(problems[0], geometry));
+      if (geometry) {
+        const auto depth_generation = depth_leases[7];
+        depth_leases[7] = std::make_shared<DepthMap>(*depth_generation);
+        EXPECT_FALSE(shared->Matches(problems[0], true));
+        depth_leases[7] = depth_generation;
+      }
+      std::swap(problems[0].src_image_idxs[0], problems[0].src_image_idxs[1]);
+      EXPECT_FALSE(shared->Matches(problems[0], geometry));
+      std::swap(problems[0].src_image_idxs[0], problems[0].src_image_idxs[1]);
       std::vector<std::unique_ptr<PatchMatchCuda> > owners;
       owners.push_back(std::make_unique<PatchMatchCuda>(options, problems[0]));
       owners[0]->UseSparseSources(shared);
@@ -951,6 +1071,9 @@ TEST_F(CudaTest, ImmutableSourceDepthLeasesPreserveThreeViewGeoOutput) {
   options.num_iterations = 5;
   constexpr int kReferences = 3;
   std::vector<std::shared_ptr<const DepthMap> > canonical;
+  std::vector<std::shared_ptr<const Bitmap> > bitmap_leases;
+  for (const auto& image : input.images)
+    bitmap_leases.push_back(std::make_shared<Bitmap>(image.GetBitmap()));
   for (const auto& depth : input.depths)
     canonical.push_back(std::make_shared<DepthMap>(depth));
   std::vector<std::vector<DepthMap> > old_depths(kReferences, input.depths);
@@ -967,6 +1090,7 @@ TEST_F(CudaTest, ImmutableSourceDepthLeasesPreserveThreeViewGeoOutput) {
     auto& candidate = new_problems[ref];
     old.ref_image_idx = candidate.ref_image_idx = ref;
     old.images = candidate.images = &input.images;
+    candidate.source_bitmap_leases = &bitmap_leases;
     old.normal_maps = candidate.normal_maps = &input.normals;
     old.depth_maps = &old_depths[ref];
     candidate.depth_maps = &owned_depths[ref];
@@ -997,6 +1121,16 @@ TEST_F(CudaTest, ImmutableSourceDepthLeasesPreserveThreeViewGeoOutput) {
     expected.push_back(read(owner));
   }
 
+  // Verify that the same leased payloads also feed the dense fallback.
+  for (int ref = 0; ref < kReferences; ++ref) {
+    PatchMatchCuda leased(options, new_problems[ref]);
+    leased.Run();
+    const auto actual = read(leased);
+    ExpectExactlyEqual(std::get<0>(expected[ref]), std::get<0>(actual));
+    ExpectExactlyEqual(std::get<1>(expected[ref]), std::get<1>(actual));
+    ExpectExactlyEqual(std::get<2>(expected[ref]), std::get<2>(actual));
+    EXPECT_EQ(std::get<3>(expected[ref]), std::get<3>(actual));
+  }
   ASSERT_GT(PatchMatchSparseSources::Budget(new_pointers, true), 0);
   auto shared = PatchMatchSparseSources::Create(new_pointers, true);
   ASSERT_TRUE(shared);

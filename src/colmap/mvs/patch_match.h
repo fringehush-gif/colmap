@@ -6,6 +6,7 @@
 #include "colmap/mvs/image.h"
 #include "colmap/mvs/normal_map.h"
 #include "colmap/mvs/patch_match_options.h"
+#include "colmap/sensor/bitmap.h"
 #ifndef __CUDACC__
 #include "colmap/util/base_controller.h"
 #include "colmap/util/threading.h"
@@ -37,11 +38,36 @@ class PatchMatch {
     // Input images for the photometric consistency term.
     std::vector<Image>* images = nullptr;
 
+    // Optional source bitmap owners. Their actual payload is used by BOTH
+    // dense and sparse source upload. The reference keeps its independent
+    // bitmap. Callers must not mutate a retained payload through another alias
+    // until all consumers and the source bank have finished. A lease must pin
+    // the actual payload storage, not alias it from an unrelated lifetime
+    // token. Some workspaces return non-owning aliases, so non-null alone does
+    // not establish that the lease keeps the payload alive.
+    std::vector<std::shared_ptr<const Bitmap>>* source_bitmap_leases = nullptr;
+
+    const Bitmap& InputBitmap(const int image_idx) const {
+      const auto& image = images->at(image_idx);
+      if (source_bitmap_leases != nullptr && image_idx != ref_image_idx &&
+          image_idx >= 0 &&
+          static_cast<size_t>(image_idx) < source_bitmap_leases->size()) {
+        const auto& lease = source_bitmap_leases->at(image_idx);
+        if (lease != nullptr && lease.use_count() > 0 && lease->IsGrey() &&
+            static_cast<size_t>(lease->Width()) == image.GetWidth() &&
+            static_cast<size_t>(lease->Height()) == image.GetHeight())
+          return *lease;
+      }
+      return image.GetBitmap();
+    }
+
     // Input depth maps for the geometric consistency term.
     std::vector<DepthMap>* depth_maps = nullptr;
 
     // Optional immutable source maps retained from Workspace leases. The
     // reference depth remains in depth_maps because initialization owns it.
+    // As for source_bitmap_leases, the owner must retain the actual payload,
+    // and no mutable alias may change it during upload or use.
     std::vector<std::shared_ptr<const DepthMap>>* source_depth_leases = nullptr;
 
     const DepthMap& InputDepthMap(const int image_idx) const {
@@ -49,7 +75,7 @@ class PatchMatch {
           image_idx >= 0 &&
           static_cast<size_t>(image_idx) < source_depth_leases->size()) {
         const auto& lease = source_depth_leases->at(image_idx);
-        if (lease != nullptr) return *lease;
+        if (lease != nullptr && lease.use_count() > 0) return *lease;
       }
       return depth_maps->at(image_idx);
     }
@@ -128,6 +154,7 @@ class PatchMatchController : public BaseController {
     PatchMatchOptions options;
     PatchMatch::Problem problem;
     std::vector<Image> images;
+    std::vector<std::shared_ptr<const Bitmap>> source_bitmap_leases;
     std::vector<DepthMap> depth_maps;
     std::vector<std::shared_ptr<const DepthMap>> source_depth_leases;
     std::vector<NormalMap> normal_maps;
@@ -142,7 +169,8 @@ class PatchMatchController : public BaseController {
   void ReadGpuIndices();
   bool PrepareProblem(const PatchMatchOptions& options,
                       size_t problem_idx,
-                      PreparedProblem* prepared);
+                      PreparedProblem* prepared,
+                      bool retain_sparse_sources = false);
   void ProcessProblem(const PatchMatchOptions& options, size_t problem_idx);
   void ProcessProblemPair(const PatchMatchOptions& options,
                           size_t first_problem_idx,

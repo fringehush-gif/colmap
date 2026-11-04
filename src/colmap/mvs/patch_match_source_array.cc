@@ -22,6 +22,39 @@
 namespace colmap {
 namespace mvs {
 namespace {
+template <typename T>
+bool SameOwnedPayload(const std::shared_ptr<const T>& a,
+                      const std::shared_ptr<const T>& b) {
+  return a && b && a.use_count() > 0 && b.use_count() > 0 &&
+         a.get() == b.get() && !a.owner_before(b) && !b.owner_before(a);
+}
+std::shared_ptr<const Bitmap> BitmapOwner(const PatchMatch::Problem& p,
+                                          int id) {
+  if (!p.images || id < 0 || id == p.ref_image_idx ||
+      size_t(id) >= p.images->size() || !p.source_bitmap_leases ||
+      size_t(id) >= p.source_bitmap_leases->size())
+    return {};
+  const auto& lease = p.source_bitmap_leases->at(id);
+  const auto& image = p.images->at(id);
+  if (!lease || lease.use_count() == 0 || &p.InputBitmap(id) != lease.get() ||
+      !lease->IsGrey() || lease->Width() != image.GetWidth() ||
+      lease->Height() != image.GetHeight())
+    return {};
+  return lease;
+}
+std::shared_ptr<const DepthMap> DepthOwner(const PatchMatch::Problem& p,
+                                           int id) {
+  if (!p.images || id < 0 || id == p.ref_image_idx ||
+      size_t(id) >= p.images->size() || !p.source_depth_leases ||
+      size_t(id) >= p.source_depth_leases->size())
+    return {};
+  const auto& lease = p.source_depth_leases->at(id);
+  if (!lease || lease.use_count() == 0 || &p.InputDepthMap(id) != lease.get() ||
+      lease->GetWidth() != p.images->at(id).GetWidth() ||
+      lease->GetHeight() != p.images->at(id).GetHeight())
+    return {};
+  return lease;
+}
 class SourceDeviceScope {
  public:
   explicit SourceDeviceScope(int device) {
@@ -81,6 +114,7 @@ size_t Round(size_t value, size_t alignment) {
   THROW_CHECK_LE(extra, std::numeric_limits<size_t>::max() - value);
   return value + extra;
 }
+#endif
 struct SourcePlan {
   size_t width = 0, height = 0, slots = 0;
   std::vector<int> ids;
@@ -105,14 +139,12 @@ SourcePlan Plan(const std::vector<const PatchMatch::Problem*>& problems,
       if (id < 0 || size_t(id) >= p->images->size() || id == p->ref_image_idx)
         return {};
       const auto& image = p->images->at(id);
-      if (!image.GetWidth() || !image.GetHeight() ||
-          !image.GetBitmap().IsGrey() ||
-          image.GetWidth() != image.GetBitmap().Width() ||
-          image.GetHeight() != image.GetBitmap().Height())
-        return {};
-      if (geometric && (size_t(id) >= p->depth_maps->size() ||
-                        p->InputDepthMap(id).GetWidth() != image.GetWidth() ||
-                        p->InputDepthMap(id).GetHeight() != image.GetHeight()))
+      const auto bitmap = BitmapOwner(*p, id);
+      if (!image.GetWidth() || !image.GetHeight() || !bitmap) return {};
+      if (geometric &&
+          (!DepthOwner(*p, id) || size_t(id) >= p->depth_maps->size() ||
+           p->InputDepthMap(id).GetWidth() != image.GetWidth() ||
+           p->InputDepthMap(id).GetHeight() != image.GetHeight()))
         return {};
       width = std::max(width, image.GetWidth());
       height = std::max(height, image.GetHeight());
@@ -123,7 +155,11 @@ SourcePlan Plan(const std::vector<const PatchMatch::Problem*>& problems,
       } else {
         const auto& old =
             plan.providers[found - plan.ids.begin()]->images->at(id);
-        if (old.GetPath() != image.GetPath() ||
+        const auto* provider = plan.providers[found - plan.ids.begin()];
+        if (!SameOwnedPayload(BitmapOwner(*provider, id), bitmap) ||
+            (geometric && !SameOwnedPayload(DepthOwner(*provider, id),
+                                            DepthOwner(*p, id))) ||
+            old.GetPath() != image.GetPath() ||
             old.GetWidth() != image.GetWidth() ||
             old.GetHeight() != image.GetHeight())
           return {};
@@ -141,6 +177,7 @@ SourcePlan Plan(const std::vector<const PatchMatch::Problem*>& problems,
   plan.problems = problems;
   return plan;
 }
+#ifdef COLMAP_SPARSE_SOURCE_RUNTIME
 struct SourceLayout {
   size_t width = 0, height = 0, stride = 0, pool = 0;
 };
@@ -223,6 +260,8 @@ struct PatchMatchSparseSources::Impl {
     std::vector<int> sources;
     const std::vector<Image>* images;
     const std::vector<DepthMap>* depths;
+    std::vector<std::shared_ptr<const Bitmap>> bitmap_owners;
+    std::vector<std::shared_ptr<const DepthMap>> depth_owners;
   };
   std::vector<Binding> bindings;
 #ifdef COLMAP_SPARSE_SOURCE_RUNTIME
@@ -317,7 +356,7 @@ struct PatchMatchSparseSources::Impl {
       const auto& image = p->images->at(id);
       const T* source;
       if constexpr (sizeof(T) == 1)
-        source = image.GetBitmap().RowMajorData().data();
+        source = p->InputBitmap(id).RowMajorData().data();
       else
         source = p->InputDepthMap(id).GetPtr();
       for (size_t row = 0; row < image.GetHeight(); ++row)
@@ -348,6 +387,10 @@ struct PatchMatchSparseSources::Impl {
 PatchMatchSparseSources::PatchMatchSparseSources(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
 PatchMatchSparseSources::~PatchMatchSparseSources() = default;
+bool PatchMatchSparseSources::HasConsistentInputs(
+    const std::vector<const PatchMatch::Problem*>& problems, bool geometric) {
+  return Plan(problems, geometric).width != 0;
+}
 size_t PatchMatchSparseSources::Budget(
     const std::vector<const PatchMatch::Problem*>& problems, bool geometric) {
 #ifdef COLMAP_SPARSE_SOURCE_RUNTIME
@@ -377,11 +420,19 @@ std::shared_ptr<const PatchMatchSparseSources> PatchMatchSparseSources::Create(
   impl->geometric = geometric;
   impl->width = plan.width;
   impl->height = plan.height;
-  for (const auto* p : problems)
-    impl->bindings.push_back({p->ref_image_idx,
-                              p->src_image_idxs,
-                              p->images,
-                              geometric ? p->depth_maps : nullptr});
+  for (const auto* p : problems) {
+    Impl::Binding binding{p->ref_image_idx,
+                          p->src_image_idxs,
+                          p->images,
+                          geometric ? p->depth_maps : nullptr,
+                          {},
+                          {}};
+    for (int id : p->src_image_idxs) {
+      binding.bitmap_owners.push_back(BitmapOwner(*p, id));
+      if (geometric) binding.depth_owners.push_back(DepthOwner(*p, id));
+    }
+    impl->bindings.push_back(std::move(binding));
+  }
   impl->images.reserve(problems.size());
   impl->depths.reserve(problems.size());
   impl->maps.reserve(Product(plan.slots, geometric ? 2 : 1));
@@ -405,10 +456,20 @@ bool PatchMatchSparseSources::Matches(const PatchMatch::Problem& p,
                                       bool geometric) const {
   if (geometric != impl_->geometric) return false;
   for (const auto& binding : impl_->bindings)
-    if (binding.reference == p.ref_image_idx)
-      return binding.sources == p.src_image_idxs &&
-             binding.images == p.images &&
-             (!geometric || binding.depths == p.depth_maps);
+    if (binding.reference == p.ref_image_idx) {
+      if (binding.sources != p.src_image_idxs || binding.images != p.images ||
+          (geometric && binding.depths != p.depth_maps))
+        return false;
+      for (size_t slot = 0; slot < binding.sources.size(); ++slot) {
+        const int id = binding.sources[slot];
+        if (!SameOwnedPayload(binding.bitmap_owners[slot],
+                              BitmapOwner(p, id)) ||
+            (geometric &&
+             !SameOwnedPayload(binding.depth_owners[slot], DepthOwner(p, id))))
+          return false;
+      }
+      return true;
+    }
   return false;
 }
 

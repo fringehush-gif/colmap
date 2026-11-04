@@ -3826,10 +3826,11 @@ void PatchMatchCuda::InitSourceImages() {
       image_slices.reserve(problem_.src_image_idxs.size());
       for (const auto image_idx : problem_.src_image_idxs) {
         const Image& image = problem_.images->at(image_idx);
-        image_slices.push_back({image.GetBitmap().RowMajorData().data(),
-                                image.GetWidth(),
-                                image.GetHeight(),
-                                image.GetWidth()});
+        image_slices.push_back(
+            {problem_.InputBitmap(image_idx).RowMajorData().data(),
+             image.GetWidth(),
+             image.GetHeight(),
+             image.GetWidth()});
       }
       src_images_texture_ = PatchMatchSourceArray<uint8_t>::FromHostSlices(
           texture_desc, max_width, max_height, image_slices);
@@ -3842,7 +3843,7 @@ void PatchMatchCuda::InitSourceImages() {
           kDefaultValue);
       for (size_t i = 0; i < problem_.src_image_idxs.size(); ++i) {
         const Image& image = problem_.images->at(problem_.src_image_idxs[i]);
-        const Bitmap& bitmap = image.GetBitmap();
+        const Bitmap& bitmap = problem_.InputBitmap(problem_.src_image_idxs[i]);
         // The texture reads each layer with a row stride of max_width, while
         // the bitmap rows are packed with the image's own width. Images
         // narrower than max_width must therefore be copied row by row - a

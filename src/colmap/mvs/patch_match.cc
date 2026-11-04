@@ -123,11 +123,12 @@ void PatchMatch::Check() const {
     THROW_CHECK_LT(image_idx, problem_.images->size()) << image_idx;
 
     const Image& image = problem_.images->at(image_idx);
-    THROW_CHECK_GT(image.GetBitmap().Width(), 0) << image_idx;
-    THROW_CHECK_GT(image.GetBitmap().Height(), 0) << image_idx;
-    THROW_CHECK(image.GetBitmap().IsGrey()) << image_idx;
-    THROW_CHECK_EQ(image.GetWidth(), image.GetBitmap().Width()) << image_idx;
-    THROW_CHECK_EQ(image.GetHeight(), image.GetBitmap().Height()) << image_idx;
+    const Bitmap& bitmap = problem_.InputBitmap(image_idx);
+    THROW_CHECK_GT(bitmap.Width(), 0) << image_idx;
+    THROW_CHECK_GT(bitmap.Height(), 0) << image_idx;
+    THROW_CHECK(bitmap.IsGrey()) << image_idx;
+    THROW_CHECK_EQ(image.GetWidth(), bitmap.Width()) << image_idx;
+    THROW_CHECK_EQ(image.GetHeight(), bitmap.Height()) << image_idx;
 
     // Make sure, the calibration matrix only contains fx, fy, cx, cy.
     THROW_CHECK_LT(std::abs(image.GetK()[1] - 0.0f), 1e-6f) << image_idx;
@@ -498,7 +499,8 @@ void PatchMatchController::ReadGpuIndices() {
 
 bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
                                           const size_t problem_idx,
-                                          PreparedProblem* prepared) {
+                                          PreparedProblem* prepared,
+                                          const bool retain_sparse_sources) {
   if (CheckIfStopped()) {
     return false;
   }
@@ -558,6 +560,10 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
   auto& depth_maps = prepared->depth_maps;
   auto& normal_maps = prepared->normal_maps;
   images = model.images;
+  if (retain_sparse_sources) {
+    prepared->source_bitmap_leases.resize(model.images.size());
+    problem.source_bitmap_leases = &prepared->source_bitmap_leases;
+  }
   if (options.geom_consistency) {
     depth_maps.resize(model.images.size());
     normal_maps.resize(model.images.size());
@@ -618,13 +624,23 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
       futures.reserve(valid_image_idxs.size());
       for (const auto image_idx : valid_image_idxs) {
         futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
-          images.at(image_idx).SetBitmap(
-              *workspace_->GetBitmapLease(image_idx));
+          const auto bitmap_lease = workspace_->GetBitmapLease(image_idx);
+          if (retain_sparse_sources && image_idx != problem.ref_image_idx &&
+              bitmap_lease.use_count() > 0 && bitmap_lease->IsGrey() &&
+              static_cast<size_t>(bitmap_lease->Width()) ==
+                  images.at(image_idx).GetWidth() &&
+              static_cast<size_t>(bitmap_lease->Height()) ==
+                  images.at(image_idx).GetHeight()) {
+            prepared->source_bitmap_leases.at(image_idx) = bitmap_lease;
+          } else {
+            images.at(image_idx).SetBitmap(*bitmap_lease);
+          }
           if (options.geom_consistency) {
             const auto depth_lease = workspace_->GetDepthMapLease(image_idx);
             // Only source maps may alias the immutable workspace owner. The
             // reference retains its independent mutable initialization copy.
             if (image_idx != problem.ref_image_idx &&
+                depth_lease.use_count() > 0 &&
                 depth_lease->GetWidth() == images.at(image_idx).GetWidth() &&
                 depth_lease->GetHeight() == images.at(image_idx).GetHeight()) {
               prepared->source_depth_leases.at(image_idx) = depth_lease;
@@ -798,7 +814,7 @@ void PatchMatchController::ProcessProblemBatch(
   input.reserve(problem_indices.size());
   for (const size_t index : problem_indices) {
     auto prepared = std::make_unique<PreparedProblem>();
-    if (PrepareProblem(options, index, prepared.get())) {
+    if (PrepareProblem(options, index, prepared.get(), true)) {
       PatchMatch(prepared->options, prepared->problem).Check();
       input.push_back(std::move(prepared));
     }
