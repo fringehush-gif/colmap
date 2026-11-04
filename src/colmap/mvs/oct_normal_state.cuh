@@ -483,46 +483,6 @@ __device__ inline void StoreNormal(ActiveNormalView view,
     view.fp32.SetSlice(row, col, normal);
 }
 
-__device__ inline void LoadNormal(OctNormalView view,
-                                  size_t row,
-                                  size_t col,
-                                  float* normal,
-                                  oct_magnitude::Encoded& code) {
-  code = view.ReadCode(row, col);
-  view.DecodeCode(code, normal);
-}
-__device__ inline void PrepareNormal(OctNormalView view,
-                                     float* normal,
-                                     oct_magnitude::Encoded& code) {
-  code = view.Canonicalize(normal);
-}
-__device__ inline void StoreNormal(OctNormalView view,
-                                   size_t row,
-                                   size_t col,
-                                   const float*,
-                                   oct_magnitude::Encoded code) {
-  view.StoreCode(row, col, code);
-}
-__device__ inline void LoadNormal(GpuMatView<float> view,
-                                  size_t row,
-                                  size_t col,
-                                  float* normal,
-                                  oct_magnitude::Encoded& code) {
-  view.GetSlice(row, col, normal);
-  code = oct_magnitude::Invalid();
-}
-__device__ inline void PrepareNormal(GpuMatView<float>,
-                                     float*,
-                                     oct_magnitude::Encoded& code) {
-  code = oct_magnitude::Invalid();
-}
-__device__ inline void StoreNormal(GpuMatView<float> view,
-                                   size_t row,
-                                   size_t col,
-                                   const float* normal,
-                                   oct_magnitude::Encoded) {
-  view.SetSlice(row, col, normal);
-}
 #endif
 
 }  // namespace mvs
