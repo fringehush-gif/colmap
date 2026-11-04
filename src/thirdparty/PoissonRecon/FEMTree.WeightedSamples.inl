@@ -387,7 +387,7 @@ Point< Real , 2 > FEMTree< Dim , Real >::_splatPointData( V zero , Allocator< FE
 
 	auto Splat = [&]( FEMTreeNode *node , Real dx )
 	{
-		double width = 1.0 / ( 1<<_localDepth( temp ) );
+		double width = 1.0 / ( 1<<_localDepth( node ) );
 		// Scale by:
 		//		weight: the area/volume associated with the sample
 		//		dx: the fraction of the sample splatted into the current depth
@@ -398,9 +398,9 @@ Point< Real , 2 > FEMTree< Dim , Real >::_splatPointData( V zero , Allocator< FE
 #ifdef SHOW_WARNINGS
 #warning "you've got me gcc version<5"
 #endif // SHOW_WARNINGS
-		_splatPointData< CreateNodes , ThreadSafe , V >( zero , nodeAllocator , temp , position , _v , dataInfo , dataKey );
+		_splatPointData< CreateNodes , ThreadSafe , V >( zero , nodeAllocator , node , position , _v , dataInfo , dataKey );
 #else // !__GNUC__ || __GNUC__ >=5
-		_splatPointData< CreateNodes , ThreadSafe , V ,  DataSigs ... >( zero , nodeAllocator , temp , position , _v , dataInfo , dataKey );
+		_splatPointData< CreateNodes , ThreadSafe , V ,  DataSigs ... >( zero , nodeAllocator , node , position , _v , dataInfo , dataKey );
 #endif // __GNUC__ || __GNUC__ < 4
 	};
 	Splat( temp , (Real)dx );
@@ -463,7 +463,7 @@ Point< Real , 2 > FEMTree< Dim , Real >::_splatPointData( V zero , Allocator< FE
 
 	auto Splat = [&]( FEMTreeNode *node , Real dx )
 	{
-		double width = 1.0 / ( 1<<_localDepth( temp ) );
+		double width = 1.0 / ( 1<<_localDepth( node ) );
 		// Scale by:
 		//		weight: the area/volume associated with the sample
 		//		dx: the fraction of the sample splatted into the current depth
@@ -474,9 +474,9 @@ Point< Real , 2 > FEMTree< Dim , Real >::_splatPointData( V zero , Allocator< FE
 #ifdef SHOW_WARNINGS
 		#warning "you've got me gcc version<5"
 #endif // SHOW_WARNINGS
-		_splatPointData< CreateNodes , ThreadSafe , V >( zero , nodeAllocator , temp , position , _v , dataInfo , dataKey );
+		_splatPointData< CreateNodes , ThreadSafe , V >( zero , nodeAllocator , node , position , _v , dataInfo , dataKey );
 #else // !__GNUC__ || __GNUC__ >=5
-		_splatPointData< CreateNodes , ThreadSafe , V ,  DataSigs ... >( zero , nodeAllocator , temp , position , _v , dataInfo , dataKey );
+		_splatPointData< CreateNodes , ThreadSafe , V ,  DataSigs ... >( zero , nodeAllocator , node , position , _v , dataInfo , dataKey );
 #endif // __GNUC__ || __GNUC__ < 4
 	};
 	Splat( temp , (Real)dx );
