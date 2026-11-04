@@ -137,3 +137,18 @@ def test_patch_match_normal_oct40_option() -> None:
         setattr(options, name, True)
         assert options.check() == pycolmap.has_cuda
         setattr(options, name, False)
+
+
+def test_patch_match_probability_unorm16_option() -> None:
+    options = pycolmap.PatchMatchOptions()
+    assert options.probability_unorm16 is False
+    assert options.todict()["probability_unorm16"] is False
+    options.probability_unorm16 = True
+    options.checkpoint_hmm = False
+    assert not options.check()
+    copied = pycolmap.PatchMatchOptions(options.todict())
+    assert copied.probability_unorm16 is True
+    assert not copied.checkpoint_hmm
+    assert not copied.check()
+    copied.checkpoint_hmm = True
+    assert copied.check() == pycolmap.has_cuda

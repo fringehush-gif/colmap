@@ -201,6 +201,12 @@ void BindMVS(py::module& m) {
               "checkpoint_hmm, radius 5 and step 1; mutually exclusive with "
               "other NCC cost codecs.")
           .def_readwrite(
+              "probability_unorm16",
+              &PMOpts::probability_unorm16,
+              "Store previous selection probabilities as lossy UNORM16. "
+              "Requires CUDA and checkpoint_hmm; may change source sampling, "
+              "depth and normals.")
+          .def_readwrite(
               "checkpoint_hmm",
               &PMOpts::checkpoint_hmm,
               "Reduce GPU memory by replaying backward HMM messages from "
