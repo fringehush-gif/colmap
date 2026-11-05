@@ -3377,6 +3377,106 @@ TEST(StereoFusion, RetiredEagerInputsSurviveInterruptionAndRepeat) {
   }
 }
 
+TEST(StereoFusion, EmptyModelProducesNoOutput) {
+  const auto root = CreateTestDir();
+  CreateDirIfNotExists(root / "sparse");
+  CreateDirIfNotExists(root / "images");
+  CreateDirIfNotExists(root / "stereo");
+  Reconstruction reconstruction;
+  reconstruction.Write(root / "sparse");
+  {
+    std::ofstream config(root / "stereo/fusion.cfg");
+    ASSERT_TRUE(config.is_open());
+  }
+  for (const int mode : {0, 1, 2, 3}) {
+    SCOPED_TRACE(mode);
+    StereoFusionOptions options;
+    options.num_threads = 1;
+    options.use_cache = mode == 1;
+    options.bounded_cache = mode >= 2;
+    options.bounded_cache_components = mode == 3;
+    options.bounded_cache_neighborhood = mode == 3;
+    StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+    ASSERT_NO_THROW(fusion.Run());
+    EXPECT_TRUE(fusion.GetFusedPoints().empty());
+    EXPECT_TRUE(fusion.GetFusedPointsVisibility().empty());
+  }
+}
+
+TEST(StereoFusion, ChangedRosterAfterCancellationSelectsOnlyCurrentRoots) {
+  const bool mapped_storage_supported = ImmutableMapRegion::Supported();
+  RecordProperty("mapped_storage_supported",
+                 mapped_storage_supported ? "true" : "false");
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  Model model;
+  model.Read(root, "COLMAP");
+  ASSERT_EQ(model.images.size(), 2);
+  const auto write_roster = [&](const std::vector<int>& image_indices) {
+    std::ofstream config(root / "stereo/fusion.cfg");
+    for (const int image_idx : image_indices) {
+      config << model.GetImageName(image_idx) << '\n';
+    }
+    config.close();
+    ASSERT_TRUE(config);
+  };
+
+  for (const std::string mode :
+       {"eager", "lru", "bounded", "components", "mapped"}) {
+    SCOPED_TRACE(mode);
+    if (mode == "mapped" && !mapped_storage_supported) continue;
+    StereoFusionOptions options;
+    options.num_threads = 1;
+    options.min_num_pixels = options.max_num_pixels = 1;
+    options.cache_size = 1.0 / 1024;
+    options.use_cache = mode == "lru";
+    options.bounded_cache =
+        mode == "bounded" || mode == "components" || mode == "mapped";
+    options.bounded_cache_components = mode == "components" || mode == "mapped";
+    options.bounded_cache_neighborhood = mode == "components";
+    options.bounded_cache_normal_tile_size = mode == "components" ? 4 : 0;
+    if (mode == "components" || mode == "mapped") {
+      options.bounded_cache_normal_mapped_bytes = 1 << 20;
+      options.bounded_cache_normal_mapped_files = 2;
+    }
+    StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+    write_roster({0, 1});
+    int stop_checks = 0;
+    fusion.SetCheckIfStoppedFunc([&] { return ++stop_checks == 2; });
+    fusion.Run();
+    ASSERT_EQ(stop_checks, 2);
+    ASSERT_TRUE(fusion.GetFusedPoints().empty());
+
+    // Cancellation has initialized both per-image rasters without consuming
+    // either root. Reusing that state must not admit a now-excluded image.
+    write_roster({1});
+    fusion.SetCheckIfStoppedFunc([] { return false; });
+    ASSERT_NO_THROW(fusion.Run());
+    EXPECT_EQ(fusion.GetFusedPoints().size(), 600);
+    ASSERT_EQ(fusion.GetFusedPointsVisibility().size(), 600);
+    for (const auto& visibility : fusion.GetFusedPointsVisibility()) {
+      EXPECT_EQ(visibility, (std::vector<int>{1}));
+    }
+
+    write_roster({});
+    ASSERT_NO_THROW(fusion.Run());
+    EXPECT_TRUE(fusion.GetFusedPoints().empty());
+    EXPECT_TRUE(fusion.GetFusedPointsVisibility().empty());
+
+    write_roster({0, 1});
+    ASSERT_NO_THROW(fusion.Run());
+    EXPECT_EQ(fusion.GetFusedPoints().size(), 1200);
+    ASSERT_EQ(fusion.GetFusedPointsVisibility().size(), 1200);
+    std::vector<size_t> coverage(2, 0);
+    for (const auto& visibility : fusion.GetFusedPointsVisibility()) {
+      ASSERT_EQ(visibility.size(), 1);
+      ASSERT_GE(visibility.front(), 0);
+      ASSERT_LT(visibility.front(), 2);
+      ++coverage[visibility.front()];
+    }
+    EXPECT_EQ(coverage, (std::vector<size_t>{600, 600}));
+  }
+}
+
 TEST(StereoFusion, RejectedRootsDoNotLeakVisibility) {
   const auto root = CreateTwoViewNormalDecisionFixture();
   for (const int num_samples : {3, 1, 2}) {

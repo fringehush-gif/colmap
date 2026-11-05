@@ -239,9 +239,12 @@ int FindNextImage(const std::vector<std::vector<int>>& overlapping_images,
                   const int prev_image_idx) {
   THROW_CHECK_EQ(used_images.size(), fused_images.size());
 
-  for (const auto image_idx : overlapping_images.at(prev_image_idx)) {
-    if (used_images.at(image_idx) && !fused_images.at(image_idx)) {
-      return image_idx;
+  // A negative previous index selects the first eligible root.
+  if (prev_image_idx >= 0) {
+    for (const auto image_idx : overlapping_images.at(prev_image_idx)) {
+      if (used_images.at(image_idx) && !fused_images.at(image_idx)) {
+        return image_idx;
+      }
     }
   }
 
@@ -875,7 +878,9 @@ void StereoFusion::Run() {
     }
     size_t num_fused_images = 0;
     size_t total_fused_points = 0;
-    for (int image_idx = 0; image_idx >= 0;
+    for (int image_idx = internal::FindNextImage(
+             overlapping_images_, used_images_, fused_images_, -1);
+         image_idx >= 0;
          image_idx = internal::FindNextImage(
              overlapping_images_, used_images_, fused_images_, image_idx)) {
       if (CheckIfStopped()) {
