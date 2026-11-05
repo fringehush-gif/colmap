@@ -429,11 +429,14 @@ void StereoFusion::Fuse(const int thread_id,
         Eigen::Vector4f(col * depth, row * depth, depth, 1.0f);
 
     // Read the color of the pixel.
-    const auto& bitmap_scale = bitmap_scales_.at(image_idx);
+    const auto& bitmap = workspace_->GetBitmap(image_idx);
+    const auto& depth_map_size = depth_map_sizes_.at(image_idx);
     const auto color =
-        workspace_->GetBitmap(image_idx)
-            .InterpolateNearestNeighbor(col / bitmap_scale.first,
-                                        row / bitmap_scale.second)
+        bitmap
+            .GetPixel(internal::RescalePixelCenter(
+                          col, depth_map_size.first, bitmap.Width()),
+                      internal::RescalePixelCenter(
+                          row, depth_map_size.second, bitmap.Height()))
             .value_or(BitmapColor<uint8_t>(0));
 
     // Set the current pixel as visited.
