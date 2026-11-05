@@ -34,6 +34,7 @@ DAMAGE.
 #include <vector>
 #include <stdlib.h>
 #include <unordered_map>
+#include <type_traits>
 #include <string.h>
 #ifdef _WIN32
 #include <io.h>
@@ -620,14 +621,17 @@ namespace PoissonRecon
 
 	template< class Real , unsigned int Dim > Real SquareArea( Point< Real , Dim > p1 , Point< Real , Dim > p2 , Point< Real , Dim > p3 )
 	{
-		Point< Real , Dim > v1 = p2-p1 , v2 = p3-p1;
-		// Area^2 = ( |v1|^2 * |v2|^2 * sin^2( < v1 ,v2 ) ) / 4
-		//        = ( |v1|^2 * |v2|^2 * ( 1 - cos^2( < v1 ,v2 ) ) ) / 4
-		//        = ( |v1|^2 * |v2|^2 * ( 1 - < v1 , v2 >^2 / ( |v1|^2 * |v2|^2 ) ) ) / 4
-		//        = ( |v1|^2 * |v2|^2 - < v1 , v2 >^2 ) / 4
-		Real dot = Point< Real , Dim >::Dot( v1 , v2 );
-		Real l1 = Point< Real , Dim >::SquareNorm( v1 ) , l2 = Point< Real , Dim >::SquareNorm( v2 );
-		return ( l1 * l2 - dot * dot ) / 4;
+		using Accumulator = std::conditional_t< std::is_same_v< Real , float > , double , Real >;
+		const Point< Accumulator , Dim > v1 = Point< Accumulator , Dim >( p2 ) - Point< Accumulator , Dim >( p1 );
+		const Point< Accumulator , Dim > v2 = Point< Accumulator , Dim >( p3 ) - Point< Accumulator , Dim >( p1 );
+		// Sum squared minors instead of subtracting nearly equal Gram products.
+		Accumulator squareArea = 0;
+		for( unsigned int i=0 ; i<Dim ; i++ ) for( unsigned int j=i+1 ; j<Dim ; j++ )
+		{
+			const Accumulator minor = v1[i]*v2[j] - v1[j]*v2[i];
+			squareArea += minor*minor;
+		}
+		return (Real)( squareArea / 4 );
 	}
 	template< class Real , unsigned int Dim > Real Area( Point< Real , Dim > p1 , Point< Real , Dim > p2 , Point< Real , Dim > p3 ){ return (Real)sqrt( SquareArea( p1 , p2 , p3 ) ); }
 
