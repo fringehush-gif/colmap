@@ -578,5 +578,82 @@ TEST(RectifyAndUndistortStereoImages, Nominal) {
   EXPECT_EQ(undistorted_image1.Height(), undistorted_image2.Height());
 }
 
+TEST(RectifyAndUndistortStereoImages, PreservesMetadataAcrossWarpModes) {
+  const Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kPinhole, 100, 64, 64);
+  const Rigid3d cam2_from_cam1(Eigen::Quaterniond::Identity(),
+                               Eigen::Vector3d(1, 0, 0));
+  for (const bool as_rgb : {false, true}) {
+    Bitmap left(64, 64, as_rgb);
+    Bitmap right(64, 64, as_rgb);
+    left.Fill(BitmapColor<uint8_t>(73, 91, 115));
+    right.Fill(BitmapColor<uint8_t>(167, 153, 129));
+    left.SetMetaData("stereo-source", "left");
+    right.SetMetaData("stereo-source", "right");
+    for (const auto interpolation :
+         {WarpImageOptions::Interpolation::kNearestNeighbor,
+          WarpImageOptions::Interpolation::kBilinear}) {
+      for (const double direct_warp_min_scale : {0.0, 2.0}) {
+        UndistortCameraOptions options;
+        options.max_image_size = 32;
+        options.warp_options.interpolation = interpolation;
+        options.warp_options.direct_warp_min_scale = direct_warp_min_scale;
+        Bitmap rectified_left;
+        Bitmap rectified_right;
+        Camera rectified_camera;
+        Eigen::Matrix4d Q;
+        RectifyAndUndistortStereoImages(options,
+                                        left,
+                                        right,
+                                        camera,
+                                        camera,
+                                        cam2_from_cam1,
+                                        &rectified_left,
+                                        &rectified_right,
+                                        &rectified_camera,
+                                        &Q);
+        EXPECT_EQ(rectified_left.GetMetaData("stereo-source"), "left");
+        EXPECT_EQ(rectified_right.GetMetaData("stereo-source"), "right");
+        EXPECT_EQ(rectified_left.Width(), 32);
+        EXPECT_EQ(rectified_left.Height(), 32);
+        EXPECT_EQ(rectified_right.Width(), 32);
+        EXPECT_EQ(rectified_right.Height(), 32);
+        EXPECT_EQ(rectified_left.IsRGB(), as_rgb);
+        EXPECT_EQ(rectified_right.IsRGB(), as_rgb);
+      }
+    }
+  }
+}
+
+TEST(RectifyAndUndistortStereoImages, FirstOutputCompleteWhenSecondWarpFails) {
+  const Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kPinhole, 100, 64, 64);
+  Camera invalid_camera = camera;
+  invalid_camera.params.clear();
+  Bitmap left(64, 64, true);
+  Bitmap right(64, 64, true);
+  left.SetMetaData("stereo-source", "left");
+  right.SetMetaData("stereo-source", "right");
+  Bitmap rectified_left;
+  Bitmap rectified_right;
+  Camera rectified_camera;
+  Eigen::Matrix4d Q;
+  const Rigid3d cam2_from_cam1(Eigen::Quaterniond::Identity(),
+                               Eigen::Vector3d(1, 0, 0));
+  EXPECT_ANY_THROW(RectifyAndUndistortStereoImages(UndistortCameraOptions(),
+                                                   left,
+                                                   right,
+                                                   camera,
+                                                   invalid_camera,
+                                                   cam2_from_cam1,
+                                                   &rectified_left,
+                                                   &rectified_right,
+                                                   &rectified_camera,
+                                                   &Q));
+  EXPECT_EQ(rectified_left.GetMetaData("stereo-source"), "left");
+  EXPECT_EQ(rectified_left.Width(), 64);
+  EXPECT_EQ(rectified_left.Height(), 64);
+}
+
 }  // namespace
 }  // namespace colmap

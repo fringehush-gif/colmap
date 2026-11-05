@@ -437,16 +437,6 @@ void RectifyAndUndistortStereoImages(const UndistortCameraOptions& options,
   THROW_CHECK_EQ(distorted_camera2.height, distorted_image2.Height());
 
   *undistorted_camera = UndistortCamera(options, distorted_camera1);
-  *undistorted_image1 = Bitmap(static_cast<int>(undistorted_camera->width),
-                               static_cast<int>(undistorted_camera->height),
-                               distorted_image1.IsRGB());
-  distorted_image1.CloneMetadata(undistorted_image1);
-
-  *undistorted_image2 = Bitmap(static_cast<int>(undistorted_camera->width),
-                               static_cast<int>(undistorted_camera->height),
-                               distorted_image2.IsRGB());
-  distorted_image2.CloneMetadata(undistorted_image2);
-
   Eigen::Matrix3d H1;
   Eigen::Matrix3d H2;
   RectifyStereoCameras(
@@ -458,12 +448,14 @@ void RectifyAndUndistortStereoImages(const UndistortCameraOptions& options,
                                         *undistorted_camera,
                                         distorted_image1,
                                         undistorted_image1);
+  distorted_image1.CloneMetadata(undistorted_image1);
   WarpImageWithHomographyBetweenCameras(options.warp_options,
                                         H2.inverse(),
                                         distorted_camera2,
                                         *undistorted_camera,
                                         distorted_image2,
                                         undistorted_image2);
+  distorted_image2.CloneMetadata(undistorted_image2);
 }
 
 }  // namespace colmap
