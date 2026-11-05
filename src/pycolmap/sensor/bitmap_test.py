@@ -86,6 +86,54 @@ def test_bitmap_from_array_rgb() -> None:
     assert bitmap.is_rgb
 
 
+@pytest.mark.parametrize("as_rgb", [False, True])
+def test_bitmap_from_array_noncontiguous(as_rgb: bool) -> None:
+    shape = (6, 8, 3) if as_rgb else (6, 8)
+    source = np.arange(np.prod(shape), dtype=np.uint8).reshape(shape)
+    view = source[::2, ::-1]
+    assert not view.flags.c_contiguous
+    bitmap = pycolmap.Bitmap.from_array(view)
+    np.testing.assert_array_equal(bitmap.to_array(), view)
+
+
+def test_bitmap_from_array_broadcast() -> None:
+    view = np.broadcast_to(np.array([[71]], dtype=np.uint8), (3, 5))
+    assert not view.flags.c_contiguous
+    bitmap = pycolmap.Bitmap.from_array(view)
+    np.testing.assert_array_equal(bitmap.to_array(), view)
+
+
+@pytest.mark.parametrize("as_rgb", [False, True])
+def test_bitmap_from_array_memoryview_noncontiguous(as_rgb: bool) -> None:
+    shape = (6, 8, 3) if as_rgb else (6, 8)
+    source = np.arange(np.prod(shape), dtype=np.uint8).reshape(shape)
+    view = source[::2, ::-1]
+    buffer = memoryview(view)
+    assert not buffer.c_contiguous
+    bitmap = pycolmap.Bitmap.from_array(buffer)
+    np.testing.assert_array_equal(bitmap.to_array(), view)
+
+
+@pytest.mark.parametrize("dtype", [np.int16, np.float32, object])
+def test_bitmap_from_array_memoryview_rejects_unsafe_dtype(dtype) -> None:
+    buffer = memoryview(np.zeros((3, 5), dtype=dtype))
+    with pytest.raises(TypeError):
+        pycolmap.Bitmap.from_array(buffer)
+
+
+def test_bitmap_from_array_sequence() -> None:
+    source = [[0, 17, 255], [71, 131, 3]]
+    bitmap = pycolmap.Bitmap.from_array(source)
+    np.testing.assert_array_equal(bitmap.to_array(), np.array(source, dtype=np.uint8))
+
+
+@pytest.mark.parametrize("dtype", [np.int16, np.float32, object])
+def test_bitmap_from_array_rejects_unsafe_dtype(dtype) -> None:
+    source = np.zeros((3, 5), dtype=dtype)
+    with pytest.raises(TypeError):
+        pycolmap.Bitmap.from_array(source)
+
+
 def test_bitmap_to_array_roundtrip_grey() -> None:
     array_in = np.random.randint(0, 256, (48, 64), dtype=np.uint8)
     bitmap = pycolmap.Bitmap.from_array(array_in)
@@ -509,3 +557,25 @@ def test_bitmap_scope_loader_failure_preserves_stats_and_releases_on_close(
         scope.close()
     assert loader_ref() is None
     assert scope.stats()["bitmapReads"] == 0
+
+
+@pytest.mark.parametrize(
+    ("shape", "strides"),
+    [
+        ((1, (1 << 32) + 1), (0, 1)),
+        (((1 << 32) + 1, 1), (1, 0)),
+        ((1, 1, (1 << 32) + 1), (0, 0, 1)),
+    ],
+)
+def test_bitmap_from_array_rejects_dimensions_before_narrowing(shape, strides):
+    if np.dtype(np.intp).itemsize <= 4:
+        pytest.skip("requires NumPy dimensions wider than a C++ int")
+    # Metadata-only view: validation must reject before accessing its pixels.
+    # Each oversized axis would otherwise narrow to one on a 32-bit int.
+    backing = np.zeros(1, dtype=np.uint8)
+    view = np.lib.stride_tricks.as_strided(
+        backing, shape=shape, strides=strides, writeable=False
+    )
+    assert view.flags.c_contiguous
+    with pytest.raises(RuntimeError):
+        pycolmap.Bitmap.from_array(view)

@@ -466,6 +466,17 @@ std::optional<std::pair<int, int>> ScopedBitmapReader::ImageSize(
   return found->second;
 }
 
+// Pixel access, pitch and interpolation still use signed int offsets. Keep
+// every stored raster in that domain; widening allocation alone is unsafe.
+bool Bitmap::IsValidSize(const int width,
+                         const int height,
+                         const int channels) {
+  return width >= 0 && height >= 0 && (channels == 1 || channels == 3) &&
+         width <= std::numeric_limits<int>::max() / channels &&
+         (width == 0 ||
+          height <= std::numeric_limits<int>::max() / (width * channels));
+}
+
 Bitmap::Bitmap()
     : width_(0), height_(0), channels_(0), linear_colorspace_(false) {
   EnsureOpenImageIOInitialized();
@@ -475,6 +486,7 @@ Bitmap::Bitmap(const int width,
                const int height,
                const bool as_rgb,
                const bool linear_colorspace) {
+  THROW_CHECK(Bitmap::IsValidSize(width, height, as_rgb ? 3 : 1));
   EnsureOpenImageIOInitialized();
   width_ = width;
   height_ = height;
@@ -600,7 +612,9 @@ std::optional<double> Bitmap::ExifFocalLength() const {
       //   (Diagonal distance of image area in the 35 mm camera (43.27 mm) /
       //    Diagonal distance of image area on the image sensor of the DSC)
       //    * focal length of the lens of the DSC.
-      const double diagonal = std::sqrt(width_ * width_ + height_ * height_);
+      const double width = width_;
+      const double height = height_;
+      const double diagonal = std::sqrt(width * width + height * height);
       return focal_length_35mm / 43.27 * diagonal;
     }
   }
@@ -906,6 +920,12 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
     return false;
   }
 
+  if (width <= 0 || height <= 0 || image_spec.depth != 1 || image_spec.deep ||
+      !Bitmap::IsValidSize(width, height, as_rgb ? 3 : 1)) {
+    VLOG(3) << "Unsupported bitmap storage layout or dimensions";
+    return false;
+  }
+
   // The ordinary RGB8-to-gray route otherwise holds a full RGB image while
   // CloneAsGrey allocates its output. Keep the same decoder and gray
   // expression, but convert bounded RGB rows directly into the final gray pixel
@@ -963,6 +983,12 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
     return true;
   }
 
+  // The full decoder also needs storage for its intermediate channel count.
+  // Keep this after bounded RGB-to-gray decoding, which avoids that raster.
+  if (!Bitmap::IsValidSize(width, height, channels)) {
+    VLOG(3) << "Unsupported bitmap dimensions: " << width << "x" << height;
+    return false;
+  }
   width_ = width;
   height_ = height;
   channels_ = channels;
@@ -1085,6 +1111,7 @@ void Bitmap::SetImageData(int width, int height, std::vector<uint8_t>&& data) {
 void Bitmap::Rescale(const int new_width,
                      const int new_height,
                      RescaleFilter filter) {
+  THROW_CHECK(Bitmap::IsValidSize(new_width, new_height, channels_));
   // A valid image already on the requested grid needs no OIIO filtering or
   // replacement allocation. Preserve SetImageData's metadata-axis repair;
   // leave malformed and empty inputs and unknown filters on the old path.
@@ -1218,8 +1245,10 @@ void Bitmap::Crop(const int left,
   THROW_CHECK_GE(top, 0);
   THROW_CHECK_GT(width, 0);
   THROW_CHECK_GT(height, 0);
-  THROW_CHECK_LE(left + width, width_);
-  THROW_CHECK_LE(top + height, height_);
+  THROW_CHECK_LE(left, width_);
+  THROW_CHECK_LE(top, height_);
+  THROW_CHECK_LE(width, width_ - left);
+  THROW_CHECK_LE(height, height_ - top);
   if (left == 0 && top == 0 && width == width_ && height == height_) {
     return;
   }
@@ -1275,6 +1304,7 @@ Bitmap Bitmap::CloneAsRGB() const {
     return Clone();
   } else {
     THROW_CHECK_EQ(channels_, 1);
+    THROW_CHECK(Bitmap::IsValidSize(width_, height_, 3));
     Bitmap cloned;
     cloned.width_ = width_;
     cloned.height_ = height_;

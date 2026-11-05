@@ -52,6 +52,10 @@ class Bitmap {
   Bitmap& operator=(const Bitmap& other);
   Bitmap& operator=(Bitmap&& other) noexcept;
 
+  // Whether a gray/RGB shape fits the bitmap's signed indexing domain.
+  // Zero dimensions are permitted; this does not test memory availability.
+  static bool IsValidSize(int width, int height, int channels);
+
   // Dimensions of bitmap.
   inline int Width() const;
   inline int Height() const;
