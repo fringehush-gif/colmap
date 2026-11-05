@@ -270,6 +270,74 @@ TEST_P(CorrespondenceGraphFinalizeTest, ThreeView) {
             2);
 }
 
+TEST_P(CorrespondenceGraphFinalizeTest, PairLocalDuplicates) {
+  CorrespondenceGraph graph;
+  for (image_t image_id = 0; image_id < 3; ++image_id) {
+    graph.AddImage(image_id, 3);
+  }
+  TwoViewGeometry history;
+  history.inlier_matches = {{0, 0}, {0, 1}, {1, 0}};
+  graph.AddTwoViewGeometry(0, 2, history);
+  history.inlier_matches = {{0, 0}, {1, 0}};
+  graph.AddTwoViewGeometry(1, 2, history);
+
+  // Both endpoints have earlier partners. Interleave valid one-to-many and
+  // many-to-one matches, repeated matches, and invalid indices in a swapped
+  // pair.
+  TwoViewGeometry geometry;
+  geometry.config = TwoViewGeometry::CALIBRATED;
+  geometry.cam2_from_cam1 =
+      Rigid3d(Eigen::Quaterniond::Identity(), Eigen::Vector3d(1, 2, 3));
+  geometry.inlier_matches = {
+      {0, 0}, {0, 1}, {1, 0}, {0, 0}, {2, 2}, {0, 1}, {3, 0}, {0, 3}, {1, 0}};
+  graph.AddTwoViewGeometry(1, 0, geometry);
+  if (GetParam()) {
+    graph.Finalize();
+  }
+
+  EXPECT_EQ(graph.NumImagePairs(), 3);
+  EXPECT_EQ(graph.NumCorrespondencesForImage(0), 7);
+  EXPECT_EQ(graph.NumCorrespondencesForImage(1), 6);
+  EXPECT_EQ(graph.NumCorrespondencesForImage(2), 5);
+  EXPECT_EQ(graph.NumObservationsForImage(0), 3);
+  EXPECT_EQ(graph.NumObservationsForImage(1), 3);
+  EXPECT_EQ(graph.NumObservationsForImage(2), 2);
+  EXPECT_EQ(graph.NumMatchesBetweenImages(0, 1), 4);
+  EXPECT_EQ(graph.NumMatchesBetweenImages(0, 2), 3);
+  EXPECT_EQ(graph.NumMatchesBetweenImages(1, 2), 2);
+
+  const auto expect_corrs =
+      [&](const image_t image_id,
+          const point2D_t point2D_idx,
+          const std::vector<std::pair<image_t, point2D_t>>& expected) {
+        std::vector<CorrespondenceGraph::Correspondence> corrs;
+        graph.ExtractCorrespondences(image_id, point2D_idx, &corrs);
+        std::vector<std::pair<image_t, point2D_t>> actual;
+        actual.reserve(corrs.size());
+        for (const auto& corr : corrs) {
+          actual.emplace_back(corr.image_id, corr.point2D_idx);
+        }
+        EXPECT_EQ(actual, expected) << image_id << ":" << point2D_idx;
+      };
+  expect_corrs(0, 0, {{2, 0}, {2, 1}, {1, 0}, {1, 1}});
+  expect_corrs(0, 1, {{2, 0}, {1, 0}});
+  expect_corrs(0, 2, {{1, 2}});
+  expect_corrs(1, 0, {{2, 0}, {0, 0}, {0, 1}});
+  expect_corrs(1, 1, {{2, 0}, {0, 0}});
+  expect_corrs(1, 2, {{0, 2}});
+  expect_corrs(2, 0, {{0, 0}, {0, 1}, {1, 0}, {1, 1}});
+  expect_corrs(2, 1, {{0, 0}});
+  expect_corrs(2, 2, {});
+
+  const FeatureMatches expected_matches = {{0, 0}, {0, 1}, {1, 0}, {2, 2}};
+  const auto extracted = graph.ExtractTwoViewGeometry(1, 0, true);
+  EXPECT_EQ(extracted.config, geometry.config);
+  EXPECT_EQ(extracted.inlier_matches, expected_matches);
+  ASSERT_TRUE(extracted.cam2_from_cam1.has_value());
+  EXPECT_THAT(*extracted.cam2_from_cam1,
+              Rigid3dNear(*geometry.cam2_from_cam1, 1e-6, 1e-6));
+}
+
 INSTANTIATE_TEST_SUITE_P(CorrespondenceGraph,
                          CorrespondenceGraphFinalizeTest,
                          testing::Bool(),

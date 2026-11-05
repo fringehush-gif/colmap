@@ -111,15 +111,17 @@ void CorrespondenceGraph::AddTwoViewGeometry(
       auto& corrs1 = image1.corrs[match.point2D_idx1];
       auto& corrs2 = image2.corrs[match.point2D_idx2];
 
-      // We add valid correspondences bidirectionally, so checking from only one
-      // side is sufficient to detect duplicated matches.
-      const bool duplicate =
-          std::find_if(corrs1.begin(),
-                       corrs1.end(),
-                       [image_id2, &match](const Correspondence& corr) {
-                         return corr.image_id == image_id2 &&
-                                corr.point2D_idx == match.point2D_idx2;
-                       }) != corrs1.end();
+      // Each image pair is added once, so only the trailing run from this
+      // call can contain duplicates. Earlier entries target other images.
+      bool duplicate = false;
+      for (auto it = corrs1.rbegin();
+           it != corrs1.rend() && it->image_id == image_id2;
+           ++it) {
+        if (it->point2D_idx == match.point2D_idx2) {
+          duplicate = true;
+          break;
+        }
+      }
 
       if (duplicate) {
         image1.num_correspondences -= 1;
