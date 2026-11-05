@@ -192,6 +192,59 @@ TEST(StereoImageRectifier, PropagatesOutputOpenFailure) {
   ExpectOutputOpenFailure([&]() { owner.Run(); }, "Q.txt");
 }
 
+TEST(ImageUndistorters, ApplyRegionOfInterestToPinhole) {
+  const auto temp_dir = CreateTestDir();
+  const auto image_path = temp_dir / "input_images";
+  const auto output_path = temp_dir / "output";
+  const auto standalone_path = temp_dir / "standalone";
+  CreateDirIfNotExists(image_path);
+  CreateDirIfNotExists(output_path);
+  Reconstruction reconstruction =
+      CreateSyntheticReconstructionWithBitmaps(image_path);
+  for (const auto& [camera_id, camera] : reconstruction.Cameras()) {
+    reconstruction.Camera(camera_id) = Camera::CreateFromModelId(
+        camera_id, CameraModelId::kPinhole, 100, 100, 100);
+  }
+  ASSERT_EQ(reconstruction.NumImages(), 2);
+  UndistortCameraOptions camera_options;
+  camera_options.roi_min_x = 0.1;
+  camera_options.roi_min_y = 0.2;
+  camera_options.roi_max_x = 0.9;
+  camera_options.roi_max_y = 0.8;
+  COLMAPUndistorter::Options options;
+  options.num_threads = 1;
+  COLMAPUndistorter undistorter(
+      options, camera_options, reconstruction, image_path, output_path);
+  undistorter.Run();
+  StandaloneImageUndistorter::Options standalone_options;
+  standalone_options.num_threads = 1;
+  for (const auto& [image_id, image] : reconstruction.Images()) {
+    standalone_options.image_names_and_cameras.emplace_back(image.Name(),
+                                                            *image.CameraPtr());
+  }
+  StandaloneImageUndistorter standalone(
+      standalone_options, camera_options, image_path, standalone_path);
+  standalone.Run();
+
+  Reconstruction output_reconstruction;
+  output_reconstruction.Read(output_path / "sparse");
+  ASSERT_EQ(output_reconstruction.NumImages(), reconstruction.NumImages());
+  ASSERT_EQ(output_reconstruction.NumCameras(), reconstruction.NumCameras());
+  for (const auto& [image_id, image] : reconstruction.Images()) {
+    for (const auto& path : {output_path / "images", standalone_path}) {
+      Bitmap bitmap;
+      ASSERT_TRUE(bitmap.Read(path / image.Name()));
+      EXPECT_EQ(bitmap.Width(), 80);
+      EXPECT_EQ(bitmap.Height(), 60);
+    }
+    const Camera& camera = output_reconstruction.Camera(image.CameraId());
+    EXPECT_EQ(camera.width, 80);
+    EXPECT_EQ(camera.height, 60);
+    EXPECT_EQ(camera.PrincipalPointX(), 40);
+    EXPECT_EQ(camera.PrincipalPointY(), 30);
+  }
+}
+
 TEST(COLMAPUndistorter, Integration) {
   const auto temp_dir = CreateTestDir();
   const auto image_path = temp_dir / "input_images";

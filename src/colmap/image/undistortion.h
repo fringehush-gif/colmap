@@ -30,6 +30,12 @@ struct UndistortCameraOptions {
   double roi_max_x = 1.0;
   double roi_max_y = 1.0;
 
+  // Whether the requested bounds differ from the full original image.
+  bool HasRegionOfInterest() const {
+    return roi_min_x != 0.0 || roi_min_y != 0.0 || roi_max_x != 1.0 ||
+           roi_max_y != 1.0;
+  }
+
   // Maximum norm of the undistorted camera-space point (= tan(theta) where
   // theta is the angle from the optical axis) used when tracing border pixels
   // to compute the output image dimensions. For fisheye cameras with off-center
