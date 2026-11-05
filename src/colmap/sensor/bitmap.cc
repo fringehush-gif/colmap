@@ -390,8 +390,7 @@ std::shared_ptr<ScopedBitmapReader> ScopedBitmapReader::Create(
     if (!image_sizes_wh.empty()) {
       const auto size = image_sizes_wh.at(keys.size() - 1);
       if (size.first <= 0 || size.second <= 0 ||
-          size.first > std::numeric_limits<int>::max() / 3 ||
-          size.second > std::numeric_limits<int>::max() / (size.first * 3)) {
+          !Bitmap::IsValidSize(size.first, size.second, 3)) {
         throw std::invalid_argument(
             "Bitmap reader RGB8 dimensions are invalid");
       }
@@ -1114,7 +1113,7 @@ void Bitmap::Rescale(const int new_width,
   THROW_CHECK(Bitmap::IsValidSize(new_width, new_height, channels_));
   // A valid image already on the requested grid needs no OIIO filtering or
   // replacement allocation. Preserve SetImageData's metadata-axis repair;
-  // leave malformed and empty inputs and unknown filters on the old path.
+  // leave empty rasters and unknown filters on the filtering path.
   if (new_width == width_ && new_height == height_ && width_ > 0 &&
       height_ > 0 && channels_ > 0 && meta_data_ != nullptr &&
       (filter == RescaleFilter::kBilinear || filter == RescaleFilter::kBox) &&
@@ -1273,8 +1272,8 @@ void ConvertPackedRGB8ToGrey(const uint8_t* rgb,
   for (size_t i = 0; i < num_pixels; ++i) {
     // Same expression/order as the original CloneAsGrey loop. Non-negative
     // weighted sum plus 0.5 permits truncation and compiler vectorization.
-    // NOLINTNEXTLINE(bugprone-incorrect-roundings)
     gray[i] =
+        // NOLINTNEXTLINE(bugprone-incorrect-roundings)
         static_cast<uint8_t>(.2126f * rgb[3 * i + 0] + .7152f * rgb[3 * i + 1] +
                              .0722f * rgb[3 * i + 2] + .5f);
   }
