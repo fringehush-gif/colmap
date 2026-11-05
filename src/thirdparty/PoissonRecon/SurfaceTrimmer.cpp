@@ -307,25 +307,15 @@ void Triangulate( const std::vector< Vertex >& vertices , const std::vector< std
 template< class Real , unsigned int Dim , typename Index , class Vertex >
 double PolygonArea( const std::vector< Vertex >& vertices , const std::vector< Index >& polygon )
 {
-	auto Area =[]( Point< Real , Dim > v1 , Point< Real , Dim > v2 , Point< Real , Dim > v3 )
-	{
-		Point< Real , Dim > v[] = { v2-v1 , v3-v1 };
-		XForm< Real , 2 > Mass;
-		for( int i=0 ; i<2 ; i++ ) for( int j=0 ; j<2 ; j++ ) Mass(i,j) = Point< Real , Dim >::Dot( v[i] , v[j] );
-		double det = Mass.determinant();
-		if( det<0 ) return (Real)0;
-		else return (Real)( sqrt( Mass.determinant() ) / 2. );
-	};
-
 	if( polygon.size()<3 ) return 0.;
-	else if( polygon.size()==3 ) return Area( vertices[polygon[0]].template get<0>() , vertices[polygon[1]].template get<0>() , vertices[polygon[2]].template get<0>() );
+	else if( polygon.size()==3 ) return PoissonRecon::Area< double , Dim >( vertices[polygon[0]].template get<0>() , vertices[polygon[1]].template get<0>() , vertices[polygon[2]].template get<0>() );
 	else
 	{
-		Point< Real , DEFAULT_DIMENSION > center;
+		Point< double , Dim > center;
 		for( size_t i=0 ; i<polygon.size() ; i++ ) center += vertices[ polygon[i] ].template get<0>();
-		center /= Real( polygon.size() );
+		center /= double( polygon.size() );
 		double area = 0;
-		for( size_t i=0 ; i<polygon.size() ; i++ ) area += Area( center , vertices[ polygon[i] ].template get<0>() , vertices[ polygon[ (i+1)%polygon.size() ] ].template get<0>() );
+		for( size_t i=0 ; i<polygon.size() ; i++ ) area += PoissonRecon::Area< double , Dim >( center , vertices[ polygon[i] ].template get<0>() , vertices[ polygon[ (i+1)%polygon.size() ] ].template get<0>() );
 		return area;
 	}
 }
