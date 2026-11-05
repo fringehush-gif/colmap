@@ -1928,13 +1928,17 @@ void StereoFusion::Fuse(const int thread_id,
           bitmap_scale.second == 1.0f && col >= 0 &&
           col <= kMaxExactFloatInteger && row >= 0 &&
           row <= kMaxExactFloatInteger;
+      const auto& depth_map_size = depth_map_sizes_.at(image_idx);
       const auto color =
           ((bitmap_image && bitmap_image->bitmap_on_depth_grid) ||
            resident_on_depth_grid)
               ? bitmap_data.GetPixel(col, row).value_or(BitmapColor<uint8_t>(0))
               : bitmap_data
-                    .InterpolateNearestNeighbor(col / bitmap_scale.first,
-                                                row / bitmap_scale.second)
+                    .GetPixel(
+                        internal::RescalePixelCenter(
+                            col, depth_map_size.first, bitmap_data.Width()),
+                        internal::RescalePixelCenter(
+                            row, depth_map_size.second, bitmap_data.Height()))
                     .value_or(BitmapColor<uint8_t>(0));
       bitmap_lease.reset();
 
