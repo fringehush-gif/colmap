@@ -19,6 +19,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <set>
 #include <tuple>
 #include <utility>
@@ -69,22 +70,75 @@ class OptionalCudaAllocationRefused : public CudaAllocationRefused {
 
 #ifndef COLMAP_HIP_ENABLED
 namespace {
-struct PairStreams {
-  cudaStream_t first = nullptr, second = nullptr;
-  PairStreams() {
-    CUDA_SAFE_CALL(cudaStreamCreateWithFlags(&first, cudaStreamNonBlocking));
-    const cudaError_t second_status =
-        cudaStreamCreateWithFlags(&second, cudaStreamNonBlocking);
-    if (second_status != cudaSuccess) {
-      (void)cudaStreamDestroy(first);
-      first = nullptr;
-      CUDA_SAFE_CALL(second_status);
+thread_local bool work_stream_construction_active = false;
+
+class WorkStreamConstructionScope {
+ public:
+  WorkStreamConstructionScope()
+      : previous_(std::exchange(work_stream_construction_active, true)) {}
+  ~WorkStreamConstructionScope() {
+    work_stream_construction_active = previous_;
+  }
+  WorkStreamConstructionScope(const WorkStreamConstructionScope&) = delete;
+  WorkStreamConstructionScope& operator=(const WorkStreamConstructionScope&) =
+      delete;
+
+ private:
+  const bool previous_;
+};
+
+class WorkStreams {
+ public:
+  WorkStreams(size_t count, bool synchronize_on_close)
+      : values(count, nullptr), synchronize_on_close_(synchronize_on_close) {
+    WorkStreamConstructionScope construction;
+    CudaCleanupScope cleanup;
+    try {
+      for (auto& stream : values) {
+        CUDA_SAFE_ALLOCATE(
+            "PatchMatch work stream",
+            stream,
+            cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        THROW_CHECK(stream != nullptr);
+      }
+      cleanup.Check();
+    } catch (...) {
+      // No sweep has started. Attempt every partial release before allowing
+      // a clean resource refusal to reach a smaller admission path.
+      Close(false);
+      cleanup.Check();
+      throw;
     }
   }
-  ~PairStreams() {
-    if (second) (void)cudaStreamDestroy(second);
-    if (first) (void)cudaStreamDestroy(first);
+  // Normal destruction is enclosed in CheckedCudaCleanup by each caller.
+  // Unwinding closes best-effort without turning a sweep failure into retry.
+  ~WorkStreams() { Close(synchronize_on_close_); }
+  WorkStreams(const WorkStreams&) = delete;
+  WorkStreams& operator=(const WorkStreams&) = delete;
+
+  std::vector<cudaStream_t> values;
+
+ private:
+  void Close(bool synchronize) noexcept {
+    for (size_t offset = 0; offset < values.size(); ++offset) {
+      // Preserve the batch's forward synchronized teardown and the pair's
+      // reverse construction order. A failed release is never retried here.
+      const size_t index =
+          synchronize_on_close_ ? offset : values.size() - 1 - offset;
+      const auto stream = std::exchange(values[index], nullptr);
+      if (!stream) continue;
+      if (synchronize) {
+        CudaCleanupScope::ObserveCleanup(
+            "cudaStreamSynchronize PatchMatch work stream",
+            cudaStreamSynchronize(stream));
+      }
+      CudaCleanupScope::ObserveCleanup(
+          "cudaStreamDestroy PatchMatch work stream",
+          cudaStreamDestroy(stream));
+    }
   }
+
+  const bool synchronize_on_close_;
 };
 
 bool DefaultReferencePairSettings(const PatchMatchOptions& o) {
@@ -114,6 +168,14 @@ bool DefaultReferencePairSettings(const PatchMatchOptions& o) {
          o.geom_consistency == o.filter;
 }
 }  // namespace
+
+namespace internal {
+// Observation only: fault selection belongs to the native test wrappers.
+// No installed header or runtime option exposes this construction phase.
+bool IsPatchMatchWorkStreamConstructionActive() noexcept {
+  return work_stream_construction_active;
+}
+}  // namespace internal
 #endif
 
 PatchMatch::PatchMatch(const PatchMatchOptions& options, const Problem& problem)
@@ -852,15 +914,26 @@ void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
     return;
   }
 
+  std::optional<WorkStreams> streams;
+  try {
+    streams.emplace(2, /*synchronize_on_close=*/false);
+  } catch (const CudaAllocationRefused& error) {
+    CheckedCudaCleanup([&] { second_cuda.reset(); });
+    size_t free_bytes = 0, total_bytes = 0;
+    CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
+    LOG(WARNING) << "Optional paired work streams refused; running singly: "
+                 << error.what();
+    finish_first_native();
+    return;
+  }
   LOG(INFO) << "Running paired PatchMatch references " << first_problem_idx
             << " and " << second_problem_idx;
-  {
-    PairStreams streams;
-    RunPatchMatchPair(*first_cuda, *second_cuda, streams.first, streams.second);
-    write_cuda(first, *first_cuda);
-    write_cuda(second, *second_cuda);
-  }
+  RunPatchMatchPair(
+      *first_cuda, *second_cuda, streams->values[0], streams->values[1]);
+  write_cuda(first, *first_cuda);
+  write_cuda(second, *second_cuda);
   CheckedCudaCleanup([&] {
+    streams.reset();
     second_cuda.reset();
     first_cuda.reset();
   });
@@ -979,22 +1052,38 @@ void PatchMatchController::ProcessProblemBatch(
                                         kExternalMargin &&
                           free_bytes >= owned_peak + kExternalMargin;
             if (enough_for_rotation) {
-              PairStreams streams;
-              RunPatchMatchPair(
-                  *owners[i], *owners[i + 1], streams.first, streams.second);
-              write_cuda(*input[i], *owners[i]);
-              write_cuda(*input[i + 1], *owners[i + 1]);
-              CheckedCudaCleanup([&] {
-                owners[i].reset();
-                owners[i + 1].reset();
-              });
-              i += 2;
-              continue;
+              std::optional<WorkStreams> streams;
+              try {
+                streams.emplace(2, /*synchronize_on_close=*/false);
+              } catch (const CudaAllocationRefused& error) {
+                CheckedCudaCleanup([&] { owners[i + 1].reset(); });
+                query_memory(
+                    "after-pair-stream-refusal", &free_bytes, &total_bytes);
+                LOG(WARNING)
+                    << "Optional pair work streams refused; running singly: "
+                    << error.what();
+              }
+              if (streams) {
+                RunPatchMatchPair(*owners[i],
+                                  *owners[i + 1],
+                                  streams->values[0],
+                                  streams->values[1]);
+                write_cuda(*input[i], *owners[i]);
+                write_cuda(*input[i + 1], *owners[i + 1]);
+                CheckedCudaCleanup([&] {
+                  owners[i].reset();
+                  owners[i + 1].reset();
+                  streams.reset();
+                });
+                i += 2;
+                continue;
+              }
             }
             // Match the incumbent pair's low-memory fallback: the first
             // constructed owner is retained, the second is released before
             // running the first view singly.
-            CheckedCudaCleanup([&] { owners[i + 1].reset(); });
+            if (owners[i + 1])
+              CheckedCudaCleanup([&] { owners[i + 1].reset(); });
           }
         }
       }
@@ -1183,37 +1272,24 @@ void PatchMatchController::ProcessProblemBatch(
   std::vector<PatchMatchCuda*> views;
   views.reserve(owners.size());
   for (auto& owner : owners) views.push_back(owner.get());
-  {
-    struct BatchStreams {
-      std::vector<cudaStream_t> values;
-      explicit BatchStreams(size_t count) : values(count, nullptr) {
-        try {
-          for (auto& stream : values)
-            CUDA_SAFE_CALL(
-                cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-        } catch (...) {
-          for (auto stream : values)
-            if (stream) (void)cudaStreamDestroy(stream);
-          throw;
-        }
-      }
-      ~BatchStreams() {
-        for (auto stream : values) {
-          if (stream) {
-            (void)cudaStreamSynchronize(stream);
-            (void)cudaStreamDestroy(stream);
-          }
-        }
-      }
-    } streams(input.size());
-    LOG(INFO) << "Running " << input.size() << " reference PatchMatch batch"
-              << (shared ? " (sparse source aliases)" : "");
-    RunPatchMatchBatch(views, streams.values);
-    for (size_t i = 0; i < input.size(); ++i) write_cuda(*input[i], *owners[i]);
-    CheckedCudaCleanup([&] {
-      for (auto& owner : owners) owner.reset();
-    });
-  }  // Batch streams are destroyed before the shared bank.
+  std::optional<WorkStreams> streams;
+  try {
+    streams.emplace(input.size(), /*synchronize_on_close=*/true);
+  } catch (const CudaAllocationRefused& error) {
+    if (sparse_test_hooks_)
+      sparse_test_hooks_->sparse_bank_at_work_stream_refusal =
+          shared != nullptr;
+    cleanup_and_readmit("after-batch-stream-refusal", error.what());
+    return;
+  }
+  LOG(INFO) << "Running " << input.size() << " reference PatchMatch batch"
+            << (shared ? " (sparse source aliases)" : "");
+  RunPatchMatchBatch(views, streams->values);
+  for (size_t i = 0; i < input.size(); ++i) write_cuda(*input[i], *owners[i]);
+  CheckedCudaCleanup([&] {
+    for (auto& owner : owners) owner.reset();
+    streams.reset();
+  });  // Batch streams are destroyed before the shared bank.
   CheckedCudaCleanup([&] {
     if (shared) shared->Close();
     shared.reset();

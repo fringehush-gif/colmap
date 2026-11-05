@@ -235,7 +235,11 @@ if(CUDA_ENABLED)
                 "LINKER:--wrap=cudaMallocPitch"
                 "LINKER:--wrap=cudaMalloc3DArray"
                 "LINKER:--wrap=cudaFree"
-                "LINKER:--wrap=cudaFreeArray")
+                "LINKER:--wrap=cudaFreeArray"
+                "LINKER:--wrap=cudaStreamCreateWithFlags"
+                "LINKER:--wrap=cudaStreamDestroy"
+                "LINKER:--wrap=cudaPeekAtLastError"
+                "LINKER:--wrap=cudaGetLastError")
             COLMAP_ADD_TEST(
                 NAME cuda_texture_constructor_test
                 SRCS cuda_texture_constructor_test.cc

@@ -49,7 +49,60 @@
 // The production cleanup observer itself remains thread-local.
 #ifdef COLMAP_TEST_CUDA_ALLOCATION_WRAPPING
 #include <atomic>
+namespace colmap::mvs::internal {
+bool IsPatchMatchWorkStreamConstructionActive() noexcept __attribute__((weak));
+}
 namespace {
+enum class StreamFault {
+  kNone,
+  kRefuse,
+  kPrior,
+  kOther,
+  kMismatch,
+  kFailedNonNull,
+  kSuccessNull,
+  kDestroy
+};
+enum class StreamEventKind { kCreated, kRefused, kDestroyed, kQuery };
+struct StreamEvent {
+  StreamEventKind kind;
+  cudaStream_t stream;
+  size_t ordinal;
+};
+// Fixed storage keeps wrapped cleanup calls allocation-free, including while
+// an exception is unwinding. Tests inspect it after the worker has joined.
+std::array<StreamEvent, 256> stream_events;
+std::atomic<size_t> stream_event_count{0}, stream_attempts{0};
+std::atomic<size_t> stream_fail_first{0}, stream_fail_second{0};
+std::atomic<size_t> stream_fired{0}, stream_destroy_failures{0};
+std::atomic<StreamFault> stream_fault{StreamFault::kNone};
+std::atomic<bool> stream_capture{false};
+thread_local bool stream_worker_seen = false;
+bool InWorkStreamConstruction() {
+  return colmap::mvs::internal::IsPatchMatchWorkStreamConstructionActive &&
+         colmap::mvs::internal::IsPatchMatchWorkStreamConstructionActive();
+}
+void RecordStreamEvent(StreamEventKind kind,
+                       cudaStream_t stream,
+                       size_t ordinal) {
+  const size_t index = stream_event_count.fetch_add(1);
+  if (index < stream_events.size())
+    stream_events[index] = {kind, stream, ordinal};
+}
+void ResetStreamFault(StreamFault fault,
+                      size_t first,
+                      size_t second = 0,
+                      bool capture_only = false) {
+  stream_capture = false;
+  stream_event_count = 0;
+  stream_attempts = 0;
+  stream_fired = 0;
+  stream_destroy_failures = 0;
+  stream_fail_first = first;
+  stream_fail_second = second;
+  stream_fault = fault;
+  stream_capture = capture_only || fault != StreamFault::kNone;
+}
 std::atomic<size_t> wrapped_eligible{0}, wrapped_fail_at{0};
 std::atomic<bool> wrapped_fired{false}, wrapped_fail_cleanup{false};
 std::atomic<size_t> wrapped_cleanup_injected{0};
@@ -108,6 +161,68 @@ extern "C" cudaError_t __real_cudaMalloc3DArray(cudaArray_t*,
 extern "C" cudaError_t __real_cudaMemGetInfo(size_t*, size_t*);
 extern "C" cudaError_t __real_cudaFree(void*);
 extern "C" cudaError_t __real_cudaFreeArray(cudaArray_t);
+extern "C" cudaError_t __real_cudaStreamCreateWithFlags(cudaStream_t*,
+                                                        unsigned int);
+extern "C" cudaError_t __real_cudaStreamDestroy(cudaStream_t);
+extern "C" cudaError_t __real_cudaPeekAtLastError();
+extern "C" cudaError_t __real_cudaGetLastError();
+extern "C" cudaError_t __wrap_cudaStreamCreateWithFlags(cudaStream_t* out,
+                                                        unsigned int flags) {
+  if (!stream_capture || !InWorkStreamConstruction())
+    return __real_cudaStreamCreateWithFlags(out, flags);
+  stream_worker_seen = true;
+  const size_t ordinal = ++stream_attempts;
+  const bool selected =
+      ordinal == stream_fail_first || ordinal == stream_fail_second;
+  if (!selected) {
+    const auto status = __real_cudaStreamCreateWithFlags(out, flags);
+    if (status == cudaSuccess)
+      RecordStreamEvent(StreamEventKind::kCreated, *out, ordinal);
+    return status;
+  }
+  ++stream_fired;
+  const auto mode = stream_fault.load();
+  if (mode == StreamFault::kFailedNonNull) {
+    const auto status = __real_cudaStreamCreateWithFlags(out, flags);
+    if (status != cudaSuccess) return status;
+    RecordStreamEvent(StreamEventKind::kCreated, *out, ordinal);
+  } else {
+    *out = nullptr;
+  }
+  RecordStreamEvent(StreamEventKind::kRefused, *out, ordinal);
+  if (mode == StreamFault::kSuccessNull) return cudaSuccess;
+  return mode == StreamFault::kOther ? cudaErrorInvalidValue
+                                     : cudaErrorMemoryAllocation;
+}
+extern "C" cudaError_t __wrap_cudaStreamDestroy(cudaStream_t stream) {
+  const bool partial = stream_capture && InWorkStreamConstruction();
+  const auto status = __real_cudaStreamDestroy(stream);
+  if (!partial) return status;
+  RecordStreamEvent(
+      StreamEventKind::kDestroyed, stream, stream_attempts.load());
+  if (status == cudaSuccess && stream_fault == StreamFault::kDestroy &&
+      stream_fired && stream_destroy_failures.fetch_add(1) == 0)
+    return cudaErrorUnknown;  // The real handle was released before injection.
+  return status;
+}
+extern "C" cudaError_t __wrap_cudaPeekAtLastError() {
+  if (stream_capture && InWorkStreamConstruction() &&
+      stream_fault == StreamFault::kPrior && !stream_fired &&
+      stream_attempts.load() + 1 == stream_fail_first) {
+    stream_worker_seen = true;
+    ++stream_fired;
+    RecordStreamEvent(StreamEventKind::kRefused, nullptr, stream_fail_first);
+    return cudaErrorLaunchFailure;
+  }
+  return __real_cudaPeekAtLastError();
+}
+extern "C" cudaError_t __wrap_cudaGetLastError() {
+  const auto actual = __real_cudaGetLastError();
+  if (stream_capture && InWorkStreamConstruction() && stream_fired &&
+      stream_fault == StreamFault::kMismatch && actual == cudaSuccess)
+    return cudaErrorInvalidValue;
+  return actual;
+}
 extern "C" cudaError_t __wrap_cudaMalloc(void** out, size_t size) {
   if (InjectAllocation()) {
     *out = nullptr;
@@ -147,6 +262,8 @@ extern "C" cudaError_t __wrap_cudaMalloc3DArray(
   return status;
 }
 extern "C" cudaError_t __wrap_cudaMemGetInfo(size_t* free, size_t* total) {
+  if (stream_capture && stream_worker_seen && stream_fired)
+    RecordStreamEvent(StreamEventKind::kQuery, nullptr, stream_attempts.load());
   const cudaError_t status = __real_cudaMemGetInfo(free, total);
   if (status == cudaSuccess) {
     ++wrapped_meminfo_calls;
@@ -224,6 +341,28 @@ class PatchMatchControllerTestAccess {
       if (errors.exceptions().size() == 1)
         std::rethrow_exception(errors.exceptions().front());
       throw;
+    } catch (...) {
+      controller.sparse_test_hooks_ = nullptr;
+      throw;
+    }
+    controller.sparse_test_hooks_ = nullptr;
+  }
+  static void RunSingles(PatchMatchController& controller,
+                         Hooks& hooks,
+                         const PatchMatchOptions& options,
+                         size_t count) {
+    controller.ReadWorkspace();
+    controller.ReadProblems();
+    controller.ReadGpuIndices();
+    controller.thread_pool_ = std::make_unique<ThreadPool>(1);
+    controller.io_thread_pool_ = std::make_unique<ThreadPool>(2);
+    controller.sparse_test_hooks_ = &hooks;
+    try {
+      for (size_t index = 0; index < count; ++index) {
+        controller.thread_pool_->AddTask(
+            &PatchMatchController::ProcessProblem, &controller, options, index);
+        controller.thread_pool_->Wait();
+      }
     } catch (...) {
       controller.sparse_test_hooks_ = nullptr;
       throw;
@@ -1469,6 +1608,245 @@ std::pair<size_t, size_t> FindControllerFixtureShape(bool batch,
     }
   }
   return {0, 0};
+}
+
+// Validate every partially constructed handle before the first fresh query.
+// Event capture itself is fixed-size and does not allocate in CUDA cleanup.
+void ExpectStreamCleanupBeforeQueries(const std::vector<size_t>& ordinals) {
+  const size_t count = stream_event_count.load();
+  ASSERT_LE(count, stream_events.size());
+  size_t begin = 0;
+  size_t previous_ordinal = 0;
+  for (const size_t ordinal : ordinals) {
+    size_t failure = begin;
+    while (failure < count &&
+           stream_events[failure].kind != StreamEventKind::kRefused)
+      ++failure;
+    ASSERT_LT(failure, count);
+    EXPECT_EQ(stream_events[failure].ordinal, ordinal);
+    size_t query = failure + 1;
+    while (query < count &&
+           stream_events[query].kind != StreamEventKind::kQuery)
+      ++query;
+    ASSERT_LT(query, count) << "No fresh memory query after refusal";
+    size_t created = 0;
+    for (size_t i = begin; i < failure; ++i) {
+      if (stream_events[i].kind != StreamEventKind::kCreated) continue;
+      ++created;
+      size_t releases = 0;
+      for (size_t j = failure + 1; j < query; ++j)
+        if (stream_events[j].kind == StreamEventKind::kDestroyed &&
+            stream_events[j].stream == stream_events[i].stream)
+          ++releases;
+      EXPECT_EQ(releases, 1u);
+    }
+    EXPECT_EQ(created, ordinal - previous_ordinal - 1);
+    previous_ordinal = ordinal;
+    begin = failure + 1;
+  }
+}
+
+void RunControllerWorkStreamRefusals(bool sparse) {
+  ASSERT_TRUE(internal::IsPatchMatchWorkStreamConstructionActive != nullptr);
+  auto options = ControllerWorkspaceFixture::Options();
+  options.geom_consistency = false;
+  options.filter = false;
+  options.sparse_source_sharing = sparse;
+  constexpr size_t width = 513, height = 257;
+  const std::vector<std::pair<size_t, size_t>> shapes(5, {width, height});
+  if (!CanPairPatchMatchViews(
+          width, height, width, height, false, options.checkpoint_hmm) ||
+      !CanBatchPatchMatchViews(shapes, false, options.checkpoint_hmm)) {
+    GTEST_SKIP() << "Fixed controller pair/batch shape is not admitted";
+  }
+  if (sparse && !PatchMatchSparseSources::IsSupported())
+    GTEST_SKIP() << "Sparse source sharing is unsupported";
+  struct ResetOnExit {
+    ~ResetOnExit() { ResetStreamFault(StreamFault::kNone, 0); }
+  } reset;
+  ControllerWorkspaceFixture fixture(width, height);
+  const auto native_root = fixture.Workspace();
+  PatchMatchControllerTestAccess::Hooks native_hooks;
+  {
+    PatchMatchController native(options, native_root, "COLMAP", "");
+    ASSERT_NO_THROW(PatchMatchControllerTestAccess::RunSingles(
+        native, native_hooks, options, 5));
+  }
+  const auto expected = ControllerWorkspaceFixture::Outputs(native_root);
+  ASSERT_EQ(expected.size(), 10u);
+  ASSERT_EQ(native_hooks.written_references.size(), 5u);
+  // Direct pair uses the same first two images but has a two-reference output.
+  const auto pair_root = fixture.Workspace();
+  PatchMatchControllerTestAccess::Hooks pair_hooks;
+  {
+    PatchMatchController native(options, pair_root, "COLMAP", "");
+    ASSERT_NO_THROW(PatchMatchControllerTestAccess::RunSingles(
+        native, pair_hooks, options, 2));
+  }
+  const auto expected_pair = ControllerWorkspaceFixture::Outputs(pair_root);
+  ASSERT_EQ(expected_pair.size(), 4u);
+  // Capture-only controls establish creation and output parity. Normal stream
+  // destruction occurs outside the construction scope and is not counted.
+  for (const bool batch : {false, true}) {
+    SCOPED_TRACE(batch);
+    const auto root = fixture.Workspace();
+    PatchMatchControllerTestAccess::Hooks hooks;
+    ResetStreamFault(StreamFault::kNone, 0, 0, true);
+    {
+      PatchMatchController controller(options, root, "COLMAP", "");
+      if (batch) {
+        ASSERT_NO_THROW(PatchMatchControllerTestAccess::Run(controller, hooks));
+      } else {
+        ASSERT_NO_THROW(PatchMatchControllerTestAccess::RunPair(
+            controller, hooks, options, 0, 1));
+      }
+    }
+    const size_t expected_creations = batch ? 5u : 2u;
+    ASSERT_EQ(stream_attempts.load(), expected_creations);
+    ASSERT_EQ(stream_event_count.load(), expected_creations);
+    ASSERT_EQ(stream_fired.load(), 0u);
+    for (size_t i = 0; i < expected_creations; ++i) {
+      EXPECT_EQ(stream_events[i].kind, StreamEventKind::kCreated);
+      EXPECT_NE(stream_events[i].stream, nullptr);
+      EXPECT_EQ(stream_events[i].ordinal, i + 1);
+    }
+    EXPECT_EQ(hooks.written_references,
+              batch ? native_hooks.written_references
+                    : pair_hooks.written_references);
+    EXPECT_EQ(ControllerWorkspaceFixture::Outputs(root),
+              batch ? expected : expected_pair);
+    ResetStreamFault(StreamFault::kNone, 0);
+  }
+  for (const size_t ordinal : {1u, 2u}) {
+    SCOPED_TRACE(ordinal);
+    const auto root = fixture.Workspace();
+    PatchMatchControllerTestAccess::Hooks hooks;
+    ResetStreamFault(StreamFault::kRefuse, ordinal);
+    {
+      PatchMatchController controller(options, root, "COLMAP", "");
+      ASSERT_NO_THROW(PatchMatchControllerTestAccess::RunPair(
+          controller, hooks, options, 0, 1));
+    }
+    ASSERT_EQ(stream_fired.load(), 1u);
+    ExpectStreamCleanupBeforeQueries({ordinal});
+    EXPECT_EQ(hooks.written_references, pair_hooks.written_references);
+    EXPECT_EQ(ControllerWorkspaceFixture::Outputs(root), expected_pair);
+    ResetStreamFault(StreamFault::kNone, 0);
+  }
+  for (const auto failures :
+       {std::pair<size_t, size_t>{1, 0}, {3, 0}, {5, 0}, {1, 2}}) {
+    SCOPED_TRACE(failures.first);
+    SCOPED_TRACE(failures.second);
+    const auto root = fixture.Workspace();
+    PatchMatchControllerTestAccess::Hooks hooks;
+    ResetStreamFault(StreamFault::kRefuse, failures.first, failures.second);
+    {
+      PatchMatchController controller(options, root, "COLMAP", "");
+      ASSERT_NO_THROW(PatchMatchControllerTestAccess::Run(controller, hooks));
+    }
+    ASSERT_EQ(stream_fired.load(), failures.second ? 2u : 1u);
+    const auto has_phase = [&](const char* phase) {
+      return std::any_of(
+          hooks.memory_queries.begin(),
+          hooks.memory_queries.end(),
+          [&](const auto& q) { return std::string(q.phase) == phase; });
+    };
+    EXPECT_TRUE(has_phase("after-batch-stream-refusal"));
+    EXPECT_EQ(hooks.sparse_bank_at_work_stream_refusal, sparse);
+    if (failures.second) EXPECT_TRUE(has_phase("after-pair-stream-refusal"));
+    ExpectStreamCleanupBeforeQueries(
+        failures.second ? std::vector<size_t>{failures.first, failures.second}
+                        : std::vector<size_t>{failures.first});
+    EXPECT_EQ(hooks.written_references, native_hooks.written_references);
+    EXPECT_EQ(ControllerWorkspaceFixture::Outputs(root), expected);
+    ResetStreamFault(StreamFault::kNone, 0);
+  }
+}
+
+TEST_F(CudaTest, ControllerWorkStreamRefusalsSparseOff) {
+  RunControllerWorkStreamRefusals(false);
+}
+
+TEST_F(CudaTest, ControllerWorkStreamRefusalsSparseOptionOn) {
+  // The refusal hook observes pointer presence, not bank contents or lifetime.
+  RunControllerWorkStreamRefusals(true);
+}
+
+TEST_F(CudaTest, ControllerWorkStreamFatalFailuresNeverReadmit) {
+  ASSERT_TRUE(internal::IsPatchMatchWorkStreamConstructionActive != nullptr);
+  auto options = ControllerWorkspaceFixture::Options();
+  options.geom_consistency = false;
+  options.filter = false;
+  constexpr size_t width = 513, height = 257;
+  const std::vector<std::pair<size_t, size_t>> shapes(5, {width, height});
+  if (!CanBatchPatchMatchViews(shapes, false, options.checkpoint_hmm))
+    GTEST_SKIP() << "Fixed controller batch shape is not admitted";
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  for (const auto& item : std::array<std::pair<StreamFault, const char*>, 6>{
+           {{StreamFault::kPrior, "preexisting error"},
+            {StreamFault::kOther, "runtime failure"},
+            {StreamFault::kMismatch, "last-error mismatch"},
+            {StreamFault::kFailedNonNull, "unresolved output"},
+            {StreamFault::kSuccessNull, "Check failed: stream != nullptr"},
+            {StreamFault::kDestroy, "cudaStreamDestroy"}}}) {
+    const StreamFault fault = item.first;
+    const char* const reason = item.second;
+    SCOPED_TRACE(static_cast<int>(fault));
+    EXPECT_EXIT(
+        ([&, fault, reason]() {
+          ControllerWorkspaceFixture fixture(width, height);
+          const auto root = fixture.Workspace();
+          PatchMatchControllerTestAccess::Hooks hooks;
+          ResetStreamFault(fault, 3);
+          bool threw = false;
+          std::string message;
+          {
+            PatchMatchController controller(options, root, "COLMAP", "");
+            try {
+              PatchMatchControllerTestAccess::Run(controller, hooks);
+            } catch (const std::exception& error) {
+              threw = true;
+              message = error.what();
+            }
+          }
+          const size_t count = stream_event_count.load();
+          if (!threw || message.find(reason) == std::string::npos ||
+              stream_fired.load() != 1 || count > stream_events.size() ||
+              !hooks.written_references.empty())
+            std::_Exit(81);
+          size_t failure = 0;
+          while (failure < count &&
+                 stream_events[failure].kind != StreamEventKind::kRefused)
+            ++failure;
+          if (failure == count || stream_events[failure].ordinal != 3)
+            std::_Exit(82);
+          size_t created = 0, destroyed = 0;
+          for (size_t i = 0; i < count; ++i) {
+            if (stream_events[i].kind == StreamEventKind::kQuery)
+              std::_Exit(83);
+            if (stream_events[i].kind == StreamEventKind::kCreated) {
+              ++created;
+              size_t releases = 0;
+              for (size_t j = failure + 1; j < count; ++j)
+                if (stream_events[j].kind == StreamEventKind::kDestroyed &&
+                    stream_events[j].stream == stream_events[i].stream)
+                  ++releases;
+              if (releases != 1) std::_Exit(84);
+            }
+            if (stream_events[i].kind == StreamEventKind::kDestroyed)
+              ++destroyed;
+          }
+          if (created != (fault == StreamFault::kFailedNonNull ? 3u : 2u) ||
+              destroyed != created ||
+              (fault == StreamFault::kDestroy &&
+               stream_destroy_failures.load() == 0))
+            std::_Exit(85);
+          ResetStreamFault(StreamFault::kNone, 0);
+          std::_Exit(0);
+        }()),
+        ::testing::ExitedWithCode(0),
+        "");
+  }
 }
 
 TEST_F(CudaTest, ControllerPairAllocationRefusals) {
