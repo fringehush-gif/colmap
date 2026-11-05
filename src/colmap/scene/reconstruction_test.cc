@@ -1230,6 +1230,67 @@ TEST(Reconstruction, DeleteAllPoints2DAndPoints3D) {
   EXPECT_TRUE(reconstruction.IsValid());
 }
 
+TEST(Reconstruction, TranscribeImageIdsMissingNamePreservesState) {
+  Reconstruction reconstruction;
+  GenerateReconstruction(3, &reconstruction);
+  Track track;
+  track.AddElement(1, 0);
+  track.AddElement(2, 0);
+  reconstruction.AddPoint3D(Eigen::Vector3d(0, 0, 1), track);
+  ASSERT_TRUE(reconstruction.IsValid());
+  const Reconstruction before = reconstruction;
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  database->WriteCamera(reconstruction.Camera(1), /*use_camera_id=*/true);
+
+  // The first visited image is remappable; a later name is missing.
+  Image database_image;
+  database_image.SetName(reconstruction.Images().begin()->second.Name());
+  database_image.SetCameraId(reconstruction.Camera(1).camera_id);
+  database_image.SetImageId(100);
+  ASSERT_FALSE(database_image.HasFrameId());
+  ASSERT_EQ(database->WriteImage(database_image, /*use_image_id=*/true), 100);
+
+  EXPECT_THROW(reconstruction.TranscribeImageIdsToDatabase(*database),
+               std::exception);
+  EXPECT_EQ(reconstruction.Rigs(), before.Rigs());
+  EXPECT_EQ(reconstruction.Cameras(), before.Cameras());
+  EXPECT_EQ(reconstruction.Frames(), before.Frames());
+  EXPECT_EQ(reconstruction.Images(), before.Images());
+  EXPECT_EQ(reconstruction.Points3D(), before.Points3D());
+  EXPECT_TRUE(reconstruction.IsValid());
+  ExpectValidPtrs(reconstruction);
+}
+
+TEST(Reconstruction, TranscribeImageIdsDuplicateTargetPreservesState) {
+  Reconstruction reconstruction;
+  GenerateReconstruction(2, &reconstruction);
+  reconstruction.Image(2).SetName(reconstruction.Image(1).Name());
+  Track track;
+  track.AddElement(1, 0);
+  track.AddElement(2, 0);
+  reconstruction.AddPoint3D(Eigen::Vector3d(0, 0, 1), track);
+  ASSERT_TRUE(reconstruction.IsValid());
+  const Reconstruction before = reconstruction;
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  database->WriteCamera(reconstruction.Camera(1), /*use_camera_id=*/true);
+  Image database_image;
+  database_image.SetName(reconstruction.Image(1).Name());
+  database_image.SetCameraId(reconstruction.Camera(1).camera_id);
+  database_image.SetImageId(100);
+  ASSERT_FALSE(database_image.HasFrameId());
+  ASSERT_EQ(database->WriteImage(database_image, /*use_image_id=*/true), 100);
+
+  EXPECT_THROW(reconstruction.TranscribeImageIdsToDatabase(*database),
+               std::exception);
+  EXPECT_EQ(reconstruction.Rigs(), before.Rigs());
+  EXPECT_EQ(reconstruction.Cameras(), before.Cameras());
+  EXPECT_EQ(reconstruction.Frames(), before.Frames());
+  EXPECT_EQ(reconstruction.Images(), before.Images());
+  EXPECT_EQ(reconstruction.Points3D(), before.Points3D());
+  EXPECT_TRUE(reconstruction.IsValid());
+  ExpectValidPtrs(reconstruction);
+}
+
 TEST(Reconstruction, TranscribeImageIdsToDatabase) {
   const std::vector<std::string> kImageNames = {
       "test_image1.jpg", "test_image2.jpg", "test_image3.jpg"};

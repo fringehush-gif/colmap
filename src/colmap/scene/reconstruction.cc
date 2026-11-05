@@ -917,7 +917,8 @@ void Reconstruction::TranscribeImageIdsToDatabase(const Database& database) {
   NodeHashMap<image_t, class Image> new_images;
   new_images.reserve(NumImages());
 
-  for (auto& [_, image] : images_) {
+  // Stage ID changes until every lookup and target-ID check has succeeded.
+  for (const auto& [_, image] : images_) {
     const std::optional<class Image> database_image =
         database.ReadImageWithName(image.Name());
     if (!database_image.has_value()) {
@@ -925,8 +926,10 @@ void Reconstruction::TranscribeImageIdsToDatabase(const Database& database) {
                        << " does not exist in database";
     }
     old_to_new_image_ids.emplace(image.ImageId(), database_image->ImageId());
-    image.SetImageId(database_image->ImageId());
-    THROW_CHECK(new_images.emplace(database_image->ImageId(), image).second);
+    auto [new_image_it, inserted] =
+        new_images.emplace(database_image->ImageId(), image);
+    THROW_CHECK(inserted);
+    new_image_it->second.SetImageId(database_image->ImageId());
   }
 
   images_ = std::move(new_images);
