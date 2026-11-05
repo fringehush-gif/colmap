@@ -1388,8 +1388,8 @@ TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
   ASSERT_EQ(serial.GetFusedPoints().size(), 30 * 40);
   ASSERT_EQ(serial.GetFusedPointsVisibility().size(), 30 * 40);
   const auto expected = capture(serial);
-  // Cached inputs retain nearest-neighbor sampling rather than the resident
-  // unit-grid shortcut. Compare all pixel attributes and visibility exactly.
+  // Compare resident and cached sampling, including every pixel attribute
+  // and visibility entry.
   options.use_cache = true;
   StereoFusion cached(options, root, "COLMAP", "", "geometric");
   cached.Run();
@@ -3576,13 +3576,24 @@ TEST(StereoFusion, MixedResolutionColorsFollowPixelCenters) {
       for (int col = 0; col < width; ++col) normal.Set(row, col, 2, -1.0f);
     }
     normal.Write(root / "stereo/normal_maps/view.png.geometric.bin");
-    for (const std::string mode : {"eager", "lru"}) {
+    for (const std::string mode : {"eager",
+                                   "lru",
+                                   "bounded",
+                                   "components",
+                                   "compact",
+                                   "compact_neighborhood"}) {
       SCOPED_TRACE(mode);
       StereoFusionOptions options;
       options.num_threads = 1;
       options.min_num_pixels = 1;
       options.max_num_pixels = 1;
       options.use_cache = mode == "lru";
+      options.bounded_cache = mode != "eager" && mode != "lru";
+      options.bounded_cache_components =
+          mode == "components" || mode == "compact_neighborhood";
+      options.bounded_cache_compact_rgb =
+          mode == "compact" || mode == "compact_neighborhood";
+      options.bounded_cache_neighborhood = mode == "compact_neighborhood";
       options.cache_size = 1.0 / 1024;
       StereoFusion fusion(options, root, "COLMAP", "", "geometric");
       fusion.Run();

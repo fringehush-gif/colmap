@@ -1442,17 +1442,18 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
       if (grid.first != width || grid.second != height) {
         Bitmap compact(
             static_cast<int>(grid.first), static_cast<int>(grid.second), true);
-        // Match fusion float division, round and out-of-range black.
-        const float scale_x = static_cast<float>(grid.first) / width;
-        const float scale_y = static_cast<float>(grid.second) / height;
+        // Use the same exact pixel-center mapping as live fusion sampling.
         for (size_t row = 0; row < grid.second; ++row) {
+          const int source_row = internal::RescalePixelCenter(
+              row, compact.Height(), data->bitmap.Height());
           for (size_t col = 0; col < grid.first; ++col) {
             compact.SetPixel(
                 col,
                 row,
                 data->bitmap
-                    .InterpolateNearestNeighbor(static_cast<int>(col) / scale_x,
-                                                static_cast<int>(row) / scale_y)
+                    .GetPixel(internal::RescalePixelCenter(
+                                  col, compact.Width(), data->bitmap.Width()),
+                              source_row)
                     .value_or(BitmapColor<uint8_t>(0)));
           }
         }

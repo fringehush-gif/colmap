@@ -1717,13 +1717,13 @@ TEST(BoundedWorkspaceResident, CompactRgbAdmissionAndExactSamples) {
     EXPECT_EQ(lease->bitmap.Height(), grid.second);
     EXPECT_EQ(lease->bitmap_on_depth_grid, compacted);
     EXPECT_EQ(lease->NumBytes(), pixels * 19);
-    const float sx = static_cast<float>(grid.first) / 10;
-    const float sy = static_cast<float>(grid.second) / 5;
     for (int row = 0; row < grid.second; ++row) {
       for (int col = 0; col < grid.first; ++col) {
-        const auto expected =
-            golden.InterpolateNearestNeighbor(col / sx, row / sy)
-                .value_or(BitmapColor<uint8_t>(0));
+        // Evaluate the source pixel center in double precision, independent
+        // of the integer production helper and its identity shortcut.
+        const int source_col = std::floor((col + 0.5) * 10 / grid.first);
+        const int source_row = std::floor((row + 0.5) * 5 / grid.second);
+        const auto expected = golden.GetPixel(source_col, source_row).value();
         const auto actual = lease->bitmap.GetPixel(col, row).value();
         EXPECT_EQ(actual.r, expected.r);
         EXPECT_EQ(actual.g, expected.g);

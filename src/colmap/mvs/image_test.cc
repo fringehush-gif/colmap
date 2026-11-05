@@ -19,6 +19,10 @@ TEST(Image, RescalePixelCenter) {
   EXPECT_EQ(RescalePixelCenter(4, 5, 10), 9);
   EXPECT_EQ(RescalePixelCenter(0, 10, 5), 0);
   EXPECT_EQ(RescalePixelCenter(9, 10, 5), 4);
+  // Distinct wide extents can round to a float scale of one.
+  const int unit = 1 << 24;
+  EXPECT_EQ(RescalePixelCenter(unit / 2, unit, unit + 1), unit / 2 + 1);
+  EXPECT_EQ(RescalePixelCenter(unit / 2 + 1, unit + 1, unit), unit / 2);
   const int largest = std::numeric_limits<int>::max();
   EXPECT_EQ(RescalePixelCenter(largest - 1, largest, largest), largest - 1);
   EXPECT_EQ(RescalePixelCenter(largest - 1, largest, largest - 1), largest - 2);

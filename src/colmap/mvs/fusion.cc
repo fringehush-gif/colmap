@@ -1888,7 +1888,6 @@ void StereoFusion::Fuse(const int thread_id,
           Eigen::Vector4f(col * depth, row * depth, depth, 1.0f);
 
       // Read the color of the pixel.
-      const auto& bitmap_scale = bitmap_scales_.at(image_idx);
       const auto* borrowed_bitmap =
           kResident ? nullptr
           : options_.bounded_cache_neighborhood &&
@@ -1921,25 +1920,15 @@ void StereoFusion::Fuse(const int thread_id,
       const Bitmap& bitmap_data = bitmap_image ? bitmap_image->bitmap
                                   : resident   ? *resident->bitmap
                                                : *bitmap;
-      // Unit-scale float coordinates preserve these integer pixel positions.
-      constexpr int kMaxExactFloatInteger = 1 << 24;
-      const bool resident_on_depth_grid =
-          resident && bitmap_scale.first == 1.0f &&
-          bitmap_scale.second == 1.0f && col >= 0 &&
-          col <= kMaxExactFloatInteger && row >= 0 &&
-          row <= kMaxExactFloatInteger;
       const auto& depth_map_size = depth_map_sizes_.at(image_idx);
+      // The sampler owns the exact identity case for equal raster extents.
       const auto color =
-          ((bitmap_image && bitmap_image->bitmap_on_depth_grid) ||
-           resident_on_depth_grid)
-              ? bitmap_data.GetPixel(col, row).value_or(BitmapColor<uint8_t>(0))
-              : bitmap_data
-                    .GetPixel(
-                        internal::RescalePixelCenter(
+          bitmap_data
+              .GetPixel(internal::RescalePixelCenter(
                             col, depth_map_size.first, bitmap_data.Width()),
                         internal::RescalePixelCenter(
                             row, depth_map_size.second, bitmap_data.Height()))
-                    .value_or(BitmapColor<uint8_t>(0));
+              .value_or(BitmapColor<uint8_t>(0));
       bitmap_lease.reset();
 
       // Set the current pixel as visited.
