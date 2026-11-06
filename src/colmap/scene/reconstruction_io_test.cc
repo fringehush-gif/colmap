@@ -857,6 +857,18 @@ class ThrowingWriteBuffer : public LimitedWriteBuffer {
   }
 };
 
+bool LaterWriteThrowsOnBadStream() {
+  std::ostringstream stream;
+  stream.setstate(std::ios::badbit);
+  stream.exceptions(std::ios::failbit);
+  try {
+    stream.write("", 0);
+  } catch (const std::ios_base::failure&) {
+    return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 TEST(ReconstructionBinary, InitiallyFailedStreamPublishesNothing) {
@@ -918,6 +930,7 @@ TEST(ReconstructionBinary, ThrowingStreamPreservesOriginalErrorAndPrefix) {
 }
 
 TEST(ReconstructionBinary, ExceptionMasksAndLogicalFinalField) {
+  const bool expected_later_throw = LaterWriteThrowsOnBadStream();
   Reconstruction reconstruction = CreateBinaryWireFixture(3);
   for (const image_t id : reconstruction.RegImageIds()) {
     reconstruction.Image(id).SetName("small");
@@ -962,8 +975,15 @@ TEST(ReconstructionBinary, ExceptionMasksAndLogicalFinalField) {
             }
           } else if (fails && (mask & std::ios::failbit) != 0 &&
                      capacity < last_field_start) {
-            // A later logical write observes badbit through its sentry.
-            EXPECT_THROW(write(stream), std::ios_base::failure);
+            // A later sentry may add failbit when it observes badbit.
+            bool caught = false;
+            try {
+              write(stream);
+            } catch (const std::ios_base::failure&) {
+              caught = true;
+            }
+            EXPECT_EQ(caught, (stream.rdstate() & std::ios::failbit) != 0);
+            EXPECT_EQ(caught, expected_later_throw);
           } else {
             EXPECT_NO_THROW(write(stream));
           }
@@ -1010,6 +1030,7 @@ class RejectLogicalWriteBuffer : public std::streambuf {
 }  // namespace
 
 TEST(ReconstructionBinary, FailbitOnlyRetainsNameTerminatorField) {
+  const bool expected_later_throw = LaterWriteThrowsOnBadStream();
   for (const std::string& name : {std::string{},
                                  std::string("short \xc3\xa5"),
                                  std::string("raw\0name", 8)}) {
@@ -1032,10 +1053,15 @@ TEST(ReconstructionBinary, FailbitOnlyRetainsNameTerminatorField) {
         RejectLogicalWriteBuffer buffer(rejected_call, throwing_sink);
         std::ostream stream(&buffer);
         stream.exceptions(std::ios::failbit);
-        // With badbit exceptions disabled, the original sink error is
-        // swallowed by ostream; the following field triggers failbit.
-        EXPECT_THROW(WriteImagesBinary(reconstruction, stream),
-                     std::ios_base::failure);
+        // With badbit exceptions disabled, a later sentry may add failbit.
+        bool caught = false;
+        try {
+          WriteImagesBinary(reconstruction, stream);
+        } catch (const std::ios_base::failure&) {
+          caught = true;
+        }
+        EXPECT_EQ(caught, (stream.rdstate() & std::ios::failbit) != 0);
+        EXPECT_EQ(caught, expected_later_throw);
         EXPECT_TRUE(stream.bad());
         EXPECT_EQ(buffer.Bytes(), expected.substr(0, accepted));
       }
