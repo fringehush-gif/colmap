@@ -579,45 +579,258 @@ TEST(DefaultBundleAdjuster, GaugeFixingWithThreePoints_PinsExactlyThreePoints) {
   CheckVariableCamera(reconstruction.Camera(2), orig_reconstruction.Camera(2));
 }
 
+std::vector<image_t> GaugeTrackImageIds(const Point3D& point) {
+  std::vector<image_t> ids;
+  for (const auto& element : point.track.Elements())
+    ids.push_back(element.image_id);
+  std::sort(ids.begin(), ids.end());
+  return ids;
+}
+
 TEST(DefaultBundleAdjuster,
      GaugeFixingWithThreePoints_CountsExistingConstantPoints) {
+  int device_count = 0;
+  const cudaError_t status = cudaGetDeviceCount(&device_count);
+  if (status != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
+  }
+  struct AnchorCase {
+    int implicit_points;
+    int explicit_points;
+    bool refine_points;
+    bool fixed_pose_only = false;
+  };
+  for (const AnchorCase test : {AnchorCase{0, 1, true},
+                                AnchorCase{0, 0, true},
+                                AnchorCase{1, 0, true},
+                                AnchorCase{2, 0, true},
+                                AnchorCase{3, 0, true},
+                                AnchorCase{3, 0, false},
+                                AnchorCase{3, 0, true, true}}) {
+    SCOPED_TRACE(::testing::Message()
+                 << "implicit=" << test.implicit_points
+                 << " explicit=" << test.explicit_points
+                 << " refine_points=" << test.refine_points
+                 << " fixed_pose_only=" << test.fixed_pose_only);
+    SetPRNGSeed(0);
+    Reconstruction reconstruction;
+    SyntheticDatasetOptions opts;
+    opts.num_rigs = 3;
+    opts.num_cameras_per_rig = 1;
+    opts.num_frames_per_rig = 1;
+    opts.num_points3D = 100;
+    SynthesizeDataset(opts, &reconstruction);
+    ASSERT_EQ(reconstruction.NumPoints3D(), opts.num_points3D);
+    for (const auto& [id, point] : reconstruction.Points3D()) {
+      ASSERT_GE(id, 1);
+      ASSERT_LE(id, opts.num_points3D);
+      ASSERT_EQ(GaugeTrackImageIds(point), (std::vector<image_t>{1, 2, 3}));
+    }
+    // Only the selected anchors retain an observation outside the local BA.
+    // Their full tracks therefore exceed the two included observations.
+    const Image& external_image = reconstruction.Image(3);
+    for (point2D_t idx = 0; idx < external_image.NumPoints2D(); ++idx) {
+      const Point2D& point = external_image.Point2D(idx);
+      if (point.HasPoint3D() &&
+          point.point3D_id > static_cast<point3D_t>(test.implicit_points)) {
+        reconstruction.DeleteObservation(3, idx);
+      }
+    }
+    if (test.fixed_pose_only) {
+      const Image& image = reconstruction.Image(2);
+      for (point2D_t idx = 0; idx < image.NumPoints2D(); ++idx) {
+        const Point2D& point = image.Point2D(idx);
+        if (point.HasPoint3D() &&
+            point.point3D_id <= static_cast<point3D_t>(test.implicit_points)) {
+          reconstruction.DeleteObservation(2, idx);
+        }
+      }
+    }
+    ASSERT_EQ(reconstruction.NumPoints3D(), opts.num_points3D);
+    for (const auto& [id, point] : reconstruction.Points3D()) {
+      const bool implicit = id <= static_cast<point3D_t>(test.implicit_points);
+      const std::vector<image_t> expected =
+          !implicit              ? std::vector<image_t>{1, 2}
+          : test.fixed_pose_only ? std::vector<image_t>{1, 3}
+                                 : std::vector<image_t>{1, 2, 3};
+      ASSERT_EQ(GaugeTrackImageIds(point), expected);
+    }
+    SyntheticNoiseOptions noise_opts;
+    noise_opts.point2D_stddev = 1;
+    noise_opts.point3D_stddev = 0.1;
+    noise_opts.rig_from_world_rotation_stddev = 0.3;
+    noise_opts.rig_from_world_translation_stddev = 0.05;
+    SynthesizeNoise(noise_opts, &reconstruction);
+    const Reconstruction original = reconstruction;
+    ASSERT_GT((original.Point3D(2).xyz - original.Point3D(1).xyz)
+                  .cross(original.Point3D(3).xyz - original.Point3D(1).xyz)
+                  .norm(),
+              1e-3);
+    BundleAdjustmentConfig config;
+    config.AddImage(1);
+    config.AddImage(2);
+    for (int idx = 1; idx <= test.explicit_points; ++idx) {
+      config.AddConstantPoint(idx);
+    }
+    config.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
+    if (test.fixed_pose_only) {
+      config.SetConstantRigFromWorldPose(reconstruction.Image(1).FrameId());
+      config.SetConstantCamIntrinsics(reconstruction.Image(2).CameraId());
+    }
+    BundleAdjustmentOptions options;
+    options.refine_focal_length = test.fixed_pose_only;
+    options.refine_extra_params = test.fixed_pose_only;
+    options.refine_principal_point = false;
+    options.refine_points3D = test.refine_points;
+    options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
+    options.caspar->collect_iteration_data = true;
+    auto adjuster =
+        CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+    const auto summary =
+        std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
+            adjuster->Solve());
+    ASSERT_NE(summary, nullptr);
+    ASSERT_NE(summary->termination_type,
+              BundleAdjustmentTerminationType::FAILURE);
+    EXPECT_EQ(summary->num_residuals,
+              400 - (test.fixed_pose_only ? 2 * test.implicit_points : 0));
+    ASSERT_TRUE(std::isfinite(summary->initial_score));
+    ASSERT_GT(summary->initial_score, 0);
+    EXPECT_TRUE(std::any_of(summary->iterations.begin(),
+                            summary->iterations.end(),
+                            [&](const auto& iteration) {
+                              return iteration.step_accepted &&
+                                     std::isfinite(iteration.score_best) &&
+                                     iteration.score_best <
+                                         summary->initial_score;
+                            }));
+    int unchanged = 0;
+    double largest_change = 0;
+    for (const auto& [id, point] : reconstruction.Points3D()) {
+      EXPECT_TRUE(point.xyz.allFinite());
+      if (point.xyz == original.Point3D(id).xyz) ++unchanged;
+      largest_change = std::max(largest_change,
+                                (point.xyz - original.Point3D(id).xyz).norm());
+    }
+    EXPECT_EQ(unchanged,
+              test.refine_points
+                  ? 3 + (test.fixed_pose_only ? test.implicit_points : 0)
+                  : opts.num_points3D);
+    if (test.refine_points) {
+      EXPECT_GT(largest_change, 1e-3);
+    }
+    for (int idx = 1; idx <= test.implicit_points; ++idx) {
+      CheckConstantPoint(reconstruction.Point3D(idx), original.Point3D(idx));
+    }
+    for (int idx = 1; idx <= test.explicit_points; ++idx) {
+      CheckConstantPoint(reconstruction.Point3D(idx), original.Point3D(idx));
+    }
+  }
+}
+
+TEST(DefaultBundleAdjuster,
+     GaugeFixingWithThreePoints_IgnoresInactiveImplicitExternalPoints) {
+  int device_count = 0;
+  const cudaError_t status = cudaGetDeviceCount(&device_count);
+  if (status != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
+  }
+  SetPRNGSeed(0);
   Reconstruction reconstruction;
   SyntheticDatasetOptions opts;
-  opts.num_rigs = 2;
+  opts.num_rigs = 4;
   opts.num_cameras_per_rig = 1;
   opts.num_frames_per_rig = 1;
   opts.num_points3D = 100;
   SynthesizeDataset(opts, &reconstruction);
+  ASSERT_EQ(reconstruction.NumPoints3D(), opts.num_points3D);
+  for (const auto& [id, point] : reconstruction.Points3D()) {
+    ASSERT_EQ(GaugeTrackImageIds(point), (std::vector<image_t>{1, 2, 3, 4}));
+  }
+  for (const image_t image_id : {image_t{3}, image_t{4}}) {
+    const Image& image = reconstruction.Image(image_id);
+    for (point2D_t idx = 0; idx < image.NumPoints2D(); ++idx) {
+      if (image.Point2D(idx).HasPoint3D()) {
+        reconstruction.DeleteObservation(image_id, idx);
+      }
+    }
+  }
+  ASSERT_EQ(reconstruction.NumPoints3D(), opts.num_points3D);
+  for (const auto& [id, point] : reconstruction.Points3D()) {
+    ASSERT_EQ(GaugeTrackImageIds(point), (std::vector<image_t>{1, 2}));
+  }
   SyntheticNoiseOptions noise_opts;
   noise_opts.point2D_stddev = 1;
   noise_opts.point3D_stddev = 0.1;
   noise_opts.rig_from_world_rotation_stddev = 0.3;
   noise_opts.rig_from_world_translation_stddev = 0.05;
   SynthesizeNoise(noise_opts, &reconstruction);
-  const Reconstruction orig_reconstruction = reconstruction;
-
+  const camera_t unsupported_id = reconstruction.Image(4).CameraId();
+  const Camera old_camera = reconstruction.Camera(unsupported_id);
+  reconstruction.Camera(unsupported_id) =
+      Camera::CreateFromModelId(unsupported_id,
+                                CameraModelId::kOpenCV,
+                                old_camera.MeanFocalLength(),
+                                old_camera.width,
+                                old_camera.height);
   BundleAdjustmentConfig config;
   config.AddImage(1);
   config.AddImage(2);
-  config.AddConstantPoint(1);  // 1 existing constant; gauge fixer adds 2 more
   config.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
-
+  std::vector<point3D_t> external_ids;
+  for (point2D_t idx = 0; idx < 3; ++idx) {
+    ASSERT_FALSE(reconstruction.Image(3).Point2D(idx).HasPoint3D());
+    ASSERT_FALSE(reconstruction.Image(4).Point2D(idx).HasPoint3D());
+    Track track;
+    track.AddElement(3, idx);
+    track.AddElement(4, idx);
+    const Eigen::Vector3d xyz(idx == 1 ? 1.0 : 0.0, idx == 2 ? 1.0 : 0.0, 4.0);
+    const point3D_t id = reconstruction.AddPoint3D(xyz, track);
+    external_ids.push_back(id);
+    ASSERT_EQ(GaugeTrackImageIds(reconstruction.Point3D(id)),
+              (std::vector<image_t>{3, 4}));
+    config.AddVariablePoint(id);
+  }
+  const Reconstruction original = reconstruction;
   BundleAdjustmentOptions options;
+  options.refine_focal_length = false;
+  options.refine_extra_params = false;
+  options.refine_principal_point = false;
+  options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
+  options.caspar->collect_iteration_data = true;
   auto adjuster =
       CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
-  ASSERT_NE(adjuster->Solve()->termination_type,
+  const auto summary = std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
+      adjuster->Solve());
+  ASSERT_NE(summary, nullptr);
+  ASSERT_NE(summary->termination_type,
             BundleAdjustmentTerminationType::FAILURE);
-
-  // Total unchanged = 1 config-constant + 2 gauge-fixed = 3.
-  int n_unchanged = 0;
-  for (const auto& [point3D_id, point3D] : reconstruction.Points3D()) {
-    if (point3D.xyz == orig_reconstruction.Point3D(point3D_id).xyz) {
-      ++n_unchanged;
+  EXPECT_EQ(summary->num_residuals, 400);
+  ASSERT_TRUE(std::isfinite(summary->initial_score));
+  ASSERT_GT(summary->initial_score, 0);
+  EXPECT_TRUE(std::any_of(summary->iterations.begin(),
+                          summary->iterations.end(),
+                          [&](const auto& iteration) {
+                            return iteration.step_accepted &&
+                                   std::isfinite(iteration.score_best) &&
+                                   iteration.score_best <
+                                       summary->initial_score;
+                          }));
+  int unchanged_local = 0;
+  double largest_change = 0;
+  for (const auto& [id, point] : reconstruction.Points3D()) {
+    EXPECT_TRUE(point.xyz.allFinite());
+    if (std::find(external_ids.begin(), external_ids.end(), id) !=
+        external_ids.end()) {
+      CheckConstantPoint(point, original.Point3D(id));
+    } else {
+      if (point.xyz == original.Point3D(id).xyz) ++unchanged_local;
+      largest_change = std::max(largest_change,
+                                (point.xyz - original.Point3D(id).xyz).norm());
     }
   }
-  EXPECT_EQ(n_unchanged, 3);
-
-  CheckConstantPoint(reconstruction.Point3D(1), orig_reconstruction.Point3D(1));
+  EXPECT_EQ(unchanged_local, 3);
+  EXPECT_GT(largest_change, 1e-3);
 }
 
 TEST(DefaultBundleAdjuster, MultiCameraRigResidualCountConstantSensorFromRig) {
