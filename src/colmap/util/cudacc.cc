@@ -132,11 +132,15 @@ bool CudaCleanupScope::ObserveCleanup(const char* operation,
 }
 void CudaCleanupScope::Check() const {
   if (operation_ != nullptr) {
-    std::throw_with_nested(
-        std::runtime_error(StringPrintf("CUDA %s cleanup %s failed (code %d)",
-                                        driver_ ? "driver" : "runtime",
-                                        operation_,
-                                        code_)));
+    const std::runtime_error error(
+        StringPrintf("CUDA %s cleanup %s failed (code %d)",
+                      driver_ ? "driver" : "runtime",
+                      operation_,
+                      code_));
+    if (std::current_exception()) {
+      std::throw_with_nested(error);
+    }
+    throw error;
   }
 }
 
