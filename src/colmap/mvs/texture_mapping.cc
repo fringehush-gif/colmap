@@ -263,8 +263,12 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
   occlusion_tester.Build(mesh);
 #endif
 
-  // Flat score buffer: scores[fi * num_images + ii].
-  std::vector<double> scores(num_faces * num_images, -1.0);
+  std::vector<int> view_per_face(num_faces, -1);
+  // Smoothing only needs positive-score eligibility, not the scores themselves.
+  std::vector<uint8_t> eligible_views;
+  if (options.view_selection_smoothing_iterations > 0) {
+    eligible_views.resize(num_faces * num_images, 0);
+  }
 
 #ifdef _OPENMP
   [[maybe_unused]] const int num_threads =
@@ -283,6 +287,7 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
     const Eigen::Vector3f v2 = GetVertex(mesh, idx[2]);
     const Eigen::Vector3f centroid = (v0 + v1 + v2) / 3.0f;
     const std::array<Eigen::Vector3f, 3> verts = {v0, v1, v2};
+    double best_score = -1.0;
 
     for (size_t ii = 0; ii < num_images; ++ii) {
       const Image& img = images[ii];
@@ -331,17 +336,11 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
       const double area =
           std::abs(static_cast<double>(e1.x()) * static_cast<double>(e2.y()) -
                    static_cast<double>(e1.y()) * static_cast<double>(e2.x()));
-      scores[fi * num_images + ii] = area;
-    }
-  }
-
-  std::vector<int> view_per_face(num_faces, -1);
-  for (size_t fi = 0; fi < num_faces; ++fi) {
-    double best_score = -1.0;
-    for (size_t ii = 0; ii < num_images; ++ii) {
-      const double s = scores[fi * num_images + ii];
-      if (s > best_score) {
-        best_score = s;
+      if (!eligible_views.empty()) {
+        eligible_views[fi * num_images + ii] = area > 0;
+      }
+      if (area > best_score) {
+        best_score = area;
         view_per_face[fi] = static_cast<int>(ii);
       }
     }
@@ -364,7 +363,7 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
       int best_count =
           label_counts.count(best_label) ? label_counts[best_label] : 0;
       for (const auto& [label, count] : label_counts) {
-        if (count > best_count && scores[fi * num_images + label] > 0) {
+        if (count > best_count && eligible_views[fi * num_images + label]) {
           best_count = count;
           best_label = label;
         }

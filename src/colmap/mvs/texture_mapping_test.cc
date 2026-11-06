@@ -408,6 +408,87 @@ TEST(MeshTextureMapping, NeighborSmoothing) {
   }
 }
 
+TEST(MeshTextureMapping, ViewSelectionPreservesScoresAndSmoothing) {
+  const auto no_images =
+      MeshTextureMapping(MakeTriangleMesh(), {}, MeshTextureMappingOptions());
+  EXPECT_EQ(no_images.face_view_ids, (std::vector<int>{-1, -1}));
+  EXPECT_EQ(no_images.face_uvs, std::vector<float>(12, 0.0f));
+  EXPECT_EQ(no_images.atlas_width, 0);
+  EXPECT_EQ(no_images.atlas_height, 0);
+
+  const Image regular =
+      MakeTestImage(64, 64, BitmapColor<uint8_t>(180, 70, 40));
+  const auto MakeView = [&](const float distance) {
+    const float T[3] = {-0.5f, 0.5f, distance};
+    Image image("other.png", 64, 64, regular.GetK(), regular.GetR(), T);
+    Bitmap bitmap(64, 64, /*as_rgb=*/true);
+    bitmap.Fill(BitmapColor<uint8_t>(30, 150, 200));
+    image.SetBitmap(std::move(bitmap));
+    return image;
+  };
+  const Image far = MakeView(1e9f);
+  const Image close = MakeView(1.5f);
+
+  const auto CheckSelection = [](const PlyMesh& mesh,
+                                 const std::vector<Image>& images,
+                                 const int smoothing,
+                                 const std::vector<int>& expected) {
+    MeshTextureMappingOptions options;
+    options.apply_color_correction = false;
+    options.inpaint_radius = 0;
+    options.view_selection_smoothing_iterations = smoothing;
+    MeshTextureMappingResult reference;
+    for (const int num_threads : {1, 3}) {
+      SCOPED_TRACE(num_threads);
+      options.num_threads = num_threads;
+      auto result = MeshTextureMapping(mesh, images, options);
+      ASSERT_EQ(result.face_view_ids, expected);
+      ASSERT_EQ(result.face_uvs.size(), 6 * mesh.faces.size());
+      for (const float uv : result.face_uvs) EXPECT_TRUE(std::isfinite(uv));
+      if (num_threads == 1) {
+        reference = std::move(result);
+      } else {
+        EXPECT_EQ(result.face_uvs, reference.face_uvs);
+        EXPECT_EQ(result.atlas_width, reference.atlas_width);
+        EXPECT_EQ(result.atlas_height, reference.atlas_height);
+        EXPECT_EQ(result.texture_atlas.RowMajorData(),
+                  reference.texture_atlas.RowMajorData());
+      }
+    }
+  };
+
+  PlyMesh mesh = MakeTriangleMesh();
+  mesh.faces.emplace_back(0, 0, 0);  // No normal, hence no eligible view.
+  for (const int smoothing : {0, 3}) {
+    SCOPED_TRACE(smoothing);
+    // Equal positive areas choose the first view; positive areas beat zero.
+    CheckSelection(mesh, {regular, regular}, smoothing, {0, 0, -1});
+    CheckSelection(mesh, {far, regular}, smoothing, {1, 1, -1});
+  }
+
+  // The thin face has a valid normal but collapses under float projection.
+  // Zero area wins the initial argmax over -1, but must not enable smoothing.
+  mesh.vertices = {PlyMeshVertex(0, 0, 0),
+                   PlyMeshVertex(1, 0, 0),
+                   PlyMeshVertex(0, 1e-8f, 0),
+                   PlyMeshVertex(0, -1, 0)};
+  mesh.faces = {PlyMeshFace(0, 1, 2), PlyMeshFace(1, 0, 3)};
+  CheckSelection(mesh, {far, regular}, 0, {0, 1});
+  CheckSelection(mesh, {far, regular}, 3, {0, 1});
+
+  // Only the middle face fits in the close camera. Its two neighbors vote
+  // for the wider view, which has a positive score for all three faces.
+  mesh.vertices = {PlyMeshVertex(0, 0, 0),
+                   PlyMeshVertex(1, 0, 0),
+                   PlyMeshVertex(0, 1, 0),
+                   PlyMeshVertex(1.5f, 1.5f, 0),
+                   PlyMeshVertex(-1, 0, 0)};
+  mesh.faces = {
+      PlyMeshFace(0, 1, 2), PlyMeshFace(1, 3, 2), PlyMeshFace(0, 2, 4)};
+  CheckSelection(mesh, {close, regular}, 0, {0, 1, 1});
+  CheckSelection(mesh, {close, regular}, 3, {1, 1, 1});
+}
+
 TEST(MeshTextureMapping, CubeAdjacency) {
   // Verify the cube mesh produces faces with proper adjacency
   // by running the full pipeline.
@@ -594,8 +675,8 @@ TEST(MeshTextureMapping, InpaintDoesNotOverwriteBaked) {
         int best_distance = options.inpaint_radius + 1;
         size_t pixel_ties = 0;
         for (int sy = std::max(0, y - options.inpaint_radius);
-             sy <= std::min(result_base.atlas_height - 1,
-                            y + options.inpaint_radius);
+             sy <=
+             std::min(result_base.atlas_height - 1, y + options.inpaint_radius);
              ++sy) {
           for (int sx = std::max(0, x - options.inpaint_radius);
                sx <= std::min(result_base.atlas_width - 1,
