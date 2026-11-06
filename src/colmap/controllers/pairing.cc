@@ -214,7 +214,8 @@ VocabTreePairGenerator::VocabTreePairGenerator(
     std::function<bool(image_t, image_t)> image_pair_filter)
     : options_(options),
       cache_(THROW_CHECK_NOTNULL(cache)),
-      queue_(std::make_unique<JobQueue<Retrieval>>(options_.num_threads)),
+      queue_(std::make_unique<JobQueue<Retrieval>>(
+          GetEffectiveNumThreads(options_.num_threads))),
       image_pair_filter_(std::move(image_pair_filter)),
       thread_pool_(std::make_unique<ThreadPool>(options_.num_threads)) {
   THROW_CHECK(options.Check());
