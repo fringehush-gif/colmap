@@ -3,6 +3,7 @@
 #include "colmap/estimators/bundle_adjustment.h"
 
 #include "colmap/estimators/bundle_adjustment_ceres.h"
+#include "colmap/estimators/bundle_adjustment_internal.h"
 #include "colmap/geometry/rigid3_matchers.h"
 #include "colmap/scene/database.h"
 #include "colmap/scene/reconstruction_matchers.h"
@@ -66,6 +67,67 @@ std::vector<BundleAdjustmentBackend> BundleAdjustmentBackends() {
   backends.push_back(BundleAdjustmentBackend::CASPAR);
 #endif
   return backends;
+}
+
+TEST(FixedGaugeWithThreePoints, UsesAffineSpan) {
+  for (const double scale : {1e-6, 1.0, 1e6}) {
+    for (const double offset : {0.0, 4.0}) {
+      SCOPED_TRACE(scale);
+      SCOPED_TRACE(offset);
+      internal::FixedGaugeWithThreePoints gauge;
+      const Eigen::Vector3d origin = scale * Eigen::Vector3d(1, 2, offset);
+      EXPECT_TRUE(gauge.MaybeAddFixedPoint(origin));
+      EXPECT_FALSE(gauge.MaybeAddFixedPoint(origin));
+      EXPECT_TRUE(
+          gauge.MaybeAddFixedPoint(origin + scale * Eigen::Vector3d::UnitX()));
+      EXPECT_FALSE(gauge.MaybeAddFixedPoint(
+          origin + 2 * scale * Eigen::Vector3d::UnitX()));
+      EXPECT_TRUE(
+          gauge.MaybeAddFixedPoint(origin + scale * Eigen::Vector3d::UnitY()));
+      EXPECT_EQ(gauge.num_fixed_points, 3);
+      EXPECT_FALSE(
+          gauge.MaybeAddFixedPoint(origin + scale * Eigen::Vector3d::UnitZ()));
+    }
+  }
+}
+
+TEST(FixedGaugeWithThreePoints, AcceptsWorldOrigin) {
+  internal::FixedGaugeWithThreePoints gauge;
+  EXPECT_TRUE(gauge.MaybeAddFixedPoint(Eigen::Vector3d::Zero()));
+  EXPECT_TRUE(gauge.MaybeAddFixedPoint(Eigen::Vector3d::UnitX()));
+  EXPECT_TRUE(gauge.MaybeAddFixedPoint(Eigen::Vector3d::UnitY()));
+  EXPECT_EQ(gauge.num_fixed_points, 3);
+}
+
+TEST(FixedGaugeWithThreePoints, RejectsDegeneracyAndStopsAtThreeAnchors) {
+  internal::FixedGaugeWithThreePoints gauge;
+  const Eigen::Vector3d origin(4, -8, 16);
+  EXPECT_TRUE(gauge.MaybeAddFixedPoint(origin));
+  EXPECT_FALSE(gauge.MaybeAddFixedPoint(origin));
+  EXPECT_EQ(gauge.num_fixed_points, 1);
+  EXPECT_TRUE(gauge.MaybeAddFixedPoint(origin + Eigen::Vector3d::UnitX()));
+  EXPECT_FALSE(gauge.MaybeAddFixedPoint(origin));
+  EXPECT_FALSE(gauge.MaybeAddFixedPoint(origin + 2 * Eigen::Vector3d::UnitX()));
+  EXPECT_EQ(gauge.num_fixed_points, 2);
+  EXPECT_TRUE(gauge.MaybeAddFixedPoint(origin + Eigen::Vector3d::UnitY()));
+  EXPECT_FALSE(gauge.MaybeAddFixedPoint(origin + Eigen::Vector3d::UnitZ()));
+  EXPECT_FALSE(gauge.MaybeAddFixedPoint(origin));
+  EXPECT_EQ(gauge.num_fixed_points, 3);
+}
+
+TEST(FixedGaugeWithThreePoints, UsesRelativeNumericalRank) {
+  for (const double scale : {1e-6, 1.0, 1e6}) {
+    SCOPED_TRACE(scale);
+    internal::FixedGaugeWithThreePoints gauge;
+    EXPECT_TRUE(gauge.MaybeAddFixedPoint(Eigen::Vector3d::Zero()));
+    EXPECT_TRUE(gauge.MaybeAddFixedPoint(scale * Eigen::Vector3d::UnitX()));
+    // Below the relative numerical rank threshold at double precision.
+    EXPECT_FALSE(
+        gauge.MaybeAddFixedPoint(scale * Eigen::Vector3d(1, 1e-18, 0)));
+    EXPECT_EQ(gauge.num_fixed_points, 2);
+    EXPECT_TRUE(gauge.MaybeAddFixedPoint(scale * Eigen::Vector3d(1, 1e-8, 0)));
+    EXPECT_EQ(gauge.num_fixed_points, 3);
+  }
 }
 
 TEST(BundleAdjustmentOptions, Copy) {

@@ -737,6 +737,96 @@ TEST(DefaultBundleAdjuster, ConstantExtraParam) {
   }
 }
 
+TEST(DefaultBundleAdjuster, ThreePointGaugeIsIndependentOfPlaneOffset) {
+  for (const double scale : {1e-6, 1.0, 1e6}) {
+    for (const double offset : {0.0, 4.0}) {
+      for (const int num_constant : {0, 1, 2, 3, 4}) {
+        SCOPED_TRACE(scale);
+        SCOPED_TRACE(offset);
+        SCOPED_TRACE(num_constant);
+        Reconstruction reconstruction;
+        SyntheticDatasetOptions options;
+        options.num_rigs = 2;
+        options.num_cameras_per_rig = 1;
+        options.num_frames_per_rig = 1;
+        options.num_points3D = 4;
+        SynthesizeDataset(options, &reconstruction);
+        reconstruction.Point3D(1).xyz = scale * Eigen::Vector3d(0, 0, offset);
+        reconstruction.Point3D(2).xyz = scale * Eigen::Vector3d(1, 0, offset);
+        reconstruction.Point3D(3).xyz = scale * Eigen::Vector3d(0, 1, offset);
+        reconstruction.Point3D(4).xyz = scale * Eigen::Vector3d(1, 1, offset);
+
+        // Inspect construction only: the synthetic tracks provide the parameter
+        // blocks, while the coordinates deliberately exercise the gauge
+        // selector.
+        BundleAdjustmentConfig config;
+        config.AddImage(1);
+        config.AddImage(2);
+        config.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
+        for (int id = 1; id <= num_constant; ++id) {
+          config.AddConstantPoint(id);
+        }
+        auto adjuster = CreateDefaultCeresBundleAdjuster(
+            BundleAdjustmentOptions(), config, reconstruction);
+        const auto& problem = GetCeresProblem(*adjuster);
+        EXPECT_EQ(problem.NumResiduals(), 16);
+        int num_fixed = 0;
+        for (const point3D_t id : {1, 2, 3, 4}) {
+          const Point3D& point = reconstruction.Point3D(id);
+          ASSERT_EQ(point.track.Length(), 2);
+          ASSERT_TRUE(problem.HasParameterBlock(point.xyz.data()));
+          const bool is_fixed =
+              problem.IsParameterBlockConstant(point.xyz.data());
+          num_fixed += is_fixed;
+          if (id <= static_cast<point3D_t>(num_constant)) {
+            EXPECT_TRUE(is_fixed);
+          }
+        }
+        // Any three corners are non-collinear. Do not depend on hash-map order,
+        // and preserve extra constants explicitly requested by the caller.
+        EXPECT_EQ(num_fixed, std::max(3, num_constant));
+      }
+    }
+  }
+}
+
+TEST(DefaultBundleAdjuster, ThreePointGaugeRejectsDegenerateAnchors) {
+  for (const double offset : {0.0, 4.0}) {
+    for (const bool collinear : {false, true}) {
+      SCOPED_TRACE(offset);
+      SCOPED_TRACE(collinear);
+      Reconstruction reconstruction;
+      SyntheticDatasetOptions options;
+      options.num_rigs = 2;
+      options.num_cameras_per_rig = 1;
+      options.num_frames_per_rig = 1;
+      options.num_points3D = 4;
+      SynthesizeDataset(options, &reconstruction);
+      for (const point3D_t id : {1, 2, 3, 4}) {
+        reconstruction.Point3D(id).xyz =
+            Eigen::Vector3d(collinear ? id - 1 : 0, 0, offset);
+      }
+
+      BundleAdjustmentConfig config;
+      config.AddImage(1);
+      config.AddImage(2);
+      config.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
+      auto adjuster = CreateDefaultCeresBundleAdjuster(
+          BundleAdjustmentOptions(), config, reconstruction);
+      const auto& problem = GetCeresProblem(*adjuster);
+      EXPECT_EQ(problem.NumResiduals(), 16);
+      int num_fixed = 0;
+      for (const point3D_t id : {1, 2, 3, 4}) {
+        const Point3D& point = reconstruction.Point3D(id);
+        ASSERT_EQ(point.track.Length(), 2);
+        ASSERT_TRUE(problem.HasParameterBlock(point.xyz.data()));
+        num_fixed += problem.IsParameterBlockConstant(point.xyz.data());
+      }
+      EXPECT_EQ(num_fixed, collinear ? 2 : 1);
+    }
+  }
+}
+
 TEST(DefaultBundleAdjuster, FixGaugeWithThreePoints) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions synthetic_dataset_options;
