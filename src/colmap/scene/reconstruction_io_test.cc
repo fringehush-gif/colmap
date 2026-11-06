@@ -5,10 +5,16 @@
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <locale>
 #include <sstream>
+#include <stdexcept>
+#include <streambuf>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -377,6 +383,45 @@ INSTANTIATE_TEST_SUITE_P(
         []() { return std::make_unique<ReaderWriterTextFileStream>(); },
         []() { return std::make_unique<ReaderWriterBinaryFileStream>(); }));
 
+TEST(BinaryFileIO, ReportsWriteFailure) {
+#if defined(__linux__)
+  // Verify the device is available and rejects even a buffered header write.
+  std::ofstream full("/dev/full", std::ios::binary);
+  if (!full.is_open()) {
+    GTEST_SKIP() << "/dev/full is unavailable";
+  }
+  full.put('\0');
+  full.flush();
+  ASSERT_TRUE(full.fail());
+  full.close();
+
+  Reconstruction reconstruction;
+  for (const bool populated : {false, true}) {
+    SCOPED_TRACE(populated);
+    if (populated) {
+      SyntheticDatasetOptions options;
+      options.num_rigs = 1;
+      options.num_cameras_per_rig = 2;
+      options.num_frames_per_rig = 2;
+      options.num_points3D = 10;
+      SynthesizeDataset(options, &reconstruction);
+    }
+    EXPECT_THROW(WriteRigsBinary(reconstruction, "/dev/full"),
+                 std::invalid_argument);
+    EXPECT_THROW(WriteCamerasBinary(reconstruction, "/dev/full"),
+                 std::invalid_argument);
+    EXPECT_THROW(WriteFramesBinary(reconstruction, "/dev/full"),
+                 std::invalid_argument);
+    EXPECT_THROW(WriteImagesBinary(reconstruction, "/dev/full"),
+                 std::invalid_argument);
+    EXPECT_THROW(WritePoints3DBinary(reconstruction, "/dev/full"),
+                 std::invalid_argument);
+  }
+#else
+  GTEST_SKIP() << "/dev/full failure injection requires Linux";
+#endif
+}
+
 TEST(ExportNVM, Nominal) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions synthetic_dataset_options;
@@ -629,4 +674,373 @@ TEST(TextIO, LocaleIndependentRoundtrip) {
 }
 
 }  // namespace
+
+namespace {
+
+// Encode the documented fields independently of production endian/stream helpers.
+void AppendWireUnsigned(uint64_t value, const size_t bytes, std::string* output) {
+  for (size_t i = 0; i < bytes; ++i) {
+    output->push_back(static_cast<char>((value >> (8 * i)) & 0xff));
+  }
+}
+
+void AppendWireDouble(const double value, std::string* output) {
+  uint64_t bits;
+  static_assert(sizeof(bits) == sizeof(value));
+  std::memcpy(&bits, &value, sizeof(bits));
+  AppendWireUnsigned(bits, 8, output);
+}
+
+std::string ExpectedImageWire(const Reconstruction& reconstruction) {
+  std::string output;
+  AppendWireUnsigned(reconstruction.NumRegImages(), 8, &output);
+  for (const image_t id : reconstruction.RegImageIds()) {
+    const Image& image = reconstruction.Image(id);
+    AppendWireUnsigned(id, 4, &output);
+    const Rigid3d pose = image.CamFromWorld();
+    for (const double value : {pose.rotation().w(), pose.rotation().x(),
+                              pose.rotation().y(), pose.rotation().z(),
+                              pose.translation().x(), pose.translation().y(),
+                              pose.translation().z()}) {
+      AppendWireDouble(value, &output);
+    }
+    AppendWireUnsigned(image.CameraId(), 4, &output);
+    output += image.Name();
+    output.push_back('\0');
+    AppendWireUnsigned(image.NumPoints2D(), 8, &output);
+    for (const Point2D& point : image.Points2D()) {
+      AppendWireDouble(point.xy.x(), &output);
+      AppendWireDouble(point.xy.y(), &output);
+      AppendWireUnsigned(point.point3D_id, 8, &output);
+    }
+  }
+  return output;
+}
+
+std::string ExpectedPointWire(const Reconstruction& reconstruction) {
+  std::vector<point3D_t> ids;
+  for (const auto& [id, point] : reconstruction.Points3D()) ids.push_back(id);
+  std::sort(ids.begin(), ids.end());
+  std::string output;
+  AppendWireUnsigned(ids.size(), 8, &output);
+  for (const point3D_t id : ids) {
+    const Point3D& point = reconstruction.Point3D(id);
+    AppendWireUnsigned(id, 8, &output);
+    for (int axis = 0; axis < 3; ++axis) {
+      AppendWireDouble(point.xyz(axis), &output);
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+      AppendWireUnsigned(point.color(axis), 1, &output);
+    }
+    AppendWireDouble(point.error, &output);
+    AppendWireUnsigned(point.track.Length(), 8, &output);
+    for (const auto& element : point.track.Elements()) {
+      AppendWireUnsigned(element.image_id, 4, &output);
+      AppendWireUnsigned(element.point2D_idx, 4, &output);
+    }
+  }
+  return output;
+}
+
+Reconstruction CreateBinaryWireFixture(const int num_points) {
+  SyntheticDatasetOptions options;
+  options.num_rigs = 1;
+  options.num_cameras_per_rig = 1;
+  options.num_frames_per_rig = 2;
+  options.num_points3D = num_points;
+  options.num_points2D_without_point3D = 3;
+  Reconstruction reconstruction;
+  SynthesizeDataset(options, &reconstruction);
+  const auto& ids = reconstruction.RegImageIds();
+  reconstruction.Image(ids[0]).SetName("sub dir/camera \xc3\xa5.png");
+  reconstruction.Image(ids[1]).SetName(std::string(32773, 'x'));
+  auto& image = reconstruction.Image(ids[0]);
+  image.Point2D(0).xy.x() = -0.0;
+  image.Point2D(0).xy.y() = std::numeric_limits<double>::infinity();
+  const uint64_t nan_bits = UINT64_C(0x7ff8000000001234);
+  std::memcpy(&image.Point2D(1).xy.x(), &nan_bits, sizeof(nan_bits));
+  for (const auto& [id, unused] : reconstruction.Points3D()) {
+    auto& point = reconstruction.Point3D(id);
+    point.color = Eigen::Vector3ub(0, 128, 255);
+    point.error = (id % 2) ? -0.0 : 0.125;
+  }
+  return reconstruction;
+}
+
+class LimitedWriteBuffer : public std::streambuf {
+ public:
+  explicit LimitedWriteBuffer(const size_t capacity) : capacity_(capacity) {}
+  const std::string& Bytes() const { return bytes_; }
+
+ protected:
+  std::streamsize xsputn(const char* data, std::streamsize size) override {
+    const size_t count = std::min<size_t>(size, capacity_ - bytes_.size());
+    bytes_.append(data, count);
+    return count;
+  }
+
+ private:
+  const size_t capacity_;
+  std::string bytes_;
+};
+
+}  // namespace
+
+TEST(ReconstructionBinary, ExactDocumentedWireAndBufferBoundaries) {
+  Reconstruction empty;
+  std::ostringstream empty_images, empty_points;
+  WriteImagesBinary(empty, empty_images);
+  WritePoints3DBinary(empty, empty_points);
+  EXPECT_EQ(empty_images.str(), std::string(8, '\0'));
+  EXPECT_EQ(empty_points.str(), std::string(8, '\0'));
+  for (const int num_points : {3, 1371}) {
+    SCOPED_TRACE(num_points);
+    const Reconstruction reconstruction = CreateBinaryWireFixture(num_points);
+    std::ostringstream images, points;
+    WriteImagesBinary(reconstruction, images);
+    WritePoints3DBinary(reconstruction, points);
+    EXPECT_EQ(images.str(), ExpectedImageWire(reconstruction));
+    EXPECT_EQ(points.str(), ExpectedPointWire(reconstruction));
+  }
+}
+
+TEST(ReconstructionBinary, ShortWritePreservesStreamFailureAndPrefix) {
+  const Reconstruction reconstruction = CreateBinaryWireFixture(1371);
+  for (const bool write_images : {false, true}) {
+    const std::string expected = write_images
+                                     ? ExpectedImageWire(reconstruction)
+                                     : ExpectedPointWire(reconstruction);
+    const auto write = [&](std::ostream& stream) {
+      if (write_images) WriteImagesBinary(reconstruction, stream);
+      else WritePoints3DBinary(reconstruction, stream);
+    };
+    for (const size_t capacity : {size_t{0}, size_t{1}, size_t{7}, size_t{8},
+                                  size_t{32767}, size_t{32768}, size_t{32769},
+                                  expected.size() - 1, expected.size()}) {
+      SCOPED_TRACE(write_images);
+      SCOPED_TRACE(capacity);
+      for (const bool exceptions : {false, true}) {
+        SCOPED_TRACE(exceptions);
+        LimitedWriteBuffer buffer(capacity);
+        std::ostream stream(&buffer);
+        if (exceptions) stream.exceptions(std::ios::badbit | std::ios::failbit);
+        if (exceptions && capacity < expected.size()) {
+          EXPECT_THROW(write(stream), std::ios_base::failure);
+        } else {
+          EXPECT_NO_THROW(write(stream));
+        }
+        EXPECT_EQ(stream.good(), capacity == expected.size());
+        EXPECT_EQ(buffer.Bytes(), expected.substr(0, capacity));
+      }
+    }
+  }
+}
+
+namespace {
+
+class WireSinkFailure : public std::runtime_error {
+ public:
+  WireSinkFailure() : std::runtime_error("original wire sink failure") {}
+};
+
+class ThrowingWriteBuffer : public LimitedWriteBuffer {
+ public:
+  using LimitedWriteBuffer::LimitedWriteBuffer;
+
+ protected:
+  std::streamsize xsputn(const char* data, const std::streamsize size) override {
+    const std::streamsize accepted = LimitedWriteBuffer::xsputn(data, size);
+    if (accepted != size) {
+      throw WireSinkFailure();
+    }
+    return accepted;
+  }
+};
+
+}  // namespace
+
+TEST(ReconstructionBinary, InitiallyFailedStreamPublishesNothing) {
+  const Reconstruction reconstruction;
+  for (const bool write_images : {false, true}) {
+    SCOPED_TRACE(write_images);
+    for (const auto state :
+         {std::ios::badbit, std::ios::failbit, std::ios::eofbit}) {
+      SCOPED_TRACE(state);
+      LimitedWriteBuffer buffer(64);
+      std::ostream stream(&buffer);
+      stream.setstate(state);
+      if (write_images) {
+        EXPECT_THROW(WriteImagesBinary(reconstruction, stream),
+                     std::invalid_argument);
+      } else {
+        EXPECT_THROW(WritePoints3DBinary(reconstruction, stream),
+                     std::invalid_argument);
+      }
+      EXPECT_EQ(stream.rdstate(), state);
+      EXPECT_TRUE(buffer.Bytes().empty());
+    }
+  }
+}
+
+TEST(ReconstructionBinary, ThrowingStreamPreservesOriginalErrorAndPrefix) {
+  const Reconstruction reconstruction = CreateBinaryWireFixture(1371);
+  for (const bool write_images : {false, true}) {
+    SCOPED_TRACE(write_images);
+    const std::string expected = write_images
+                                     ? ExpectedImageWire(reconstruction)
+                                     : ExpectedPointWire(reconstruction);
+    const auto write = [&](std::ostream& stream) {
+      if (write_images) {
+        WriteImagesBinary(reconstruction, stream);
+      } else {
+        WritePoints3DBinary(reconstruction, stream);
+      }
+    };
+    for (const size_t capacity :
+         {size_t{0}, size_t{8}, size_t{32768}, expected.size() - 1}) {
+      SCOPED_TRACE(capacity);
+      ASSERT_LT(capacity, expected.size());
+      for (const bool exceptions : {false, true}) {
+        SCOPED_TRACE(exceptions);
+        ThrowingWriteBuffer buffer(capacity);
+        std::ostream stream(&buffer);
+        if (exceptions) {
+          stream.exceptions(std::ios::badbit | std::ios::failbit);
+          EXPECT_THROW(write(stream), WireSinkFailure);
+        } else {
+          EXPECT_NO_THROW(write(stream));
+        }
+        EXPECT_TRUE(stream.bad());
+        EXPECT_EQ(buffer.Bytes(), expected.substr(0, capacity));
+      }
+    }
+  }
+}
+
+TEST(ReconstructionBinary, ExceptionMasksAndLogicalFinalField) {
+  Reconstruction reconstruction = CreateBinaryWireFixture(3);
+  for (const image_t id : reconstruction.RegImageIds()) {
+    reconstruction.Image(id).SetName("small");
+  }
+  for (const bool write_images : {false, true}) {
+    SCOPED_TRACE(write_images);
+    const std::string expected = write_images
+                                     ? ExpectedImageWire(reconstruction)
+                                     : ExpectedPointWire(reconstruction);
+    ASSERT_LT(expected.size(), 32768);
+    // The last image field is point3D_id; the last point field is point2D_idx.
+    const size_t last_field_start = expected.size() - (write_images ? 8 : 4);
+    const auto write = [&](std::ostream& stream) {
+      if (write_images) {
+        WriteImagesBinary(reconstruction, stream);
+      } else {
+        WritePoints3DBinary(reconstruction, stream);
+      }
+    };
+    for (const auto mask : {std::ios::goodbit,
+                           std::ios::failbit,
+                           std::ios::badbit,
+                           std::ios::failbit | std::ios::badbit}) {
+      SCOPED_TRACE(mask);
+      for (const size_t capacity : {size_t{0},
+                                    size_t{8},
+                                    last_field_start - 1,
+                                    last_field_start,
+                                    expected.size() - 1,
+                                    expected.size()}) {
+        SCOPED_TRACE(capacity);
+        const auto check = [&](auto& buffer, const bool throwing_sink) {
+          SCOPED_TRACE(throwing_sink);
+          std::ostream stream(&buffer);
+          stream.exceptions(mask);
+          const bool fails = capacity < expected.size();
+          if (fails && (mask & std::ios::badbit) != 0) {
+            if (throwing_sink) {
+              EXPECT_THROW(write(stream), WireSinkFailure);
+            } else {
+              EXPECT_THROW(write(stream), std::ios_base::failure);
+            }
+          } else if (fails && (mask & std::ios::failbit) != 0 &&
+                     capacity < last_field_start) {
+            // A later logical write observes badbit through its sentry.
+            EXPECT_THROW(write(stream), std::ios_base::failure);
+          } else {
+            EXPECT_NO_THROW(write(stream));
+          }
+          EXPECT_EQ(stream.good(), !fails);
+          EXPECT_EQ(stream.bad(), fails);
+          EXPECT_EQ(buffer.Bytes(), expected.substr(0, capacity));
+        };
+        LimitedWriteBuffer short_buffer(capacity);
+        check(short_buffer, false);
+        ThrowingWriteBuffer throwing_buffer(capacity);
+        check(throwing_buffer, true);
+      }
+    }
+  }
+}
+
+namespace {
+
+class RejectLogicalWriteBuffer : public std::streambuf {
+ public:
+  RejectLogicalWriteBuffer(const size_t rejected_call, const bool throwing)
+      : rejected_call_(rejected_call), throwing_(throwing) {}
+  const std::string& Bytes() const { return bytes_; }
+
+ protected:
+  std::streamsize xsputn(const char* data, const std::streamsize size) override {
+    if (num_calls_++ == rejected_call_) {
+      if (throwing_) {
+        throw WireSinkFailure();
+      }
+      return 0;
+    }
+    bytes_.append(data, size);
+    return size;
+  }
+
+ private:
+  const size_t rejected_call_;
+  const bool throwing_;
+  size_t num_calls_ = 0;
+  std::string bytes_;
+};
+
+}  // namespace
+
+TEST(ReconstructionBinary, FailbitOnlyRetainsNameTerminatorField) {
+  for (const std::string& name : {std::string{},
+                                 std::string("short \xc3\xa5"),
+                                 std::string("raw\0name", 8)}) {
+    SCOPED_TRACE(name);
+    Reconstruction reconstruction = CreateBinaryWireFixture(3);
+    const auto& ids = reconstruction.RegImageIds();
+    reconstruction.Image(ids[0]).SetName(name);
+    reconstruction.Image(ids[1]).SetName("second");
+    const std::string expected = ExpectedImageWire(reconstruction);
+    ASSERT_LT(expected.size(), 32768);
+    // Count, image ID, quaternion, translation, and camera ID precede name.
+    constexpr size_t kNameOffset = 8 + 4 + 7 * 8 + 4;
+    // Zero-based logical writes 10 and 11 are name+NUL and point count.
+    for (const size_t rejected_call : {size_t{10}, size_t{11}}) {
+      SCOPED_TRACE(rejected_call);
+      const size_t accepted =
+          kNameOffset + (rejected_call == 10 ? 0 : name.size() + 1);
+      for (const bool throwing_sink : {false, true}) {
+        SCOPED_TRACE(throwing_sink);
+        RejectLogicalWriteBuffer buffer(rejected_call, throwing_sink);
+        std::ostream stream(&buffer);
+        stream.exceptions(std::ios::failbit);
+        // With badbit exceptions disabled, the original sink error is
+        // swallowed by ostream; the following field triggers failbit.
+        EXPECT_THROW(WriteImagesBinary(reconstruction, stream),
+                     std::ios_base::failure);
+        EXPECT_TRUE(stream.bad());
+        EXPECT_EQ(buffer.Bytes(), expected.substr(0, accepted));
+      }
+    }
+  }
+}
+
 }  // namespace colmap
