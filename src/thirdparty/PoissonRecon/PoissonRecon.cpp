@@ -26,9 +26,11 @@ ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF S
 DAMAGE.
 */
 
+#include "PoissonRecon.h"
 #include "PreProcessor.h"
 #include "Reconstructors.h"
 
+#include <algorithm>
 #include <memory>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,6 +53,17 @@ namespace {
 
 const int DefaultSchedule = (int)ThreadPool::Schedule;
 const int DefaultChunkSize = (int)ThreadPool::ChunkSize;
+
+template< typename Real >
+void RemoveColorProperties( std::vector< PlyProperty > &properties )
+{
+	const VertexFactory::RGBColorFactory< Real > factory;
+	for( unsigned int i=0 ; i<factory.plyReadNum() ; i++ )
+	{
+		const std::string name = factory.plyReadProperty(i).name;
+		properties.erase( std::remove_if( properties.begin() , properties.end() , [&]( const PlyProperty &property ){ return !property.is_list && property.name==name; } ) , properties.end() );
+	}
+}
 
 // Command-line options belong to one synchronous invocation.
 struct Parameters
@@ -602,7 +615,7 @@ void Execute( const Parameters &options , const AuxDataFactory &auxDataFactory )
 
 } // namespace
 
-int RunPoissonRecon( int argc , char* argv[] )
+int RunPoissonRecon( int argc , char* argv[] , bool readPlyColors )
 {
 	Timer timer;
 #ifdef ARRAY_DEBUG
@@ -645,6 +658,7 @@ int RunPoissonRecon( int argc , char* argv[] )
 		if( !factory.template plyValidReadProperties<0>( readFlags ) ) MK_THROW( "Ply file does not contain positions" );
 		if( !factory.template plyValidReadProperties<1>( readFlags ) ) MK_THROW( "Ply file does not contain normals" );
 		delete[] readFlags;
+		if( !readPlyColors ) RemoveColorProperties< Real >( unprocessedProperties );
 #if defined(POISSON_AUX_NATIVE_GPU)
         const bool standard_rgb = unprocessedProperties.size()==3 &&
             unprocessedProperties[0].name=="red" &&
@@ -685,6 +699,7 @@ int RunPoissonRecon( int argc , char* argv[] )
 		if( !factory.template plyValidReadProperties<0>( readFlags ) ) MK_THROW( "Ply file does not contain positions" );
 		if( !factory.template plyValidReadProperties<1>( readFlags ) ) MK_THROW( "Ply file does not contain normals" );
 		delete[] readFlags;
+		if( !readPlyColors ) RemoveColorProperties< Real >( unprocessedProperties );
 #if defined(POISSON_AUX_NATIVE_GPU)
         const bool standard_rgb = unprocessedProperties.size()==3 &&
             unprocessedProperties[0].name=="red" &&
@@ -720,4 +735,9 @@ int RunPoissonRecon( int argc , char* argv[] )
 	}
 
 	return EXIT_SUCCESS;
+}
+
+int RunPoissonRecon( int argc , char* argv[] )
+{
+	return RunPoissonRecon( argc , argv , true );
 }

@@ -101,7 +101,8 @@ bool PoissonMeshing(const PoissonMeshingOptions& options,
     }
 
     if (RunPoissonRecon(args_cstr.size(),
-                        const_cast<char**>(args_cstr.data())) != EXIT_SUCCESS) {
+                        const_cast<char**>(args_cstr.data()),
+                        options.color) != EXIT_SUCCESS) {
       success = false;
     }
 

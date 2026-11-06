@@ -16,6 +16,7 @@
 #include "thirdparty/PoissonRecon/PolygonIndexChain.h"
 #include "thirdparty/PoissonRecon/RegularTree.h"
 #include "thirdparty/PoissonRecon/SurfaceTrimmer.h"
+#include "thirdparty/PoissonRecon/VertexFactory.h"
 #include "thirdparty/PoissonRecon/normal_capture.h"
 #include "thirdparty/PoissonRecon/trim_gpu_adapter.h"
 
@@ -1764,6 +1765,217 @@ TEST(PoissonMeshing, TrimmerDoesNotReusePreviousArguments) {
   ASSERT_EQ(RunSurfaceTrimmer(static_cast<int>(argv.size()), argv.data()),
             EXIT_SUCCESS);
   EXPECT_EQ(RunSurfaceTrimmer(1, argv.data()), EXIT_FAILURE);
+}
+
+bool WriteAuxiliaryAsciiPly(const std::filesystem::path& path,
+                            const std::vector<PlyPoint>& points,
+                            const std::vector<std::string>& color_properties,
+                            const bool write_quality) {
+  std::ofstream output(path);
+  output.imbue(std::locale::classic());
+  output << std::setprecision(std::numeric_limits<float>::max_digits10);
+  output << "ply\nformat ascii 1.0\nelement vertex " << points.size()
+         << "\nproperty float x\nproperty float y\nproperty float z"
+         << "\nproperty float nx\nproperty float ny\nproperty float nz\n";
+  for (const auto& name : color_properties) {
+    output << "property uchar " << name << '\n';
+  }
+  if (write_quality) output << "property float quality\n";
+  output << "end_header\n";
+  for (const auto& point : points) {
+    output << point.x << ' ' << point.y << ' ' << point.z << ' ' << point.nx
+           << ' ' << point.ny << ' ' << point.nz;
+    for (const auto& name : color_properties) {
+      const auto value = name == "red" || name == "r"     ? point.r
+                         : name == "green" || name == "g" ? point.g
+                                                          : point.b;
+      output << ' ' << static_cast<int>(value);
+    }
+    if (write_quality) output << " 7";
+    output << '\n';
+  }
+  output.close();
+  return output.good();
+}
+
+void CheckMeshProperties(const std::filesystem::path& path,
+                         std::vector<std::string> auxiliary_properties) {
+  const auto mesh = ReadPlyMesh(path).mesh;
+  ASSERT_GE(mesh.vertices.size(), 3);
+  ASSERT_FALSE(mesh.faces.empty());
+  for (const auto& vertex : mesh.vertices) {
+    EXPECT_TRUE(std::isfinite(vertex.x));
+    EXPECT_TRUE(std::isfinite(vertex.y));
+    EXPECT_TRUE(std::isfinite(vertex.z));
+  }
+  for (const auto& face : mesh.faces) {
+    EXPECT_LT(face.vertex_idx1, mesh.vertices.size());
+    EXPECT_LT(face.vertex_idx2, mesh.vertices.size());
+    EXPECT_LT(face.vertex_idx3, mesh.vertices.size());
+  }
+  std::vector<PoissonRecon::PlyProperty> properties;
+  PoissonRecon::PLY::ReadVertexHeader(path.string(), properties);
+  std::vector<std::string> names;
+  for (const auto& property : properties) names.push_back(property.name);
+  auxiliary_properties.insert(auxiliary_properties.end(), {"x", "y", "z"});
+  std::sort(names.begin(), names.end());
+  std::sort(auxiliary_properties.begin(), auxiliary_properties.end());
+  EXPECT_EQ(names, auxiliary_properties);
+
+  std::vector<PoissonRecon::PlyProperty> attributes;
+  std::vector<std::pair<float, float>> expected_values;
+  for (const auto& property : properties) {
+    if (property.name == "quality") {
+      attributes.push_back(property);
+      expected_values.emplace_back(7.0f, 0.01f);
+    } else if (property.name == "red" || property.name == "r") {
+      attributes.push_back(property);
+      expected_values.emplace_back(17.0f, 1.0f);
+    } else if (property.name == "green" || property.name == "g") {
+      attributes.push_back(property);
+      expected_values.emplace_back(109.0f, 1.0f);
+    } else if (property.name == "blue" || property.name == "b") {
+      attributes.push_back(property);
+      expected_values.emplace_back(233.0f, 1.0f);
+    }
+  }
+  if (!attributes.empty()) {
+    using Factory = PoissonRecon::VertexFactory::DynamicFactory<float>;
+    const Factory factory(attributes);
+    std::vector<Factory::VertexType> values;
+    std::vector<std::vector<int>> polygons;
+    std::vector<std::string> comments;
+    int file_type = 0;
+    auto read_flags = std::make_unique<bool[]>(attributes.size());
+    PoissonRecon::PLY::ReadPolygons(path.string(),
+                                    factory,
+                                    values,
+                                    polygons,
+                                    file_type,
+                                    comments,
+                                    read_flags.get());
+    for (size_t index = 0; index < attributes.size(); ++index) {
+      ASSERT_TRUE(read_flags[index]);
+    }
+    ASSERT_EQ(values.size(), mesh.vertices.size());
+    for (const auto& value : values) {
+      for (size_t index = 0; index < attributes.size(); ++index) {
+        EXPECT_NEAR(value[index],
+                    expected_values[index].first,
+                    expected_values[index].second);
+      }
+    }
+  }
+}
+
+TEST(PoissonMeshing, ColorOptionControlsStandardReorderedAndAliasRgb) {
+  const auto test_dir = CreateTestDir();
+  const auto points = MakeDeterministicColoredCubePoints();
+  for (const std::string layout : {"standard", "reordered", "aliases"}) {
+    SCOPED_TRACE(layout);
+    const auto input = test_dir / (layout + ".ply");
+    const std::vector<std::string> colors =
+        layout == "aliases" ? std::vector<std::string>{"r", "g", "b"}
+                            : std::vector<std::string>{"red", "green", "blue"};
+    if (layout == "standard") {
+      WriteBinaryPlyPoints(input, points, true, true);
+    } else if (layout == "reordered") {
+      ASSERT_TRUE(WriteReorderedRgbAsciiPly(input, points));
+    } else {
+      ASSERT_TRUE(WriteAuxiliaryAsciiPly(input, points, colors, false));
+    }
+    for (const bool color : {false, true}) {
+      SCOPED_TRACE(color);
+      PoissonMeshingOptions options;
+      options.depth = 3;
+      options.point_weight = 1.0;
+      options.trim = 0.0;
+      options.num_threads = 1;
+      options.color = color;
+      const auto output =
+          test_dir / (layout + (color ? "-color.ply" : "-plain.ply"));
+      ASSERT_TRUE(PoissonMeshing(options, input, output));
+      CheckMeshProperties(output, color ? colors : std::vector<std::string>{});
+    }
+  }
+}
+
+TEST(PoissonMeshing, ColorlessInputRetainsGeometryOnlyOutput) {
+  const auto test_dir = CreateTestDir();
+  const auto input = test_dir / "geometry.ply";
+  WriteBinaryPlyPoints(
+      input, MakeDeterministicColoredCubePoints(), true, false);
+  for (const bool color : {false, true}) {
+    PoissonMeshingOptions options;
+    options.depth = 3;
+    options.trim = 0.0;
+    options.num_threads = 1;
+    options.color = color;
+    const auto output = test_dir / (color ? "enabled.ply" : "disabled.ply");
+    ASSERT_TRUE(PoissonMeshing(options, input, output));
+    CheckMeshProperties(output, {});
+  }
+}
+
+TEST(PoissonMeshing, ColorOptionPreservesNonColorAuxiliaryProperties) {
+  const auto test_dir = CreateTestDir();
+  const auto points = MakeDeterministicColoredCubePoints();
+  const std::vector<std::vector<std::string>> layouts = {
+      {},
+      {"red", "green", "blue"},
+      {"r", "g", "b"},
+      {"red"},
+      {"r", "green", "b"},
+      {"red", "green", "blue", "r", "g", "b"}};
+  for (size_t index = 0; index < layouts.size(); ++index) {
+    SCOPED_TRACE(index);
+    const auto input = test_dir / ("input-" + std::to_string(index) + ".ply");
+    ASSERT_TRUE(WriteAuxiliaryAsciiPly(input, points, layouts[index], true));
+    for (const bool color : {false, true}) {
+      SCOPED_TRACE(color);
+      PoissonMeshingOptions options;
+      options.depth = 3;
+      options.trim = 0.0;
+      options.num_threads = 1;
+      options.color = color;
+      const auto output = test_dir / (std::to_string(index) +
+                                      (color ? "-color.ply" : "-plain.ply"));
+      ASSERT_TRUE(PoissonMeshing(options, input, output));
+      std::vector<std::string> expected{"quality"};
+      if (color)
+        expected.insert(
+            expected.end(), layouts[index].begin(), layouts[index].end());
+      CheckMeshProperties(output, expected);
+    }
+  }
+}
+
+TEST(PoissonMeshing, GenericEntryRetainsAutomaticAuxiliaryProperties) {
+  const auto test_dir = CreateTestDir();
+  const auto points = MakeDeterministicColoredCubePoints();
+  for (const bool quality : {false, true}) {
+    const auto input = test_dir / (quality ? "quality.ply" : "rgb.ply");
+    const auto output =
+        test_dir / (quality ? "quality-mesh.ply" : "rgb-mesh.ply");
+    const std::vector<std::string> colors{"red", "green", "blue"};
+    ASSERT_TRUE(WriteAuxiliaryAsciiPly(input, points, colors, quality));
+    std::vector<std::string> args = {"poisson_recon",
+                                     "--in",
+                                     input.string(),
+                                     "--out",
+                                     output.string(),
+                                     "--depth",
+                                     "3",
+                                     "--fullDepth",
+                                     "3"};
+    std::vector<char*> argv;
+    for (auto& arg : args) argv.push_back(arg.data());
+    ASSERT_EQ(RunPoissonRecon(static_cast<int>(argv.size()), argv.data()),
+              EXIT_SUCCESS);
+    std::vector<std::string> expected = colors;
+    if (quality) expected.push_back("quality");
+    CheckMeshProperties(output, expected);
+  }
 }
 
 }  // namespace
