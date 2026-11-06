@@ -296,7 +296,8 @@ void VocabTreePairGenerator::Reset() {
     StopQueries();
     // A stopped queue/pool cannot restart. Replace them only after joining the
     // old queries, so no old result can enter the new retrieval pass.
-    auto queue = std::make_unique<JobQueue<Retrieval>>(options_.num_threads);
+    auto queue = std::make_unique<JobQueue<Retrieval>>(
+        GetEffectiveNumThreads(options_.num_threads));
     auto thread_pool = std::make_unique<ThreadPool>(options_.num_threads);
     queue_ = std::move(queue);
     thread_pool_ = std::move(thread_pool);

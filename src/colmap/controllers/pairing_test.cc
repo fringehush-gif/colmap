@@ -7,6 +7,7 @@
 #include "colmap/scene/database_sqlite.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/eigen_matchers.h"
+#include "colmap/util/hash_containers.h"
 #include "colmap/util/testing.h"
 
 #include <algorithm>
@@ -189,20 +190,28 @@ TEST(VocabTreePairGenerator, ResetAfterPartialConsumptionDiscardsOldResults) {
     query_ids.push_back(image.ImageId());
   }
   VocabTreePairingOptions options;
-  options.num_threads = 1;
   options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
   CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
-  VocabTreePairGenerator generator(options, database, query_ids);
-  EXPECT_FALSE(generator.Next().empty());
-  generator.Reset();
-  for (const image_t query_id : query_ids) {
-    const auto pairs = generator.Next();
-    ASSERT_FALSE(pairs.empty());
-    for (const auto& pair : pairs) {
-      EXPECT_EQ(pair.first, query_id);
+  for (const int num_threads : {-1, 0, 1}) {
+    SCOPED_TRACE(num_threads);
+    options.num_threads = num_threads;
+    VocabTreePairGenerator generator(options, database, query_ids);
+    ASSERT_FALSE(generator.Next().empty());
+    generator.Reset();
+    FlatHashSet<image_t> seen_query_ids;
+    for (size_t i = 0; i < query_ids.size(); ++i) {
+      const auto pairs = generator.Next();
+      ASSERT_FALSE(pairs.empty());
+      const image_t query_id = pairs.front().first;
+      EXPECT_TRUE(seen_query_ids.insert(query_id).second);
+      for (const auto& pair : pairs) {
+        EXPECT_EQ(pair.first, query_id);
+      }
     }
+    EXPECT_EQ(seen_query_ids,
+              (FlatHashSet<image_t>(query_ids.begin(), query_ids.end())));
+    EXPECT_TRUE(generator.HasFinished());
   }
-  EXPECT_TRUE(generator.HasFinished());
 }
 
 TEST(VocabTreePairGenerator, UnexpectedQueryErrorAllowsReset) {
