@@ -13,9 +13,93 @@
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/types.h"
 
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <string>
 
 namespace colmap {
+
+namespace {
+
+void FlushAndCloseBinaryFile(std::ofstream& file,
+                             const std::filesystem::path& path) {
+  file.flush();
+  const bool flushed = file.good();
+  file.close();
+  THROW_CHECK(flushed && file.good()) << "Failed to write binary file: " << path;
+}
+
+// Batch the many small fields in images.bin and points3D.bin without retaining
+// a whole model in memory. Flush explicitly to publish trailing bytes and honor
+// the stream's error policy.
+class BufferedLittleEndianWriter {
+ public:
+  explicit BufferedLittleEndianWriter(std::ostream& stream)
+      : stream_(stream),
+        is_little_endian_(IsLittleEndian()),
+        // A failed write sets badbit. With failbit-only exceptions, a later
+        // field's sentry may be the operation that throws. Keep those logical
+        // write boundaries for this exception policy.
+        buffer_writes_((stream.exceptions() &
+                        (std::ios::failbit | std::ios::badbit)) !=
+                       std::ios::failbit) {}
+
+  template <typename T>
+  void Write(const T value) {
+    if (!buffer_writes_) {
+      WriteBinaryLittleEndian<T>(&stream_, value);
+      return;
+    }
+    if (buffer_.size() - size_ < sizeof(T)) {
+      Flush();
+    }
+    const T little_endian = is_little_endian_ ? value : ReverseBytes(value);
+    std::memcpy(buffer_.data() + size_, &little_endian, sizeof(T));
+    size_ += sizeof(T);
+  }
+
+  void WriteNullTerminatedString(const std::string& value) {
+    if (!buffer_writes_) {
+      const std::string terminated = value + '\0';
+      stream_.write(terminated.data(), terminated.size());
+      return;
+    }
+    WriteBytes(value.data(), value.size());
+    Write<uint8_t>(0);
+  }
+
+  void Flush() {
+    if (size_ > 0) {
+      stream_.write(buffer_.data(), size_);
+      size_ = 0;
+    }
+  }
+
+ private:
+  void WriteBytes(const char* data, size_t size) {
+    while (size > 0) {
+      const size_t chunk_size = std::min(size, buffer_.size() - size_);
+      std::memcpy(buffer_.data() + size_, data, chunk_size);
+      size_ += chunk_size;
+      data += chunk_size;
+      size -= chunk_size;
+      if (size_ == buffer_.size()) {
+        Flush();
+      }
+    }
+  }
+
+  std::ostream& stream_;
+  const bool is_little_endian_;
+  const bool buffer_writes_;
+  std::array<char, 32768> buffer_;
+  size_t size_ = 0;
+};
+
+}  // namespace
 
 void ReadRigsBinary(Reconstruction& reconstruction, std::istream& stream) {
   THROW_CHECK(stream.good());
@@ -308,6 +392,7 @@ void WriteRigsBinary(const Reconstruction& reconstruction,
   std::ofstream file(path, std::ios::trunc | std::ios::binary);
   THROW_CHECK_FILE_OPEN(file, path);
   WriteRigsBinary(reconstruction, file);
+  FlushAndCloseBinaryFile(file, path);
 }
 
 void WriteCamerasBinary(const Reconstruction& reconstruction,
@@ -333,6 +418,7 @@ void WriteCamerasBinary(const Reconstruction& reconstruction,
   std::ofstream file(path, std::ios::trunc | std::ios::binary);
   THROW_CHECK_FILE_OPEN(file, path);
   WriteCamerasBinary(reconstruction, file);
+  FlushAndCloseBinaryFile(file, path);
 }
 
 void WriteFramesBinary(const Reconstruction& reconstruction,
@@ -376,40 +462,42 @@ void WriteFramesBinary(const Reconstruction& reconstruction,
   std::ofstream file(path, std::ios::trunc | std::ios::binary);
   THROW_CHECK_FILE_OPEN(file, path);
   WriteFramesBinary(reconstruction, file);
+  FlushAndCloseBinaryFile(file, path);
 }
 
 void WriteImagesBinary(const Reconstruction& reconstruction,
                        std::ostream& stream) {
   THROW_CHECK(stream.good());
+  BufferedLittleEndianWriter writer(stream);
 
-  WriteBinaryLittleEndian<uint64_t>(&stream, reconstruction.NumRegImages());
+  writer.Write<uint64_t>(reconstruction.NumRegImages());
 
   for (const image_t image_id : reconstruction.RegImageIds()) {
     const Image& image = reconstruction.Image(image_id);
 
-    WriteBinaryLittleEndian<image_t>(&stream, image_id);
+    writer.Write<image_t>(image_id);
 
     const Rigid3d& cam_from_world = image.CamFromWorld();
-    WriteBinaryLittleEndian<double>(&stream, cam_from_world.rotation().w());
-    WriteBinaryLittleEndian<double>(&stream, cam_from_world.rotation().x());
-    WriteBinaryLittleEndian<double>(&stream, cam_from_world.rotation().y());
-    WriteBinaryLittleEndian<double>(&stream, cam_from_world.rotation().z());
-    WriteBinaryLittleEndian<double>(&stream, cam_from_world.translation().x());
-    WriteBinaryLittleEndian<double>(&stream, cam_from_world.translation().y());
-    WriteBinaryLittleEndian<double>(&stream, cam_from_world.translation().z());
+    writer.Write<double>(cam_from_world.rotation().w());
+    writer.Write<double>(cam_from_world.rotation().x());
+    writer.Write<double>(cam_from_world.rotation().y());
+    writer.Write<double>(cam_from_world.rotation().z());
+    writer.Write<double>(cam_from_world.translation().x());
+    writer.Write<double>(cam_from_world.translation().y());
+    writer.Write<double>(cam_from_world.translation().z());
 
-    WriteBinaryLittleEndian<camera_t>(&stream, image.CameraId());
+    writer.Write<camera_t>(image.CameraId());
 
-    const std::string name = image.Name() + '\0';
-    stream.write(name.c_str(), name.size());
+    writer.WriteNullTerminatedString(image.Name());
 
-    WriteBinaryLittleEndian<uint64_t>(&stream, image.NumPoints2D());
+    writer.Write<uint64_t>(image.NumPoints2D());
     for (const Point2D& point2D : image.Points2D()) {
-      WriteBinaryLittleEndian<double>(&stream, point2D.xy(0));
-      WriteBinaryLittleEndian<double>(&stream, point2D.xy(1));
-      WriteBinaryLittleEndian<point3D_t>(&stream, point2D.point3D_id);
+      writer.Write<double>(point2D.xy(0));
+      writer.Write<double>(point2D.xy(1));
+      writer.Write<point3D_t>(point2D.point3D_id);
     }
   }
+  writer.Flush();
 }
 
 void WriteImagesBinary(const Reconstruction& reconstruction,
@@ -417,33 +505,36 @@ void WriteImagesBinary(const Reconstruction& reconstruction,
   std::ofstream file(path, std::ios::trunc | std::ios::binary);
   THROW_CHECK_FILE_OPEN(file, path);
   WriteImagesBinary(reconstruction, file);
+  FlushAndCloseBinaryFile(file, path);
 }
 
 void WritePoints3DBinary(const Reconstruction& reconstruction,
                          std::ostream& stream) {
   THROW_CHECK(stream.good());
+  BufferedLittleEndianWriter writer(stream);
 
-  WriteBinaryLittleEndian<uint64_t>(&stream, reconstruction.NumPoints3D());
+  writer.Write<uint64_t>(reconstruction.NumPoints3D());
 
   for (const point3D_t point3D_id :
        ExtractSortedIds(reconstruction.Points3D())) {
     const Point3D& point3D = reconstruction.Point3D(point3D_id);
 
-    WriteBinaryLittleEndian<point3D_t>(&stream, point3D_id);
-    WriteBinaryLittleEndian<double>(&stream, point3D.xyz(0));
-    WriteBinaryLittleEndian<double>(&stream, point3D.xyz(1));
-    WriteBinaryLittleEndian<double>(&stream, point3D.xyz(2));
-    WriteBinaryLittleEndian<uint8_t>(&stream, point3D.color(0));
-    WriteBinaryLittleEndian<uint8_t>(&stream, point3D.color(1));
-    WriteBinaryLittleEndian<uint8_t>(&stream, point3D.color(2));
-    WriteBinaryLittleEndian<double>(&stream, point3D.error);
+    writer.Write<point3D_t>(point3D_id);
+    writer.Write<double>(point3D.xyz(0));
+    writer.Write<double>(point3D.xyz(1));
+    writer.Write<double>(point3D.xyz(2));
+    writer.Write<uint8_t>(point3D.color(0));
+    writer.Write<uint8_t>(point3D.color(1));
+    writer.Write<uint8_t>(point3D.color(2));
+    writer.Write<double>(point3D.error);
 
-    WriteBinaryLittleEndian<uint64_t>(&stream, point3D.track.Length());
+    writer.Write<uint64_t>(point3D.track.Length());
     for (const TrackElement& track_el : point3D.track.Elements()) {
-      WriteBinaryLittleEndian<image_t>(&stream, track_el.image_id);
-      WriteBinaryLittleEndian<point2D_t>(&stream, track_el.point2D_idx);
+      writer.Write<image_t>(track_el.image_id);
+      writer.Write<point2D_t>(track_el.point2D_idx);
     }
   }
+  writer.Flush();
 }
 
 void WritePoints3DBinary(const Reconstruction& reconstruction,
@@ -451,6 +542,7 @@ void WritePoints3DBinary(const Reconstruction& reconstruction,
   std::ofstream file(path, std::ios::trunc | std::ios::binary);
   THROW_CHECK_FILE_OPEN(file, path);
   WritePoints3DBinary(reconstruction, file);
+  FlushAndCloseBinaryFile(file, path);
 }
 
 }  // namespace colmap
