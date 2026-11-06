@@ -14,6 +14,7 @@ class NormalMap : public Mat<float> {
   NormalMap();
   NormalMap(size_t width, size_t height);
   explicit NormalMap(const Mat<float>& mat);
+  explicit NormalMap(Mat<float>&& mat);
 
   void Rescale(float factor);
   void Downsize(size_t max_width, size_t max_height);
