@@ -2,6 +2,7 @@
 
 #include "colmap/sfm/incremental_mapper.h"
 
+#include "colmap/estimators/two_view_geometry.h"
 #include "colmap/scene/correspondence_graph.h"
 #include "colmap/scene/database_cache.h"
 #include "colmap/scene/database_sqlite.h"
@@ -610,27 +611,99 @@ TEST_F(IncrementalMapperTest, EqualRankInitialImagesUseAscendingId) {
 TEST_F(IncrementalMapperTest, RejectedNonemptySeedAdvancesToNextSeed) {
   options_.num_threads = 1;
   options_.random_seed = 0;
+  ASSERT_EQ(options_.init_min_num_inliers, 10);
+  constexpr size_t kRejectedNumMatches = 14;
+  ASSERT_LT(kRejectedNumMatches, TwoViewGeometryOptions().min_num_inliers);
+
+  std::vector<image_t> ids;
+  for (const auto& [image_id, image] : cache_->Images()) {
+    ids.push_back(image_id);
+  }
+  std::sort(ids.begin(), ids.end());
+  ASSERT_EQ(ids.size(), 10);
+  const image_t first_seed = ids.front();
+  for (const image_t image_id : ids) {
+    ASSERT_EQ(cache_->Camera(cache_->Image(image_id).CameraId())
+                  .HasPriorFocalLength(),
+              cache_->Camera(cache_->Image(first_seed).CameraId())
+                  .HasPriorFocalLength());
+  }
+
+  // Keep one actually acceptable synthetic pair, excluding the first seed.
+  // Its unmodified pixels/calibration remain the valid-later precondition.
+  image_t valid_id1 = kInvalidImageId;
+  image_t valid_id2 = kInvalidImageId;
+  for (size_t i = 1; i < ids.size() && valid_id1 == kInvalidImageId; ++i) {
+    for (size_t j = i + 1; j < ids.size(); ++j) {
+      if (IncrementalMapperImpl::EstimateInitialTwoViewGeometry(
+              options_, *cache_, ids[i], ids[j])
+              .has_value()) {
+        valid_id1 = ids[i];
+        valid_id2 = ids[j];
+        break;
+      }
+    }
+  }
+  ASSERT_NE(valid_id1, kInvalidImageId);
+  const image_pair_t valid_pair = ImagePairToPairId(valid_id1, valid_id2);
+
+  // A star gives the first seed 9 * 14 correspondences, more than the
+  // untouched valid pair's at most 100 + 14. Each star edge admits a
+  // neighbor at mapper threshold 10, but cannot pass estimator minimum 15.
+  for (size_t i = 0; i < ids.size(); ++i) {
+    for (size_t j = i + 1; j < ids.size(); ++j) {
+      auto geometry = database_->ReadTwoViewGeometry(ids[i], ids[j]);
+      database_->DeleteTwoViewGeometry(ids[i], ids[j]);
+      if (ids[i] == first_seed) {
+        ASSERT_GE(geometry.inlier_matches.size(), kRejectedNumMatches);
+        geometry.inlier_matches.resize(kRejectedNumMatches);
+      } else if (ImagePairToPairId(ids[i], ids[j]) != valid_pair) {
+        continue;
+      } else {
+        ASSERT_LT(geometry.inlier_matches.size() + kRejectedNumMatches,
+                  (ids.size() - 1) * kRejectedNumMatches);
+      }
+      database_->WriteTwoViewGeometry(ids[i], ids[j], geometry);
+    }
+  }
+  mapper_->EndReconstruction(/*discard=*/false);
+  cache_ = DatabaseCache::Create(*database_, DatabaseCache::Options());
+  mapper_ = std::make_unique<IncrementalMapper>(cache_);
+  reconstruction_ = std::make_shared<Reconstruction>();
+  mapper_->BeginReconstruction(reconstruction_);
+
   const FlatHashMap<image_t, size_t> empty;
   const auto& graph = *cache_->CorrespondenceGraph();
+  ASSERT_EQ(graph.NumCorrespondencesForImage(first_seed),
+            (ids.size() - 1) * kRejectedNumMatches);
+  for (size_t i = 1; i < ids.size(); ++i) {
+    ASSERT_GT(graph.NumCorrespondencesForImage(first_seed),
+              graph.NumCorrespondencesForImage(ids[i]));
+  }
   const auto seeds = IncrementalMapperImpl::FindFirstInitialImage(
       options_, graph, *reconstruction_, empty, empty);
   ASSERT_GE(seeds.size(), 2);
+  ASSERT_EQ(seeds[0], first_seed);
+  ASSERT_EQ(seeds[1], valid_id1);
   const auto neighbors = IncrementalMapperImpl::FindSecondInitialImage(
-      options_, seeds[0], graph, *reconstruction_, empty);
+      options_, first_seed, graph, *reconstruction_, empty);
+  ASSERT_EQ(neighbors, (std::vector<image_t>(ids.begin() + 1, ids.end())));
   ASSERT_FALSE(neighbors.empty());
-  // Collapse only the first seed's cache coordinates to make its geometry
-  // degenerate. Ranking still uses the unchanged reconstruction and graph.
-  for (auto& point : cache_->Image(seeds[0]).Points2D()) {
-    point.xy = Eigen::Vector2d::Zero();
+  for (const image_t neighbor : neighbors) {
+    ASSERT_EQ(graph.NumMatchesBetweenImages(first_seed, neighbor),
+              kRejectedNumMatches);
   }
   ASSERT_FALSE(IncrementalMapperImpl::EstimateInitialTwoViewGeometry(
-                   options_, *cache_, seeds[0], neighbors[0])
+                   options_, *cache_, first_seed, neighbors[0])
                    .has_value());
+  ASSERT_TRUE(IncrementalMapperImpl::EstimateInitialTwoViewGeometry(
+                  options_, *cache_, valid_id1, valid_id2)
+                  .has_value());
   FlatHashSet<image_pair_t> tried;
-  // Leave one first-seed pair for a real rejected estimate; skip its remaining
-  // neighbors to keep this fixture small and guarantee cursor exhaustion.
+  // Leave one real rejected estimate; the remaining first-seed neighbors
+  // are already tried, so its nonempty neighbor cursor must be exhausted.
   for (size_t i = 1; i < neighbors.size(); ++i) {
-    tried.insert(ImagePairToPairId(seeds[0], neighbors[i]));
+    tried.insert(ImagePairToPairId(first_seed, neighbors[i]));
   }
   const auto result =
       IncrementalMapperImpl::FindInitialImagePair(options_,
@@ -642,10 +715,14 @@ TEST_F(IncrementalMapperTest, RejectedNonemptySeedAdvancesToNextSeed) {
                                                   kInvalidImageId,
                                                   kInvalidImageId);
   ASSERT_TRUE(result.has_value());
-  EXPECT_NE(result->image_id1, seeds[0]);
-  EXPECT_EQ(tried.count(ImagePairToPairId(seeds[0], neighbors[0])), 1);
+  EXPECT_NE(result->image_id1, first_seed);
+  EXPECT_EQ(result->image_id1, seeds[1]);
+  EXPECT_EQ(ImagePairToPairId(result->image_id1, result->image_id2),
+            valid_pair);
+  EXPECT_EQ(tried.count(ImagePairToPairId(first_seed, neighbors[0])), 1);
   EXPECT_EQ(
       tried.count(ImagePairToPairId(result->image_id1, result->image_id2)), 1);
+  EXPECT_EQ(tried.size(), neighbors.size() + 1);
 }
 TEST_F(IncrementalMapperTest, ExhaustedLazyInitialPairsCanBeRetried) {
   options_.num_threads = 2;
