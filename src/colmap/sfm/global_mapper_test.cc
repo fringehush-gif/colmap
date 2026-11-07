@@ -4,9 +4,16 @@
 
 #include "colmap/scene/database_cache.h"
 #include "colmap/scene/database_sqlite.h"
+#include "colmap/scene/pose_graph.h"
 #include "colmap/scene/reconstruction_matchers.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/testing.h"
+
+#include <algorithm>
+#include <cmath>
+#include <map>
+#include <sstream>
+#include <stdexcept>
 
 #include <gtest/gtest.h>
 
@@ -210,6 +217,229 @@ TEST(GlobalMapperOptions, RefineSensorFromRigPropagatesToSubOptions) {
   EXPECT_FALSE(options.RotationAveraging().refine_sensor_from_rig);
   EXPECT_FALSE(options.GlobalPositioning().refine_sensor_from_rig);
   EXPECT_FALSE(options.BundleAdjustment().refine_sensor_from_rig);
+}
+
+// Exercise the real track consumer using the maintained scene/database fixture.
+// The explicit matches below define three tracks independently of union-find:
+//   {(a,0), (a,1), (b,0), (c,0)}, {(a,2), (b,2), (c,2)}, {(a,3), (b,3)}.
+class GlobalTrackEstablishmentTest : public testing::Test {
+ protected:
+  using Observation = std::pair<image_t, point2D_t>;
+  using Observations = std::vector<Observation>;
+
+  void SetUp() override {
+    database_ = Database::Open(CreateTestDir() / "database.db");
+    SyntheticDatasetOptions synthetic_options;
+    synthetic_options.num_rigs = 1;
+    synthetic_options.num_cameras_per_rig = 1;
+    synthetic_options.num_frames_per_rig = 3;
+    synthetic_options.num_points3D = 4;
+    synthetic_options.two_view_geometry_has_relative_pose = true;
+    SynthesizeDataset(synthetic_options, &ground_truth_, database_.get());
+    DatabaseCache::Options cache_options;
+    cache_options.load_all_images = true;
+    cache_ = DatabaseCache::Create(*database_, cache_options);
+    for (const auto& [image_id, image] : cache_->Images()) {
+      image_ids_.push_back(image_id);
+    }
+    std::sort(image_ids_.begin(), image_ids_.end());
+    ASSERT_EQ(image_ids_.size(), 3);
+
+    CorrespondenceGraph graph;
+    for (const image_t image_id : image_ids_) {
+      graph.AddImage(image_id, cache_->Image(image_id).NumPoints2D());
+    }
+    const auto add_matches = [&](size_t i, size_t j, FeatureMatches matches) {
+      TwoViewGeometry geometry;
+      geometry.cam2_from_cam1 = Rigid3d();
+      geometry.inlier_matches = std::move(matches);
+      graph.AddTwoViewGeometry(
+          image_ids_[i], image_ids_[j], std::move(geometry));
+    };
+    add_matches(0, 1, {{0, 0}, {2, 2}, {3, 3}});
+    add_matches(1, 2, {{0, 0}, {2, 2}});
+    add_matches(0, 2, {{1, 0}, {2, 2}});
+    graph.Finalize();
+    *cache_->CorrespondenceGraph() = std::move(graph);
+
+    // A wrong cache-coordinate lookup sees distance 0, whereas the
+    // reconstruction coordinates below have distance 10. Thus only the latter
+    // must reject this track when the threshold is immediately below 10.
+    cache_->Image(image_ids_[0]).Point2D(0).xy = Eigen::Vector2d::Zero();
+    cache_->Image(image_ids_[0]).Point2D(1).xy = Eigen::Vector2d::Zero();
+
+    BeginReconstruction();
+  }
+
+  void BeginReconstruction(const PoseGraph* pose_graph = nullptr) {
+    mapper_ = std::make_unique<GlobalMapper>(cache_);
+    reconstruction_ = std::make_shared<Reconstruction>();
+    mapper_->BeginReconstruction(reconstruction_, pose_graph);
+    for (const image_t image_id : image_ids_) {
+      const frame_t frame_id = reconstruction_->Image(image_id).FrameId();
+      reconstruction_->Frame(frame_id).SetRigFromWorld(
+          ground_truth_.Frame(frame_id).RigFromWorld());
+      reconstruction_->RegisterFrame(frame_id);
+    }
+    // Pixel-space distance 10, exactly the default consistency threshold.
+    reconstruction_->Image(image_ids_[0]).Point2D(0).xy = Eigen::Vector2d(0, 0);
+    reconstruction_->Image(image_ids_[0]).Point2D(1).xy = Eigen::Vector2d(6, 8);
+  }
+
+  Observations LongTrack() const {
+    return {{image_ids_[0], 0},
+            {image_ids_[0], 1},
+            {image_ids_[1], 0},
+            {image_ids_[2], 0}};
+  }
+  Observations ThreeViewTrack() const {
+    return {{image_ids_[0], 2}, {image_ids_[1], 2}, {image_ids_[2], 2}};
+  }
+  Observations TwoViewTrack() const {
+    return {{image_ids_[0], 3}, {image_ids_[1], 3}};
+  }
+
+  void ExpectTracks(std::vector<Observations> expected) {
+    std::vector<Observations> actual;
+    std::map<point3D_t, Observations> ordered_tracks;
+    for (const auto& [point3D_id, point3D] : reconstruction_->Points3D()) {
+      Observations observations;
+      for (const auto& element : point3D.track.Elements()) {
+        observations.emplace_back(element.image_id, element.point2D_idx);
+        EXPECT_EQ(reconstruction_->Image(element.image_id)
+                      .Point2D(element.point2D_idx)
+                      .point3D_id,
+                  point3D_id);
+      }
+      ordered_tracks.emplace(point3D_id, observations);
+      std::sort(observations.begin(), observations.end());
+      actual.push_back(std::move(observations));
+    }
+    for (auto& observations : expected) {
+      std::sort(observations.begin(), observations.end());
+    }
+    std::sort(actual.begin(), actual.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(actual, expected);
+
+    // Preserve point IDs and the unsorted per-track observation order for the
+    // paired baseline/candidate XML comparison; the set oracle above is
+    // primary.
+    std::ostringstream roster;
+    for (const auto& [point3D_id, observations] : ordered_tracks) {
+      roster << point3D_id << ':';
+      for (const auto& [image_id, point2D_idx] : observations) {
+        roster << image_id << ',' << point2D_idx << ';';
+      }
+      roster << '|';
+    }
+    RecordProperty("ordered_track_roster", roster.str());
+  }
+
+  std::shared_ptr<Database> database_;
+  Reconstruction ground_truth_;
+  std::shared_ptr<DatabaseCache> cache_;
+  std::unique_ptr<GlobalMapper> mapper_;
+  std::shared_ptr<Reconstruction> reconstruction_;
+  std::vector<image_t> image_ids_;
+};
+
+TEST_F(GlobalTrackEstablishmentTest, SuppliedGraphOutlivesItsSource) {
+  {
+    PoseGraph pose_graph;
+    pose_graph.Load(*cache_->CorrespondenceGraph());
+    BeginReconstruction(&pose_graph);
+  }
+  mapper_->EstablishTracks(GlobalMapperOptions());
+  ExpectTracks({LongTrack(), ThreeViewTrack()});
+}
+
+TEST_F(GlobalTrackEstablishmentTest, SuppliedGraphPreservesInvalidEdges) {
+  PoseGraph pose_graph;
+  pose_graph.Load(*cache_->CorrespondenceGraph());
+  const image_pair_t excluded_pair =
+      ImagePairToPairId(image_ids_[0], image_ids_[2]);
+  pose_graph.SetInvalidEdge(excluded_pair);
+  BeginReconstruction(&pose_graph);
+  mapper_->EstablishTracks(GlobalMapperOptions());
+  ExpectTracks({{{image_ids_[0], 0}, {image_ids_[1], 0}, {image_ids_[2], 0}},
+                ThreeViewTrack()});
+  EXPECT_FALSE(pose_graph.IsValid(excluded_pair));
+  EXPECT_EQ(pose_graph.NumEdges(), 3);
+}
+
+TEST_F(GlobalTrackEstablishmentTest, PixelThresholdAndSourceCoordinates) {
+  std::map<image_t, std::vector<Eigen::Vector2d>> source_xy;
+  for (const auto& [image_id, image] : reconstruction_->Images()) {
+    for (const auto& point2D : image.Points2D()) {
+      source_xy[image_id].push_back(point2D.xy);
+    }
+  }
+  const auto cache_images = cache_->Images();
+  mapper_->EstablishTracks(GlobalMapperOptions());
+  ExpectTracks({LongTrack(), ThreeViewTrack()});
+  for (const auto& [image_id, image] : reconstruction_->Images()) {
+    for (point2D_t idx = 0; idx < image.NumPoints2D(); ++idx) {
+      EXPECT_EQ(image.Point2D(idx).xy.x(), source_xy.at(image_id).at(idx).x());
+      EXPECT_EQ(image.Point2D(idx).xy.y(), source_xy.at(image_id).at(idx).y());
+    }
+    EXPECT_EQ(cache_->Image(image_id), cache_images.at(image_id));
+  }
+}
+
+TEST_F(GlobalTrackEstablishmentTest, JustBelowPixelThresholdRejectsWholeTrack) {
+  GlobalMapperOptions options;
+  options.track_intra_image_consistency_threshold = std::nextafter(10., 0.);
+  mapper_->EstablishTracks(options);
+  ExpectTracks({ThreeViewTrack()});
+}
+
+TEST_F(GlobalTrackEstablishmentTest, ViewCountFilter) {
+  GlobalMapperOptions options;
+  options.track_min_num_views_per_track = 2;
+  options.track_max_num_views_per_track = 2;
+  mapper_->EstablishTracks(options);
+  ExpectTracks({TwoViewTrack()});
+}
+
+TEST_F(GlobalTrackEstablishmentTest, LongestTrackBudget) {
+  GlobalMapperOptions options;
+  options.keep_max_num_tracks = 1;
+  mapper_->EstablishTracks(options);
+  ExpectTracks({LongTrack()});
+}
+
+TEST_F(GlobalTrackEstablishmentTest, ZeroTrackBudget) {
+  GlobalMapperOptions options;
+  options.keep_max_num_tracks = 0;
+  mapper_->EstablishTracks(options);
+  ExpectTracks({});
+}
+
+TEST_F(GlobalTrackEstablishmentTest, PerViewEarlyStopCountsImagesOnce) {
+  GlobalMapperOptions options;
+  options.track_required_tracks_per_view = 0;
+  mapper_->EstablishTracks(options);
+  ExpectTracks({LongTrack()});
+}
+
+TEST_F(GlobalTrackEstablishmentTest, PosedButUnregisteredImageRejected) {
+  const frame_t frame_id = reconstruction_->Image(image_ids_[2]).FrameId();
+  reconstruction_->DeRegisterFrame(frame_id);
+  reconstruction_->Frame(frame_id).SetRigFromWorld(
+      ground_truth_.Frame(frame_id).RigFromWorld());
+  ASSERT_TRUE(reconstruction_->Image(image_ids_[2]).HasPose());
+  ASSERT_EQ(reconstruction_->NumRegImages(), 2);
+  EXPECT_ANY_THROW(mapper_->EstablishTracks(GlobalMapperOptions()));
+  EXPECT_EQ(reconstruction_->NumPoints3D(), 0);
+}
+
+TEST_F(GlobalTrackEstablishmentTest, FeatureBoundsCheckedBeforePublication) {
+  reconstruction_->Image(image_ids_[0])
+      .SetPoints2D(std::vector<Eigen::Vector2d>(1, Eigen::Vector2d::Zero()));
+  EXPECT_THROW(mapper_->EstablishTracks(GlobalMapperOptions()),
+               std::out_of_range);
+  EXPECT_EQ(reconstruction_->NumPoints3D(), 0);
 }
 
 }  // namespace
