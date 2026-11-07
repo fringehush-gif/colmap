@@ -47,11 +47,9 @@ void DepthMap::Rescale(const float factor) {
   DownsampleImage(
       data_.data(), height_, width_, new_height, new_width, new_data.data());
 
-  data_ = new_data;
+  data_ = std::move(new_data);
   width_ = new_width;
   height_ = new_height;
-
-  data_.shrink_to_fit();
 }
 
 void DepthMap::Downsize(const size_t max_width, const size_t max_height) {
