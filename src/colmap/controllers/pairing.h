@@ -9,8 +9,10 @@
 #include "colmap/util/threading.h"
 #include "colmap/util/types.h"
 
+#include <exception>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 
 namespace colmap {
 
@@ -264,6 +266,8 @@ class VocabTreePairGenerator : public PairGenerator {
       const std::vector<image_t>& query_image_ids = {},
       std::function<bool(image_t, image_t)> image_pair_filter = {});
 
+  ~VocabTreePairGenerator() override;
+
   void Reset() override;
 
   bool HasFinished() const override;
@@ -278,11 +282,13 @@ class VocabTreePairGenerator : public PairGenerator {
     std::vector<retrieval::ImageScore> image_scores;
   };
 
-  void Query(image_t image_id);
+  JobQueue<Retrieval>::Job PopRetrieval();
+  void StopQueries();
+  void Query(image_t image_id) noexcept;
 
   const VocabTreePairingOptions options_;
   const std::shared_ptr<FeatureMatcherCache> cache_;
-  ThreadPool thread_pool_;
+  const int num_threads_;
   JobQueue<Retrieval> queue_;
   std::unique_ptr<retrieval::VisualIndex> visual_index_;
   retrieval::VisualIndex::QueryOptions query_options_;
@@ -291,6 +297,11 @@ class VocabTreePairGenerator : public PairGenerator {
   std::vector<std::pair<image_t, image_t>> image_pairs_;
   size_t query_idx_ = 0;
   size_t result_idx_ = 0;
+  bool stopped_ = false;
+  std::mutex query_error_mutex_;
+  std::exception_ptr query_error_;
+  // Workers must join before any state borrowed by Query is destroyed.
+  ThreadPool thread_pool_;
 };
 
 class SequentialPairGenerator : public PairGenerator {
