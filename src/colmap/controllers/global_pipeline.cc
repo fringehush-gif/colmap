@@ -252,6 +252,12 @@ GlobalPipeline::ReconstructionStats GlobalPipeline::ReconstructMultiComponents(
   // Build the base reconstruction, pose graph, and pose priors from the cache.
   Reconstruction base;
   base.Load(*database_cache_);
+  // Rotation decomposition does not use image observations. Release their
+  // buffers before copying the base for each component.
+  base.DeleteAllPoints2DAndPoints3D();
+  for (const auto& [image_id, _] : base.Images()) {
+    base.Image(image_id).SetPoints2D(std::vector<Point2D>());
+  }
   PoseGraph pose_graph;
   pose_graph.Load(*database_cache_->CorrespondenceGraph());
   const std::vector<PosePrior>& pose_priors = database_cache_->PosePriors();
