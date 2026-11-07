@@ -282,6 +282,52 @@ TEST(Reconstruction, AddFrame) {
   ExpectValidPtrs(reconstruction);
 }
 
+TEST(Reconstruction, AddPosedFrameRegistersNewFrame) {
+  Reconstruction reconstruction;
+  Camera camera1 =
+      Camera::CreateFromModelId(1, CameraModelId::kSimplePinhole, 1, 1, 1);
+  Camera camera2 = camera1;
+  camera2.camera_id = 2;
+  reconstruction.AddCamera(camera1);
+  reconstruction.AddCamera(camera2);
+
+  Rig rig;
+  rig.SetRigId(1);
+  rig.AddRefSensor(camera1.SensorId());
+  rig.AddSensor(camera2.SensorId());
+  reconstruction.AddRig(rig);
+
+  Frame first;
+  first.SetFrameId(20);
+  first.SetRigId(rig.RigId());
+  first.AddDataId(data_t(camera1.SensorId(), 101));
+  first.AddDataId(data_t(camera2.SensorId(), 102));
+  first.SetRigFromWorld(Rigid3d());
+  reconstruction.AddFrame(first);
+  EXPECT_TRUE(reconstruction.Frame(20).HasFinalDataIds());
+  EXPECT_EQ(reconstruction.NumRegImages(), 2);
+
+  Frame second;
+  second.SetFrameId(10);
+  second.SetRigId(rig.RigId());
+  second.AddDataId(data_t(camera1.SensorId(), 103));
+  second.SetRigFromWorld(Rigid3d());
+  reconstruction.AddFrame(second);
+
+  Frame unposed;
+  unposed.SetFrameId(30);
+  unposed.SetRigId(rig.RigId());
+  unposed.AddDataId(data_t(camera1.SensorId(), 104));
+  reconstruction.AddFrame(unposed);
+  EXPECT_THAT(reconstruction.RegFrameIds(), testing::ElementsAre(20, 10));
+  EXPECT_EQ(reconstruction.NumRegImages(), 3);
+
+  EXPECT_ANY_THROW(reconstruction.AddFrame(first));
+  reconstruction.RegisterFrame(20);
+  EXPECT_THAT(reconstruction.RegFrameIds(), testing::ElementsAre(20, 10));
+  EXPECT_EQ(reconstruction.NumRegImages(), 3);
+}
+
 TEST(Reconstruction, AddImageWrongFrameCorrespondence) {
   Reconstruction reconstruction;
   Camera camera =
