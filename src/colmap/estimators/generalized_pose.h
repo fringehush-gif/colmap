@@ -19,12 +19,13 @@ namespace colmap {
 //
 // @param options              RANSAC options.
 // @param points2D             Corresponding 2D points.
-// @param points3D             Corresponding 3D points.
+// @param points3D             Corresponding 3D points. Exact coordinate equality
+//                             identifies repeated observations of a landmark.
 // @param camera_idxs          Index of the rig camera for each correspondence.
 // @param cams_from_rig        Relative pose from rig to each camera frame.
 // @param cameras              Cameras for which to estimate pose.
 // @param rig_from_world       Estimated rig from world pose.
-// @param num_inliers          Number of inliers in RANSAC.
+// @param num_inliers          Number of unique 3D inliers in RANSAC.
 // @param inlier_mask          Inlier mask for 2D-3D correspondences.
 //
 // @return                     Whether pose is estimated successfully.
@@ -46,7 +47,8 @@ bool EstimateGeneralizedAbsolutePose(
 //
 // @param options              RANSAC options.
 // @param points2D             Corresponding 2D points.
-// @param points3D             Corresponding 3D points.
+// @param points3D             Corresponding 3D points, with the same identity
+//                             convention as EstimateGeneralizedAbsolutePose.
 // @param camera_idxs          Index of the rig camera for each correspondence.
 // @param cams_from_rig        Relative pose from rig to each camera frame.
 // @param cameras              Cameras for which to estimate pose.
@@ -55,7 +57,7 @@ bool EstimateGeneralizedAbsolutePose(
 //                             given cams_from_rig are valid. Its scale is the
 //                             inverse scale of the rig geometry relative to
 //                             the world.
-// @param num_inliers          Number of inliers in RANSAC.
+// @param num_inliers          Number of unique 3D inliers in RANSAC.
 // @param inlier_mask          Inlier mask for 2D-3D correspondences.
 //
 // @return                     Whether pose is estimated successfully.
