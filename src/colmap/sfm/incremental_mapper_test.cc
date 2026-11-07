@@ -2,13 +2,20 @@
 
 #include "colmap/sfm/incremental_mapper.h"
 
+#include "colmap/scene/correspondence_graph.h"
 #include "colmap/scene/database_cache.h"
 #include "colmap/scene/database_sqlite.h"
 #include "colmap/scene/reconstruction_matchers.h"
 #include "colmap/scene/synthetic.h"
+#include "colmap/scene/two_view_geometry.h"
+#include "colmap/sfm/incremental_mapper_impl.h"
 #include "colmap/util/hash_containers.h"
+#include "colmap/util/threading.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <future>
 #include <stdexcept>
 
 #include <gtest/gtest.h>
@@ -325,6 +332,332 @@ TEST_F(IncrementalMapperTest, FindLocalBundle) {
   for (const auto image_id : local_bundle) {
     EXPECT_GT(reg_image_id_set.count(image_id), 0);
   }
+}
+
+using InitialPair = IncrementalMapperImpl::InitialPair;
+using InitialInfo = IncrementalMapperImpl::InitInfo;
+
+auto RankedPairs(const std::vector<InitialPair>& pairs,
+                 std::atomic<size_t>* enumerated = nullptr) {
+  return [&pairs,
+          enumerated,
+          index = size_t{0}]() mutable -> std::optional<InitialPair> {
+    if (index == pairs.size()) {
+      return std::nullopt;
+    }
+    if (enumerated != nullptr) {
+      ++*enumerated;
+    }
+    return pairs[index++];
+  };
+}
+
+InitialInfo InitialResult(const image_t first, const image_t second) {
+  InitialInfo info;
+  info.image_id1 = first;
+  info.image_id2 = second;
+  info.cam2_from_cam1.translation() = Eigen::Vector3d(1, 2, 3);
+  info.camera1.emplace();
+  info.camera2.emplace();
+  info.camera1->camera_id = 42;
+  info.camera2->camera_id = 43;
+  info.camera1->params = {1, 2, 3};
+  info.camera2->params = {4, 5, 6};
+  return info;
+}
+
+TEST(IncrementalMapperRankedInitialPair, LaterSuccessDoesNotCancelEarlier) {
+  const std::vector<InitialPair> pairs = {{1, 3}, {2, 4}, {5, 6}, {7, 8}};
+  std::atomic<size_t> enumerated = 0;
+  std::atomic<bool> bounded = false;
+  std::promise<void> later_started;
+  const auto later = later_started.get_future().share();
+  auto estimate = [&](const image_t first,
+                      const image_t second) -> std::optional<InitialInfo> {
+    if (first == 1) {
+      if (later.wait_for(std::chrono::seconds(10)) !=
+          std::future_status::ready) {
+        return std::nullopt;
+      }
+    } else {
+      bounded = enumerated.load() <= 2;
+      later_started.set_value();
+    }
+    return InitialResult(first, second);
+  };
+  FlatHashSet<image_pair_t> tried;
+  const auto result = IncrementalMapperImpl::FindRankedInitialPair(
+      2, tried, RankedPairs(pairs, &enumerated), estimate);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->image_id1, 1);
+  EXPECT_EQ(result->image_id2, 3);
+  EXPECT_TRUE(bounded.load());
+  EXPECT_EQ(enumerated.load(), 2);
+  ASSERT_EQ(tried.size(), 1);
+  EXPECT_EQ(tried.count(ImagePairToPairId(1, 3)), 1);
+  EXPECT_EQ(tried.count(ImagePairToPairId(2, 4)), 0);
+
+  FlatHashSet<image_pair_t> serial_tried;
+  const auto serial = IncrementalMapperImpl::FindRankedInitialPair(
+      1,
+      serial_tried,
+      RankedPairs(pairs),
+      [](const image_t first,
+         const image_t second) -> std::optional<InitialInfo> {
+        return InitialResult(first, second);
+      });
+  ASSERT_TRUE(serial.has_value());
+  EXPECT_EQ(serial->image_id1, result->image_id1);
+  EXPECT_EQ(serial->image_id2, result->image_id2);
+  EXPECT_EQ(serial_tried.size(), tried.size());
+  EXPECT_EQ(serial_tried.count(ImagePairToPairId(1, 3)), 1);
+}
+
+TEST(IncrementalMapperRankedInitialPair, ReversedDuplicateKeepsPrefixForRetry) {
+  const std::vector<InitialPair> pairs = {{1, 2}, {2, 1}, {1, 3}};
+  std::atomic<bool> reversed_called = false;
+  std::promise<void> suffix_started;
+  const auto suffix = suffix_started.get_future().share();
+  auto estimate = [&](const image_t first,
+                      const image_t second) -> std::optional<InitialInfo> {
+    if (first == 2) {
+      reversed_called = true;
+    } else if (second == 2) {
+      if (suffix.wait_for(std::chrono::seconds(10)) !=
+          std::future_status::ready) {
+        return std::nullopt;
+      }
+    } else {
+      suffix_started.set_value();
+    }
+    return InitialResult(first, second);
+  };
+  FlatHashSet<image_pair_t> tried = {ImagePairToPairId(7, 8)};
+  const auto result = IncrementalMapperImpl::FindRankedInitialPair(
+      2, tried, RankedPairs(pairs), estimate);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->image_id1, 1);
+  EXPECT_EQ(result->image_id2, 2);
+  EXPECT_DOUBLE_EQ(result->cam2_from_cam1.translation().x(), 1);
+  EXPECT_DOUBLE_EQ(result->cam2_from_cam1.translation().y(), 2);
+  EXPECT_DOUBLE_EQ(result->cam2_from_cam1.translation().z(), 3);
+  ASSERT_TRUE(result->camera1.has_value());
+  ASSERT_TRUE(result->camera2.has_value());
+  EXPECT_EQ(result->camera1->camera_id, 42);
+  EXPECT_EQ(result->camera2->camera_id, 43);
+  EXPECT_EQ(result->camera1->params, (std::vector<double>{1, 2, 3}));
+  EXPECT_EQ(result->camera2->params, (std::vector<double>{4, 5, 6}));
+  EXPECT_FALSE(reversed_called.load());
+  ASSERT_EQ(tried.size(), 2);
+  EXPECT_EQ(tried.count(ImagePairToPairId(7, 8)), 1);
+  EXPECT_EQ(tried.count(ImagePairToPairId(1, 2)), 1);
+  EXPECT_EQ(tried.count(ImagePairToPairId(1, 3)), 0);
+
+  std::atomic<int> retry_calls = 0;
+  auto retry_estimate =
+      [&](const image_t first,
+          const image_t second) -> std::optional<InitialInfo> {
+    ++retry_calls;
+    return InitialResult(first, second);
+  };
+  const auto retry = IncrementalMapperImpl::FindRankedInitialPair(
+      2, tried, RankedPairs(pairs), retry_estimate);
+  ASSERT_TRUE(retry.has_value());
+  EXPECT_EQ(retry->image_id1, 1);
+  EXPECT_EQ(retry->image_id2, 3);
+  EXPECT_DOUBLE_EQ(retry->cam2_from_cam1.translation().x(), 1);
+  EXPECT_DOUBLE_EQ(retry->cam2_from_cam1.translation().y(), 2);
+  EXPECT_DOUBLE_EQ(retry->cam2_from_cam1.translation().z(), 3);
+  ASSERT_TRUE(retry->camera1.has_value());
+  ASSERT_TRUE(retry->camera2.has_value());
+  EXPECT_EQ(retry->camera1->camera_id, 42);
+  EXPECT_EQ(retry->camera2->camera_id, 43);
+  EXPECT_EQ(retry->camera1->params, (std::vector<double>{1, 2, 3}));
+  EXPECT_EQ(retry->camera2->params, (std::vector<double>{4, 5, 6}));
+  EXPECT_EQ(retry_calls.load(), 1);
+  ASSERT_EQ(tried.size(), 3);
+  EXPECT_EQ(tried.count(ImagePairToPairId(1, 3)), 1);
+}
+
+TEST(IncrementalMapperRankedInitialPair, ExhaustionCommitsOnlyUntriedPairs) {
+  const std::vector<InitialPair> pairs = {
+      {1, 2}, {2, 1}, {2, 3}, {3, 2}, {4, 5}};
+  FlatHashSet<image_pair_t> tried = {ImagePairToPairId(1, 2)};
+  std::atomic<int> calls = 0;
+  auto estimate = [&](image_t, image_t) -> std::optional<InitialInfo> {
+    ++calls;
+    return std::nullopt;
+  };
+  const auto result = IncrementalMapperImpl::FindRankedInitialPair(
+      2, tried, RankedPairs(pairs), estimate);
+  EXPECT_FALSE(result.has_value());
+  EXPECT_EQ(calls.load(), 2);
+  ASSERT_EQ(tried.size(), 3);
+  EXPECT_EQ(tried.count(ImagePairToPairId(1, 2)), 1);
+  EXPECT_EQ(tried.count(ImagePairToPairId(2, 3)), 1);
+  EXPECT_EQ(tried.count(ImagePairToPairId(4, 5)), 1);
+}
+
+TEST(IncrementalMapperRankedInitialPair, RejectedBatchThenLaterSuccess) {
+  const std::vector<InitialPair> pairs = {
+      {9, 10}, {1, 2}, {2, 1}, {3, 4}, {5, 6}, {7, 8}};
+  FlatHashSet<image_pair_t> tried = {ImagePairToPairId(9, 10)};
+  std::atomic<int> calls = 0;
+  auto estimate = [&](const image_t first,
+                      const image_t second) -> std::optional<InitialInfo> {
+    ++calls;
+    if (first == 5 || first == 7) {
+      return InitialResult(first, second);
+    }
+    return std::nullopt;
+  };
+  const auto result = IncrementalMapperImpl::FindRankedInitialPair(
+      2, tried, RankedPairs(pairs), estimate);
+  ASSERT_TRUE(result.has_value());
+  // Independent serial oracle: skip the prior pair and reverse duplicate,
+  // reject (1,2) and (3,4), then choose (5,6), leaving (7,8).
+  EXPECT_EQ(result->image_id1, 5);
+  EXPECT_EQ(result->image_id2, 6);
+  ASSERT_TRUE(result->camera1.has_value());
+  ASSERT_TRUE(result->camera2.has_value());
+  EXPECT_EQ(result->camera1->camera_id, 42);
+  EXPECT_EQ(result->camera2->camera_id, 43);
+  EXPECT_DOUBLE_EQ(result->cam2_from_cam1.translation().y(), 2);
+  ASSERT_EQ(tried.size(), 4);
+  EXPECT_EQ(tried.count(ImagePairToPairId(9, 10)), 1);
+  EXPECT_EQ(tried.count(ImagePairToPairId(1, 2)), 1);
+  EXPECT_EQ(tried.count(ImagePairToPairId(3, 4)), 1);
+  EXPECT_EQ(tried.count(ImagePairToPairId(5, 6)), 1);
+  EXPECT_EQ(tried.count(ImagePairToPairId(7, 8)), 0);
+  const auto retry = IncrementalMapperImpl::FindRankedInitialPair(
+      2, tried, RankedPairs(pairs), estimate);
+  ASSERT_TRUE(retry.has_value());
+  EXPECT_EQ(retry->image_id1, 7);
+  EXPECT_EQ(retry->image_id2, 8);
+}
+TEST(IncrementalMapperRankedInitialPair, SuffixWorkerErrorIsNotSuppressed) {
+  const std::vector<InitialPair> pairs = {{1, 3}, {2, 4}, {5, 6}, {7, 8}};
+  std::promise<void> suffix_started;
+  const auto suffix = suffix_started.get_future().share();
+  auto estimate = [&](const image_t first,
+                      const image_t second) -> std::optional<InitialInfo> {
+    if (first == 1) {
+      if (suffix.wait_for(std::chrono::seconds(10)) !=
+          std::future_status::ready) {
+        return std::nullopt;
+      }
+      return InitialResult(first, second);
+    }
+    suffix_started.set_value();
+    throw std::runtime_error("suffix error");
+  };
+  FlatHashSet<image_pair_t> tried;
+  try {
+    IncrementalMapperImpl::FindRankedInitialPair(
+        2, tried, RankedPairs(pairs), estimate);
+    FAIL() << "Expected the suffix task exception";
+  } catch (const AggregateException& aggregate) {
+    ASSERT_EQ(aggregate.exceptions().size(), 1);
+    try {
+      std::rethrow_exception(aggregate.exceptions()[0]);
+    } catch (const std::runtime_error& error) {
+      EXPECT_STREQ(error.what(), "suffix error");
+    } catch (...) {
+      FAIL() << "Unexpected suffix exception type";
+    }
+  } catch (...) {
+    FAIL() << "Expected AggregateException";
+  }
+  ASSERT_EQ(tried.size(), 1);
+  EXPECT_EQ(tried.count(ImagePairToPairId(1, 3)), 1);
+  EXPECT_EQ(tried.count(ImagePairToPairId(2, 4)), 0);
+}
+
+TEST_F(IncrementalMapperTest, EqualRankInitialImagesUseAscendingId) {
+  std::vector<image_t> ids;
+  CorrespondenceGraph graph;
+  for (const auto& [image_id, image] : reconstruction_->Images()) {
+    ids.push_back(image_id);
+    graph.AddImage(image_id, image.NumPoints2D());
+  }
+  std::sort(ids.begin(), ids.end());
+  ASSERT_GE(ids.size(), 3);
+  for (size_t i = 0; i < 3; ++i) {
+    ASSERT_GT(reconstruction_->Image(ids[i]).NumPoints2D(), 0);
+    ASSERT_EQ(
+        reconstruction_->Image(ids[i]).CameraPtr()->HasPriorFocalLength(),
+        reconstruction_->Image(ids[0]).CameraPtr()->HasPriorFocalLength());
+  }
+  for (size_t i = 0; i < 3; ++i) {
+    for (size_t j = i + 1; j < 3; ++j) {
+      TwoViewGeometry geometry;
+      geometry.inlier_matches = {{0, 0}};
+      graph.AddTwoViewGeometry(ids[i], ids[j], std::move(geometry));
+    }
+  }
+  const FlatHashMap<image_t, size_t> empty;
+  options_.init_min_num_inliers = 1;
+  const auto first = IncrementalMapperImpl::FindFirstInitialImage(
+      options_, graph, *reconstruction_, empty, empty);
+  const std::vector<image_t> expected_first = {ids[0], ids[1], ids[2]};
+  EXPECT_EQ(first, expected_first);
+  const auto second = IncrementalMapperImpl::FindSecondInitialImage(
+      options_, ids[0], graph, *reconstruction_, empty);
+  const std::vector<image_t> expected_second = {ids[1], ids[2]};
+  EXPECT_EQ(second, expected_second);
+}
+
+TEST_F(IncrementalMapperTest, RejectedNonemptySeedAdvancesToNextSeed) {
+  options_.num_threads = 1;
+  options_.random_seed = 0;
+  const FlatHashMap<image_t, size_t> empty;
+  const auto& graph = *cache_->CorrespondenceGraph();
+  const auto seeds = IncrementalMapperImpl::FindFirstInitialImage(
+      options_, graph, *reconstruction_, empty, empty);
+  ASSERT_GE(seeds.size(), 2);
+  const auto neighbors = IncrementalMapperImpl::FindSecondInitialImage(
+      options_, seeds[0], graph, *reconstruction_, empty);
+  ASSERT_FALSE(neighbors.empty());
+  // Collapse only the first seed's cache coordinates to make its geometry
+  // degenerate. Ranking still uses the unchanged reconstruction and graph.
+  for (auto& point : cache_->Image(seeds[0]).Points2D()) {
+    point.xy = Eigen::Vector2d::Zero();
+  }
+  ASSERT_FALSE(IncrementalMapperImpl::EstimateInitialTwoViewGeometry(
+                   options_, *cache_, seeds[0], neighbors[0])
+                   .has_value());
+  FlatHashSet<image_pair_t> tried;
+  // Leave one first-seed pair for a real rejected estimate; skip its remaining
+  // neighbors to keep this fixture small and guarantee cursor exhaustion.
+  for (size_t i = 1; i < neighbors.size(); ++i) {
+    tried.insert(ImagePairToPairId(seeds[0], neighbors[i]));
+  }
+  const auto result =
+      IncrementalMapperImpl::FindInitialImagePair(options_,
+                                                  *cache_,
+                                                  *reconstruction_,
+                                                  empty,
+                                                  empty,
+                                                  tried,
+                                                  kInvalidImageId,
+                                                  kInvalidImageId);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_NE(result->image_id1, seeds[0]);
+  EXPECT_EQ(tried.count(ImagePairToPairId(seeds[0], neighbors[0])), 1);
+  EXPECT_EQ(
+      tried.count(ImagePairToPairId(result->image_id1, result->image_id2)), 1);
+}
+TEST_F(IncrementalMapperTest, ExhaustedLazyInitialPairsCanBeRetried) {
+  options_.num_threads = 2;
+  options_.random_seed = 0;
+  // Every seed has fewer correspondences than this threshold; enumeration
+  // must advance across empty neighbor lists without recording a trial.
+  options_.init_min_num_inliers = 100000;
+  EXPECT_FALSE(mapper_->FindInitialImagePair(
+      options_, image_id1_, image_id2_, cam2_from_cam1_));
+  options_.init_min_num_inliers = 10;
+  EXPECT_TRUE(mapper_->FindInitialImagePair(
+      options_, image_id1_, image_id2_, cam2_from_cam1_));
 }
 
 TEST_F(IncrementalMapperTest, InitialPairWorkerErrorPreservesPublicException) {

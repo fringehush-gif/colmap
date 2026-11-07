@@ -8,7 +8,9 @@
 #include "colmap/sfm/observation_manager.h"
 #include "colmap/util/hash_containers.h"
 
+#include <functional>
 #include <optional>
+#include <utility>
 
 namespace colmap {
 
@@ -47,6 +49,15 @@ class IncrementalMapperImpl {
     std::optional<Camera> camera1;
     std::optional<Camera> camera2;
   };
+
+  // Internal ranked coordinator shared by the mapper and controlled tests.
+  // The callbacks are borrowed only until all submitted tasks have joined.
+  using InitialPair = std::pair<image_t, image_t>;
+  static std::optional<InitInfo> FindRankedInitialPair(
+      int num_threads,
+      FlatHashSet<image_pair_t>& init_image_pairs,
+      const std::function<std::optional<InitialPair>()>& next_pair,
+      const std::function<std::optional<InitInfo>(image_t, image_t)>& estimate);
 
   // Implement IncrementalMapper::FindInitialImagePair
   // Returns the selected pair, or std::nullopt if no suitable pair was found.

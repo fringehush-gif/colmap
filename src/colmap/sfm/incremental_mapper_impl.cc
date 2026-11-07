@@ -10,6 +10,7 @@
 #include "colmap/util/threading.h"
 
 #include <array>
+#include <deque>
 #include <exception>
 
 namespace colmap {
@@ -24,12 +25,15 @@ struct InitImageInfo {
 };
 
 // Compare images for sorting: prefer images with prior focal length,
-// then by number of correspondences (descending).
+// then by number of correspondences (descending), then image ID (ascending).
 inline bool CompareImageInfo(const InitImageInfo& a, const InitImageInfo& b) {
   if (a.prior_focal_length != b.prior_focal_length) {
     return a.prior_focal_length > b.prior_focal_length;
   }
-  return a.num_correspondences > b.num_correspondences;
+  if (a.num_correspondences != b.num_correspondences) {
+    return a.num_correspondences > b.num_correspondences;
+  }
+  return a.image_id < b.image_id;
 }
 
 std::vector<image_t> ExtractSortedImageIds(
@@ -198,83 +202,103 @@ IncrementalMapperImpl::FindInitialImagePair(
                                                      num_registrations);
   }
 
-  std::vector<std::shared_future<std::optional<InitInfo>>> init_infos;
-  init_infos.reserve(image_ids1.size());
-
-  std::mutex init_image_pairs_mutex;
-  std::atomic_bool stop = false;
-  // Workers borrow these locals until Stop has joined, including on failure.
-  ThreadPool thread_pool(options.num_threads);
-
-  try {
-    // Try to find good initial pair.
-    for (const image_t image_id1 : image_ids1) {
-      init_infos.push_back(
-          thread_pool.AddTask([&, image_id1]() -> std::optional<InitInfo> {
-            if (stop.load()) {
-              return std::nullopt;
-            }
-
-            const std::vector<image_t> image_ids2 =
-                IncrementalMapperImpl::FindSecondInitialImage(
-                    options,
-                    image_id1,
-                    correspondence_graph,
-                    reconstruction,
-                    num_registrations);
-
-            for (const image_t image_id2 : image_ids2) {
-              if (stop.load()) {
-                return std::nullopt;
-              }
-
-              const image_pair_t pair_id =
-                  ImagePairToPairId(image_id1, image_id2);
-
-              // Try every pair only once.
-              {
-                std::lock_guard<std::mutex> lock_guard(init_image_pairs_mutex);
-                if (!init_image_pairs.emplace(pair_id).second) {
-                  continue;
-                }
-              }
-
-              std::optional<InitInfo> pair_init_info =
-                  IncrementalMapperImpl::EstimateInitialTwoViewGeometry(
-                      options, database_cache, image_id1, image_id2);
-              if (pair_init_info.has_value()) {
-                stop.store(true);
-                return pair_init_info;
-              }
-            }
-
-            return std::nullopt;
-          }));
-    }
-
-    // Iterate through the already computed results and return the first
-    // successful result. This is deterministic and produces the same result
-    // as the single-threaded version.
-    for (auto& init_info_future : init_infos) {
-      std::optional<InitInfo> result = init_info_future.get();
-      if (result.has_value()) {
-        thread_pool.Stop();
-        return result;
+  // Generate each seed's ranked neighbors only when the bounded coordinator
+  // needs another pair. Equal-ranked images use ascending image ID.
+  size_t seed_idx = 0;
+  size_t neighbor_idx = 0;
+  std::vector<image_t> neighbors;
+  auto next_pair = [&]() -> std::optional<InitialPair> {
+    while (seed_idx < image_ids1.size()) {
+      if (neighbor_idx < neighbors.size()) {
+        return InitialPair(image_ids1[seed_idx], neighbors[neighbor_idx++]);
+      }
+      if (!neighbors.empty()) {
+        ++seed_idx;
+        neighbors.clear();
+        neighbor_idx = 0;
+        continue;
+      }
+      neighbors = FindSecondInitialImage(options,
+                                         image_ids1[seed_idx],
+                                         correspondence_graph,
+                                         reconstruction,
+                                         num_registrations);
+      if (neighbors.empty()) {
+        ++seed_idx;
       }
     }
+    return std::nullopt;
+  };
+  auto estimate = [&](const image_t first, const image_t second) {
+    return EstimateInitialTwoViewGeometry(
+        options, database_cache, first, second);
+  };
+  return FindRankedInitialPair(
+      options.num_threads, init_image_pairs, next_pair, estimate);
+}
 
-    // Drain worker-side error checkers even after all futures are ready.
+std::optional<IncrementalMapperImpl::InitInfo>
+IncrementalMapperImpl::FindRankedInitialPair(
+    const int num_threads,
+    FlatHashSet<image_pair_t>& init_image_pairs,
+    const std::function<std::optional<InitialPair>()>& next_pair,
+    const std::function<std::optional<InitInfo>(image_t, image_t)>& estimate) {
+  struct PendingPair {
+    image_pair_t pair_id;
+    std::shared_future<std::optional<InitInfo>> result;
+  };
+  std::deque<PendingPair> pending;
+  FlatHashSet<image_pair_t> pending_ids;
+  bool exhausted = false;
+  // Submitted tasks borrow estimate; Stop joins them before it goes out of
+  // scope.
+  ThreadPool thread_pool(num_threads);
+
+  try {
+    while (true) {
+      while (!exhausted && pending.size() < thread_pool.NumThreads()) {
+        const auto pair = next_pair();
+        if (!pair.has_value()) {
+          exhausted = true;
+          break;
+        }
+        const image_pair_t pair_id =
+            ImagePairToPairId(pair->first, pair->second);
+        if (init_image_pairs.count(pair_id) ||
+            !pending_ids.insert(pair_id).second) {
+          continue;
+        }
+        auto result = thread_pool.AddTask(estimate, pair->first, pair->second);
+        pending.push_back({pair_id, std::move(result)});
+      }
+      if (pending.empty()) {
+        break;
+      }
+
+      // Consume this batch in rank order; suffixes never enter history on
+      // early success. Drain the pool before admitting another batch.
+      while (!pending.empty()) {
+        init_image_pairs.insert(pending.front().pair_id);
+        std::optional<InitInfo> result = pending.front().result.get();
+        pending_ids.erase(pending.front().pair_id);
+        pending.pop_front();
+        if (result.has_value()) {
+          // Stop joins the suffix and conservatively reports worker errors.
+          thread_pool.Stop();
+          return result;
+        }
+      }
+      // Release completed task checkers before admitting the next batch.
+      thread_pool.Wait();
+    }
     thread_pool.Stop();
-    // No suitable pair found in entire dataset.
     return std::nullopt;
   } catch (...) {
-    stop.store(true);
     try {
       thread_pool.Stop();
     } catch (const std::exception& error) {
-      // Stop drains every task error. Preserve the original submission/future
-      // exception instead of reporting it again from the pool destructor.
-      LOG(WARNING) << "Initial-pair task errors during cleanup: " << error.what();
+      LOG(WARNING) << "Initial-pair task errors during cleanup: "
+                   << error.what();
     } catch (...) {
       LOG(WARNING) << "Unknown initial-pair task error during cleanup";
     }
