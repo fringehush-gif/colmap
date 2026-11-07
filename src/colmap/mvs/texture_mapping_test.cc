@@ -2,10 +2,12 @@
 
 #include "colmap/mvs/texture_mapping.h"
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 #include <vector>
 
+#include <Eigen/Geometry>
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -407,6 +409,87 @@ TEST(MeshTextureMapping, NeighborSmoothing) {
   }
 }
 
+TEST(MeshTextureMapping, ViewSelectionPreservesScoresAndSmoothing) {
+  const auto no_images =
+      MeshTextureMapping(MakeTriangleMesh(), {}, MeshTextureMappingOptions());
+  EXPECT_EQ(no_images.face_view_ids, (std::vector<int>{-1, -1}));
+  EXPECT_EQ(no_images.face_uvs, std::vector<float>(12, 0.0f));
+  EXPECT_EQ(no_images.atlas_width, 0);
+  EXPECT_EQ(no_images.atlas_height, 0);
+
+  const Image regular =
+      MakeTestImage(64, 64, BitmapColor<uint8_t>(180, 70, 40));
+  const auto MakeView = [&](const float distance) {
+    const float T[3] = {-0.5f, 0.5f, distance};
+    Image image("other.png", 64, 64, regular.GetK(), regular.GetR(), T);
+    Bitmap bitmap(64, 64, /*as_rgb=*/true);
+    bitmap.Fill(BitmapColor<uint8_t>(30, 150, 200));
+    image.SetBitmap(std::move(bitmap));
+    return image;
+  };
+  const Image far = MakeView(1e9f);
+  const Image close = MakeView(1.5f);
+
+  const auto CheckSelection = [](const PlyMesh& mesh,
+                                 const std::vector<Image>& images,
+                                 const int smoothing,
+                                 const std::vector<int>& expected) {
+    MeshTextureMappingOptions options;
+    options.apply_color_correction = false;
+    options.inpaint_radius = 0;
+    options.view_selection_smoothing_iterations = smoothing;
+    MeshTextureMappingResult reference;
+    for (const int num_threads : {1, 3}) {
+      SCOPED_TRACE(num_threads);
+      options.num_threads = num_threads;
+      auto result = MeshTextureMapping(mesh, images, options);
+      ASSERT_EQ(result.face_view_ids, expected);
+      ASSERT_EQ(result.face_uvs.size(), 6 * mesh.faces.size());
+      for (const float uv : result.face_uvs) EXPECT_TRUE(std::isfinite(uv));
+      if (num_threads == 1) {
+        reference = std::move(result);
+      } else {
+        EXPECT_EQ(result.face_uvs, reference.face_uvs);
+        EXPECT_EQ(result.atlas_width, reference.atlas_width);
+        EXPECT_EQ(result.atlas_height, reference.atlas_height);
+        EXPECT_EQ(result.texture_atlas.RowMajorData(),
+                  reference.texture_atlas.RowMajorData());
+      }
+    }
+  };
+
+  PlyMesh mesh = MakeTriangleMesh();
+  mesh.faces.emplace_back(0, 0, 0);  // No normal, hence no eligible view.
+  for (const int smoothing : {0, 3}) {
+    SCOPED_TRACE(smoothing);
+    // Equal positive areas choose the first view; positive areas beat zero.
+    CheckSelection(mesh, {regular, regular}, smoothing, {0, 0, -1});
+    CheckSelection(mesh, {far, regular}, smoothing, {1, 1, -1});
+  }
+
+  // The thin face has a valid normal but collapses under float projection.
+  // Zero area wins the initial argmax over -1, but must not enable smoothing.
+  mesh.vertices = {PlyMeshVertex(0, 0, 0),
+                   PlyMeshVertex(1, 0, 0),
+                   PlyMeshVertex(0, 1e-8f, 0),
+                   PlyMeshVertex(0, -1, 0)};
+  mesh.faces = {PlyMeshFace(0, 1, 2), PlyMeshFace(1, 0, 3)};
+  CheckSelection(mesh, {far, regular}, 0, {0, 1});
+  CheckSelection(mesh, {far, regular}, 3, {0, 1});
+
+  // Only the middle face fits in the close camera. Its two neighbors vote
+  // for the wider view, which has a positive score for all three faces.
+  mesh.vertices = {PlyMeshVertex(0, 0, 0),
+                   PlyMeshVertex(1, 0, 0),
+                   PlyMeshVertex(0, 1, 0),
+                   PlyMeshVertex(1.5f, 1.5f, 0),
+                   PlyMeshVertex(-1, 0, 0)};
+  mesh.faces = {
+      PlyMeshFace(0, 1, 2), PlyMeshFace(1, 3, 2), PlyMeshFace(0, 2, 4)};
+  CheckSelection(mesh, {close, regular}, 0, {0, 1, 1});
+  CheckSelection(mesh, {close, regular}, 3, {1, 1, 1});
+}
+
 TEST(MeshTextureMapping, CubeAdjacency) {
   // Verify the cube mesh produces faces with proper adjacency
   // by running the full pipeline.
@@ -542,9 +625,21 @@ TEST(MeshTextureMapping, InpaintDoesNotOverwriteBaked) {
   };
   mesh.faces = {PlyMeshFace(0, 1, 2)};
 
-  const BitmapColor<uint8_t> src_color(200, 100, 50);
   std::vector<Image> images;
-  images.push_back(MakeTestImage(256, 256, src_color));
+  images.push_back(MakeTestImage(64, 64, BitmapColor<uint8_t>(0)));
+  Bitmap pattern(64, 64, /*as_rgb=*/true);
+  for (int y = 0; y < 64; ++y) {
+    for (int x = 0; x < 64; ++x) {
+      pattern.SetPixel(
+          x,
+          y,
+          x < 32 ? BitmapColor<uint8_t>(0)
+                 : BitmapColor<uint8_t>(static_cast<uint8_t>(1 + 3 * x),
+                                        static_cast<uint8_t>(1 + 3 * y),
+                                        200));
+    }
+  }
+  images.back().SetBitmap(std::move(pattern));
 
   // Run without inpainting.
   MeshTextureMappingOptions options;
@@ -552,23 +647,99 @@ TEST(MeshTextureMapping, InpaintDoesNotOverwriteBaked) {
   options.view_selection_smoothing_iterations = 0;
   options.inpaint_radius = 0;
   const auto result_base = MeshTextureMapping(mesh, images, options);
+  // A companion white render exposes coverage independently of the actual RGB.
+  // Black source pixels are valid baked seeds, not holes in the atlas.
+  const auto coverage = MeshTextureMapping(
+      mesh, {MakeTestImage(64, 64, BitmapColor<uint8_t>(255))}, options);
+  ASSERT_EQ(coverage.atlas_width, result_base.atlas_width);
+  ASSERT_EQ(coverage.atlas_height, result_base.atlas_height);
+  ASSERT_EQ(coverage.face_view_ids, result_base.face_view_ids);
+  ASSERT_EQ(coverage.face_uvs, result_base.face_uvs);
 
-  // Run with inpainting.
-  options.inpaint_radius = 5;
-  const auto result_inpaint = MeshTextureMapping(mesh, images, options);
+  ASSERT_GT(result_base.atlas_width, 0);
+  ASSERT_GT(result_base.atlas_height, 0);
 
-  // Check that baked pixels are unchanged.
+  // The nearest covered seed in Manhattan distance wins, including black.
+  // Equal distances retain the first seed in scan order; no queue is replayed.
+  std::vector<uint8_t> baked_mask(result_base.atlas_width *
+                                  result_base.atlas_height);
   for (int y = 0; y < result_base.atlas_height; ++y) {
     for (int x = 0; x < result_base.atlas_width; ++x) {
-      const auto base_color = result_base.texture_atlas.GetPixel(x, y);
-      const auto inpaint_color = result_inpaint.texture_atlas.GetPixel(x, y);
-      ASSERT_TRUE(base_color.has_value());
-      ASSERT_TRUE(inpaint_color.has_value());
-      if (base_color->r != 0 || base_color->g != 0 || base_color->b != 0) {
-        EXPECT_EQ(base_color->r, inpaint_color->r);
-        EXPECT_EQ(base_color->g, inpaint_color->g);
-        EXPECT_EQ(base_color->b, inpaint_color->b);
+      const auto pixel = coverage.texture_atlas.GetPixel(x, y);
+      ASSERT_TRUE(pixel.has_value());
+      baked_mask[y * result_base.atlas_width + x] =
+          *pixel != BitmapColor<uint8_t>(0);
+    }
+  }
+  for (const int radius : {1, 3, 5, 1000}) {
+    SCOPED_TRACE(radius);
+    options.inpaint_radius = radius;
+    const auto result_inpaint = MeshTextureMapping(mesh, images, options);
+    ASSERT_EQ(result_inpaint.atlas_width, result_base.atlas_width);
+    ASSERT_EQ(result_inpaint.atlas_height, result_base.atlas_height);
+    ASSERT_EQ(result_inpaint.face_view_ids, result_base.face_view_ids);
+    ASSERT_EQ(result_inpaint.face_uvs, result_base.face_uvs);
+    size_t baked_count = 0;
+    size_t black_baked_count = 0;
+    size_t black_winners_against_color = 0;
+    size_t filled_count = 0;
+    size_t distinct_color_ties = 0;
+    for (int y = 0; y < result_base.atlas_height; ++y) {
+      for (int x = 0; x < result_base.atlas_width; ++x) {
+        const auto base_color = result_base.texture_atlas.GetPixel(x, y);
+        const auto inpaint_color = result_inpaint.texture_atlas.GetPixel(x, y);
+        ASSERT_TRUE(base_color.has_value());
+        ASSERT_TRUE(inpaint_color.has_value());
+        auto expected = *base_color;
+        if (baked_mask[y * result_base.atlas_width + x]) {
+          ++baked_count;
+          black_baked_count += expected == BitmapColor<uint8_t>(0);
+        } else {
+          int best_distance = options.inpaint_radius + 1;
+          size_t pixel_ties = 0;
+          bool colored_seed_in_range = false;
+          for (int sy = std::max(0, y - options.inpaint_radius);
+               sy <= std::min(result_base.atlas_height - 1,
+                              y + options.inpaint_radius);
+               ++sy) {
+            for (int sx = std::max(0, x - options.inpaint_radius);
+                 sx <= std::min(result_base.atlas_width - 1,
+                                x + options.inpaint_radius);
+                 ++sx) {
+              const int distance = std::abs(sx - x) + std::abs(sy - y);
+              if (distance > options.inpaint_radius) continue;
+              const auto seed = result_base.texture_atlas.GetPixel(sx, sy);
+              ASSERT_TRUE(seed.has_value());
+              if (!baked_mask[sy * result_base.atlas_width + sx]) continue;
+              colored_seed_in_range |= *seed != BitmapColor<uint8_t>(0);
+              if (distance < best_distance) {
+                best_distance = distance;
+                expected = *seed;
+                pixel_ties = 0;
+              } else if (distance == best_distance && *seed != expected) {
+                ++pixel_ties;
+              }
+            }
+          }
+          distinct_color_ties += pixel_ties;
+          black_winners_against_color +=
+              best_distance <= options.inpaint_radius &&
+              expected == BitmapColor<uint8_t>(0) && colored_seed_in_range;
+          filled_count += expected != BitmapColor<uint8_t>(0);
+        }
+        EXPECT_EQ(*inpaint_color, expected) << "atlas pixel " << x << ", " << y;
       }
+    }
+    EXPECT_GT(baked_count, 0);
+    EXPECT_GT(black_baked_count, 0);
+    // Ignoring black seeds must cause a visible error, not simply leave holes
+    // black.
+    if (radius == 5) {
+      EXPECT_GT(black_winners_against_color, 0);
+    }
+    EXPECT_GT(filled_count, 0);
+    if (radius == 5) {
+      EXPECT_GT(distinct_color_ties, 0);
     }
   }
 }
@@ -673,6 +844,42 @@ TEST(MeshTextureMapping, SamplesAtPixelCenters) {
   EXPECT_EQ(color->r, 255);
   EXPECT_EQ(color->g, 255);
   EXPECT_EQ(color->b, 255);
+}
+
+TEST(MeshTextureMapping, RotatedCameraCenterSelection) {
+  const Eigen::Matrix3f rotation =
+      (Eigen::AngleAxisf(0.23f, Eigen::Vector3f::UnitZ()) *
+       Eigen::AngleAxisf(0.12f, Eigen::Vector3f::UnitY()) *
+       Eigen::AngleAxisf(3.03f, Eigen::Vector3f::UnitX()))
+          .toRotationMatrix();
+  const Eigen::Matrix<float, 3, 3, Eigen::RowMajor> row_rotation = rotation;
+  const float K[9] = {256, 0, 128, 0, 256, 128, 0, 0, 1};
+  std::vector<Image> images;
+  for (const float z : {5.0f, 12.0f}) {
+    const Eigen::Vector3f center(0.5f, 0.5f, z);
+    const Eigen::Vector3f translation = -rotation * center;
+    Image image(
+        "rotated.png", 256, 256, K, row_rotation.data(), translation.data());
+    Bitmap bitmap(256, 256, /*as_rgb=*/true);
+    bitmap.Fill(BitmapColor<uint8_t>(100, 150, 200));
+    image.SetBitmap(std::move(bitmap));
+    images.push_back(std::move(image));
+  }
+  MeshTextureMappingOptions options;
+  options.apply_color_correction = false;
+  options.inpaint_radius = 0;
+  options.view_selection_smoothing_iterations = 0;
+  options.num_threads = 1;
+  const auto result = MeshTextureMapping(MakeTriangleMesh(), images, options);
+  EXPECT_EQ(result.face_view_ids, (std::vector<int>{0, 0}));
+  ASSERT_EQ(result.face_uvs.size(), 12);
+  for (float uv : result.face_uvs) EXPECT_TRUE(std::isfinite(uv));
+  const auto far_only =
+      MeshTextureMapping(MakeTriangleMesh(), {images[1]}, options);
+  EXPECT_EQ(far_only.face_view_ids, (std::vector<int>{0, 0}));
+  std::reverse(images.begin(), images.end());
+  const auto reversed = MeshTextureMapping(MakeTriangleMesh(), images, options);
+  EXPECT_EQ(reversed.face_view_ids, (std::vector<int>{1, 1}));
 }
 
 }  // namespace
