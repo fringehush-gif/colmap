@@ -375,6 +375,44 @@ class PatchMatchControllerTestAccess {
     }
     controller.sparse_test_hooks_ = nullptr;
   }
+  struct PreparedSources {
+    std::vector<int> local;
+    std::vector<int> shared;
+    int min_num_consistent;
+  };
+  static std::array<PreparedSources, 2> PrepareSourceOrders(
+      PatchMatchController& controller, const int missing_source) {
+    controller.ReadWorkspace();
+    controller.ReadProblems();
+    controller.gpu_indices_ = {-1};
+    controller.thread_pool_ = std::make_unique<ThreadPool>(1);
+    controller.io_thread_pool_ = std::make_unique<ThreadPool>(2);
+    auto& problem = controller.problems_.at(0);
+    problem.ref_image_idx = 0;
+    problem.src_image_idxs = {3, 1, 3, 0, 4, 2, 1};
+    if (missing_source >= 0) {
+      const auto path =
+          controller.workspace_path_ / "images" /
+          controller.workspace_->GetModel().GetImageName(missing_source);
+      THROW_CHECK(std::filesystem::remove(path));
+    }
+    std::array<PreparedSources, 2> results;
+    for (auto& result : results) {
+      result = controller.thread_pool_
+                   ->AddTask([&]() {
+                     PatchMatchController::PreparedProblem prepared;
+                     THROW_CHECK(controller.PrepareProblem(
+                         controller.options_, 0, &prepared));
+                     return PreparedSources{
+                         prepared.problem.src_image_idxs,
+                         controller.problems_.at(0).src_image_idxs,
+                         prepared.options.filter_min_num_consistent};
+                   })
+                   .get();
+      controller.thread_pool_->Wait();
+    }
+    return results;
+  }
   static std::array<size_t, 3> PreparedBitmapCounts(
       PatchMatchController& controller, const bool retain_sources) {
     controller.ReadWorkspace();
@@ -1670,6 +1708,31 @@ class ControllerWorkspaceFixture {
   Reconstruction reconstruction;
   std::vector<std::string> names;
 };
+
+TEST(PatchMatchController, PreparePreservesConfiguredSourceOrder) {
+  for (const int missing_source : {-1, 4}) {
+    ControllerWorkspaceFixture fixture(32, 24);
+    auto options = ControllerWorkspaceFixture::Options();
+    options.geom_consistency = false;
+    options.filter = false;
+    options.allow_missing_files = missing_source >= 0;
+    options.depth_min = 0.1f;
+    options.depth_max = 100.0f;
+    options.filter_min_num_consistent = 10;
+    PatchMatchController controller(options, fixture.Workspace(), "COLMAP", "");
+    const auto results = PatchMatchControllerTestAccess::PrepareSourceOrders(
+        controller, missing_source);
+    const std::vector<int> expected = missing_source < 0
+                                          ? std::vector<int>{3, 1, 4, 2}
+                                          : std::vector<int>{3, 1, 2};
+    for (const auto& result : results) {
+      EXPECT_EQ(result.local, expected);
+      EXPECT_EQ(result.shared, expected);
+    }
+    EXPECT_EQ(results[0].min_num_consistent, 4);
+    EXPECT_EQ(results[1].min_num_consistent, expected.size());
+  }
+}
 
 #ifdef COLMAP_TEST_CUDA_ALLOCATION_WRAPPING
 std::pair<size_t, size_t> FindControllerFixtureShape(bool batch,

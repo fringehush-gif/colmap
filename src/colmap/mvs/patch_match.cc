@@ -710,9 +710,6 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
       }
 
       valid_image_idxs.push_back(image_idx);
-      if (image_idx != problem.ref_image_idx) {
-        src_image_idxs.push_back(image_idx);
-      }
     }
 
     // Read images in parallel using the shared I/O thread pool.
@@ -756,6 +753,16 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
       }
     });
 
+    // Preserve configured source order while excluding missing and repeated
+    // images. Keep the reference separate from the source list.
+    used_image_idxs.clear();
+    used_image_idxs.insert(valid_image_idxs.begin(), valid_image_idxs.end());
+    for (const int image_idx : problem.src_image_idxs) {
+      if (image_idx != problem.ref_image_idx &&
+          used_image_idxs.erase(image_idx) > 0) {
+        src_image_idxs.push_back(image_idx);
+      }
+    }
     shared_problem.src_image_idxs = src_image_idxs;
     problem.src_image_idxs = std::move(src_image_idxs);
   }
