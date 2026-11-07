@@ -99,6 +99,79 @@ class WorkspaceTests : public ::testing::Test {
   std::string image_name_;
 };
 
+TEST_F(WorkspaceTests, BoundedDepthDimensionsRetryAndPublishToReaders) {
+  BoundedWorkspace workspace(GetOptions());
+  const auto path = workspace.GetDepthMapPath(0);
+  const auto saved = AddFileExtension(path, ".saved");
+  std::filesystem::rename(path, saved);
+  EXPECT_THROW(workspace.GetDepthMapDimensions(0), std::exception);
+  EXPECT_THROW(workspace.GetDepthMapDimensions(0), std::exception);
+  std::filesystem::rename(saved, path);
+
+  // A parseable raster whose consumed height rounds to zero must not publish.
+  DepthMap invalid_grid(10000, 1, 1.0f, 10.0f);
+  invalid_grid.Fill(2.0f);
+  invalid_grid.Write(path);
+  EXPECT_THROW(workspace.GetDepthMapDimensions(0), std::exception);
+  DepthMap repaired_grid(10, 5, 1.0f, 10.0f);
+  repaired_grid.Fill(1.0f);
+  repaired_grid.Write(path);
+
+  std::promise<void> start;
+  const auto ready = start.get_future().share();
+  std::vector<std::future<std::pair<size_t, size_t>>> readers;
+  for (int i = 0; i < 8; ++i) {
+    readers.push_back(std::async(std::launch::async, [&] {
+      ready.wait();
+      return workspace.GetDepthMapDimensions(0);
+    }));
+  }
+  start.set_value();
+  for (auto& reader : readers) {
+    EXPECT_EQ(reader.get(), std::make_pair(size_t{10}, size_t{5}));
+  }
+  // Deliberate cache-hit probe, not permission to mutate production inputs.
+  std::filesystem::rename(path, saved);
+  EXPECT_NO_THROW({
+    EXPECT_EQ(workspace.GetDepthMapDimensions(0),
+              std::make_pair(size_t{10}, size_t{5}));
+  });
+  std::filesystem::rename(saved, path);
+
+  using Component = BoundedWorkspace::Component;
+  EXPECT_EQ(workspace.GetResidentBytesEstimate(0, Component::kDepth), 200);
+  EXPECT_EQ(workspace.GetResidentBytesEstimate(0, Component::kNormal), 600);
+  EXPECT_EQ(
+      workspace.AcquireComponent(0, Component::kDepth)->depth_map.GetWidth(),
+      10);
+}
+
+TEST_F(WorkspaceTests, BoundedDepthDimensionsKeepDownsizeAndWorkspaceScope) {
+  auto options = GetOptions();
+  options.max_image_size = 6;
+  const auto path =
+      temp_dir_ / "stereo/depth_maps" / (image_name_ + ".geometric.bin");
+  {
+    BoundedWorkspace workspace(options);
+    DepthMap expected;
+    expected.Read(path);
+    const auto& image = workspace.GetModel().images.at(0);
+    expected.Downsize(image.GetWidth(), image.GetHeight());
+    const auto grid = workspace.GetDepthMapDimensions(0);
+    EXPECT_EQ(grid, std::make_pair(expected.GetWidth(), expected.GetHeight()));
+    const auto loaded =
+        workspace.AcquireComponent(0, BoundedWorkspace::Component::kDepth);
+    EXPECT_EQ(loaded->depth_map.GetData(), expected.GetData());
+  }
+  // A later Workspace validates its own input generation.
+  DepthMap changed(5, 2, 1.0f, 10.0f);
+  changed.Fill(2.0f);
+  changed.Write(path);
+  BoundedWorkspace fresh(options);
+  EXPECT_EQ(fresh.GetDepthMapDimensions(0),
+            std::make_pair(size_t{5}, size_t{2}));
+}
+
 TEST_F(WorkspaceTests, SparseDepthChargesConstructionAndReloadsAfterEviction) {
   auto options = GetOptions();
   options.cache_size = 700.0 / (1ULL << 30);

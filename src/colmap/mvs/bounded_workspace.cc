@@ -245,12 +245,13 @@ struct BoundedWorkspace::CacheEntry {
 struct BoundedWorkspace::CacheState
     : std::enable_shared_from_this<BoundedWorkspace::CacheState> {
   CacheState(const size_t capacity,
-             const size_t num_images,
+             const size_t num_keys,
              const bool compact_depth)
-      : entries(num_images),
-        load_bytes(num_images, 0),
-        depth_resident_bytes(compact_depth ? num_images : 0, 0),
-        base_keys(num_images) {
+      : entries(num_keys),
+        load_bytes(num_keys, 0),
+        depth_resident_bytes(compact_depth ? num_keys : 0, 0),
+        depth_map_dimensions(num_keys / 4),
+        base_keys(num_keys) {
     stats.capacity_bytes = capacity;
   }
 
@@ -259,6 +260,10 @@ struct BoundedWorkspace::CacheState
   std::vector<std::shared_ptr<CacheEntry>> entries;
   std::vector<size_t> load_bytes;
   std::vector<size_t> depth_resident_bytes;
+  // Consumed depth grids, after the existing Downsize calculation. A zero
+  // width is unpublished; failures are retried. Inputs are immutable for the
+  // workspace lifetime, as required by load_bytes and normal_tile_grids_.
+  std::vector<std::pair<size_t, size_t>> depth_map_dimensions;
   std::vector<int> active_keys;
   std::map<std::tuple<int, size_t, size_t, size_t>, int> tile_keys;
   std::vector<int> free_tile_keys;
@@ -929,19 +934,31 @@ size_t BoundedWorkspace::GetLoadReservationBytes(
 
 std::pair<size_t, size_t> BoundedWorkspace::GetDepthMapDimensions(
     const int image_idx) const {
-  const auto shape = ReadMapShape(GetDepthMapPath(image_idx), 1);
   const auto& image = model_.images.at(image_idx);
-  if (shape.width <= image.GetWidth() && shape.height <= image.GetHeight()) {
-    return {shape.width, shape.height};
+  const auto state = cache_state_;
+  {
+    std::lock_guard<std::mutex> lock(state->mutex);
+    const auto cached = state->depth_map_dimensions.at(image_idx);
+    if (cached.first != 0) return cached;
   }
-  const float factor =
-      std::min(static_cast<float>(image.GetWidth()) / shape.width,
-               static_cast<float>(image.GetHeight()) / shape.height);
-  const size_t width = std::round(shape.width * factor);
-  const size_t height = std::round(shape.height * factor);
-  THROW_CHECK_GT(width, 0);
-  THROW_CHECK_GT(height, 0);
-  return {width, height};
+  // Do not hold the cache mutex across file I/O. Concurrent first readers may
+  // repeat validation, but only a fully validated grid is published.
+  const auto shape = ReadMapShape(GetDepthMapPath(image_idx), 1);
+  std::pair<size_t, size_t> grid{shape.width, shape.height};
+  if (shape.width > image.GetWidth() || shape.height > image.GetHeight()) {
+    const float factor =
+        std::min(static_cast<float>(image.GetWidth()) / shape.width,
+                 static_cast<float>(image.GetHeight()) / shape.height);
+    grid = {std::round(shape.width * factor),
+            std::round(shape.height * factor)};
+    THROW_CHECK_GT(grid.first, 0);
+    THROW_CHECK_GT(grid.second, 0);
+  }
+  {
+    std::lock_guard<std::mutex> lock(state->mutex);
+    state->depth_map_dimensions.at(image_idx) = grid;
+  }
+  return grid;
 }
 
 size_t BoundedWorkspace::GetResidentBytesEstimate(
