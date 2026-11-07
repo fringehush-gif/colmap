@@ -4,6 +4,8 @@
 
 #include "colmap/image/warp.h"
 
+#include <utility>
+
 namespace colmap {
 namespace mvs {
 
@@ -12,10 +14,14 @@ NormalMap::NormalMap() : Mat<float>(0, 0, 3) {}
 NormalMap::NormalMap(const size_t width, const size_t height)
     : Mat<float>(width, height, 3) {}
 
-NormalMap::NormalMap(const Mat<float>& mat)
-    : Mat<float>(mat.GetWidth(), mat.GetHeight(), mat.GetDepth()) {
+NormalMap::NormalMap(const Mat<float>& mat) : NormalMap() {
   THROW_CHECK_EQ(mat.GetDepth(), 3);
-  data_ = mat.GetData();
+  Mat<float>::operator=(mat);
+}
+
+NormalMap::NormalMap(Mat<float>&& mat) : NormalMap() {
+  THROW_CHECK_EQ(mat.GetDepth(), 3);
+  Mat<float>::operator=(std::move(mat));
 }
 
 void NormalMap::Rescale(const float factor) {
@@ -39,11 +45,9 @@ void NormalMap::Rescale(const float factor) {
                     new_data.data() + new_offset);
   }
 
-  data_ = new_data;
+  data_ = std::move(new_data);
   width_ = new_width;
   height_ = new_height;
-
-  data_.shrink_to_fit();
 
   // Re-normalize the normal vectors.
   for (size_t r = 0; r < height_; ++r) {
