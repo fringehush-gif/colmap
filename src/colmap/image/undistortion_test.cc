@@ -108,10 +108,113 @@ TEST(UndistortCamera, Nominal) {
   EXPECT_EQ(undistorted_camera.ModelName(), "PINHOLE");
   EXPECT_EQ(undistorted_camera.FocalLengthX(), 100);
   EXPECT_EQ(undistorted_camera.FocalLengthY(), 100);
-  EXPECT_EQ(undistorted_camera.width, 80);
-  EXPECT_EQ(undistorted_camera.height, 60);
-  EXPECT_EQ(undistorted_camera.PrincipalPointX(), 40);
-  EXPECT_EQ(undistorted_camera.PrincipalPointY(), 30);
+  Camera cropped_camera = distorted_camera;
+  cropped_camera.width = 80;
+  cropped_camera.height = 60;
+  cropped_camera.SetPrincipalPointX(40);
+  cropped_camera.SetPrincipalPointY(30);
+  options.roi_min_x = options.roi_min_y = 0.0;
+  options.roi_max_x = options.roi_max_y = 1.0;
+  const Camera expected_camera = UndistortCamera(options, cropped_camera);
+  EXPECT_EQ(undistorted_camera.width, expected_camera.width);
+  EXPECT_EQ(undistorted_camera.height, expected_camera.height);
+  EXPECT_EQ(undistorted_camera.PrincipalPointX(),
+            expected_camera.PrincipalPointX());
+  EXPECT_EQ(undistorted_camera.PrincipalPointY(),
+            expected_camera.PrincipalPointY());
+}
+
+TEST(UndistortCamera, PinholeRegionOfInterest) {
+  UndistortCameraOptions options;
+  options.roi_min_x = 0.1;
+  options.roi_min_y = 0.2;
+  options.roi_max_x = 0.9;
+  options.roi_max_y = 0.8;
+  for (const CameraModelId model :
+       {CameraModelId::kSimplePinhole, CameraModelId::kPinhole}) {
+    const Camera camera = Camera::CreateFromModelId(1, model, 100, 100, 100);
+    const Camera cropped = UndistortCamera(options, camera);
+    EXPECT_EQ(cropped.width, 80);
+    EXPECT_EQ(cropped.height, 60);
+    EXPECT_EQ(cropped.PrincipalPointX(), 40);
+    EXPECT_EQ(cropped.PrincipalPointY(), 30);
+    EXPECT_EQ(cropped.FocalLengthX(), 100);
+    EXPECT_EQ(cropped.FocalLengthY(), 100);
+  }
+}
+
+TEST(UndistortCamera, RegionOfInterestRoundingAndSizeLimit) {
+  const Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kPinhole, 100, 100, 100);
+  UndistortCameraOptions options;
+  options.roi_min_x = 0.1;
+  options.roi_min_y = 0.2;
+  options.roi_max_x = 0.9;
+  options.roi_max_y = 0.8;
+  options.max_image_size = 40;
+  const Camera limited = UndistortCamera(options, camera);
+  EXPECT_EQ(limited.width, 40);
+  EXPECT_EQ(limited.height, 30);
+  EXPECT_EQ(limited.FocalLengthX(), 50);
+  EXPECT_EQ(limited.FocalLengthY(), 50);
+  EXPECT_EQ(limited.PrincipalPointX(), 20);
+  EXPECT_EQ(limited.PrincipalPointY(), 15);
+
+  // Crops need not include the principal point.
+  options.max_image_size = -1;
+  options.roi_min_x = options.roi_min_y = 0.8;
+  options.roi_max_x = options.roi_max_y = 0.9;
+  const Camera off_center = UndistortCamera(options, camera);
+  EXPECT_EQ(off_center.width, 10);
+  EXPECT_EQ(off_center.height, 10);
+  EXPECT_EQ(off_center.PrincipalPointX(), -30);
+  EXPECT_EQ(off_center.PrincipalPointY(), -30);
+
+  // A positive normalized crop that rounds to one pixel boundary stays
+  // nonempty.
+  options.roi_min_x = options.roi_min_y = 0.501;
+  options.roi_max_x = options.roi_max_y = 0.502;
+  const Camera tiny = UndistortCamera(options, camera);
+  EXPECT_EQ(tiny.width, 1);
+  EXPECT_EQ(tiny.height, 1);
+  EXPECT_EQ(tiny.PrincipalPointX(), 0);
+  EXPECT_EQ(tiny.PrincipalPointY(), 0);
+}
+
+TEST(UndistortCamera, RegionOfInterestMatchesVirtualCrop) {
+  for (const CameraModelId model : {CameraModelId::kSimpleRadial,
+                                    CameraModelId::kOpenCVFisheye,
+                                    CameraModelId::kSimpleFisheye}) {
+    Camera camera = Camera::CreateFromModelId(1, model, 400, 400, 300);
+    if (!camera.ExtraParamsIdxs().empty()) {
+      camera.params[camera.ExtraParamsIdxs()[0]] = 0.05;
+    }
+    camera.SetPrincipalPointX(210);
+    camera.SetPrincipalPointY(130);
+    Camera cropped = camera;
+    cropped.width = 280;
+    cropped.height = 210;
+    cropped.SetPrincipalPointX(170);
+    cropped.SetPrincipalPointY(70);
+    for (const double blank_pixels : {0.0, 1.0}) {
+      UndistortCameraOptions options;
+      options.blank_pixels = blank_pixels;
+      options.roi_min_x = 0.1;
+      options.roi_min_y = 0.2;
+      options.roi_max_x = 0.8;
+      options.roi_max_y = 0.9;
+      const Camera actual = UndistortCamera(options, camera);
+      options.roi_min_x = options.roi_min_y = 0.0;
+      options.roi_max_x = options.roi_max_y = 1.0;
+      const Camera expected = UndistortCamera(options, cropped);
+      EXPECT_EQ(actual.width, expected.width);
+      EXPECT_EQ(actual.height, expected.height);
+      EXPECT_NEAR(actual.PrincipalPointX(), expected.PrincipalPointX(), 1e-10);
+      EXPECT_NEAR(actual.PrincipalPointY(), expected.PrincipalPointY(), 1e-10);
+      EXPECT_EQ(actual.FocalLengthX(), expected.FocalLengthX());
+      EXPECT_EQ(actual.FocalLengthY(), expected.FocalLengthY());
+    }
+  }
 }
 
 TEST(UndistortCamera, MaxCamPointNorm) {
@@ -365,6 +468,42 @@ TEST(UndistortReconstruction, RescalesAlreadyUndistortedCameras) {
     reconstruction.RegisterFrame(frame.FrameId());
   }
 
+  Reconstruction unchanged = reconstruction;
+  UndistortReconstruction(UndistortCameraOptions(), &unchanged);
+  EXPECT_EQ(unchanged.Camera(1).width, 100);
+  EXPECT_EQ(unchanged.Camera(1).height, 100);
+  ASSERT_EQ(unchanged.NumImages(), kNumImages);
+  for (const auto& [image_id, image] : unchanged.Images()) {
+    ASSERT_EQ(image.NumPoints2D(), 1);
+    EXPECT_THAT(image.Point2D(0).xy, EigenMatrixNear(point_xy, 1e-10));
+  }
+
+  Reconstruction cropped = reconstruction;
+  // The crop shifts every observation, including those outside its bounds.
+  // It does not remove observations or filter tracks.
+  for (const auto& [image_id, image] : reconstruction.Images()) {
+    cropped.Image(image_id).SetPoints2D(
+        std::vector<Eigen::Vector2d>{point_xy, Eigen::Vector2d(0, 5)});
+  }
+  UndistortCameraOptions roi_options;
+  roi_options.roi_min_x = 0.1;
+  roi_options.roi_min_y = 0.2;
+  roi_options.roi_max_x = 0.9;
+  roi_options.roi_max_y = 0.8;
+  UndistortReconstruction(roi_options, &cropped);
+  EXPECT_EQ(cropped.Camera(1).width, 80);
+  EXPECT_EQ(cropped.Camera(1).height, 60);
+  EXPECT_EQ(cropped.Camera(1).PrincipalPointX(), 40);
+  EXPECT_EQ(cropped.Camera(1).PrincipalPointY(), 30);
+  ASSERT_EQ(cropped.NumImages(), kNumImages);
+  for (const auto& [image_id, image] : cropped.Images()) {
+    ASSERT_EQ(image.NumPoints2D(), 2);
+    EXPECT_THAT(image.Point2D(0).xy,
+                EigenMatrixNear(Eigen::Vector2d(50, 20), 1e-10));
+    EXPECT_THAT(image.Point2D(1).xy,
+                EigenMatrixNear(Eigen::Vector2d(-10, -15), 1e-10));
+  }
+
   UndistortCameraOptions options;
   options.max_image_size = 50;
   UndistortReconstruction(options, &reconstruction);
@@ -427,6 +566,21 @@ TEST(UndistortReconstruction, RescalesSphericalCameras) {
     reconstruction.AddFrame(frame);
     reconstruction.AddImage(image);
     reconstruction.RegisterFrame(frame.FrameId());
+  }
+
+  Reconstruction unchanged = reconstruction;
+  UndistortCameraOptions roi_options;
+  roi_options.roi_min_x = roi_options.roi_min_y = 0.2;
+  roi_options.roi_max_x = roi_options.roi_max_y = 0.8;
+  UndistortReconstruction(roi_options, &unchanged);
+  EXPECT_EQ(unchanged.Camera(1), camera);
+  ASSERT_EQ(unchanged.NumImages(), kNumImages);
+  for (const auto& [image_id, image] : unchanged.Images()) {
+    ASSERT_EQ(image.NumPoints2D(), points_xy.size());
+    for (point2D_t idx = 0; idx < image.NumPoints2D(); ++idx) {
+      EXPECT_THAT(image.Point2D(idx).xy,
+                  EigenMatrixNear(points_xy[idx], 1e-10));
+    }
   }
 
   UndistortCameraOptions options;
@@ -576,6 +730,83 @@ TEST(RectifyAndUndistortStereoImages, Nominal) {
   EXPECT_EQ(undistorted_camera.height, undistorted_image1.Height());
   EXPECT_EQ(undistorted_image1.Width(), undistorted_image2.Width());
   EXPECT_EQ(undistorted_image1.Height(), undistorted_image2.Height());
+}
+
+TEST(RectifyAndUndistortStereoImages, PreservesMetadataAcrossWarpModes) {
+  const Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kPinhole, 100, 64, 64);
+  const Rigid3d cam2_from_cam1(Eigen::Quaterniond::Identity(),
+                               Eigen::Vector3d(1, 0, 0));
+  for (const bool as_rgb : {false, true}) {
+    Bitmap left(64, 64, as_rgb);
+    Bitmap right(64, 64, as_rgb);
+    left.Fill(BitmapColor<uint8_t>(73, 91, 115));
+    right.Fill(BitmapColor<uint8_t>(167, 153, 129));
+    left.SetMetaData("stereo-source", "left");
+    right.SetMetaData("stereo-source", "right");
+    for (const auto interpolation :
+         {WarpImageOptions::Interpolation::kNearestNeighbor,
+          WarpImageOptions::Interpolation::kBilinear}) {
+      for (const double direct_warp_min_scale : {0.0, 2.0}) {
+        UndistortCameraOptions options;
+        options.max_image_size = 32;
+        options.warp_options.interpolation = interpolation;
+        options.warp_options.direct_warp_min_scale = direct_warp_min_scale;
+        Bitmap rectified_left;
+        Bitmap rectified_right;
+        Camera rectified_camera;
+        Eigen::Matrix4d Q;
+        RectifyAndUndistortStereoImages(options,
+                                        left,
+                                        right,
+                                        camera,
+                                        camera,
+                                        cam2_from_cam1,
+                                        &rectified_left,
+                                        &rectified_right,
+                                        &rectified_camera,
+                                        &Q);
+        EXPECT_EQ(rectified_left.GetMetaData("stereo-source"), "left");
+        EXPECT_EQ(rectified_right.GetMetaData("stereo-source"), "right");
+        EXPECT_EQ(rectified_left.Width(), 32);
+        EXPECT_EQ(rectified_left.Height(), 32);
+        EXPECT_EQ(rectified_right.Width(), 32);
+        EXPECT_EQ(rectified_right.Height(), 32);
+        EXPECT_EQ(rectified_left.IsRGB(), as_rgb);
+        EXPECT_EQ(rectified_right.IsRGB(), as_rgb);
+      }
+    }
+  }
+}
+
+TEST(RectifyAndUndistortStereoImages, FirstOutputCompleteWhenSecondWarpFails) {
+  const Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kPinhole, 100, 64, 64);
+  Camera invalid_camera = camera;
+  invalid_camera.params.clear();
+  Bitmap left(64, 64, true);
+  Bitmap right(64, 64, true);
+  left.SetMetaData("stereo-source", "left");
+  right.SetMetaData("stereo-source", "right");
+  Bitmap rectified_left;
+  Bitmap rectified_right;
+  Camera rectified_camera;
+  Eigen::Matrix4d Q;
+  const Rigid3d cam2_from_cam1(Eigen::Quaterniond::Identity(),
+                               Eigen::Vector3d(1, 0, 0));
+  EXPECT_ANY_THROW(RectifyAndUndistortStereoImages(UndistortCameraOptions(),
+                                                   left,
+                                                   right,
+                                                   camera,
+                                                   invalid_camera,
+                                                   cam2_from_cam1,
+                                                   &rectified_left,
+                                                   &rectified_right,
+                                                   &rectified_camera,
+                                                   &Q));
+  EXPECT_EQ(rectified_left.GetMetaData("stereo-source"), "left");
+  EXPECT_EQ(rectified_left.Width(), 64);
+  EXPECT_EQ(rectified_left.Height(), 64);
 }
 
 }  // namespace

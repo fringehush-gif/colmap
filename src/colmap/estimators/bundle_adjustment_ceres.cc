@@ -3,6 +3,7 @@
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 
 #include "colmap/estimators/alignment.h"
+#include "colmap/estimators/bundle_adjustment_internal.h"
 #include "colmap/estimators/ceres_loss_function.h"
 #include "colmap/estimators/cost_functions/manifold.h"
 #include "colmap/estimators/cost_functions/pose_prior.h"
@@ -202,31 +203,11 @@ bool CeresPosePriorBundleAdjustmentOptions::Check() const {
 
 namespace {
 
-struct FixedGaugeWithThreePoints {
-  // The number of fixed points for the Gauge.
-  Eigen::Index num_fixed_points = 0;
-  // The coordinates of the fixed points as columns.
-  Eigen::Matrix3d fixed_points = Eigen::Matrix3d::Zero();
-  bool MaybeAddFixedPoint(const Eigen::Vector3d& point) {
-    if (num_fixed_points >= 3) {
-      return false;
-    }
-    fixed_points.col(num_fixed_points) = point;
-    if (fixed_points.colPivHouseholderQr().rank() > num_fixed_points) {
-      ++num_fixed_points;
-      return true;
-    } else {
-      fixed_points.col(num_fixed_points).setZero();
-      return false;
-    }
-  }
-};
-
 void FixGaugeWithThreePoints(
     const FlatHashMap<point3D_t, size_t>& point3D_num_observations,
     Reconstruction& reconstruction,
     ceres::Problem& problem) {
-  FixedGaugeWithThreePoints fixed_gauge;
+  internal::FixedGaugeWithThreePoints fixed_gauge;
 
   // First check if we already fixed enough points in the problem.
   for (const auto& [point3D_id, num_observations] : point3D_num_observations) {

@@ -6,6 +6,7 @@
 #include "colmap/util/file.h"
 #include "colmap/util/threading.h"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstdint>
@@ -112,7 +113,6 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
         bitmap->Height() != static_cast<int>(height)) {
       bitmap->Rescale(static_cast<int>(width), static_cast<int>(height));
     }
-    bitmaps_[image_idx] = std::move(bitmap);
 
     // Read and rescale depth map
     auto depth_map = std::make_unique<DepthMap>();
@@ -120,38 +120,52 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
     if (depth_map->GetWidth() != width || depth_map->GetHeight() != height) {
       depth_map->Downsize(width, height);
     }
-    depth_maps_[image_idx] = std::move(depth_map);
 
     auto normal = std::make_unique<NormalMap>();
     normal->Read(GetNormalMapPath(image_idx));
     if (normal->GetWidth() != width || normal->GetHeight() != height) {
       normal->Downsize(width, height);
     }
+    // Publish only a complete replacement after every read succeeds.
+    bitmaps_[image_idx] = std::move(bitmap);
+    depth_maps_[image_idx] = std::move(depth_map);
     normal_maps_[image_idx] = std::move(normal);
   };
 
-  // Each model slot is published by at most one task in this Load call.
-  std::vector<uint8_t> enqueued(num_images, 0);
-  const int num_threads = GetEffectiveNumThreads(options_.num_threads);
+  // Resolve the complete roster before starting workers. Keep first-occurrence
+  // order, including missing inputs, so each model slot is considered once.
+  std::vector<uint8_t> seen(num_images, 0);
+  std::vector<int> image_indices;
+  image_indices.reserve(std::min(image_names.size(), num_images));
+  for (const auto& image_name : image_names) {
+    const int image_idx = model_.GetImageIdx(image_name);
+    if (!seen[image_idx]) {
+      image_indices.push_back(image_idx);
+      seen[image_idx] = 1;
+    }
+  }
+  const int num_threads = static_cast<int>(std::min(
+      static_cast<size_t>(GetEffectiveNumThreads(options_.num_threads)),
+      std::max<size_t>(image_indices.size(), 1)));
   ThreadPool thread_pool(num_threads);
   Timer timer;
   timer.Start();
 
   LOG(INFO) << StringPrintf("Loading workspace data with %d threads...",
                             num_threads);
-  for (size_t i = 0; i < image_names.size(); ++i) {
-    const int image_idx = model_.GetImageIdx(image_names[i]);
-    if (enqueued[image_idx]) continue;
-    if (HasBitmap(image_idx) && HasDepthMap(image_idx)) {
-      thread_pool.AddTask(LoadWorkspaceData, image_idx);
-      enqueued[image_idx] = 1;
-    } else {
-      LOG(WARNING) << StringPrintf(
-          "Ignoring image %s, because input does not exist.",
-          image_names[i].c_str());
-    }
-  }
   try {
+    // Admission and submission can fail after earlier reads have started.
+    for (const int image_idx : image_indices) {
+      ReleaseFullRamImageInputs(image_idx);
+      if (HasBitmap(image_idx) && HasDepthMap(image_idx) &&
+          HasNormalMap(image_idx)) {
+        thread_pool.AddTask(LoadWorkspaceData, image_idx);
+      } else {
+        LOG(WARNING) << StringPrintf(
+            "Ignoring image %s, because input does not exist.",
+            model_.GetImageName(image_idx).c_str());
+      }
+    }
     thread_pool.Wait();
   } catch (...) {
     const auto failure = std::current_exception();

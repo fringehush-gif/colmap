@@ -125,8 +125,7 @@ VL_XCAT(vl_imconvcol_v, SFX)
  int step, unsigned int flags)
 {
   vl_index x = 0 ;
-  vl_index y ;
-  vl_index dheight = (src_height - 1) / step + 1 ;
+  vl_index y, output_y ;
   vl_bool transp = flags & VL_TRANSPOSE ;
   vl_bool zeropad = (flags & VL_PAD_MASK) == VL_PAD_BY_ZERO ;
 
@@ -149,23 +148,21 @@ VL_XCAT(vl_imconvcol_v, SFX)
     /* Calculate dest[x,y] = sum_p image[x,p] filt[y - p]
      * where supp(filt) = [filt_begin, filt_end] = [fb,fe].
      *
-     * CHUNK_A: y - fe <= p < 0
-     *          completes VL_MAX(fe - y, 0) samples
-     * CHUNK_B: VL_MAX(y - fe, 0) <= p < VL_MIN(y - fb, height - 1)
-     *          completes fe - VL_MAX(fb, height - y) + 1 samples
-     * CHUNK_C: completes all samples
+     * Count taps in descending filter order. Clip the upper padding
+     * to the actual filter length, address only in-range source rows, and
+     * use the last edge for lower padding even without a central sample.
      */
-    T const *filti ;
+    vl_index tap = 0 ;
     vl_index stop ;
 
-    for (y = 0 ; y < (signed)src_height ; y += step) {
+    for (y = 0, output_y = 0 ; y < (signed)src_height ; y += step, ++output_y) {
       T acc = 0 ;
       T v = 0, c ;
-      T const* srci ;
+      vl_index source_y ;
 
-      filti = filt ;
-      stop = filt_end - y ;
-      srci = src + x - stop * src_stride ;
+      tap = 0 ;
+      stop = VL_MIN(filt_end - y, filt_end - filt_begin + 1) ;
+      source_y = VL_MAX(0, y - filt_end) ;
 
       if (stop > 0) {
         if (zeropad) {
@@ -173,39 +170,39 @@ VL_XCAT(vl_imconvcol_v, SFX)
         } else {
           v = *(src + x) ;
         }
-        while (filti > filt - stop) {
-          c = *filti-- ;
+        while (tap < stop) {
+          c = filt[-tap++] ;
           acc += v * c ;
-          srci += src_stride ;
         }
       }
 
       stop = filt_end - VL_MAX(filt_begin, y - (signed)src_height + 1) + 1 ;
-      while (filti > filt - stop) {
-        v = *srci ;
-        c = *filti-- ;
+      while (tap < stop) {
+        v = *(src + x + source_y * src_stride) ;
+        c = filt[-tap++] ;
         acc += v * c ;
-        srci += src_stride ;
+        ++source_y ;
       }
 
       if (zeropad) v = 0 ;
+      else if (tap == 0) v = src[x + (src_height - 1) * src_stride] ;
 
       stop = filt_end - filt_begin + 1 ;
-      while (filti > filt - stop) {
-        c = *filti-- ;
+      while (tap < stop) {
+        c = filt[-tap++] ;
         acc += v * c ;
       }
 
       if (transp) {
-        *dst = acc ; dst += 1 ;
+        dst[output_y] = acc ;
       } else {
-        *dst = acc ; dst += dst_stride ;
+        dst[output_y * dst_stride] = acc ;
       }
     } /* next y */
     if (transp) {
-      dst += 1 * dst_stride - dheight * 1 ;
+      if (x + 1 < (signed)src_width) dst += dst_stride ;
     } else {
-      dst += 1 * 1 - dheight * dst_stride ;
+      if (x + 1 < (signed)src_width) dst += 1 ;
     }
     x += 1 ;
   } /* next x */

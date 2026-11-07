@@ -31,7 +31,12 @@ void BindEigenGeometry(py::module& m) {
           "from_buffer",
           [](py::array_t<double> arr) {
             THROW_CHECK_EQ(arr.size(), 4);
-            return Rotation3dWrapper(std::move(arr));
+            auto contiguous =
+                (arr.flags() & py::array::c_style) == py::array::c_style
+                    ? py::reinterpret_borrow<Rotation3dWrapper::Array>(arr)
+                    : Rotation3dWrapper::Array::ensure(arr);
+            THROW_CHECK(contiguous);
+            return Rotation3dWrapper(std::move(contiguous));
           },
           "array"_a,
           "Create from numpy array view (zero-copy if contiguous).")

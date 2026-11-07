@@ -7,6 +7,7 @@ COLMAP_ADD_LIBRARY(
     SRCS
         advancing_front_meshing.h advancing_front_meshing.cc
         bounded_workspace.h bounded_workspace.cc
+        sparse_depth.h
         immutable_map_pool.h
         consistency_graph.h consistency_graph.cc
         delaunay_meshing.h delaunay_meshing.cc
@@ -234,7 +235,11 @@ if(CUDA_ENABLED)
                 "LINKER:--wrap=cudaMallocPitch"
                 "LINKER:--wrap=cudaMalloc3DArray"
                 "LINKER:--wrap=cudaFree"
-                "LINKER:--wrap=cudaFreeArray")
+                "LINKER:--wrap=cudaFreeArray"
+                "LINKER:--wrap=cudaStreamCreateWithFlags"
+                "LINKER:--wrap=cudaStreamDestroy"
+                "LINKER:--wrap=cudaPeekAtLastError"
+                "LINKER:--wrap=cudaGetLastError")
             COLMAP_ADD_TEST(
                 NAME cuda_texture_constructor_test
                 SRCS cuda_texture_constructor_test.cc

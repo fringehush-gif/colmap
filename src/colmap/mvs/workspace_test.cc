@@ -8,6 +8,7 @@
 #include "colmap/sensor/bitmap_reader.h"
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
+#include "colmap/util/threading.h"
 
 #include <array>
 #include <atomic>
@@ -16,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -96,6 +98,117 @@ class WorkspaceTests : public ::testing::Test {
   std::filesystem::path temp_dir_;
   std::string image_name_;
 };
+
+TEST_F(WorkspaceTests, SparseDepthChargesConstructionAndReloadsAfterEviction) {
+  auto options = GetOptions();
+  options.cache_size = 700.0 / (1ULL << 30);
+  using Component = BoundedWorkspace::Component;
+  BoundedWorkspace raw(options);
+  Mat<float> depth(10, 5, 1);
+  depth.Fill(0.0f);
+  depth.Set(4, 9, 0, 5.0f);
+  depth.Write(raw.GetDepthMapPath(0));
+  BoundedWorkspace workspace(options, true);
+  ASSERT_TRUE(workspace.UsesCompactDepth());
+  const size_t raw_bytes = raw.GetLoadReservationBytes(0, Component::kDepth);
+  const size_t reserved =
+      workspace.GetLoadReservationBytes(0, Component::kDepth);
+  EXPECT_GE(reserved, 2 * raw_bytes);
+  auto lease = workspace.AcquireComponent(0, Component::kDepth);
+  ASSERT_TRUE(lease->sparse_depth);
+  EXPECT_TRUE(lease->depth_map.GetData().empty());
+  EXPECT_FLOAT_EQ(lease->GetDepth(4, 9), 5.0f);
+  EXPECT_FLOAT_EQ(lease->GetDepth(0, 0), 0.0f);
+  EXPECT_EQ(workspace.GetCacheStats().resident_bytes, lease->NumBytes());
+  EXPECT_EQ(workspace.GetResidentBytesEstimate(0, Component::kDepth),
+            lease->NumBytes());
+  EXPECT_LT(lease->NumBytes(), raw_bytes);
+  auto handle = lease.GetHandle();
+  const auto payload = BoundedWorkspaceTransientPinTestPeer::Payload(handle);
+  lease.reset();
+  auto borrowed = handle.TryBorrow();
+  ASSERT_TRUE(borrowed);
+  bool released = false;
+  BoundedWorkspaceTransientPinTestPeer::BeforeArm(workspace, [&] {
+    released = true;
+    borrowed.reset();
+  });
+  auto normal = workspace.AcquireComponent(0, Component::kNormal);
+  EXPECT_TRUE(released);
+  EXPECT_TRUE(payload.expired());
+  EXPECT_FALSE(handle.TryBorrow());
+  normal.reset();
+  auto reloaded = workspace.AcquireComponent(0, Component::kDepth);
+  ASSERT_TRUE(reloaded->sparse_depth);
+  EXPECT_FLOAT_EQ(reloaded->GetDepth(4, 9), 5.0f);
+  EXPECT_EQ(workspace.GetLoadReservationBytes(0, Component::kDepth), reserved);
+  EXPECT_EQ(workspace.GetCacheStats().reserved_bytes, 0);
+  EXPECT_LE(workspace.GetCacheStats().peak_charged_bytes, 700);
+}
+
+TEST_F(WorkspaceTests, SparseDepthFailureRetriesAndLeaseOutlivesWorkspace) {
+  auto options = GetOptions();
+  options.cache_size = 1.0;
+  using Component = BoundedWorkspace::Component;
+  BoundedWorkspace::ImageLease survivor;
+  {
+    BoundedWorkspace workspace(options, true);
+    const auto path = workspace.GetDepthMapPath(0);
+    workspace.GetLoadReservationBytes(0, Component::kDepth);
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << "10&5&1&";
+    EXPECT_THROW(workspace.AcquireComponent(0, Component::kDepth),
+                 std::exception);
+    EXPECT_EQ(workspace.GetCacheStats().reserved_bytes, 0);
+    Mat<float> depth(10, 5, 1);
+    depth.Fill(0.0f);
+    depth.Set(1, 1, 0, 7.0f);
+    depth.Write(path);
+    survivor = workspace.AcquireComponent(0, Component::kDepth);
+    ASSERT_TRUE(survivor->sparse_depth);
+  }
+  EXPECT_FLOAT_EQ(survivor->GetDepth(1, 1), 7.0f);
+  EXPECT_FLOAT_EQ(survivor->GetDepth(0, 0), 0.0f);
+  survivor.reset();
+}
+
+TEST_F(WorkspaceTests, DenseDepthFallsBackWithinRawLoadReservation) {
+  auto options = GetOptions();
+  Mat<float> depth(10, 5, 1);
+  depth.Fill(1.0f);
+  using Component = BoundedWorkspace::Component;
+  size_t reservation = 0;
+  {
+    BoundedWorkspace planning(options, true);
+    depth.Write(planning.GetDepthMapPath(0));
+    reservation = planning.GetLoadReservationBytes(0, Component::kDepth);
+  }
+  options.cache_size = static_cast<double>(reservation) / (1ULL << 30);
+  BoundedWorkspace workspace(options, true);
+  EXPECT_EQ(workspace.GetLoadReservationBytes(0, Component::kDepth),
+            reservation);
+  auto lease = workspace.AcquireComponent(0, Component::kDepth);
+  ASSERT_TRUE(lease);
+  EXPECT_FALSE(lease->sparse_depth);
+  EXPECT_EQ(lease->depth_map.GetData().size(), depth.GetData().size());
+  EXPECT_FLOAT_EQ(lease->GetDepth(0, 0), 1.0f);
+  EXPECT_EQ(workspace.GetCacheStats().resident_bytes, lease->NumBytes());
+  EXPECT_EQ(workspace.GetCacheStats().reserved_bytes, 0);
+  EXPECT_LE(workspace.GetCacheStats().peak_charged_bytes, reservation);
+}
+
+TEST_F(WorkspaceTests, ExactDepthDoesNotReserveSparseConstruction) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  auto options = GetOptions();
+  options.exact_depth_state = true;
+  options.mapped_normal_bytes_limit = 1 << 20;
+  options.mapped_normal_files_limit = 2;
+  BoundedWorkspace raw(options);
+  BoundedWorkspace compact(options, true);
+  EXPECT_FALSE(compact.UsesCompactDepth());
+  EXPECT_EQ(
+      raw.GetLoadReservationBytes(0, BoundedWorkspace::Component::kDepth),
+      compact.GetLoadReservationBytes(0, BoundedWorkspace::Component::kDepth));
+}
 
 TEST_F(WorkspaceTests, SoftBorrowExcludesEvictionAndRejectsStaleGeneration) {
   auto options = GetOptions();
@@ -309,7 +422,9 @@ class ParameterizedWorkspaceTests
       public ::testing::WithParamInterface<std::function<
           std::unique_ptr<Workspace>(const Workspace::Options&)>> {};
 
-void ExpectLoadedWorkspaceData(Workspace& workspace) {
+void ExpectLoadedWorkspaceData(
+    Workspace& workspace,
+    const BitmapColor<uint8_t>& expected_color = BitmapColor<uint8_t>(7, 8, 9)) {
   const auto& bitmap = workspace.GetBitmap(0);
   const auto& depth = workspace.GetDepthMap(0);
   const auto& normal = workspace.GetNormalMap(0);
@@ -325,9 +440,9 @@ void ExpectLoadedWorkspaceData(Workspace& workspace) {
     for (int col = 0; col < 10; ++col) {
       const auto pixel = bitmap.GetPixel(col, row);
       ASSERT_TRUE(pixel);
-      EXPECT_EQ(pixel->r, 7);
-      EXPECT_EQ(pixel->g, 8);
-      EXPECT_EQ(pixel->b, 9);
+      EXPECT_EQ(pixel->r, expected_color.r);
+      EXPECT_EQ(pixel->g, expected_color.g);
+      EXPECT_EQ(pixel->b, expected_color.b);
       EXPECT_FLOAT_EQ(depth.Get(row, col), 1.0f);
       for (int channel = 0; channel < 3; ++channel) {
         EXPECT_FLOAT_EQ(normal.Get(row, col, channel), 1.0f);
@@ -369,8 +484,129 @@ TEST_F(WorkspaceTests, ReleaseEagerImageInputsPreservesMetadataAndReload) {
   EXPECT_THROW(bounded.ReleaseFullRamImageInputs(0), std::invalid_argument);
 }
 
+TEST_F(WorkspaceTests, EagerLoadSkipsMissingNormalBeforeReadingAnyInput) {
+  auto options = GetOptions();
+  options.num_threads = 1;
+  Workspace workspace(options);
+  const auto normal_path = workspace.GetNormalMapPath(0);
+  ASSERT_TRUE(std::filesystem::remove(normal_path));
+  ASSERT_TRUE(workspace.HasBitmap(0));
+  ASSERT_TRUE(workspace.HasDepthMap(0));
+  ASSERT_FALSE(workspace.HasNormalMap(0));
+  std::atomic<int> reads{0};
+  auto reader =
+      ScopedBitmapReader::Create({workspace.GetBitmapPath(0)},
+                                 [&](const auto&, bool, bool, Bitmap* target) {
+                                   ++reads;
+                                   *target = Bitmap(10, 5, true);
+                                   target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+                                   return true;
+                                 },
+                                 {{10, 5}});
+
+  EXPECT_NO_THROW(workspace.Load({image_name_}));
+  EXPECT_EQ(reads.load(), 0);
+  EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+  EXPECT_THROW(workspace.GetDepthMap(0), std::invalid_argument);
+  EXPECT_THROW(workspace.GetNormalMap(0), std::invalid_argument);
+
+  Mat<float> normal(10, 5, 3);
+  normal.Fill(1.0f);
+  normal.Write(normal_path);
+  workspace.Load({image_name_});
+  EXPECT_EQ(reads.load(), 1);
+  ExpectLoadedWorkspaceData(workspace);
+  reader->Close();
+}
+
+TEST_F(WorkspaceTests, EagerLoadDrainsWorkersAfterNormalMetadataError) {
+#ifdef _WIN32
+  GTEST_SKIP() << "Self-referential symlink creation needs Windows privilege";
+#else
+  SyntheticDatasetOptions synthetic_options;
+  synthetic_options.num_rigs = 1;
+  synthetic_options.num_cameras_per_rig = 1;
+  synthetic_options.num_frames_per_rig = 3;
+  synthetic_options.camera_width = 10;
+  synthetic_options.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(synthetic_options, &reconstruction);
+  reconstruction.Write(temp_dir_ / "sparse");
+  for (const auto& [_, image] : reconstruction.Images()) {
+    if (image.Name() == image_name_) continue;
+    for (const auto& folder : {"depth_maps", "normal_maps"}) {
+      std::filesystem::copy_file(
+          temp_dir_ / "stereo" / folder / (image_name_ + ".geometric.bin"),
+          temp_dir_ / "stereo" / folder / (image.Name() + ".geometric.bin"));
+    }
+    std::filesystem::copy_file(temp_dir_ / "images" / image_name_,
+                               temp_dir_ / "images" / image.Name());
+  }
+
+  auto options = GetOptions();
+  options.num_threads = 1;
+  Workspace workspace(options);
+  std::vector<std::filesystem::path> bitmap_paths;
+  std::vector<std::string> names;
+  for (int image_idx = 0; image_idx < 3; ++image_idx) {
+    bitmap_paths.push_back(workspace.GetBitmapPath(image_idx));
+    names.push_back(workspace.GetModel().GetImageName(image_idx));
+  }
+  const auto bad_normal = workspace.GetNormalMapPath(2);
+  ASSERT_TRUE(std::filesystem::remove(bad_normal));
+  std::filesystem::create_symlink(bad_normal.filename(), bad_normal);
+  ASSERT_THROW(workspace.HasNormalMap(2), std::filesystem::filesystem_error);
+
+  std::promise<void> first_started;
+  auto started = first_started.get_future();
+  std::promise<void> release_first;
+  const auto released = release_first.get_future().share();
+  std::atomic<int> reads{0};
+  std::atomic<int> finished{0};
+  auto reader = ScopedBitmapReader::Create(
+      bitmap_paths,
+      [&](const auto&, bool, bool, Bitmap* target) {
+        if (reads.fetch_add(1) == 0) {
+          first_started.set_value();
+          released.wait_for(std::chrono::seconds(5));
+          ++finished;
+          return false;  // An earlier worker also reports a read failure.
+        }
+        *target = Bitmap(10, 5, true);
+        target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+        ++finished;
+        return true;
+      },
+      {{10, 5}, {10, 5}, {10, 5}});
+  std::atomic<bool> started_in_time{false};
+  std::thread releaser([&] {
+    started_in_time =
+        started.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    release_first.set_value();
+  });
+
+  std::exception_ptr failure;
+  try {
+    workspace.Load(names);
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  releaser.join();
+  ASSERT_TRUE(failure);
+  EXPECT_THROW(std::rethrow_exception(failure),
+               std::filesystem::filesystem_error);
+  EXPECT_TRUE(started_in_time);
+  EXPECT_EQ(reads.load(), 2);
+  EXPECT_EQ(finished.load(), 2);  // Both callbacks finished before return.
+  EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+  EXPECT_EQ(workspace.GetBitmap(1).Width(), 10);
+  EXPECT_THROW(workspace.GetBitmap(2), std::invalid_argument);
+  reader->Close();
+#endif
+}
+
 TEST_F(WorkspaceTests, EagerLoadDeduplicatesPerCall) {
-  for (const int num_threads : {1, 2}) {
+  for (const int num_threads : {-9, -1, 0, 1, 2, 8}) {
     SCOPED_TRACE(num_threads);
     auto options = GetOptions();
     options.num_threads = num_threads;
@@ -385,7 +621,10 @@ TEST_F(WorkspaceTests, EagerLoadDeduplicatesPerCall) {
           return true;
         },
         {{10, 5}});
+    workspace.Load({});
+    EXPECT_EQ(reads.load(), 0);
     workspace.Load({image_name_, image_name_, image_name_});
+    EXPECT_EQ(workspace.GetOptions().num_threads, num_threads);
     ASSERT_EQ(reads.load(), 1);
     ExpectLoadedWorkspaceData(workspace);
     workspace.Load({image_name_, image_name_});
@@ -393,6 +632,91 @@ TEST_F(WorkspaceTests, EagerLoadDeduplicatesPerCall) {
     ExpectLoadedWorkspaceData(workspace);
     reader->Close();
   }
+}
+
+TEST_F(WorkspaceTests, EagerLoadResolvesAllNamesBeforeDispatch) {
+  auto options = GetOptions();
+  options.num_threads = 1;
+  Workspace workspace(options);
+  std::atomic<int> reads{0};
+  auto reader =
+      ScopedBitmapReader::Create({workspace.GetBitmapPath(0)},
+                                 [&](const auto&, bool, bool, Bitmap* target) {
+                                   ++reads;
+                                   *target = Bitmap(10, 5, true);
+                                   target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+                                   return true;
+                                 },
+                                 {{10, 5}});
+  for (const std::vector<std::string>& names :
+       {std::vector<std::string>{image_name_, "unknown-image"},
+        std::vector<std::string>{"unknown-image", image_name_}}) {
+    EXPECT_THROW(workspace.Load(names), std::invalid_argument);
+    EXPECT_EQ(reads.load(), 0);
+    EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+  }
+  ASSERT_NO_THROW(workspace.Load({image_name_}));
+  EXPECT_EQ(reads.load(), 1);
+  ExpectLoadedWorkspaceData(workspace);
+  reader->Close();
+}
+
+TEST_F(WorkspaceTests, EagerLoadPreservesFirstOccurrenceOrderWithOneWorker) {
+  SyntheticDatasetOptions synthetic_options;
+  synthetic_options.num_rigs = 1;
+  synthetic_options.num_cameras_per_rig = 1;
+  synthetic_options.num_frames_per_rig = 3;
+  synthetic_options.camera_width = 10;
+  synthetic_options.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(synthetic_options, &reconstruction);
+  reconstruction.Write(temp_dir_ / "sparse");
+  for (const auto& [image_id, image] : reconstruction.Images()) {
+    if (image.Name() == image_name_) continue;
+    for (const auto& folder : {"depth_maps", "normal_maps"}) {
+      std::filesystem::copy_file(
+          temp_dir_ / "stereo" / folder / (image_name_ + ".geometric.bin"),
+          temp_dir_ / "stereo" / folder / (image.Name() + ".geometric.bin"));
+    }
+    std::filesystem::copy_file(temp_dir_ / "images" / image_name_,
+                               temp_dir_ / "images" / image.Name());
+  }
+  auto options = GetOptions();
+  options.num_threads = 1;
+  Workspace workspace(options);
+  std::vector<std::filesystem::path> paths;
+  paths.reserve(3);
+  for (int image_idx = 0; image_idx < 3; ++image_idx) {
+    paths.push_back(workspace.GetBitmapPath(image_idx));
+  }
+  std::vector<std::string> read_names;
+  auto reader = ScopedBitmapReader::Create(
+      paths,
+      [&](const auto& path, bool, bool, Bitmap* target) {
+        read_names.push_back(path.filename().string());
+        *target = Bitmap(10, 5, true);
+        target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+        return true;
+      },
+      {{10, 5}, {10, 5}, {10, 5}});
+  const std::vector<std::string> names = {workspace.GetModel().GetImageName(2),
+                                          workspace.GetModel().GetImageName(0),
+                                          workspace.GetModel().GetImageName(1)};
+  workspace.Load({names[0], names[1], names[0], names[2], names[1]});
+  EXPECT_EQ(read_names, names);
+  const auto* bitmap = &workspace.GetBitmap(0);
+  const auto* depth = &workspace.GetDepthMap(0);
+  const auto* normal = &workspace.GetNormalMap(0);
+  ASSERT_TRUE(std::filesystem::remove(workspace.GetNormalMapPath(2)));
+  EXPECT_NO_THROW(workspace.Load({names[0]}));
+  EXPECT_THROW(workspace.GetBitmap(2), std::invalid_argument);
+  EXPECT_THROW(workspace.GetDepthMap(2), std::invalid_argument);
+  EXPECT_THROW(workspace.GetNormalMap(2), std::invalid_argument);
+  EXPECT_EQ(&workspace.GetBitmap(0), bitmap);
+  EXPECT_EQ(&workspace.GetDepthMap(0), depth);
+  EXPECT_EQ(&workspace.GetNormalMap(0), normal);
+  EXPECT_FLOAT_EQ(workspace.GetDepthMap(0).Get(0, 0), 1.0f);
+  reader->Close();
 }
 
 TEST_F(WorkspaceTests, CachedLeasesSurviveConcurrentClear) {
@@ -525,6 +849,81 @@ TEST_F(WorkspaceTests, EagerBitmapReadFailureCanBeRetried) {
   EXPECT_EQ(reads.load(), 2);
   ExpectLoadedWorkspaceData(workspace);
   reader->Close();
+}
+
+TEST_F(WorkspaceTests, EagerReloadBitmapFailureRetiresCompleteTriplet) {
+  Workspace workspace(GetOptions());
+  bool fail = false;
+  auto reader = ScopedBitmapReader::Create(
+      {workspace.GetBitmapPath(0)},
+      [&](const auto&, bool, bool, Bitmap* target) {
+        if (fail) return false;
+        *target = Bitmap(10, 5, true);
+        target->Fill(BitmapColor<uint8_t>(7, 8, 9));
+        return true;
+      },
+      {{10, 5}});
+  ASSERT_NO_THROW(workspace.Load({image_name_}));
+  fail = true;
+  EXPECT_THROW(workspace.Load({image_name_}), AggregateException);
+  EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+  EXPECT_THROW(workspace.GetDepthMap(0), std::invalid_argument);
+  EXPECT_THROW(workspace.GetNormalMap(0), std::invalid_argument);
+  fail = false;
+  ASSERT_NO_THROW(workspace.Load({image_name_}));
+  ExpectLoadedWorkspaceData(workspace);
+  reader->Close();
+}
+
+TEST_F(WorkspaceTests, EagerReloadMissingInputRetiresCompleteTriplet) {
+  Workspace workspace(GetOptions());
+  for (const auto& path : {workspace.GetBitmapPath(0),
+                           workspace.GetDepthMapPath(0),
+                           workspace.GetNormalMapPath(0)}) {
+    ASSERT_NO_THROW(workspace.Load({image_name_}));
+    const std::filesystem::path saved = path.string() + ".saved";
+    std::filesystem::rename(path, saved);
+    EXPECT_NO_THROW(workspace.Load({image_name_}));
+    EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+    EXPECT_THROW(workspace.GetDepthMap(0), std::invalid_argument);
+    EXPECT_THROW(workspace.GetNormalMap(0), std::invalid_argument);
+    std::filesystem::rename(saved, path);
+    ASSERT_NO_THROW(workspace.Load({image_name_}));
+    ExpectLoadedWorkspaceData(workspace, BitmapColor<uint8_t>(0, 0, 0));
+  }
+}
+
+TEST_F(WorkspaceTests, EagerReloadReadFailurePublishesNoPartialTriplet) {
+  Workspace workspace(GetOptions());
+  for (const auto& path : {workspace.GetDepthMapPath(0),
+                           workspace.GetNormalMapPath(0)}) {
+    ASSERT_NO_THROW(workspace.Load({image_name_}));
+    const std::filesystem::path saved = path.string() + ".saved";
+    std::filesystem::rename(path, saved);
+    { std::ofstream truncated(path, std::ios::binary); }
+    EXPECT_THROW(workspace.Load({image_name_}), AggregateException);
+    EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
+    EXPECT_THROW(workspace.GetDepthMap(0), std::invalid_argument);
+    EXPECT_THROW(workspace.GetNormalMap(0), std::invalid_argument);
+    std::filesystem::remove(path);
+    std::filesystem::rename(saved, path);
+    ASSERT_NO_THROW(workspace.Load({image_name_}));
+    ExpectLoadedWorkspaceData(workspace, BitmapColor<uint8_t>(0, 0, 0));
+  }
+}
+
+TEST_F(WorkspaceTests, EagerReloadInvalidOrEmptyRosterPreservesResidentData) {
+  Workspace workspace(GetOptions());
+  ASSERT_NO_THROW(workspace.Load({image_name_}));
+  const auto* bitmap = &workspace.GetBitmap(0);
+  const auto* depth = &workspace.GetDepthMap(0);
+  const auto* normal = &workspace.GetNormalMap(0);
+  EXPECT_THROW(workspace.Load({image_name_, "unknown-image"}),
+               std::invalid_argument);
+  EXPECT_NO_THROW(workspace.Load({}));
+  EXPECT_EQ(&workspace.GetBitmap(0), bitmap);
+  EXPECT_EQ(&workspace.GetDepthMap(0), depth);
+  EXPECT_EQ(&workspace.GetNormalMap(0), normal);
 }
 
 TEST_F(WorkspaceTests, EagerLoadMissingInputCanBeRestored) {
@@ -963,6 +1362,43 @@ TEST(BoundedWorkspaceBase, ReservationCoalescingAndPinnedEviction) {
       EXPECT_LE(mapped_stats.peak_charged_bytes, mapped_file_bytes);
     }
     {
+      // Four pinned tiles force several metadata slots to grow together.
+      Workspace::Options metadata_options = options;
+      constexpr size_t kTileBytes = 2 * 2 * 3 * sizeof(float);
+      metadata_options.cache_size =
+          static_cast<double>(4 * kTileBytes + 1) / (1024.0 * 1024.0 * 1024.0);
+      BoundedWorkspace metadata(metadata_options);
+      EXPECT_EQ(metadata.GetNormalTileReservationBytes(first, 2), kTileBytes);
+      std::vector<BoundedWorkspace::ImageLease> pins;
+      pins.reserve(4);
+      for (size_t col = 0; col < 8; col += 2) {
+        pins.push_back(metadata.AcquireNormalTile(first, 0, col, 2));
+        ASSERT_TRUE(pins.back());
+      }
+      EXPECT_EQ(metadata.GetTileMetadataStats().slot_count, 4);
+      EXPECT_EQ(metadata.GetTileMetadataStats().live, 4);
+      EXPECT_EQ(metadata.GetTileMetadataStats().free, 0);
+      EXPECT_EQ(pins[1]->GetNormal(0, 2).z(), 1.0f);
+
+      pins.front().reset();
+      metadata.FailNextTileKeyPublicationForTesting();
+      EXPECT_THROW(metadata.AcquireNormalTile(first, 0, 8, 2), std::bad_alloc);
+      EXPECT_EQ(metadata.GetTileMetadataStats().slot_count, 4);
+      EXPECT_EQ(metadata.GetTileMetadataStats().live, 3);
+      EXPECT_EQ(metadata.GetTileMetadataStats().free, 1);
+      EXPECT_EQ(metadata.GetCacheStats().reserved_bytes, 0);
+      EXPECT_EQ(pins[1]->GetNormal(0, 2).z(), 1.0f);
+
+      auto reused = metadata.AcquireNormalTile(first, 0, 8, 2);
+      ASSERT_TRUE(reused);
+      EXPECT_EQ(reused->GetNormal(0, 8).z(), 1.0f);
+      EXPECT_EQ(metadata.GetTileMetadataStats().slot_count, 4);
+      EXPECT_EQ(metadata.GetTileMetadataStats().live, 4);
+      EXPECT_EQ(metadata.GetTileMetadataStats().free, 0);
+      EXPECT_LE(metadata.GetCacheStats().peak_charged_bytes,
+                metadata.GetCacheStats().capacity_bytes);
+    }
+    {
       // A direct sample pins its owner through eviction. Releasing the only
       // file slot lets a waiting view progress without decoded tile entries.
       BoundedWorkspace mapped(options);
@@ -1281,13 +1717,13 @@ TEST(BoundedWorkspaceResident, CompactRgbAdmissionAndExactSamples) {
     EXPECT_EQ(lease->bitmap.Height(), grid.second);
     EXPECT_EQ(lease->bitmap_on_depth_grid, compacted);
     EXPECT_EQ(lease->NumBytes(), pixels * 19);
-    const float sx = static_cast<float>(grid.first) / 10;
-    const float sy = static_cast<float>(grid.second) / 5;
     for (int row = 0; row < grid.second; ++row) {
       for (int col = 0; col < grid.first; ++col) {
-        const auto expected =
-            golden.InterpolateNearestNeighbor(col / sx, row / sy)
-                .value_or(BitmapColor<uint8_t>(0));
+        // Evaluate the source pixel center in double precision, independent
+        // of the integer production helper and its identity shortcut.
+        const int source_col = std::floor((col + 0.5) * 10 / grid.first);
+        const int source_row = std::floor((row + 0.5) * 5 / grid.second);
+        const auto expected = golden.GetPixel(source_col, source_row).value();
         const auto actual = lease->bitmap.GetPixel(col, row).value();
         EXPECT_EQ(actual.r, expected.r);
         EXPECT_EQ(actual.g, expected.g);

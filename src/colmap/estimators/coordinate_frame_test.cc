@@ -2,6 +2,8 @@
 
 #include "colmap/estimators/coordinate_frame.h"
 
+#include "colmap/estimators/coordinate_frame_internal.h"
+
 #include "colmap/geometry/gps.h"
 #include "colmap/math/math.h"
 #include "colmap/math/random.h"
@@ -10,6 +12,7 @@
 #include "colmap/util/testing.h"
 
 #include <array>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -61,6 +64,55 @@ TEST(EstimateGravityVectorFromImageOrientation, Empty) {
   Reconstruction reconstruction;
   EXPECT_EQ(EstimateGravityVectorFromImageOrientation(reconstruction),
             Eigen::Vector3d::Zero());
+}
+
+TEST(VanishingPointEstimator, ParallelSegments) {
+  for (const bool vertical : {false, true}) {
+    std::vector<LineSegment> segments = {
+        {{0, 0}, {2, 0}}, {{0, 2}, {2, 2}}, {{0, 0}, {0, 2}}};
+    if (vertical) {
+      for (auto& segment : segments) {
+        std::swap(segment.start.x(), segment.start.y());
+        std::swap(segment.end.x(), segment.end.y());
+      }
+    }
+    std::vector<Eigen::Vector3d> lines;
+    for (const auto& segment : segments) {
+      lines.push_back(segment.start.homogeneous().cross(
+          segment.end.homogeneous()));
+    }
+    std::vector<Eigen::Vector3d> models;
+    VanishingPointEstimator::Estimate(
+        {segments[0], segments[1]}, {lines[0], lines[1]}, &models);
+    ASSERT_EQ(models.size(), 1);
+    ASSERT_EQ(models[0].z(), 0);
+    ASSERT_GT(models[0].head<2>().norm(), 0);
+    for (const double scale : {-2.0, 1.0, 3.0}) {
+      std::vector<double> residuals;
+      VanishingPointEstimator::Residuals(
+          segments, lines, scale * models[0], &residuals);
+      ASSERT_EQ(residuals.size(), 3);
+      EXPECT_DOUBLE_EQ(residuals[0], 0);
+      EXPECT_DOUBLE_EQ(residuals[1], 0);
+      EXPECT_DOUBLE_EQ(residuals[2], 1);
+    }
+  }
+}
+
+TEST(VanishingPointEstimator, InvalidModelAndUndefinedConnectingLine) {
+  const std::vector<LineSegment> segments = {{{0, 0}, {2, 0}}};
+  const std::vector<Eigen::Vector3d> lines = {{0, 1, 0}};
+  const double inf = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  // The final model coincides with the segment midpoint.
+  const std::vector<Eigen::Vector3d> models = {
+      {0, 0, 0}, {inf, 0, 1}, {0, nan, 1}, {1, 0, 1}};
+  for (const auto& model : models) {
+    std::vector<double> residuals;
+    VanishingPointEstimator::Residuals(segments, lines, model, &residuals);
+    ASSERT_EQ(residuals.size(), 1);
+    EXPECT_EQ(residuals[0], std::numeric_limits<double>::max());
+  }
 }
 
 #ifdef COLMAP_LSD_ENABLED
@@ -148,7 +200,8 @@ void DrawLine(Bitmap& bitmap,
 
 void RenderLineImages(Reconstruction& reconstruction,
                       const ManhattanScene& scene,
-                      const std::filesystem::path& test_dir) {
+                      const std::filesystem::path& test_dir,
+                      const bool frontal = false) {
   // 3 cameras with combined pitch (around X) and yaw (around Y) so that both
   // the horizontal and vertical vanishing points are at finite image locations.
   const std::array<double, 3> pitch_deg = {10.0, 10.0, 8.0};
@@ -164,7 +217,10 @@ void RenderLineImages(Reconstruction& reconstruction,
                           Eigen::Vector3d::UnitX()) *
         Eigen::AngleAxisd(DegToRad(yaw_deg[cam_idx]),
                           Eigen::Vector3d::UnitY()));
-    const Rigid3d cam_from_world(cam_from_world_rot, Eigen::Vector3d::Zero());
+    const Rigid3d cam_from_world(
+        frontal ? Eigen::Quaterniond(scene.manhattan_from_world.transpose())
+                : cam_from_world_rot,
+        Eigen::Vector3d::Zero());
 
     Image image;
     image.SetImageId(cam_idx);
@@ -229,6 +285,26 @@ TEST(EstimateManhattanWorldFrame, Synthetic) {
   EXPECT_NEAR(std::abs(frame.col(0).dot(frame.col(1))), 0.0, 1e-6);
   EXPECT_NEAR(std::abs(frame.col(0).dot(frame.col(2))), 0.0, 1e-6);
   EXPECT_NEAR(std::abs(frame.col(1).dot(frame.col(2))), 0.0, 1e-6);
+}
+
+TEST(EstimateManhattanWorldFrame, Frontal) {
+  const auto scene = CreateManhattanScene();
+  const auto test_dir = CreateTestDir();
+  Reconstruction reconstruction;
+  ASSERT_NO_FATAL_FAILURE(
+      RenderLineImages(reconstruction, scene, test_dir, /*frontal=*/true));
+
+  SetPRNGSeed(0);
+  const Eigen::Matrix3d frame = EstimateManhattanWorldFrame(
+      ManhattanWorldFrameEstimationOptions(), reconstruction, test_dir);
+  const Eigen::Matrix3d gram = frame.transpose() * frame;
+  const Eigen::Matrix3d identity = Eigen::Matrix3d::Identity();
+  EXPECT_THAT(gram, EigenMatrixNear(identity, 1e-6));
+  for (int axis = 0; axis < 3; ++axis) {
+    EXPECT_NEAR(std::abs(frame.col(axis).dot(scene.manhattan_from_world.col(axis))),
+                1.0,
+                1e-3);
+  }
 }
 
 TEST(EstimateManhattanWorldFrame, Empty) {

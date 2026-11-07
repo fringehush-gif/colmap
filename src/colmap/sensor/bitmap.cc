@@ -204,7 +204,7 @@ struct BitmapReaderRegistry {
     std::weak_ptr<ScopedBitmapReader> reader;
   };
   std::mutex mutex;
-  FlatHashMap<std::string, Entry> entries;
+  FlatHashMap<std::filesystem::path::string_type, Entry> entries;
   std::atomic<size_t> count{0};
 };
 
@@ -213,8 +213,9 @@ BitmapReaderRegistry& ReaderRegistry() {
   return registry;
 }
 
-std::string ReaderPath(const std::filesystem::path& path) {
-  return std::filesystem::absolute(path).lexically_normal().generic_string();
+std::filesystem::path::string_type ReaderPath(
+    const std::filesystem::path& path) {
+  return std::filesystem::absolute(path).lexically_normal().native();
 }
 
 struct OIIOMetaData : public Bitmap::MetaData {
@@ -296,8 +297,10 @@ std::vector<uint8_t> ConvertColorSpace(const uint8_t* src_data,
   const OIIO::ImageBuf src(image_spec, const_cast<uint8_t*>(src_data));
   std::vector<uint8_t> tgt_data(height * pitch);
   OIIO::ImageBuf tgt(image_spec, tgt_data.data());
-  THROW_CHECK(OIIO::ImageBufAlgo::colorconvert(
-      tgt, src, OIIOFromStdStringView(from), OIIOFromStdStringView(to)));
+  if (!OIIO::ImageBufAlgo::colorconvert(
+          tgt, src, OIIOFromStdStringView(from), OIIOFromStdStringView(to))) {
+    THROW_CHECK(false) << tgt.geterror();
+  }
   return tgt_data;
 }
 
@@ -352,9 +355,9 @@ bool IsEquivalentColorSpace(const std::string_view& colorspace1,
 }  // namespace
 
 ScopedBitmapReader::ScopedBitmapReader(
-    std::vector<std::string> paths,
+    std::vector<PathKey> paths,
     Callback callback,
-    FlatHashMap<std::string, std::pair<int, int>> image_sizes)
+    FlatHashMap<PathKey, std::pair<int, int>> image_sizes)
     : paths_(std::move(paths)),
       callback_(std::move(callback)),
       image_sizes_(std::move(image_sizes)) {}
@@ -371,9 +374,9 @@ std::shared_ptr<ScopedBitmapReader> ScopedBitmapReader::Create(
     throw std::invalid_argument(
         "Bitmap reader dimensions must cover its exact roster");
   }
-  FlatHashMap<std::string, std::pair<int, int>> image_sizes;
-  std::vector<std::string> keys;
-  FlatHashSet<std::string> unique;
+  FlatHashMap<PathKey, std::pair<int, int>> image_sizes;
+  std::vector<PathKey> keys;
+  FlatHashSet<PathKey> unique;
   keys.reserve(paths.size());
   for (const auto& path : paths) {
     if (!path.is_absolute()) {
@@ -387,8 +390,7 @@ std::shared_ptr<ScopedBitmapReader> ScopedBitmapReader::Create(
     if (!image_sizes_wh.empty()) {
       const auto size = image_sizes_wh.at(keys.size() - 1);
       if (size.first <= 0 || size.second <= 0 ||
-          size.first > std::numeric_limits<int>::max() / 3 ||
-          size.second > std::numeric_limits<int>::max() / (size.first * 3)) {
+          !Bitmap::IsValidSize(size.first, size.second, 3)) {
         throw std::invalid_argument(
             "Bitmap reader RGB8 dimensions are invalid");
       }
@@ -463,6 +465,17 @@ std::optional<std::pair<int, int>> ScopedBitmapReader::ImageSize(
   return found->second;
 }
 
+// Pixel access, pitch and interpolation still use signed int offsets. Keep
+// every stored raster in that domain; widening allocation alone is unsafe.
+bool Bitmap::IsValidSize(const int width,
+                         const int height,
+                         const int channels) {
+  return width >= 0 && height >= 0 && (channels == 1 || channels == 3) &&
+         width <= std::numeric_limits<int>::max() / channels &&
+         (width == 0 ||
+          height <= std::numeric_limits<int>::max() / (width * channels));
+}
+
 Bitmap::Bitmap()
     : width_(0), height_(0), channels_(0), linear_colorspace_(false) {
   EnsureOpenImageIOInitialized();
@@ -472,6 +485,7 @@ Bitmap::Bitmap(const int width,
                const int height,
                const bool as_rgb,
                const bool linear_colorspace) {
+  THROW_CHECK(Bitmap::IsValidSize(width, height, as_rgb ? 3 : 1));
   EnsureOpenImageIOInitialized();
   width_ = width;
   height_ = height;
@@ -597,7 +611,9 @@ std::optional<double> Bitmap::ExifFocalLength() const {
       //   (Diagonal distance of image area in the 35 mm camera (43.27 mm) /
       //    Diagonal distance of image area on the image sensor of the DSC)
       //    * focal length of the lens of the DSC.
-      const double diagonal = std::sqrt(width_ * width_ + height_ * height_);
+      const double width = width_;
+      const double height = height_;
+      const double diagonal = std::sqrt(width * width + height * height);
       return focal_length_35mm / 43.27 * diagonal;
     }
   }
@@ -903,6 +919,12 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
     return false;
   }
 
+  if (width <= 0 || height <= 0 || image_spec.depth != 1 || image_spec.deep ||
+      !Bitmap::IsValidSize(width, height, as_rgb ? 3 : 1)) {
+    VLOG(3) << "Unsupported bitmap storage layout or dimensions";
+    return false;
+  }
+
   // The ordinary RGB8-to-gray route otherwise holds a full RGB image while
   // CloneAsGrey allocates its output. Keep the same decoder and gray
   // expression, but convert bounded RGB rows directly into the final gray pixel
@@ -946,8 +968,8 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
     }
     input->close();
     // Match ReadFromFile followed by CloneAsGrey: retain the complete decoder
-    // ImageSpec (including EXIF), changing only its channel count. Preserve the
-    // bitmap's existing linear_colorspace_ field, also for reused objects.
+    // ImageSpec (including EXIF), changing only its channel count. This path
+    // does not linearize the decoded pixels, including for reused bitmaps.
     auto meta_data = std::make_unique<OIIOMetaData>();
     meta_data->image_spec = image_spec;
     meta_data->image_spec.nchannels = 1;
@@ -956,12 +978,21 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
     width_ = width;
     height_ = height;
     channels_ = 1;
+    linear_colorspace_ = false;
     return true;
   }
 
+  // The full decoder also needs storage for its intermediate channel count.
+  // Keep this after bounded RGB-to-gray decoding, which avoids that raster.
+  if (!Bitmap::IsValidSize(width, height, channels)) {
+    VLOG(3) << "Unsupported bitmap dimensions: " << width << "x" << height;
+    return false;
+  }
   width_ = width;
   height_ = height;
   channels_ = channels;
+  // Decoding replaces the pixels before optional colorspace conversion.
+  linear_colorspace_ = false;
   data_.resize(width_ * height_ * channels_);
   // Note that OIIO supports reading a subset of channels.
   if (!input->read_image(
@@ -980,11 +1011,14 @@ bool Bitmap::ReadFromFile(const std::filesystem::path& path,
 
   if (linearize_colorspace) {
     const std::string colorspace = image_spec["oiio:ColorSpace"];
-    if (IsEquivalentColorSpace(colorspace, "linear")) {
+    // An unspecified source space cannot establish linear pixel values.
+    THROW_CHECK(!colorspace.empty()) << "Image colorspace is unspecified";
+    if (!IsEquivalentColorSpace(colorspace, "linear")) {
       data_ = ConvertColorSpace(
           data_.data(), width_, height_, channels_, colorspace, "linear");
     }
   }
+  linear_colorspace_ = linearize_colorspace;
 
   if (as_rgb && channels_ != 3) {
     *this = CloneAsRGB();
@@ -1022,6 +1056,9 @@ bool Bitmap::Write(const std::filesystem::path& path,
     maybe_linearized_output_data = ConvertColorSpace(
         data_.data(), width_, height_, channels_, "linear", *colorspace);
     output_data_ptr = maybe_linearized_output_data.data();
+  } else if (linear_colorspace_) {
+    // The source metadata remains the destination for later inverse writes.
+    SetImageSpecColorSpace(meta_data.image_spec, "linear");
   }
 
   // OIIO writers that encode IPTC metadata (e.g. JPEG, or TIFF with
@@ -1073,9 +1110,10 @@ void Bitmap::SetImageData(int width, int height, std::vector<uint8_t>&& data) {
 void Bitmap::Rescale(const int new_width,
                      const int new_height,
                      RescaleFilter filter) {
+  THROW_CHECK(Bitmap::IsValidSize(new_width, new_height, channels_));
   // A valid image already on the requested grid needs no OIIO filtering or
   // replacement allocation. Preserve SetImageData's metadata-axis repair;
-  // leave malformed and empty inputs and unknown filters on the old path.
+  // leave empty rasters and unknown filters on the filtering path.
   if (new_width == width_ && new_height == height_ && width_ > 0 &&
       height_ > 0 && channels_ > 0 && meta_data_ != nullptr &&
       (filter == RescaleFilter::kBilinear || filter == RescaleFilter::kBox) &&
@@ -1155,8 +1193,8 @@ double Bitmap::Thumbnail(const int max_image_size, RescaleFilter filter) {
   // Fit the down-sampled version exactly into the max dimensions.
   const double scale =
       static_cast<double>(max_image_size) / std::max(width_, height_);
-  Rescale(static_cast<int>(std::round(width_ * scale)),
-          static_cast<int>(std::round(height_ * scale)),
+  Rescale(std::max(1, static_cast<int>(std::round(width_ * scale))),
+          std::max(1, static_cast<int>(std::round(height_ * scale))),
           filter);
   return scale;
 }
@@ -1206,8 +1244,10 @@ void Bitmap::Crop(const int left,
   THROW_CHECK_GE(top, 0);
   THROW_CHECK_GT(width, 0);
   THROW_CHECK_GT(height, 0);
-  THROW_CHECK_LE(left + width, width_);
-  THROW_CHECK_LE(top + height, height_);
+  THROW_CHECK_LE(left, width_);
+  THROW_CHECK_LE(top, height_);
+  THROW_CHECK_LE(width, width_ - left);
+  THROW_CHECK_LE(height, height_ - top);
   if (left == 0 && top == 0 && width == width_ && height == height_) {
     return;
   }
@@ -1232,8 +1272,8 @@ void ConvertPackedRGB8ToGrey(const uint8_t* rgb,
   for (size_t i = 0; i < num_pixels; ++i) {
     // Same expression/order as the original CloneAsGrey loop. Non-negative
     // weighted sum plus 0.5 permits truncation and compiler vectorization.
-    // NOLINTNEXTLINE(bugprone-incorrect-roundings)
     gray[i] =
+        // NOLINTNEXTLINE(bugprone-incorrect-roundings)
         static_cast<uint8_t>(.2126f * rgb[3 * i + 0] + .7152f * rgb[3 * i + 1] +
                              .0722f * rgb[3 * i + 2] + .5f);
   }
@@ -1263,6 +1303,7 @@ Bitmap Bitmap::CloneAsRGB() const {
     return Clone();
   } else {
     THROW_CHECK_EQ(channels_, 1);
+    THROW_CHECK(Bitmap::IsValidSize(width_, height_, 3));
     Bitmap cloned;
     cloned.width_ = width_;
     cloned.height_ = height_;

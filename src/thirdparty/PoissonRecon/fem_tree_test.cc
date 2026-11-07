@@ -1,14 +1,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
+#include <functional>
 #include <future>
+#include <limits>
+#include <map>
+#include <memory>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <tuple>
 #include <type_traits>
@@ -207,62 +216,118 @@ TEST(PoissonRegularTreeTest, ConcurrentCreatorsObservePublishedBrood) {
   root.cleanChildren(true);
 }
 
+TEST(PoissonThreadPoolTest, AsyncSchedulesPreserveTypedAndErasedCallbacks) {
+  using Pool = PoissonRecon::ThreadPool;
+  constexpr size_t kBegin = 7;
+  constexpr size_t kEnd = 30;
+  struct StatefulCallback {
+    std::array<std::atomic<size_t>, 30> visits;
+    std::atomic<size_t> calls{0};
+    StatefulCallback() {
+      for (auto& value : visits) value.store(0, std::memory_order_relaxed);
+    }
+    StatefulCallback(const StatefulCallback& other) {
+      for (size_t i = 0; i < visits.size(); ++i)
+        visits[i].store(other.visits[i].load(std::memory_order_relaxed),
+                        std::memory_order_relaxed);
+      calls.store(other.calls.load(std::memory_order_relaxed),
+                  std::memory_order_relaxed);
+    }
+    void operator()(unsigned int thread, size_t i) {
+      EXPECT_LT(thread, 3u);
+      ++visits.at(i);
+      ++calls;
+    }
+  };
+  for (const auto schedule : {Pool::STATIC, Pool::DYNAMIC}) {
+    SCOPED_TRACE(static_cast<int>(schedule));
+    std::array<std::atomic<size_t>, kEnd> visits;
+    for (auto& value : visits) value.store(0, std::memory_order_relaxed);
+    Pool::ParallelFor(
+        kBegin,
+        kEnd,
+        [&](unsigned int thread, size_t i) {
+          EXPECT_LT(thread, 3u);
+          ++visits.at(i);
+        },
+        3,
+        Pool::ASYNC,
+        schedule,
+        5);
+    std::function<void(unsigned int, size_t)> erased = StatefulCallback{};
+    Pool::ParallelFor(kBegin, kEnd, erased, 3, Pool::ASYNC, schedule, 5);
+    const auto* state = erased.target<StatefulCallback>();
+    ASSERT_NE(state, nullptr);
+    EXPECT_EQ(state->calls.load(), kEnd - kBegin);
+    for (size_t i = 0; i < kEnd; ++i) {
+      EXPECT_EQ(visits[i].load(), i >= kBegin ? 1u : 0u);
+      EXPECT_EQ(state->visits[i].load(), visits[i].load());
+    }
+  }
+}
+
 TEST(PoissonThreadPoolTest, AsyncExceptionsJoinOutstandingWorkers) {
   using Pool = PoissonRecon::ThreadPool;
   using namespace std::chrono_literals;
-  for (const bool throw_on_caller : {true, false}) {
-    SCOPED_TRACE(throw_on_caller);
-    std::promise<void> blocked;
-    std::promise<void> throwing;
-    std::promise<void> release;
-    auto blocked_future = blocked.get_future();
-    auto throwing_future = throwing.get_future();
-    auto release_future = release.get_future().share();
-    std::atomic<bool> worker_finished{false};
-    auto result = std::async(std::launch::async, [&] {
+  for (const auto schedule : {Pool::STATIC, Pool::DYNAMIC}) {
+    SCOPED_TRACE(static_cast<int>(schedule));
+    for (const bool throw_on_caller : {true, false}) {
+      SCOPED_TRACE(throw_on_caller);
+      std::promise<void> blocked;
+      std::promise<void> throwing;
+      std::promise<void> release;
+      auto blocked_future = blocked.get_future().share();
+      auto throwing_future = throwing.get_future();
+      auto release_future = release.get_future().share();
+      std::atomic<bool> worker_finished{false};
+      auto result = std::async(std::launch::async, [&] {
+        Pool::ParallelFor(
+            0,
+            3,
+            [&](unsigned int thread, size_t) {
+              if (thread == 2) {
+                blocked.set_value();
+                if (release_future.wait_for(5s) != std::future_status::ready) {
+                  throw std::runtime_error("worker release timed out");
+                }
+                worker_finished = true;
+              } else if (thread == (throw_on_caller ? 0u : 1u)) {
+                if (blocked_future.wait_for(5s) != std::future_status::ready) {
+                  throw std::runtime_error("worker did not start");
+                }
+                throwing.set_value();
+                throw std::runtime_error("injected worker failure");
+              } else if (blocked_future.wait_for(5s) !=
+                         std::future_status::ready) {
+                throw std::runtime_error("blocked worker did not start");
+              }
+            },
+            3,
+            Pool::ASYNC,
+            schedule,
+            1);
+      });
+      const auto started = throwing_future.wait_for(5s);
+      const bool returned_early =
+          started == std::future_status::ready &&
+          result.wait_for(100ms) == std::future_status::ready;
+      release.set_value();
+      EXPECT_EQ(started, std::future_status::ready);
+      EXPECT_FALSE(returned_early);
+      EXPECT_THROW(result.get(), std::runtime_error);
+      EXPECT_TRUE(worker_finished.load());
+
+      std::atomic<size_t> completed{0};
       Pool::ParallelFor(
           0,
           3,
-          [&](unsigned int thread, size_t) {
-            if (thread == 2) {
-              blocked.set_value();
-              if (release_future.wait_for(5s) != std::future_status::ready) {
-                throw std::runtime_error("worker release timed out");
-              }
-              worker_finished = true;
-            } else if (thread == (throw_on_caller ? 0u : 1u)) {
-              if (blocked_future.wait_for(5s) != std::future_status::ready) {
-                throw std::runtime_error("worker did not start");
-              }
-              throwing.set_value();
-              throw std::runtime_error("injected worker failure");
-            }
-          },
+          [&](unsigned int, size_t) { ++completed; },
           3,
           Pool::ASYNC,
-          Pool::STATIC,
+          schedule,
           1);
-    });
-    const auto started = throwing_future.wait_for(5s);
-    const bool returned_early =
-        started == std::future_status::ready &&
-        result.wait_for(100ms) == std::future_status::ready;
-    release.set_value();
-    EXPECT_EQ(started, std::future_status::ready);
-    EXPECT_FALSE(returned_early);
-    EXPECT_THROW(result.get(), std::runtime_error);
-    EXPECT_TRUE(worker_finished.load());
-
-    std::atomic<size_t> completed{0};
-    Pool::ParallelFor(
-        0,
-        3,
-        [&](unsigned int, size_t) { ++completed; },
-        3,
-        Pool::ASYNC,
-        Pool::STATIC,
-        1);
-    EXPECT_EQ(completed.load(), 3);
+      EXPECT_EQ(completed.load(), 3);
+    }
   }
 }
 
@@ -510,6 +575,198 @@ TEST(PoissonFEMTreeTest, InitializesTriangleInsideOneGridCell) {
     }
   }
   EXPECT_GT(count, 0);
+}
+
+// Expose existing protected owners only to this test; no production API change.
+struct FractionalSplatTree : PoissonRecon::FEMTree<3, float> {
+  using Base = PoissonRecon::FEMTree<3, float>;
+  using Base::Base;
+  using Base::_getSampleDepthAndWeight;
+  using Base::_leaf;
+  using Base::_localToGlobal;
+  using Base::_setFullDepth;
+  using Base::_splatPointData;
+};
+
+using SplatAddress = std::array<int, 4>;
+using SplatCoefficients = std::map<SplatAddress, std::array<double, 3>>;
+constexpr unsigned int kSplatSig = PoissonRecon::FEMDegreeAndBType<2>::Signature;
+using SplatSigs = PoissonRecon::IsotropicUIntPack<3, kSplatSig>;
+using SplatField =
+    PoissonRecon::SparseNodeData<PoissonRecon::Point<float, 3>, SplatSigs>;
+
+// Inspect the representation so finite checks survive finite-math assumptions.
+bool IsFiniteSplatFloat(float value) {
+  static_assert(sizeof(float) == 4 && sizeof(std::uint32_t) == 4);
+  static_assert(std::numeric_limits<std::uint32_t>::digits == 32);
+  static_assert(std::numeric_limits<float>::is_iec559 &&
+                std::numeric_limits<float>::radix == 2 &&
+                std::numeric_limits<float>::digits == 24 &&
+                std::numeric_limits<float>::min_exponent == -125 &&
+                std::numeric_limits<float>::max_exponent == 128);
+  std::uint32_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return (bits & UINT32_C(0x7f800000)) != UINT32_C(0x7f800000);
+}
+
+// Closed-form centered quadratic cardinal basis, independent of FEM helpers.
+double SplatB2(double x) {
+  x = std::abs(x);
+  if (x <= 0.5) return 0.75 - x * x;
+  if (x < 1.5) return 0.5 * (1.5 - x) * (1.5 - x);
+  return 0;
+}
+
+SplatCoefficients SplatSnapshot(const FractionalSplatTree& tree,
+                                const SplatField& field) {
+  SplatCoefficients result;
+  tree.tree().processNodes([&](const FractionalSplatTree::FEMTreeNode* node) {
+    if (node->nodeData.nodeIndex < 0) return;
+    const auto* value = field(node);
+    if (!value) return;
+    int depth, offset[3];
+    tree.depthAndOffset(node, depth, offset);
+    result[{depth, offset[0], offset[1], offset[2]}] =
+        {double((*value)[0]), double((*value)[1]), double((*value)[2])};
+  });
+  return result;
+}
+
+TEST(PoissonFEMTreeTest, FractionalSplatUsesEachLevelNodeAndWidth) {
+  using namespace PoissonRecon;
+  using Degrees = IsotropicUIntPack<3, 2>;
+  FractionalSplatTree tree(1024);
+  auto* allocator = tree.nodeAllocators.empty() ? nullptr : tree.nodeAllocators[0];
+  tree._setFullDepth<false>(Degrees(), allocator, 4);
+  const Point<float, 3> position(7.5f / 16, 8.5f / 16, 9.5f / 16);
+  const Point<float, 3> value(1.f, 0.25f, -0.5f);
+  FractionalSplatTree::PointSample sample{};
+  sample.node = tree._leaf<true>(allocator, position, 4);
+  sample.sample = ProjectiveData<Point<float, 3>, float>(position, 1.f);
+  std::unique_ptr<FractionalSplatTree::DensityEstimator<2>> density(
+      tree.setDensityEstimator<1, 2>({sample}, 3, 1.f));
+  PointSupportKey<Degrees> weight_key, data_key;
+  weight_key.set(tree._localToGlobal(4));
+  data_key.set(tree._localToGlobal(4));
+  float base_depth, base_weight;
+  tree._getSampleDepthAndWeight(
+      *density, position, weight_key, base_depth, base_weight);
+  ASSERT_TRUE(IsFiniteSplatFloat(base_depth));
+  ASSERT_TRUE(IsFiniteSplatFloat(base_weight));
+  ASSERT_GT(base_weight, 0.f);
+  const float bias = 3.5f - base_depth;
+
+  Point<float, 2> fractional_metadata;
+  // max=4 takes the fractional path; max=3 is an integer-depth clamp control.
+  for (const int max_depth : {4, 3}) {
+    SCOPED_TRACE(max_depth);
+    SplatField fixed, functor;
+    const auto fixed_metadata =
+        tree._splatPointData<true, false, 2, Point<float, 3>,
+                             kSplatSig, kSplatSig, kSplatSig>(
+            Point<float, 3>(), allocator, *density, 0.f, position, value, fixed,
+            weight_key, data_key, 0, max_depth, 3, bias);
+    int callback_calls = 0;
+    std::function<int(Point<float, 3>)> maximum = [&](Point<float, 3> p) {
+      ++callback_calls;
+      EXPECT_EQ(p[0], position[0]);
+      EXPECT_EQ(p[1], position[1]);
+      EXPECT_EQ(p[2], position[2]);
+      return max_depth;
+    };
+    const auto functor_metadata =
+        tree._splatPointData<true, false, 2, Point<float, 3>,
+                             kSplatSig, kSplatSig, kSplatSig>(
+            Point<float, 3>(), allocator, *density, 0.f, position, value, functor,
+            weight_key, data_key, 0, maximum, 3, bias);
+    EXPECT_EQ(callback_calls, 1);
+    ASSERT_TRUE(IsFiniteSplatFloat(fixed_metadata[0]));
+    ASSERT_TRUE(IsFiniteSplatFloat(fixed_metadata[1]));
+    ASSERT_TRUE(IsFiniteSplatFloat(functor_metadata[0]));
+    ASSERT_TRUE(IsFiniteSplatFloat(functor_metadata[1]));
+    ASSERT_GT(fixed_metadata[0], 3.f);
+    ASSERT_LT(fixed_metadata[0], 4.f);
+    ASSERT_GT(fixed_metadata[1], 0.f);
+    EXPECT_EQ(fixed_metadata[1], base_weight);
+    EXPECT_EQ(fixed_metadata[0], functor_metadata[0]);
+    EXPECT_EQ(fixed_metadata[1], functor_metadata[1]);
+    if (max_depth == 4) {
+      fractional_metadata = fixed_metadata;
+    } else {
+      EXPECT_EQ(fixed_metadata[0], fractional_metadata[0]);
+      EXPECT_EQ(fixed_metadata[1], fractional_metadata[1]);
+    }
+
+    // Use ACTUAL raw metadata, not the requested depth: bias arithmetic can
+    // round differently with compiler floating-point transformations.
+    const double depth = std::min(double(max_depth), double(fixed_metadata[0]));
+    const int fine = int(std::ceil(depth));
+    const double alpha = 1.0 - (fine - depth);
+    const bool has_coarse = std::abs(1.0 - alpha) > 1e-6;
+    EXPECT_EQ(fine, max_depth);
+    ASSERT_EQ(has_coarse, max_depth == 4);
+    if (has_coarse) {
+      ASSERT_GE(alpha, 0.1);
+      ASSERT_LE(alpha, 0.9);
+    } else {
+      EXPECT_EQ(depth, 3.0);
+      EXPECT_EQ(alpha, 1.0);
+    }
+    SplatCoefficients expected;
+    for (int level = 0; level < (has_coarse ? 2 : 1); ++level) {
+      const int d = fine - level;
+      const double h = std::ldexp(1.0, -d);
+      const double fraction = float(level ? 1.0 - alpha : alpha);
+      int cell[3];
+      for (int axis = 0; axis < 3; ++axis)
+        cell[axis] = int(std::floor(double(position[axis]) / h));
+      for (int z = -1; z <= 1; ++z)
+        for (int y = -1; y <= 1; ++y)
+          for (int x = -1; x <= 1; ++x) {
+            const SplatAddress address{d, cell[0] + x, cell[1] + y, cell[2] + z};
+            double basis = 1;
+            for (int axis = 0; axis < 3; ++axis)
+              basis *= SplatB2(double(position[axis]) / h -
+                               (address[axis + 1] + 0.5));
+            auto& coefficient = expected[address];
+            for (int c = 0; c < 3; ++c)
+              coefficient[c] = double(value[c]) * double(fixed_metadata[1]) *
+                               fraction * basis / (h * h * h);
+          }
+    }
+    const auto fixed_values = SplatSnapshot(tree, fixed);
+    const auto functor_values = SplatSnapshot(tree, functor);
+    // Snapshots only widen float coefficients; casting back is exact.
+    for (const auto* values : {&fixed_values, &functor_values})
+      for (const auto& item : *values)
+        for (const double coefficient : item.second)
+          EXPECT_TRUE(IsFiniteSplatFloat(float(coefficient)));
+    EXPECT_EQ(fixed_values, functor_values);
+    // Exact hex values retain metadata/control maps for a later A/B XML diff.
+    std::ostringstream evidence;
+    evidence << std::hexfloat << fixed_metadata[0] << ',' << fixed_metadata[1]
+             << ";fine=" << fine << ";alpha=" << alpha
+             << ";coarse=" << has_coarse;
+    for (const auto& item : fixed_values) {
+      for (const int address : item.first) evidence << ',' << address;
+      for (const double coefficient : item.second) evidence << ',' << coefficient;
+      evidence << ';';
+    }
+    RecordProperty(max_depth == 4 ? "fractional_contract" : "control_contract",
+                   evidence.str());
+    EXPECT_EQ(expected.size(), has_coarse ? 54u : 27u);
+    EXPECT_EQ(fixed_values.size(), expected.size());
+    for (const auto& item : expected) {
+      const auto actual = fixed_values.find(item.first);
+      EXPECT_NE(actual, fixed_values.end());
+      if (actual == fixed_values.end()) continue;
+      for (int c = 0; c < 3; ++c) {
+        EXPECT_NEAR(actual->second[c], item.second[c],
+                    64 * std::numeric_limits<float>::epsilon() *
+                        std::max(1.0, std::abs(item.second[c])));
+      }
+    }
+  }
 }
 
 }  // namespace

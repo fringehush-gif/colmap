@@ -8,6 +8,7 @@
         "boost-algorithm",
         "boost-graph",
         "boost-heap",
+        "boost-interprocess",
         "boost-program-options",
         "boost-property-map",
         "boost-property-tree",

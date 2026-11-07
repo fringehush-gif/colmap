@@ -10,6 +10,7 @@
 #include "colmap/util/threading.h"
 
 #include <array>
+#include <exception>
 
 namespace colmap {
 namespace {
@@ -197,71 +198,88 @@ IncrementalMapperImpl::FindInitialImagePair(
                                                      num_registrations);
   }
 
-  ThreadPool thread_pool(options.num_threads);
   std::vector<std::shared_future<std::optional<InitInfo>>> init_infos;
   init_infos.reserve(image_ids1.size());
 
   std::mutex init_image_pairs_mutex;
   std::atomic_bool stop = false;
+  // Workers borrow these locals until Stop has joined, including on failure.
+  ThreadPool thread_pool(options.num_threads);
 
-  // Try to find good initial pair.
-  for (const image_t image_id1 : image_ids1) {
-    init_infos.push_back(
-        thread_pool.AddTask([&, image_id1]() -> std::optional<InitInfo> {
-          if (stop.load()) {
-            return std::nullopt;
-          }
-
-          const std::vector<image_t> image_ids2 =
-              IncrementalMapperImpl::FindSecondInitialImage(
-                  options,
-                  image_id1,
-                  correspondence_graph,
-                  reconstruction,
-                  num_registrations);
-
-          for (const image_t image_id2 : image_ids2) {
+  try {
+    // Try to find good initial pair.
+    for (const image_t image_id1 : image_ids1) {
+      init_infos.push_back(
+          thread_pool.AddTask([&, image_id1]() -> std::optional<InitInfo> {
             if (stop.load()) {
               return std::nullopt;
             }
 
-            const image_pair_t pair_id =
-                ImagePairToPairId(image_id1, image_id2);
+            const std::vector<image_t> image_ids2 =
+                IncrementalMapperImpl::FindSecondInitialImage(
+                    options,
+                    image_id1,
+                    correspondence_graph,
+                    reconstruction,
+                    num_registrations);
 
-            // Try every pair only once.
-            {
-              std::lock_guard<std::mutex> lock_guard(init_image_pairs_mutex);
-              if (!init_image_pairs.emplace(pair_id).second) {
-                continue;
+            for (const image_t image_id2 : image_ids2) {
+              if (stop.load()) {
+                return std::nullopt;
+              }
+
+              const image_pair_t pair_id =
+                  ImagePairToPairId(image_id1, image_id2);
+
+              // Try every pair only once.
+              {
+                std::lock_guard<std::mutex> lock_guard(init_image_pairs_mutex);
+                if (!init_image_pairs.emplace(pair_id).second) {
+                  continue;
+                }
+              }
+
+              std::optional<InitInfo> pair_init_info =
+                  IncrementalMapperImpl::EstimateInitialTwoViewGeometry(
+                      options, database_cache, image_id1, image_id2);
+              if (pair_init_info.has_value()) {
+                stop.store(true);
+                return pair_init_info;
               }
             }
 
-            std::optional<InitInfo> pair_init_info =
-                IncrementalMapperImpl::EstimateInitialTwoViewGeometry(
-                    options, database_cache, image_id1, image_id2);
-            if (pair_init_info.has_value()) {
-              stop.store(true);
-              return pair_init_info;
-            }
-          }
-
-          return std::nullopt;
-        }));
-  }
-
-  // Iterate through the already computed results and return the first
-  // successful result. This is deterministic and produces the same result
-  // as the single-threaded version.
-  for (auto& init_info_future : init_infos) {
-    std::optional<InitInfo> result = init_info_future.get();
-    if (result.has_value()) {
-      thread_pool.Stop();
-      return result;
+            return std::nullopt;
+          }));
     }
-  }
 
-  // No suitable pair found in entire dataset.
-  return std::nullopt;
+    // Iterate through the already computed results and return the first
+    // successful result. This is deterministic and produces the same result
+    // as the single-threaded version.
+    for (auto& init_info_future : init_infos) {
+      std::optional<InitInfo> result = init_info_future.get();
+      if (result.has_value()) {
+        thread_pool.Stop();
+        return result;
+      }
+    }
+
+    // Drain worker-side error checkers even after all futures are ready.
+    thread_pool.Stop();
+    // No suitable pair found in entire dataset.
+    return std::nullopt;
+  } catch (...) {
+    stop.store(true);
+    try {
+      thread_pool.Stop();
+    } catch (const std::exception& error) {
+      // Stop drains every task error. Preserve the original submission/future
+      // exception instead of reporting it again from the pool destructor.
+      LOG(WARNING) << "Initial-pair task errors during cleanup: " << error.what();
+    } catch (...) {
+      LOG(WARNING) << "Unknown initial-pair task error during cleanup";
+    }
+    throw;
+  }
 }
 
 std::vector<image_t> IncrementalMapperImpl::FindNextImages(

@@ -23,7 +23,8 @@ class Workspace {
     // The maximum cache size in gigabytes.
     double cache_size = 32.0;
 
-    // The number of threads to use when pre-loading workspace.
+    // Requested eager-loading threads; nonpositive values use available CPUs.
+    // Load caps the effective count to the unique image roster (at least one).
     int num_threads = -1;
 
     // Maximum image size in either dimension.
@@ -53,7 +54,12 @@ class Workspace {
   explicit Workspace(const Options& options);
   virtual ~Workspace() = default;
 
-  // Do nothing when we use a cache. Data is loaded as needed.
+  // Eagerly load each unique image once, in first-occurrence dispatch order.
+  // Resolve every name before dispatch; unknown names leave loaded data intact.
+  // Discard borrowed views and join readers before calling. Requested inputs
+  // are retired before loading; missing or failed inputs remain unavailable.
+  // A successful image publishes a complete triplet. Other images are unchanged.
+  // Cache-backed implementations do nothing here and load data as needed.
   virtual void Load(const std::vector<std::string>& image_names);
 
   inline const Options& GetOptions() const { return options_; }

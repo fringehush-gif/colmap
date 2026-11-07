@@ -202,36 +202,30 @@ __device__ inline void ComputePointAtDepth(const RefCamera& camera,
   point[2] = depth;
 }
 
-// Transfer depth on plane from viewing ray at row1 to row2. The returned
-// depth is the intersection of the viewing ray through row2 with the plane
-// at row1 defined by the given depth and normal.
+// Transfer the plane depth between rows of the same image column. Retain
+// depth1 for nearly parallel rays or intersections without finite positive
+// depth; that fallback need not lie on the original plane at row2.
 __device__ inline float PropagateDepth(const RefCamera& camera,
                                        const float depth1,
                                        const float normal1[3],
                                        const float row1,
-                                       const float row2) {
-  // Point along first viewing ray.
-  const float x1 = depth1 * (camera.inv_K[2] * row1 + camera.inv_K[3]);
-  const float y1 = depth1;
-  // Point on plane defined by point along first viewing ray and plane normal1.
-  const float x2 = x1 + normal1[2];
-  const float y2 = y1 - normal1[1];
-
-  // Origin of second viewing ray.
-  // const float x3 = 0.0f;
-  // const float y3 = 0.0f;
-  // Point on second viewing ray.
-  const float x4 = camera.inv_K[2] * row2 + camera.inv_K[3];
-  // const float y4 = 1.0f;
-
-  // Intersection of the lines ((x1, y1), (x2, y2)) and ((x3, y3), (x4, y4)).
-  const float denom = x2 - x1 + x4 * (y1 - y2);
+                                       const float row2,
+                                       const float col) {
+  const float ray_x = camera.inv_K[0] * col + camera.inv_K[1];
+  const float ray_y1 = camera.inv_K[2] * row1 + camera.inv_K[3];
+  const float ray_y2 = camera.inv_K[2] * row2 + camera.inv_K[3];
+  // Along one image column, x = ray_x * z. The plane's effective z
+  // coefficient therefore includes the x component of its normal.
+  const float normal_z = normal1[0] * ray_x + normal1[2];
+  const float denom = normal1[1] * ray_y2 + normal_z;
   constexpr float kEps = 1e-5f;
   if (abs(denom) < kEps) {
     return depth1;
   }
-  const float nom = y1 * x2 - x1 * y2;
-  return nom / denom;
+  const float depth2 = depth1 * ((normal1[1] * ray_y1 + normal_z) / denom);
+  // A plane horizon can put the adjacent intersection behind the camera.
+  // Retain the valid previous hypothesis when no finite forward depth exists.
+  return depth2 > 0.0f && depth2 <= FLT_MAX ? depth2 : depth1;
 }
 
 // First, compute triangulation angle between reference and source image for 3D
@@ -1026,8 +1020,6 @@ __global__ void ComputeInitialCost(
 
 struct SweepOptions {
   float perturbation = 1.0f;
-  float depth_min = 0.0f;
-  float depth_max = 1.0f;
   int num_samples = 15;
   float sigma_spatial = 3.0f;
   float sigma_color = 0.3f;
@@ -1042,6 +1034,29 @@ struct SweepOptions {
   int filter_min_num_consistent = 2;
   float filter_geom_consistency_max_cost = 1.0f;
 };
+
+namespace {
+
+SweepOptions MakeSweepOptions(const PatchMatchOptions& options) {
+  SweepOptions result;
+  result.sigma_spatial = options.sigma_spatial;
+  result.sigma_color = options.sigma_color;
+  result.num_samples = options.num_samples;
+  result.ncc_sigma = options.ncc_sigma;
+  result.min_triangulation_angle = DEG2RAD(options.min_triangulation_angle);
+  result.incident_angle_sigma = options.incident_angle_sigma;
+  result.geom_consistency_regularizer = options.geom_consistency_regularizer;
+  result.geom_consistency_max_cost = options.geom_consistency_max_cost;
+  result.filter_min_ncc = options.filter_min_ncc;
+  result.filter_min_triangulation_angle =
+      DEG2RAD(options.filter_min_triangulation_angle);
+  result.filter_min_num_consistent = options.filter_min_num_consistent;
+  result.filter_geom_consistency_max_cost =
+      options.filter_geom_consistency_max_cost;
+  return result;
+}
+
+}  // namespace
 
 constexpr int kCooperativeSampleBatchSize = 4;
 constexpr int kCooperativeSampleWindowSize = 16;
@@ -1070,6 +1085,64 @@ struct CooperativeNccJob<true, kBlockWidth, kSampleWindowSize> {
   float best_normal[3][kBlockWidth];
   int best_idx[kBlockWidth];
 };
+
+namespace {
+
+template <int kSampleWindowSize, int kBlockWidth>
+__device__ __forceinline__ int AppendSampledSource(
+    const int source,
+    const bool use_source_mask,
+    uint32_t& sampled_sources,
+    int& num_unique_sources,
+    int (&sources)[kSampleWindowSize][kBlockWidth],
+    const int lane) {
+  int job_slot = -1;
+  if (use_source_mask) {
+    job_slot = source;
+    if (job_slot >= 0) sampled_sources |= uint32_t{1} << job_slot;
+  } else if (source >= 0) {
+    job_slot = 0;
+    while (job_slot < num_unique_sources && sources[job_slot][lane] != source) {
+      ++job_slot;
+    }
+    if (job_slot == num_unique_sources) {
+      sources[job_slot][lane] = source;
+      ++num_unique_sources;
+    }
+  }
+  return job_slot;
+}
+
+template <int kSampleWindowSize, int kBlockWidth>
+__device__ __forceinline__ void PackSampledSources(
+    const bool use_source_mask,
+    const uint32_t sampled_sources,
+    int num_unique_sources,
+    const int sample_count,
+    int (&sources)[kSampleWindowSize][kBlockWidth],
+    int (&aliases)[kSampleWindowSize][kBlockWidth],
+    const int lane) {
+  if (use_source_mask) {
+    uint32_t remaining_sources = sampled_sources;
+    while (remaining_sources != 0) {
+      const int source = __ffs(remaining_sources) - 1;
+      sources[num_unique_sources++][lane] = source;
+      remaining_sources &= remaining_sources - 1;
+    }
+    for (int slot = 0; slot < sample_count; ++slot) {
+      const int source = aliases[slot][lane];
+      if (source >= 0) {
+        aliases[slot][lane] =
+            __popc(sampled_sources & ((uint32_t{1} << source) - 1));
+      }
+    }
+  }
+  for (int slot = num_unique_sources; slot < kSampleWindowSize; ++slot) {
+    sources[slot][lane] = -1;
+  }
+}
+
+}  // namespace
 
 template <int kWindowSize,
           int kWindowStep,
@@ -1333,7 +1406,8 @@ __global__ void SweepFromTopToBottom(
                                               prev_param_state.depth,
                                               prev_param_state.normal,
                                               row - 1,
-                                              row);
+                                              row,
+                                              col);
 
       // Read parameters for current pixel from previous sweep.
       curr_param_state.depth = depth_map.Get(row, col);
@@ -1489,25 +1563,13 @@ __global__ void SweepFromTopToBottom(
           }
           if constexpr (kCooperative) {
             if constexpr (kSampleWindowSize > 1) {
-              int job_slot = -1;
-              if (use_source_mask) {
-                // Keep source IDs until the complete window mask is known.
-                job_slot = pcc_computer.src_image_idx;
-                if (job_slot >= 0) sampled_sources |= uint32_t{1} << job_slot;
-              } else if (pcc_computer.src_image_idx >= 0) {
-                job_slot = 0;
-                while (job_slot < num_unique_sources &&
-                       cooperative_job.source[job_slot][threadIdx.x] !=
-                           pcc_computer.src_image_idx) {
-                  ++job_slot;
-                }
-                if (job_slot == num_unique_sources) {
-                  cooperative_job.source[job_slot][threadIdx.x] =
-                      pcc_computer.src_image_idx;
-                  ++num_unique_sources;
-                }
-              }
-              cooperative_sample_alias[slot][threadIdx.x] = job_slot;
+              cooperative_sample_alias[slot][threadIdx.x] =
+                  AppendSampledSource(pcc_computer.src_image_idx,
+                                      use_source_mask,
+                                      sampled_sources,
+                                      num_unique_sources,
+                                      cooperative_job.source,
+                                      threadIdx.x);
             } else {
               cooperative_job.source[slot][threadIdx.x] =
                   pcc_computer.src_image_idx;
@@ -1534,28 +1596,13 @@ __global__ void SweepFromTopToBottom(
           }
         }
         if constexpr (kCooperative && kSampleWindowSize > 1) {
-          if (use_source_mask) {
-            uint32_t remaining_sources = sampled_sources;
-            while (remaining_sources != 0) {
-              const int source = __ffs(remaining_sources) - 1;
-              cooperative_job.source[num_unique_sources++][threadIdx.x] =
-                  source;
-              remaining_sources &= remaining_sources - 1;
-            }
-            for (int slot = 0; slot < sample_count; ++slot) {
-              const int source = cooperative_sample_alias[slot][threadIdx.x];
-              if (source >= 0) {
-                // Rank in source order, retaining every original draw alias.
-                cooperative_sample_alias[slot][threadIdx.x] =
-                    __popc(sampled_sources & ((uint32_t{1} << source) - 1));
-              }
-            }
-          }
-          // Pack unique jobs first; aliases retain every original sample.
-          for (int slot = num_unique_sources; slot < kSampleWindowSize;
-               ++slot) {
-            cooperative_job.source[slot][threadIdx.x] = -1;
-          }
+          PackSampledSources<kSampleWindowSize>(use_source_mask,
+                                                sampled_sources,
+                                                num_unique_sources,
+                                                sample_count,
+                                                cooperative_job.source,
+                                                cooperative_sample_alias,
+                                                threadIdx.x);
         }
       }
 
@@ -1635,17 +1682,6 @@ __global__ void SweepFromTopToBottom(
                             geometric_costs[i == 3 ? 0 : (i == 4 ? 2 : i)];
               }
             }
-          }
-          if constexpr (kSampleWindowSize > 1) {
-            // Workers may overwrite their local source; restore the last draw.
-            const int last_job =
-                cooperative_sample_alias[sample_count - 1][threadIdx.x];
-            pcc_computer.src_image_idx =
-                last_job >= 0 ? cooperative_job.source[last_job][threadIdx.x]
-                              : -1;
-          } else {
-            pcc_computer.src_image_idx =
-                cooperative_job.source[sample_count - 1][threadIdx.x];
           }
         }
       } else {
@@ -1893,6 +1929,162 @@ cudaArray_t BorrowRotationRefArray(
 }
 
 }  // namespace
+#endif
+
+#ifndef COLMAP_HIP_ENABLED
+namespace {
+
+__global__ void ProbePropagatedDepthKernel(const RefCamera camera,
+                                           const float depth,
+                                           const float3 normal,
+                                           const float row1,
+                                           const float row2,
+                                           const float col,
+                                           float* output) {
+  const float n[3] = {normal.x, normal.y, normal.z};
+  *output = PropagateDepth(camera, depth, n, row1, row2, col);
+}
+
+template <bool kCooperative, int kSampleWindowSize>
+__global__ void ProbeSampledSourcesKernel(const GpuMatView<int> draws,
+                                          const GpuMatView<float> values,
+                                          GpuMatView<int> restored,
+                                          GpuMatView<float> folded) {
+  constexpr int kLanes = 8;
+  const int lane = threadIdx.x;
+  float sum = 0.0f;
+  if constexpr (!kCooperative) {
+    for (int sample = 0; sample < draws.width; ++sample) {
+      const int source = draws.Get(lane, sample);
+      restored.Set(lane, sample, source);
+      if (source >= 0) sum += values.Get(0, source);
+    }
+  } else {
+    __shared__ int sources[kSampleWindowSize][kLanes];
+    __shared__ int aliases[kSampleWindowSize][kLanes];
+    __shared__ float results[kSampleWindowSize][kLanes];
+    for (int begin = 0; begin < draws.width; begin += kSampleWindowSize) {
+      const int sample_count =
+          min(kSampleWindowSize, static_cast<int>(draws.width) - begin);
+      if constexpr (kSampleWindowSize > 1) {
+        int num_unique_sources = 0;
+        uint32_t sampled_sources = 0;
+        const bool use_source_mask = values.width <= 32;
+        for (int slot = 0; slot < kSampleWindowSize; ++slot) {
+          const int source =
+              slot < sample_count ? draws.Get(lane, begin + slot) : -1;
+          aliases[slot][lane] = AppendSampledSource(source,
+                                                    use_source_mask,
+                                                    sampled_sources,
+                                                    num_unique_sources,
+                                                    sources,
+                                                    lane);
+        }
+        PackSampledSources<kSampleWindowSize>(use_source_mask,
+                                              sampled_sources,
+                                              num_unique_sources,
+                                              sample_count,
+                                              sources,
+                                              aliases,
+                                              lane);
+      } else {
+        sources[0][lane] = draws.Get(lane, begin);
+      }
+      for (int slot = 0; slot < kSampleWindowSize; ++slot) {
+        const int source = sources[slot][lane];
+        if (source >= 0) results[slot][lane] = values.Get(0, source);
+      }
+      for (int slot = 0; slot < sample_count; ++slot) {
+        const int job = kSampleWindowSize > 1 ? aliases[slot][lane] : slot;
+        const int source = job >= 0 ? sources[job][lane] : -1;
+        restored.Set(lane, begin + slot, source);
+        if (source >= 0) sum += results[job][lane];
+      }
+    }
+  }
+  folded.Set(0, lane, sum);
+}
+
+}  // namespace
+
+namespace internal {
+
+float ProbePropagatedDepth(const std::array<float, 4>& K,
+                           const float depth,
+                           const std::array<float, 3>& normal,
+                           const float row1,
+                           const float row2,
+                           const float col) {
+  const float inv_K[4] = {1 / K[0], -K[1] / K[0], 1 / K[2], -K[3] / K[2]};
+  GpuMat<float> output(1, 1);
+  ProbePropagatedDepthKernel<<<1, 1>>>(
+      MakeRefCamera(K.data(), inv_K),
+      depth,
+      make_float3(normal[0], normal[1], normal[2]),
+      row1,
+      row2,
+      col,
+      output.GetPtr());
+  CUDA_SYNC_AND_CHECK();
+  return output.CopyToMat().GetData()[0];
+}
+
+// Private test bridge; no public option or header API. The scalar path folds
+// raw draws directly, while cooperative paths use the production pack helpers.
+std::pair<std::vector<int>, std::vector<float>> ProbeSampledSources(
+    const std::vector<int>& draws,
+    const std::vector<float>& values,
+    const int sample_window_size,
+    const bool cooperative) {
+  constexpr int kLanes = 8;
+  THROW_CHECK(!draws.empty() && draws.size() % kLanes == 0);
+  THROW_CHECK(!values.empty());
+  THROW_CHECK_LE(draws.size(),
+                 static_cast<size_t>(std::numeric_limits<int>::max()));
+  THROW_CHECK_LE(values.size(),
+                 static_cast<size_t>(std::numeric_limits<int>::max()));
+  THROW_CHECK(sample_window_size == 1 || sample_window_size == 16);
+  for (const int source : draws) {
+    THROW_CHECK_GE(source, -1);
+    THROW_CHECK(source < 0 || static_cast<size_t>(source) < values.size());
+  }
+  const size_t count = draws.size() / kLanes;
+  GpuMat<int> device_draws(count, kLanes);
+  GpuMat<float> device_values(values.size(), 1);
+  GpuMat<int> restored(count, kLanes);
+  GpuMat<float> folded(kLanes, 1);
+  CUDA_SAFE_CALL(cudaMemcpy2D(device_draws.GetPtr(),
+                              device_draws.GetPitch(),
+                              draws.data(),
+                              count * sizeof(int),
+                              count * sizeof(int),
+                              kLanes,
+                              cudaMemcpyHostToDevice));
+  CUDA_SAFE_CALL(cudaMemcpy(device_values.GetPtr(),
+                            values.data(),
+                            values.size() * sizeof(float),
+                            cudaMemcpyHostToDevice));
+  if (!cooperative) {
+    ProbeSampledSourcesKernel<false, 1><<<1, kLanes>>>(device_draws.View(),
+                                                       device_values.View(),
+                                                       restored.View(),
+                                                       folded.View());
+  } else if (sample_window_size == 1) {
+    ProbeSampledSourcesKernel<true, 1><<<1, kLanes>>>(device_draws.View(),
+                                                      device_values.View(),
+                                                      restored.View(),
+                                                      folded.View());
+  } else {
+    ProbeSampledSourcesKernel<true, 16><<<1, kLanes>>>(device_draws.View(),
+                                                       device_values.View(),
+                                                       restored.View(),
+                                                       folded.View());
+  }
+  CUDA_SYNC_AND_CHECK();
+  return {restored.CopyToMat().GetData(), folded.CopyToMat().GetData()};
+}
+
+}  // namespace internal
 #endif
 
 PatchMatchCuda::PatchMatchCuda(
@@ -2177,25 +2369,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
   const float total_num_steps = options_.num_iterations * 4;
 
-  SweepOptions sweep_options;
-  sweep_options.depth_min = options_.depth_min;
-  sweep_options.depth_max = options_.depth_max;
-  sweep_options.sigma_spatial = options_.sigma_spatial;
-  sweep_options.sigma_color = options_.sigma_color;
-  sweep_options.num_samples = options_.num_samples;
-  sweep_options.ncc_sigma = options_.ncc_sigma;
-  sweep_options.min_triangulation_angle =
-      DEG2RAD(options_.min_triangulation_angle);
-  sweep_options.incident_angle_sigma = options_.incident_angle_sigma;
-  sweep_options.geom_consistency_regularizer =
-      options_.geom_consistency_regularizer;
-  sweep_options.geom_consistency_max_cost = options_.geom_consistency_max_cost;
-  sweep_options.filter_min_ncc = options_.filter_min_ncc;
-  sweep_options.filter_min_triangulation_angle =
-      DEG2RAD(options_.filter_min_triangulation_angle);
-  sweep_options.filter_min_num_consistent = options_.filter_min_num_consistent;
-  sweep_options.filter_geom_consistency_max_cost =
-      options_.filter_geom_consistency_max_cost;
+  SweepOptions sweep_options = MakeSweepOptions(options_);
 
 #ifdef COLMAP_HIP_ENABLED
   constexpr bool kCooperative = false;
@@ -2843,23 +3017,7 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     THROW_CHECK_EQ(
         p.cost_map_->GetHeight(),
         p.rotation_in_half_pi_ % 2 == 0 ? p.ref_height_ : p.ref_width_);
-    SweepOptions o;
-    o.depth_min = p.options_.depth_min;
-    o.depth_max = p.options_.depth_max;
-    o.sigma_spatial = p.options_.sigma_spatial;
-    o.sigma_color = p.options_.sigma_color;
-    o.num_samples = p.options_.num_samples;
-    o.ncc_sigma = p.options_.ncc_sigma;
-    o.min_triangulation_angle = DEG2RAD(p.options_.min_triangulation_angle);
-    o.incident_angle_sigma = p.options_.incident_angle_sigma;
-    o.geom_consistency_regularizer = p.options_.geom_consistency_regularizer;
-    o.geom_consistency_max_cost = p.options_.geom_consistency_max_cost;
-    o.filter_min_ncc = p.options_.filter_min_ncc;
-    o.filter_min_triangulation_angle =
-        DEG2RAD(p.options_.filter_min_triangulation_angle);
-    o.filter_min_num_consistent = p.options_.filter_min_num_consistent;
-    o.filter_geom_consistency_max_cost =
-        p.options_.filter_geom_consistency_max_cost;
+    SweepOptions o = MakeSweepOptions(p.options_);
     o.perturbation = 1.0f / std::pow(2.0f, iter + sweep / 4.0f);
     o.prev_sel_prob_weight = static_cast<float>(iter * 4 + sweep) /
                              static_cast<float>(p.options_.num_iterations * 4);

@@ -332,35 +332,126 @@ TEST(GlobalPipeline, MultiComponents) {
   ASSERT_EQ(expected_components[1].size(), 5);
   DisconnectDatabaseComponents(expected_components, *database);
 
-  auto reconstruction_manager = std::make_shared<ReconstructionManager>();
-  GlobalPipelineOptions options;
-  ASSERT_TRUE(options.multiple_models);
   ViewGraphCalibrationOptions vgc_options;
   CalibrateViewGraph(vgc_options, database.get());
-  GlobalPipeline mapper(std::move(options), database, reconstruction_manager);
-  mapper.Run();
 
-  // Expect one reconstruction per component, each covering its own images.
-  ASSERT_EQ(reconstruction_manager->Size(), 2);
-  EXPECT_THAT(RegImageIdSetsPerReconstruction(*reconstruction_manager),
-              testing::UnorderedElementsAreArray(expected_components));
+  // COVARIANCE rotation averaging needs the covariances already for the
+  // component split, before the component mappers run.
+  for (const bool use_covariance : {false, true}) {
+    SCOPED_TRACE(use_covariance);
+    auto reconstruction_manager = std::make_shared<ReconstructionManager>();
+    GlobalPipelineOptions options;
+    ASSERT_TRUE(options.multiple_models);
+    if (use_covariance) {
+      options.mapper.rotation_averaging.backend =
+          RotationAveragingBackend::CERES;
+      options.mapper.rotation_averaging.reweighting =
+          RotationAveragingReweighting::COVARIANCE;
+    }
+    GlobalPipeline mapper(std::move(options), database, reconstruction_manager);
+    mapper.Run();
 
-  // Each recovered component must also match the ground truth of its cluster.
-  for (size_t i = 0; i < reconstruction_manager->Size(); ++i) {
-    const Reconstruction& reconstruction = *reconstruction_manager->Get(i);
-    const std::vector<image_t> reg_image_ids = reconstruction.RegImageIds();
-    const FlatHashSet<image_t> reconstruction_image_ids(reg_image_ids.begin(),
-                                                        reg_image_ids.end());
-    const auto group_it = std::find(expected_components.begin(),
-                                    expected_components.end(),
-                                    reconstruction_image_ids);
-    ASSERT_NE(group_it, expected_components.end());
-    const Reconstruction gt_subset =
-        ExtractGroundTruthSubset(gt_reconstruction, *group_it);
-    EXPECT_THAT(gt_subset,
-                ReconstructionNear(reconstruction,
-                                   /*max_rotation_error_deg=*/1e-2,
-                                   /*max_proj_center_error=*/1e-4));
+    // Expect one reconstruction per component, each covering its own images.
+    ASSERT_EQ(reconstruction_manager->Size(), 2);
+    EXPECT_THAT(RegImageIdSetsPerReconstruction(*reconstruction_manager),
+                testing::UnorderedElementsAreArray(expected_components));
+
+    // Each recovered component must also match the ground truth of its cluster.
+    for (size_t i = 0; i < reconstruction_manager->Size(); ++i) {
+      const Reconstruction& reconstruction = *reconstruction_manager->Get(i);
+      const std::vector<image_t> reg_image_ids = reconstruction.RegImageIds();
+      const FlatHashSet<image_t> reconstruction_image_ids(reg_image_ids.begin(),
+                                                          reg_image_ids.end());
+      const auto group_it = std::find(expected_components.begin(),
+                                      expected_components.end(),
+                                      reconstruction_image_ids);
+      ASSERT_NE(group_it, expected_components.end());
+      const Reconstruction gt_subset =
+          ExtractGroundTruthSubset(gt_reconstruction, *group_it);
+      EXPECT_THAT(gt_subset,
+                  ReconstructionNear(reconstruction,
+                                     /*max_rotation_error_deg=*/1e-2,
+                                     /*max_proj_center_error=*/1e-4));
+    }
+  }
+}
+
+TEST(GlobalPipeline, MultiComponentsPreserveObservationsOnReuse) {
+  SetPRNGSeed(1);
+  auto database = Database::Open(CreateTestDir() / "database.db");
+  Reconstruction ground_truth;
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 2;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 5;
+  dataset.num_points3D = 50;
+  dataset.num_points2D_without_point3D = 31;
+  dataset.camera_has_prior_focal_length = true;
+  dataset.two_view_geometry_has_relative_pose = true;
+  SynthesizeDataset(dataset, &ground_truth, database.get());
+  const auto groups = GroupImageIdsByRig(ground_truth);
+  DisconnectDatabaseComponents(groups, *database);
+
+  ViewGraphCalibrationOptions vgc_options;
+  CalibrateViewGraph(vgc_options, database.get());
+  FlatHashMap<image_t, FeatureKeypoints> original_keypoints;
+  for (const auto& [image_id, _] : ground_truth.Images()) {
+    original_keypoints.emplace(image_id, database->ReadKeypoints(image_id));
+  }
+
+  for (const bool use_covariance : {false, true}) {
+    SCOPED_TRACE(use_covariance);
+    auto manager = std::make_shared<ReconstructionManager>();
+    GlobalPipelineOptions options;
+    options.num_threads = 1;
+    options.random_seed = 1;
+    if (use_covariance) {
+      options.mapper.rotation_averaging.backend =
+          RotationAveragingBackend::CERES;
+      options.mapper.rotation_averaging.reweighting =
+          RotationAveragingReweighting::COVARIANCE;
+    }
+    GlobalPipeline mapper(options, database, manager);
+    for (size_t run = 0; run < 2; ++run) {
+      mapper.Run();
+      ASSERT_EQ(manager->Size(), (run + 1) * groups.size());
+      for (const auto& [image_id, expected] : original_keypoints) {
+        const auto current = database->ReadKeypoints(image_id);
+        ASSERT_EQ(current.size(), expected.size());
+        for (size_t idx = 0; idx < current.size(); ++idx) {
+          EXPECT_EQ(current[idx].x, expected[idx].x);
+          EXPECT_EQ(current[idx].y, expected[idx].y);
+        }
+      }
+      std::vector<FlatHashSet<image_t>> actual_groups;
+      for (size_t i = run * groups.size(); i < manager->Size(); ++i) {
+        const auto& actual = *manager->Get(i);
+        ASSERT_TRUE(actual.IsValid());
+        ASSERT_GT(actual.NumPoints3D(), 0u);
+        const auto image_ids = actual.RegImageIds();
+        const FlatHashSet<image_t> actual_group(image_ids.begin(),
+                                              image_ids.end());
+        actual_groups.push_back(actual_group);
+        const auto group = std::find(groups.begin(), groups.end(), actual_group);
+        ASSERT_NE(group, groups.end());
+        for (const image_t image_id : image_ids) {
+          const auto& image = actual.Image(image_id);
+          const auto& keypoints = original_keypoints.at(image_id);
+          ASSERT_EQ(image.NumPoints2D(), keypoints.size());
+          EXPECT_GT(image.NumPoints2D(), image.NumPoints3D());
+          for (point2D_t idx = 0; idx < image.NumPoints2D(); ++idx) {
+            EXPECT_EQ(image.Point2D(idx).xy,
+                      Eigen::Vector2d(keypoints[idx].x, keypoints[idx].y));
+          }
+        }
+        const auto expected = ExtractGroundTruthSubset(ground_truth, *group);
+        EXPECT_THAT(expected,
+                    ReconstructionNear(actual,
+                                       /*max_rotation_error_deg=*/1e-2,
+                                       /*max_proj_center_error=*/1e-4));
+      }
+      EXPECT_THAT(actual_groups, testing::UnorderedElementsAreArray(groups));
+    }
   }
 }
 

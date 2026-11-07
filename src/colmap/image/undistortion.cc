@@ -73,8 +73,7 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
   size_t roi_max_x = camera.width;
   size_t roi_max_y = camera.height;
 
-  const bool roi_enabled = options.roi_min_x > 0.0 || options.roi_min_y > 0.0 ||
-                           options.roi_max_x < 1.0 || options.roi_max_y < 1.0;
+  const bool roi_enabled = options.HasRegionOfInterest();
 
   if (roi_enabled) {
     roi_min_x = static_cast<size_t>(
@@ -102,8 +101,9 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
   }
 
   // Scale in order to match the boundary of the undistorted image.
-  if (roi_enabled || (camera.model_id != SimplePinholeCameraModel::model_id &&
-                      camera.model_id != PinholeCameraModel::model_id)) {
+  // Pinhole cameras need only the crop above; their borders need no warp.
+  if (camera.model_id != SimplePinholeCameraModel::model_id &&
+      camera.model_id != PinholeCameraModel::model_id) {
     // For fisheye camera, CamFromImg returns perspective-normalized coords
     // where |cam_point| = tan(theta). Near theta = pi/2, tan(theta) diverges:
     // border pixels outside the valid fisheye circle (common with off-center
@@ -125,7 +125,7 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
     for (size_t y = roi_min_y; y < roi_max_y; ++y) {
       // Left border.
       if (const std::optional<Eigen::Vector2d> cam_point1 =
-              camera.CamFromImg(Eigen::Vector2d(0.5, y + 0.5));
+              camera.CamFromImg(Eigen::Vector2d(roi_min_x + 0.5, y + 0.5));
           cam_point1.has_value() &&
           cam_point1->squaredNorm() < max_cam_point_norm_sq) {
         if (const std::optional<Eigen::Vector2d> undistorted_point1 =
@@ -137,7 +137,7 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
       }
       // Right border.
       if (const std::optional<Eigen::Vector2d> cam_point2 =
-              camera.CamFromImg(Eigen::Vector2d(camera.width - 0.5, y + 0.5));
+              camera.CamFromImg(Eigen::Vector2d(roi_max_x - 0.5, y + 0.5));
           cam_point2.has_value() &&
           cam_point2->squaredNorm() < max_cam_point_norm_sq) {
         if (const std::optional<Eigen::Vector2d> undistorted_point2 =
@@ -159,7 +159,7 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
     for (size_t x = roi_min_x; x < roi_max_x; ++x) {
       // Top border.
       if (const std::optional<Eigen::Vector2d> cam_point1 =
-              camera.CamFromImg(Eigen::Vector2d(x + 0.5, 0.5));
+              camera.CamFromImg(Eigen::Vector2d(x + 0.5, roi_min_y + 0.5));
           cam_point1.has_value() &&
           cam_point1->squaredNorm() < max_cam_point_norm_sq) {
         if (const std::optional<Eigen::Vector2d> undistorted_point1 =
@@ -171,7 +171,7 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
       }
       // Bottom border.
       if (const std::optional<Eigen::Vector2d> cam_point2 =
-              camera.CamFromImg(Eigen::Vector2d(x + 0.5, camera.height - 0.5));
+              camera.CamFromImg(Eigen::Vector2d(x + 0.5, roi_max_y - 0.5));
           cam_point2.has_value() &&
           cam_point2->squaredNorm() < max_cam_point_norm_sq) {
         if (const std::optional<Eigen::Vector2d> undistorted_point2 =
@@ -287,9 +287,10 @@ void UndistortReconstruction(const UndistortCameraOptions& options,
   // copied through as-is. When a max_image_size is requested, they are still
   // resized to match the rescaled output images: perspective cameras through
   // undistortion, spherical cameras by resizing to a smaller image of the same
-  // model.
+  // model. A perspective ROI also requires camera and observation updates.
   const auto keep_unchanged = [&options](const Camera& camera) {
-    return camera.IsUndistorted() && options.max_image_size < 0;
+    return camera.IsUndistorted() && options.max_image_size < 0 &&
+           (!camera.IsPerspective() || !options.HasRegionOfInterest());
   };
   for (const auto& [camera_id, distorted_camera] : distorted_cameras) {
     if (keep_unchanged(distorted_camera)) {
@@ -437,16 +438,6 @@ void RectifyAndUndistortStereoImages(const UndistortCameraOptions& options,
   THROW_CHECK_EQ(distorted_camera2.height, distorted_image2.Height());
 
   *undistorted_camera = UndistortCamera(options, distorted_camera1);
-  *undistorted_image1 = Bitmap(static_cast<int>(undistorted_camera->width),
-                               static_cast<int>(undistorted_camera->height),
-                               distorted_image1.IsRGB());
-  distorted_image1.CloneMetadata(undistorted_image1);
-
-  *undistorted_image2 = Bitmap(static_cast<int>(undistorted_camera->width),
-                               static_cast<int>(undistorted_camera->height),
-                               distorted_image2.IsRGB());
-  distorted_image2.CloneMetadata(undistorted_image2);
-
   Eigen::Matrix3d H1;
   Eigen::Matrix3d H2;
   RectifyStereoCameras(
@@ -458,12 +449,14 @@ void RectifyAndUndistortStereoImages(const UndistortCameraOptions& options,
                                         *undistorted_camera,
                                         distorted_image1,
                                         undistorted_image1);
+  distorted_image1.CloneMetadata(undistorted_image1);
   WarpImageWithHomographyBetweenCameras(options.warp_options,
                                         H2.inverse(),
                                         distorted_camera2,
                                         *undistorted_camera,
                                         distorted_image2,
                                         undistorted_image2);
+  distorted_image2.CloneMetadata(undistorted_image2);
 }
 
 }  // namespace colmap

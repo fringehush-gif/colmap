@@ -2,6 +2,7 @@
 
 #include "colmap/util/cudacc.h"
 
+#include <exception>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -121,6 +122,20 @@ TEST_F(CudaAllocationOrigin, StatusDistinguishesAllAllocationOutcomes) {
   auto mismatch = run(cudaErrorMemoryAllocation);
   EXPECT_EQ(mismatch.origin, O::kLastErrorMismatch);
   EXPECT_EQ(mismatch.code, cudaErrorInvalidValue);
+}
+TEST_F(CudaAllocationOrigin, CleanupWithoutOriginalHasNoNestedCause) {
+  colmap::CudaCleanupScope scope;
+  ASSERT_TRUE(colmap::CudaCleanupScope::ObserveCleanup("failed free", 42));
+  try {
+    scope.Check();
+    FAIL() << "Expected cleanup failure";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("failed free"), std::string::npos);
+    EXPECT_NE(std::string(error.what()).find("42"), std::string::npos);
+    // Guard traversal: the inherited empty nested cause would terminate.
+    ASSERT_EQ(dynamic_cast<const std::nested_exception*>(&error), nullptr);
+    EXPECT_NO_THROW(std::rethrow_if_nested(error));
+  }
 }
 TEST_F(CudaAllocationOrigin, CleanupFailureNestsOriginalOom) {
   colmap::CudaCleanupScope scope;

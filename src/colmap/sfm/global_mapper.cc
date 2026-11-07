@@ -113,12 +113,22 @@ GlobalMapper::GlobalMapper(std::shared_ptr<const DatabaseCache> database_cache)
     : database_cache_(std::move(THROW_CHECK_NOTNULL(database_cache))) {}
 
 void GlobalMapper::BeginReconstruction(
-    const std::shared_ptr<class Reconstruction>& reconstruction) {
+    const std::shared_ptr<class Reconstruction>& reconstruction,
+    const PoseGraph* pose_graph) {
   THROW_CHECK_NOTNULL(reconstruction);
   reconstruction_ = reconstruction;
   reconstruction_->Load(*database_cache_);
-  pose_graph_ = std::make_shared<class PoseGraph>();
-  pose_graph_->Load(*database_cache_->CorrespondenceGraph());
+  if (pose_graph != nullptr) {
+    FlatHashSet<image_t> image_ids;
+    image_ids.reserve(database_cache_->NumImages());
+    for (const auto& [image_id, _] : database_cache_->Images()) {
+      image_ids.insert(image_id);
+    }
+    pose_graph_ = std::make_shared<PoseGraph>(pose_graph->Subgraph(image_ids));
+  } else {
+    pose_graph_ = std::make_shared<PoseGraph>();
+    pose_graph_->Load(*database_cache_->CorrespondenceGraph());
+  }
 }
 
 std::shared_ptr<Reconstruction> GlobalMapper::Reconstruction() const {
@@ -136,6 +146,9 @@ bool GlobalMapper::RotationAveraging(const RotationEstimatorOptions& options) {
 
   // Read pose priors from the database cache.
   const std::vector<PosePrior>& pose_priors = database_cache_->PosePriors();
+
+  MaybeEstimatePoseGraphRotationCovariances(
+      options, *database_cache_, *pose_graph_);
 
   // First pass: solve rotation averaging on all frames, then filter outlier
   // pairs by rotation error and de-register frames outside the largest
@@ -166,16 +179,12 @@ void GlobalMapper::EstablishTracks(const GlobalMapperOptions& options) {
   using Observation = std::pair<image_t, point2D_t>;
   THROW_CHECK_EQ(reconstruction_->NumPoints3D(), 0);
 
-  // Build keypoints map from registered images.
-  NodeHashMap<image_t, std::vector<Eigen::Vector2d>> image_id_to_keypoints;
+  // Keep the registered-image roster without duplicating feature coordinates.
+  // Reconstruction owns these images throughout this synchronous stage; all
+  // coordinate reads finish before AddPoint3D updates observation associations.
+  NodeHashMap<image_t, const Image*> registered_images;
   for (const auto image_id : reconstruction_->RegImageIds()) {
-    const auto& image = reconstruction_->Image(image_id);
-    std::vector<Eigen::Vector2d> points;
-    points.reserve(image.NumPoints2D());
-    for (const auto& point2D : image.Points2D()) {
-      points.push_back(point2D.xy);
-    }
-    image_id_to_keypoints.emplace(image_id, std::move(points));
+    registered_images.emplace(image_id, &reconstruction_->Image(image_id));
   }
 
   auto corr_graph = database_cache_->CorrespondenceGraph();
@@ -185,9 +194,9 @@ void GlobalMapper::EstablishTracks(const GlobalMapperOptions& options) {
   FeatureMatches matches;
   for (const auto& [pair_id, edge] : pose_graph_->ValidEdges()) {
     const auto [image_id1, image_id2] = PairIdToImagePair(pair_id);
-    THROW_CHECK(image_id_to_keypoints.count(image_id1))
+    THROW_CHECK(registered_images.count(image_id1))
         << "Missing keypoints for image " << image_id1;
-    THROW_CHECK(image_id_to_keypoints.count(image_id2))
+    THROW_CHECK(registered_images.count(image_id2))
         << "Missing keypoints for image " << image_id2;
     corr_graph->ExtractMatchesBetweenImages(image_id1, image_id2, matches);
     for (const auto& match : matches) {
@@ -223,7 +232,7 @@ void GlobalMapper::EstablishTracks(const GlobalMapperOptions& options) {
 
     for (const auto& [image_id, feature_id] : observations) {
       const Eigen::Vector2d& xy =
-          image_id_to_keypoints.at(image_id).at(feature_id);
+          registered_images.at(image_id)->Point2D(feature_id).xy;
 
       auto it = image_id_set.find(image_id);
       if (it != image_id_set.end()) {
@@ -269,7 +278,7 @@ void GlobalMapper::EstablishTracks(const GlobalMapperOptions& options) {
   std::sort(track_lengths.begin(), track_lengths.end(), std::greater<>());
 
   NodeHashMap<image_t, size_t> tracks_per_image;
-  size_t images_left = image_id_to_keypoints.size();
+  size_t images_left = registered_images.size();
   const size_t max_num_tracks =
       static_cast<size_t>(options.keep_max_num_tracks);
   for (const auto& [track_length, point3D_id] : track_lengths) {

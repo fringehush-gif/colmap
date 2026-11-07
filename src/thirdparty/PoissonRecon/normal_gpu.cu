@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#include "colmap/util/cuda_allocation.h"
+
 #include <algorithm>
+#include <exception>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -40,18 +43,44 @@ bool KernelUnavailable(cudaError_t error) {
 }
 
 struct AllocationFailure {};
+struct CleanupState {
+  cudaError_t error = cudaSuccess;
+  void Record(cudaError_t status) noexcept {
+    if (error == cudaSuccess && status != cudaSuccess) error = status;
+  }
+};
+
+void CheckAllocation(colmap::CudaAllocationResult result, bool has_output) {
+  if (result.origin == colmap::CudaAllocationOrigin::kSuccess) {
+    if (!has_output)
+      throw std::runtime_error("normal GPU: empty successful allocation");
+    return;
+  }
+  if (result.origin == colmap::CudaAllocationOrigin::kRefused)
+    throw AllocationFailure{};
+  throw std::runtime_error("normal GPU: terminal allocation state " +
+                           std::to_string(static_cast<int>(result.origin)) +
+                           ": " +
+                           std::to_string(static_cast<int>(result.code)));
+}
 
 template <class T>
 struct Buffer {
   T* ptr = nullptr;
-  explicit Buffer(std::size_t count) {
+  CleanupState& cleanup;
+  Buffer(CleanupState& state, std::size_t count) : cleanup(state) {
     if (!count) return;
-    const cudaError_t error = cudaMalloc(&ptr, count * sizeof(T));
-    if (error == cudaErrorMemoryAllocation) throw AllocationFailure{};
-    Check(error);
+    const auto result = colmap::CudaTryAllocation(
+        [&] { return cudaMalloc(&ptr, count * sizeof(T)); },
+        [&] { return ptr == nullptr; });
+    if (result.origin != colmap::CudaAllocationOrigin::kSuccess && ptr) {
+      cleanup.Record(cudaFree(ptr));
+      ptr = nullptr;
+    }
+    CheckAllocation(result, ptr != nullptr);
   }
-  ~Buffer() {
-    if (ptr) cudaFree(ptr);
+  ~Buffer() noexcept {
+    if (ptr) cleanup.Record(cudaFree(ptr));
   }
   Buffer(const Buffer&) = delete;
   Buffer& operator=(const Buffer&) = delete;
@@ -135,90 +164,6 @@ bool Available(Stats& stats) {
   return true;
 }
 
-bool Reduce(const Record* const* blocks,
-            const std::size_t* counts,
-            std::size_t block_count,
-            std::size_t node_count,
-            float* output,
-            std::uint32_t* touched,
-            Stats& stats) {
-  auto reject = [&](const char* reason) {
-    stats.reason = reason;
-    return false;
-  };
-  if (!blocks || !counts || !output || !touched || !node_count ||
-      node_count > 128000000)
-    return reject("shape");
-  std::size_t record_count = 0;
-  for (std::size_t i = 0; i < block_count; ++i) {
-    if (counts[i] > 8000000 - record_count || (counts[i] && !blocks[i]))
-      return reject("records");
-    record_count += counts[i];
-  }
-  if (!record_count) return reject("empty-records");
-
-  const std::size_t record_bytes = record_count * sizeof(Record);
-  const std::size_t field_bytes = node_count * 3 * sizeof(float);
-  const std::size_t flag_bytes = node_count * sizeof(unsigned);
-  const std::size_t required =
-      record_bytes + field_bytes + flag_bytes + sizeof(unsigned);
-  stats.device_bytes = required;
-  if (required > (std::size_t(3) << 30)) return reject("workspace-budget");
-  if (!Available(stats)) return false;
-  std::size_t free_bytes = 0, total_bytes = 0;
-  const cudaError_t memory_status = cudaMemGetInfo(&free_bytes, &total_bytes);
-  if (DeviceUnavailable(memory_status)) {
-    ClearExpected(memory_status);
-    return reject("device-unavailable");
-  }
-  Check(memory_status);
-  if (required > free_bytes * 3 / 4) return reject("device-capacity");
-
-  try {
-    Buffer<Record> device_records(record_count);
-    Buffer<float> device_output(node_count * 3);
-    Buffer<unsigned> device_touched(node_count);
-    Buffer<unsigned> device_invalid(1);
-    Check(cudaMemset(device_output.ptr, 0, field_bytes));
-    Check(cudaMemset(device_touched.ptr, 0, flag_bytes));
-    Check(cudaMemset(device_invalid.ptr, 0, sizeof(unsigned)));
-    std::size_t offset = 0;
-    for (std::size_t i = 0; i < block_count; ++i) {
-      if (counts[i])
-        Check(cudaMemcpy(device_records.ptr + offset,
-                         blocks[i],
-                         counts[i] * sizeof(Record),
-                         cudaMemcpyHostToDevice));
-      offset += counts[i];
-    }
-    Scatter<<<unsigned((record_count * 32 + 255) / 256), 256>>>(
-        device_records.ptr,
-        record_count,
-        node_count,
-        device_output.ptr,
-        device_touched.ptr,
-        device_invalid.ptr);
-    Check(cudaGetLastError());
-    Check(cudaDeviceSynchronize());
-    unsigned invalid = 0;
-    Check(cudaMemcpy(&invalid,
-                     device_invalid.ptr,
-                     sizeof(unsigned),
-                     cudaMemcpyDeviceToHost));
-    if (invalid)
-      throw std::runtime_error("normal GPU: invalid captured node or value");
-    Check(cudaMemcpy(
-        output, device_output.ptr, field_bytes, cudaMemcpyDeviceToHost));
-    Check(cudaMemcpy(
-        touched, device_touched.ptr, flag_bytes, cudaMemcpyDeviceToHost));
-  } catch (const AllocationFailure&) {
-    ClearExpected(cudaErrorMemoryAllocation);
-    return reject("device-allocation");
-  }
-  stats.reason = "complete";
-  return true;
-}
-
 bool ReduceSlabs(const Record* const* blocks,
                  const std::size_t* counts,
                  std::size_t block_count,
@@ -267,11 +212,12 @@ bool ReduceSlabs(const Record* const* blocks,
   Check(memory_status);
   if (required > free_bytes * 3 / 4) return reject("device-capacity");
 
+  CleanupState cleanup;
   try {
-    Buffer<Record> device_records(record_count);
-    Buffer<float> device_output(node_count * 3);
-    Buffer<unsigned> device_touched(node_count);
-    Buffer<unsigned> device_invalid(1);
+    Buffer<Record> device_records(cleanup, record_count);
+    Buffer<float> device_output(cleanup, node_count * 3);
+    Buffer<unsigned> device_touched(cleanup, node_count);
+    Buffer<unsigned> device_invalid(cleanup, 1);
     Check(cudaMemset(device_output.ptr, 0, field_bytes));
     Check(cudaMemset(device_touched.ptr, 0, flag_bytes));
     Check(cudaMemset(device_invalid.ptr, 0, sizeof(unsigned)));
@@ -319,10 +265,17 @@ bool ReduceSlabs(const Record* const* blocks,
                         host_field.data(),
                         host_touched.data());
     }
-  } catch (const AllocationFailure&) {
-    ClearExpected(cudaErrorMemoryAllocation);
-    return reject("device-allocation");
+  } catch (...) {
+    if (cleanup.error != cudaSuccess)
+      std::throw_with_nested(std::runtime_error(
+          "normal GPU cleanup failure: " + std::to_string(int(cleanup.error))));
+    try {
+      throw;
+    } catch (const AllocationFailure&) {
+      return reject("device-allocation");
+    }
   }
+  Check(cleanup.error);
   stats.reason = "complete";
   return true;
 }

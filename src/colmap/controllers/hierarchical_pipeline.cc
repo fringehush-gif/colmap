@@ -193,13 +193,23 @@ void HierarchicalPipeline::Run() {
           cluster_image_names.insert(image_id_to_name.at(image_id));
         }
 
-        // Create a filtered database cache for this cluster.
-        DatabaseCache::Options cluster_cache_options;
-        cluster_cache_options.min_num_matches =
-            static_cast<size_t>(options_.incremental_options.min_num_matches);
-        cluster_cache_options.image_names = cluster_image_names;
-        auto cluster_database_cache = DatabaseCache::CreateFromCache(
-            *database_cache_, cluster_cache_options);
+        std::shared_ptr<DatabaseCache> cluster_database_cache;
+        if (incremental_options->image_names.empty() &&
+            !incremental_options->load_all_images &&
+            reconstruction_manager->Size() == 0) {
+          // Let the incremental constructor apply the cluster filter once.
+          incremental_options->image_names.assign(cluster_image_names.begin(),
+                                                  cluster_image_names.end());
+          cluster_database_cache = database_cache_;
+        } else {
+          // Preserve composed filters and their frame-expansion semantics.
+          DatabaseCache::Options cluster_cache_options;
+          cluster_cache_options.min_num_matches =
+              static_cast<size_t>(options_.incremental_options.min_num_matches);
+          cluster_cache_options.image_names = cluster_image_names;
+          cluster_database_cache = DatabaseCache::CreateFromCache(
+              *database_cache_, cluster_cache_options);
+        }
 
         IncrementalPipeline mapper(std::move(incremental_options),
                                    std::move(cluster_database_cache),

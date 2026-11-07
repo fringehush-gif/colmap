@@ -16,6 +16,7 @@
 #include "thirdparty/PoissonRecon/PolygonIndexChain.h"
 #include "thirdparty/PoissonRecon/RegularTree.h"
 #include "thirdparty/PoissonRecon/SurfaceTrimmer.h"
+#include "thirdparty/PoissonRecon/VertexFactory.h"
 #include "thirdparty/PoissonRecon/normal_capture.h"
 #include "thirdparty/PoissonRecon/trim_gpu_adapter.h"
 
@@ -918,93 +919,6 @@ TEST(PoissonMeshing, NormalReplayRetainsNativeFirstTouchAndRepeatedSlots) {
   }
 }
 
-TEST(PoissonMeshing, GpuNormalPrelaunchRefusalPreservesOutputs) {
-  const auto record = MakeNormalRecord();
-  const PoissonNormalGpu::Record* blocks[] = {&record};
-  const std::size_t counts[] = {1};
-  std::array<float, 3> output{7, 8, 9};
-  std::uint32_t touched = 77;
-  PoissonNormalGpu::Stats stats;
-  EXPECT_FALSE(PoissonNormalGpu::Reduce(
-      blocks, counts, 1, 128000001, output.data(), &touched, stats));
-  EXPECT_STREQ(stats.reason, "shape");
-  EXPECT_EQ(output, (std::array<float, 3>{7, 8, 9}));
-  EXPECT_EQ(touched, 77);
-
-  // This is rejected from metadata before reading the claimed record array.
-  const std::size_t oversized_counts[] = {8000000};
-  EXPECT_FALSE(PoissonNormalGpu::Reduce(
-      blocks, oversized_counts, 1, 128000000, output.data(), &touched, stats));
-  EXPECT_STREQ(stats.reason, "workspace-budget");
-  EXPECT_EQ(output, (std::array<float, 3>{7, 8, 9}));
-  EXPECT_EQ(touched, 77);
-}
-
-TEST(PoissonMeshing, GpuNormalReductionRetainsSlotsAndSubnormalBits) {
-  PoissonNormalGpu::Stats stats;
-  if (!PoissonNormalGpu::Available(stats)) {
-    GTEST_SKIP() << stats.reason;
-  }
-  std::array<PoissonNormalGpu::Record, 3> records;
-  for (auto& record : records) {
-    record = MakeNormalRecord();
-  }
-  records[0].node[0] = 0;
-  records[0].coefficient[0] = 0.5f;
-  records[0].node[26] = 2;
-  records[0].coefficient[26] = 1;
-  records[0].value[0] = 1;
-  records[0].value[1] = 2;
-  records[0].value[2] = 3;
-  records[1].node[0] = 0;
-  records[1].coefficient[0] = 0.25f;
-  records[1].value[0] = 4;
-  records[1].value[1] = 8;
-  records[1].value[2] = 12;
-  records[2].node[12] = 3;
-  records[2].coefficient[12] = 1;
-  const std::uint32_t denormal_bits = 1;
-  std::memcpy(&records[2].value[0], &denormal_bits, sizeof(denormal_bits));
-  const PoissonNormalGpu::Record* blocks[] = {records.data(), nullptr};
-  const std::size_t counts[] = {records.size(), 0};
-  std::array<float, 12> output;
-  output.fill(-7);
-  std::array<std::uint32_t, 4> touched{77, 77, 77, 77};
-  ASSERT_TRUE(PoissonNormalGpu::Reduce(
-      blocks, counts, 2, 4, output.data(), touched.data(), stats));
-  EXPECT_EQ(touched, (std::array<std::uint32_t, 4>{1, 0, 1, 1}));
-  EXPECT_EQ(output[0], 1.5f);
-  EXPECT_EQ(output[1], 3.0f);
-  EXPECT_EQ(output[2], 4.5f);
-  for (int channel = 0; channel < 3; ++channel) {
-    EXPECT_EQ(output[3 + channel], 0);
-    EXPECT_EQ(output[6 + channel], records[0].value[channel]);
-  }
-  std::uint32_t result_bits = 0;
-  std::memcpy(&result_bits, &output[9], sizeof(result_bits));
-  EXPECT_EQ(result_bits, denormal_bits);
-}
-
-TEST(PoissonMeshing, GpuNormalInvalidNodeRemainsAnError) {
-  PoissonNormalGpu::Stats stats;
-  if (!PoissonNormalGpu::Available(stats)) {
-    GTEST_SKIP() << stats.reason;
-  }
-  auto record = MakeNormalRecord();
-  record.node[0] = 1;
-  record.coefficient[0] = 1;
-  record.value[0] = 1;
-  const PoissonNormalGpu::Record* blocks[] = {&record};
-  const std::size_t counts[] = {1};
-  std::array<float, 3> output{7, 8, 9};
-  std::uint32_t touched = 77;
-  EXPECT_THROW(PoissonNormalGpu::Reduce(
-                   blocks, counts, 1, 1, output.data(), &touched, stats),
-               std::runtime_error);
-  EXPECT_EQ(output, (std::array<float, 3>{7, 8, 9}));
-  EXPECT_EQ(touched, 77);
-}
-
 struct NormalSlabTestContext {
   std::vector<PoissonNormalGpu::Record>* records = nullptr;
   std::vector<float> values;
@@ -1046,7 +960,7 @@ void NormalSlabConsume(void* opaque,
   context.next_node += count;
 }
 
-TEST(PoissonMeshing, GpuNormalSlabsMatchFullReadbackAfterCaptureRelease) {
+TEST(PoissonMeshing, GpuNormalSlabsRetainValuesAfterCaptureRelease) {
   PoissonNormalGpu::Stats stats;
   if (!PoissonNormalGpu::Available(stats)) GTEST_SKIP() << stats.reason;
   for (const std::size_t slab_nodes : {1, 2, 3, 5, 10, 11, 17}) {
@@ -1070,12 +984,18 @@ TEST(PoissonMeshing, GpuNormalSlabsMatchFullReadbackAfterCaptureRelease) {
     std::memcpy(&records[2].value[0], &denormal_bits, sizeof(denormal_bits));
     const PoissonNormalGpu::Record* blocks[] = {records.data(), nullptr};
     const std::size_t counts[] = {records.size(), 0};
-    std::array<float, 33> full_values;
-    full_values.fill(-7);
-    std::array<std::uint32_t, 11> full_touched;
-    full_touched.fill(77);
-    ASSERT_TRUE(PoissonNormalGpu::Reduce(
-        blocks, counts, 2, 11, full_values.data(), full_touched.data(), stats));
+    // Independent closed-form oracle for this fixture; do not compare two
+    // readback wrappers around the same Scatter implementation.
+    std::array<float, 33> expected_values{};
+    expected_values[0] = 1.5f;
+    expected_values[1] = 3.f;
+    expected_values[2] = 4.5f;
+    std::memcpy(&expected_values[9], &denormal_bits, sizeof(denormal_bits));
+    expected_values[30] = 1.f;
+    expected_values[31] = 2.f;
+    expected_values[32] = 3.f;
+    const std::vector<std::uint32_t> expected_touched{
+        1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1};
 
     NormalSlabTestContext context;
     context.records = &records;
@@ -1089,15 +1009,14 @@ TEST(PoissonMeshing, GpuNormalSlabsMatchFullReadbackAfterCaptureRelease) {
     EXPECT_EQ(context.next_node, 11);
     EXPECT_EQ(context.consume_calls,
               static_cast<int>((10 + slab_nodes) / slab_nodes));
-    ASSERT_EQ(context.values.size(), full_values.size());
-    ASSERT_EQ(context.touched.size(), full_touched.size());
+    ASSERT_EQ(context.values.size(), expected_values.size());
+    ASSERT_EQ(context.touched.size(), expected_touched.size());
     EXPECT_EQ(
-        std::memcmp(
-            context.values.data(), full_values.data(), sizeof(full_values)),
+        std::memcmp(context.values.data(),
+                    expected_values.data(),
+                    sizeof(expected_values)),
         0);
-    EXPECT_EQ(
-        context.touched,
-        (std::vector<std::uint32_t>(full_touched.begin(), full_touched.end())));
+    EXPECT_EQ(context.touched, expected_touched);
     std::uint32_t result_bits = 0;
     std::memcpy(&result_bits, &context.values[9], sizeof(result_bits));
     EXPECT_EQ(result_bits, denormal_bits);
@@ -1112,6 +1031,9 @@ TEST(PoissonMeshing, GpuNormalSlabPrelaunchRefusalCallsNoCallbacks) {
       &context, NormalSlabReady, NormalSlabConsume};
   PoissonNormalGpu::Stats stats;
   const std::size_t one[] = {1};
+  EXPECT_FALSE(PoissonNormalGpu::ReduceSlabs(
+      nullptr, one, 1, 11, 1, counting_callbacks, stats));
+  EXPECT_STREQ(stats.reason, "shape");
   EXPECT_FALSE(PoissonNormalGpu::ReduceSlabs(
       blocks, one, 1, 128000001, 1, counting_callbacks, stats));
   EXPECT_STREQ(stats.reason, "shape");
@@ -1843,6 +1765,217 @@ TEST(PoissonMeshing, TrimmerDoesNotReusePreviousArguments) {
   ASSERT_EQ(RunSurfaceTrimmer(static_cast<int>(argv.size()), argv.data()),
             EXIT_SUCCESS);
   EXPECT_EQ(RunSurfaceTrimmer(1, argv.data()), EXIT_FAILURE);
+}
+
+bool WriteAuxiliaryAsciiPly(const std::filesystem::path& path,
+                            const std::vector<PlyPoint>& points,
+                            const std::vector<std::string>& color_properties,
+                            const bool write_quality) {
+  std::ofstream output(path);
+  output.imbue(std::locale::classic());
+  output << std::setprecision(std::numeric_limits<float>::max_digits10);
+  output << "ply\nformat ascii 1.0\nelement vertex " << points.size()
+         << "\nproperty float x\nproperty float y\nproperty float z"
+         << "\nproperty float nx\nproperty float ny\nproperty float nz\n";
+  for (const auto& name : color_properties) {
+    output << "property uchar " << name << '\n';
+  }
+  if (write_quality) output << "property float quality\n";
+  output << "end_header\n";
+  for (const auto& point : points) {
+    output << point.x << ' ' << point.y << ' ' << point.z << ' ' << point.nx
+           << ' ' << point.ny << ' ' << point.nz;
+    for (const auto& name : color_properties) {
+      const auto value = name == "red" || name == "r"     ? point.r
+                         : name == "green" || name == "g" ? point.g
+                                                          : point.b;
+      output << ' ' << static_cast<int>(value);
+    }
+    if (write_quality) output << " 7";
+    output << '\n';
+  }
+  output.close();
+  return output.good();
+}
+
+void CheckMeshProperties(const std::filesystem::path& path,
+                         std::vector<std::string> auxiliary_properties) {
+  const auto mesh = ReadPlyMesh(path).mesh;
+  ASSERT_GE(mesh.vertices.size(), 3);
+  ASSERT_FALSE(mesh.faces.empty());
+  for (const auto& vertex : mesh.vertices) {
+    EXPECT_TRUE(std::isfinite(vertex.x));
+    EXPECT_TRUE(std::isfinite(vertex.y));
+    EXPECT_TRUE(std::isfinite(vertex.z));
+  }
+  for (const auto& face : mesh.faces) {
+    EXPECT_LT(face.vertex_idx1, mesh.vertices.size());
+    EXPECT_LT(face.vertex_idx2, mesh.vertices.size());
+    EXPECT_LT(face.vertex_idx3, mesh.vertices.size());
+  }
+  std::vector<PoissonRecon::PlyProperty> properties;
+  PoissonRecon::PLY::ReadVertexHeader(path.string(), properties);
+  std::vector<std::string> names;
+  for (const auto& property : properties) names.push_back(property.name);
+  auxiliary_properties.insert(auxiliary_properties.end(), {"x", "y", "z"});
+  std::sort(names.begin(), names.end());
+  std::sort(auxiliary_properties.begin(), auxiliary_properties.end());
+  EXPECT_EQ(names, auxiliary_properties);
+
+  std::vector<PoissonRecon::PlyProperty> attributes;
+  std::vector<std::pair<float, float>> expected_values;
+  for (const auto& property : properties) {
+    if (property.name == "quality") {
+      attributes.push_back(property);
+      expected_values.emplace_back(7.0f, 0.01f);
+    } else if (property.name == "red" || property.name == "r") {
+      attributes.push_back(property);
+      expected_values.emplace_back(17.0f, 1.0f);
+    } else if (property.name == "green" || property.name == "g") {
+      attributes.push_back(property);
+      expected_values.emplace_back(109.0f, 1.0f);
+    } else if (property.name == "blue" || property.name == "b") {
+      attributes.push_back(property);
+      expected_values.emplace_back(233.0f, 1.0f);
+    }
+  }
+  if (!attributes.empty()) {
+    using Factory = PoissonRecon::VertexFactory::DynamicFactory<float>;
+    const Factory factory(attributes);
+    std::vector<Factory::VertexType> values;
+    std::vector<std::vector<int>> polygons;
+    std::vector<std::string> comments;
+    int file_type = 0;
+    auto read_flags = std::make_unique<bool[]>(attributes.size());
+    PoissonRecon::PLY::ReadPolygons(path.string(),
+                                    factory,
+                                    values,
+                                    polygons,
+                                    file_type,
+                                    comments,
+                                    read_flags.get());
+    for (size_t index = 0; index < attributes.size(); ++index) {
+      ASSERT_TRUE(read_flags[index]);
+    }
+    ASSERT_EQ(values.size(), mesh.vertices.size());
+    for (const auto& value : values) {
+      for (size_t index = 0; index < attributes.size(); ++index) {
+        EXPECT_NEAR(value[index],
+                    expected_values[index].first,
+                    expected_values[index].second);
+      }
+    }
+  }
+}
+
+TEST(PoissonMeshing, ColorOptionControlsStandardReorderedAndAliasRgb) {
+  const auto test_dir = CreateTestDir();
+  const auto points = MakeDeterministicColoredCubePoints();
+  for (const std::string layout : {"standard", "reordered", "aliases"}) {
+    SCOPED_TRACE(layout);
+    const auto input = test_dir / (layout + ".ply");
+    const std::vector<std::string> colors =
+        layout == "aliases" ? std::vector<std::string>{"r", "g", "b"}
+                            : std::vector<std::string>{"red", "green", "blue"};
+    if (layout == "standard") {
+      WriteBinaryPlyPoints(input, points, true, true);
+    } else if (layout == "reordered") {
+      ASSERT_TRUE(WriteReorderedRgbAsciiPly(input, points));
+    } else {
+      ASSERT_TRUE(WriteAuxiliaryAsciiPly(input, points, colors, false));
+    }
+    for (const bool color : {false, true}) {
+      SCOPED_TRACE(color);
+      PoissonMeshingOptions options;
+      options.depth = 3;
+      options.point_weight = 1.0;
+      options.trim = 0.0;
+      options.num_threads = 1;
+      options.color = color;
+      const auto output =
+          test_dir / (layout + (color ? "-color.ply" : "-plain.ply"));
+      ASSERT_TRUE(PoissonMeshing(options, input, output));
+      CheckMeshProperties(output, color ? colors : std::vector<std::string>{});
+    }
+  }
+}
+
+TEST(PoissonMeshing, ColorlessInputRetainsGeometryOnlyOutput) {
+  const auto test_dir = CreateTestDir();
+  const auto input = test_dir / "geometry.ply";
+  WriteBinaryPlyPoints(
+      input, MakeDeterministicColoredCubePoints(), true, false);
+  for (const bool color : {false, true}) {
+    PoissonMeshingOptions options;
+    options.depth = 3;
+    options.trim = 0.0;
+    options.num_threads = 1;
+    options.color = color;
+    const auto output = test_dir / (color ? "enabled.ply" : "disabled.ply");
+    ASSERT_TRUE(PoissonMeshing(options, input, output));
+    CheckMeshProperties(output, {});
+  }
+}
+
+TEST(PoissonMeshing, ColorOptionPreservesNonColorAuxiliaryProperties) {
+  const auto test_dir = CreateTestDir();
+  const auto points = MakeDeterministicColoredCubePoints();
+  const std::vector<std::vector<std::string>> layouts = {
+      {},
+      {"red", "green", "blue"},
+      {"r", "g", "b"},
+      {"red"},
+      {"r", "green", "b"},
+      {"red", "green", "blue", "r", "g", "b"}};
+  for (size_t index = 0; index < layouts.size(); ++index) {
+    SCOPED_TRACE(index);
+    const auto input = test_dir / ("input-" + std::to_string(index) + ".ply");
+    ASSERT_TRUE(WriteAuxiliaryAsciiPly(input, points, layouts[index], true));
+    for (const bool color : {false, true}) {
+      SCOPED_TRACE(color);
+      PoissonMeshingOptions options;
+      options.depth = 3;
+      options.trim = 0.0;
+      options.num_threads = 1;
+      options.color = color;
+      const auto output = test_dir / (std::to_string(index) +
+                                      (color ? "-color.ply" : "-plain.ply"));
+      ASSERT_TRUE(PoissonMeshing(options, input, output));
+      std::vector<std::string> expected{"quality"};
+      if (color)
+        expected.insert(
+            expected.end(), layouts[index].begin(), layouts[index].end());
+      CheckMeshProperties(output, expected);
+    }
+  }
+}
+
+TEST(PoissonMeshing, GenericEntryRetainsAutomaticAuxiliaryProperties) {
+  const auto test_dir = CreateTestDir();
+  const auto points = MakeDeterministicColoredCubePoints();
+  for (const bool quality : {false, true}) {
+    const auto input = test_dir / (quality ? "quality.ply" : "rgb.ply");
+    const auto output =
+        test_dir / (quality ? "quality-mesh.ply" : "rgb-mesh.ply");
+    const std::vector<std::string> colors{"red", "green", "blue"};
+    ASSERT_TRUE(WriteAuxiliaryAsciiPly(input, points, colors, quality));
+    std::vector<std::string> args = {"poisson_recon",
+                                     "--in",
+                                     input.string(),
+                                     "--out",
+                                     output.string(),
+                                     "--depth",
+                                     "3",
+                                     "--fullDepth",
+                                     "3"};
+    std::vector<char*> argv;
+    for (auto& arg : args) argv.push_back(arg.data());
+    ASSERT_EQ(RunPoissonRecon(static_cast<int>(argv.size()), argv.data()),
+              EXIT_SUCCESS);
+    std::vector<std::string> expected = colors;
+    if (quality) expected.push_back("quality");
+    CheckMeshProperties(output, expected);
+  }
 }
 
 }  // namespace

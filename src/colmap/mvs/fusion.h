@@ -41,7 +41,7 @@ struct StereoFusionOptions {
   int num_threads = -1;
 
   // Full-RAM workspace loading can use a separate positive thread count.
-  // -1 retains the existing num_threads behavior.
+  // -1 uses num_threads. Workspace caps either request to its unique roster.
   int full_ram_load_threads = -1;
   // Maximum image size in either dimension.
   int max_image_size = -1;
@@ -70,7 +70,7 @@ struct StereoFusionOptions {
   // Flag indicating whether to use LRU cache or pre-load all data
   bool use_cache = false;
 
-  // Opt-in byte-bounded, pinned whole-image fusion cache.
+  // Experimental opt-in byte-bounded, pinned whole-image fusion cache.
   bool bounded_cache = false;
 
   // Load depth, normal and bitmap independently so rejected depth samples do
@@ -103,6 +103,10 @@ struct StereoFusionOptions {
 
   // Opt-in bounded-cache RGB compaction to the depth grid.
   bool bounded_cache_compact_rgb = false;
+
+  // Experimental, opt-in in-memory lossless depth compaction for bounded
+  // component neighborhoods with normal tiles. Stored depth maps stay FP32.
+  bool bounded_cache_compact_depth = false;
 
   // Cache size in gigabytes for fusion. The fusion keeps the bitmaps, depth
   // maps, normal maps, and consistency graphs of this number of images in
@@ -232,6 +236,7 @@ class FusionPixelMask {
   // Exclude depths that always fail the nonpositive check, before workers
   // start. Preserve existing mask bits; mismatched views leave them unchanged.
   void ExcludeNonpositiveDepth(const FusionFloatMapView& depth);
+  void ExcludeNonpositiveDepth(const SparseDepth& depth);
   void Set(size_t row, size_t col, char value) {
     const size_t index = CheckedIndex(row, col);
     if (value != 0 && value != 1) {

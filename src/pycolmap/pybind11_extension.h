@@ -26,7 +26,9 @@ namespace pycolmap {
 // existing memory (e.g., Rigid3d.params). This enables zero-copy access
 // to rotation data while providing the full quaternion interface.
 struct Rotation3dWrapper {
-  pybind11::array_t<double> data;
+  using Array = pybind11::array_t<
+      double, pybind11::array::c_style | pybind11::array::forcecast>;
+  Array data;
 
   // Default constructor - creates owned identity quaternion
   Rotation3dWrapper() : data(4) { map() = Eigen::Quaterniond::Identity(); }
@@ -52,8 +54,8 @@ struct Rotation3dWrapper {
         Eigen::AngleAxisd(axis_angle.norm(), axis_angle.normalized()));
   }
 
-  // View constructor - borrows existing array (zero-copy)
-  explicit Rotation3dWrapper(pybind11::array_t<double> arr)
+  // View constructor - borrows contiguous arrays, copies strided arrays.
+  explicit Rotation3dWrapper(Array arr)
       : data(std::move(arr)) {}
 
   Eigen::Map<Eigen::Quaterniond> map() {
@@ -81,16 +83,22 @@ struct type_caster<Eigen::Quaterniond> {
   bool load(handle src, bool) {
     // Try to load from Rotation3dWrapper
     if (isinstance<pycolmap::Rotation3dWrapper>(src)) {
-      value = src.cast<pycolmap::Rotation3dWrapper&>().map();
+      value = src.cast<const pycolmap::Rotation3dWrapper&>().map();
       return true;
     }
     // Also accept raw numpy arrays
     try {
       auto arr = src.cast<pybind11::array_t<double>>();
-      if (arr.size() == 4) {
-        value = Eigen::Map<const Eigen::Quaterniond>(arr.data());
-        return true;
-      }
+      if (arr.size() != 4) return false;
+      auto contiguous =
+          (arr.flags() & pybind11::array::c_style) ==
+                  pybind11::array::c_style
+              ? pybind11::reinterpret_borrow<
+                    pycolmap::Rotation3dWrapper::Array>(arr)
+              : pycolmap::Rotation3dWrapper::Array::ensure(arr);
+      if (!contiguous) return false;
+      value = Eigen::Map<const Eigen::Quaterniond>(contiguous.data());
+      return true;
     } catch (...) {
     }
     return false;

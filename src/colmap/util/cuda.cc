@@ -4,11 +4,9 @@
 
 #include "colmap/util/cudacc.h"
 #include "colmap/util/logging.h"
-#include "colmap/util/misc.h"
 
 #include <algorithm>
 #include <iostream>
-#include <string>
 
 namespace colmap {
 namespace {
@@ -130,7 +128,7 @@ void SetCudaDevicesBlockingSync(const std::vector<int>& gpu_indices) {
 #endif
 }
 
-bool CudaDeviceSupportsBf16(const int gpu_index) {
+bool CudaDeviceHasComputeCapability(const int gpu_index, const int major) {
 #ifdef COLMAP_HIP_ENABLED
   // The major version of HIP devices is the GFX version, not a compute
   // capability.
@@ -143,7 +141,7 @@ bool CudaDeviceSupportsBf16(const int gpu_index) {
     cudaGetLastError();
     return false;
   }
-  return properties.major >= 8;
+  return properties.major >= major;
 #endif
 }
 

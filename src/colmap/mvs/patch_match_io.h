@@ -12,11 +12,12 @@
 namespace colmap {
 namespace mvs {
 
-// All accepted tasks may borrow the caller's local images and maps. A failed
-// submission or read must not unwind those locals before sibling tasks finish.
-// The caller serializes submissions to this shared pool.
+// Accepted tasks may borrow local inputs or controller state. Drain them before
+// a failed submission or worker can unwind that state. Input readers retain
+// futures to preserve individual read errors; the scheduler leaves them empty.
+// The caller serializes submissions to this pool.
 template <typename Submit>
-void RunPatchMatchInputReads(ThreadPool& pool, Submit&& submit) {
+void RunPatchMatchTasks(ThreadPool& pool, Submit&& submit) {
   std::vector<std::shared_future<void>> futures;
   std::exception_ptr first_failure;
   try {
@@ -36,7 +37,7 @@ void RunPatchMatchInputReads(ThreadPool& pool, Submit&& submit) {
   }
 
   // Wait also drains ThreadPool's failure checkers. Otherwise pool destruction
-  // can rediscover a handled read error and terminate the process.
+  // can rediscover a handled worker error and terminate the process.
   try {
     pool.Wait();
   } catch (...) {

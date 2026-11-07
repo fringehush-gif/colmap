@@ -164,6 +164,15 @@ void TestCamRayFromImgToImg(const std::vector<double>& params,
   const std::optional<Eigen::Vector3d> ray = CameraModelCamRayFromImg(
       CameraModel::model_id, params, Eigen::Vector2d(x0, y0));
   ASSERT_TRUE(ray.has_value());
+  Eigen::Vector3d primitive_ray;
+  ASSERT_TRUE(CameraModel::CamRayFromImg(params.data(),
+                                         x0,
+                                         y0,
+                                         &primitive_ray.x(),
+                                         &primitive_ray.y(),
+                                         &primitive_ray.z()));
+  // Separate evaluations may use different compiler contraction contexts.
+  EXPECT_LE((*ray - primitive_ray).norm(), 1e-12);
   EXPECT_NEAR(ray->norm(), 1.0, 1e-12);
   const std::optional<Eigen::Vector2d> xy =
       CameraModelImgFromCam(CameraModel::model_id, params, *ray);
@@ -690,6 +699,33 @@ TEST(CameraModelRescale, Perspective) {
         SkewedPinholeCameraModel::model_id, scale_x, scale_y, params);
     EXPECT_EQ(params, (std::vector<double>{200, 600, 100, 240, 20}));
   }
+}
+
+TEST(CameraModelCamRayFromImg, RejectsNonfiniteAndDegenerateBearings) {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  const std::vector<Eigen::Vector2d> invalid_pixels = {
+      {nan, 0}, {0, nan}, {inf, 0}, {-inf, 0}, {0, inf}, {0, -inf}};
+  for (const auto model_id :
+       {CameraModelId::kSimplePinhole, CameraModelId::kEquirectangular}) {
+    const auto params = CameraModelInitializeParams(model_id, 650, 1000, 500);
+    for (const auto& pixel : invalid_pixels) {
+      EXPECT_FALSE(
+          CameraModelCamRayFromImg(model_id, params, pixel).has_value());
+    }
+  }
+  const auto params = CameraModelInitializeParams(
+      CameraModelId::kSimplePinhole, 650, 1000, 500);
+  const double huge = std::numeric_limits<double>::max();
+  for (const Eigen::Vector2d& pixel :
+       {Eigen::Vector2d(huge, 0), Eigen::Vector2d(0, -huge)}) {
+    EXPECT_FALSE(
+        CameraModelCamRayFromImg(CameraModelId::kSimplePinhole, params, pixel)
+            .has_value());
+  }
+  EXPECT_THROW(CameraModelCamRayFromImg(
+                   CameraModelId::kInvalid, {}, Eigen::Vector2d::Zero()),
+               std::domain_error);
 }
 
 TEST(CameraModelCalibrationMatrix, Nominal) {

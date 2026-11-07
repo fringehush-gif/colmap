@@ -12,9 +12,14 @@
 #include "colmap/util/testing.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <map>
+#include <optional>
+#include <set>
 #include <thread>
 
 #include <OpenImageIO/imageio.h>
@@ -28,6 +33,121 @@ ColorReadMode color_read_mode;
 std::thread::id mapping_thread;
 std::atomic<int> injected_prefetch_failures{0};
 std::atomic<int> serial_successes{0};
+std::atomic<int> async_scanlines{0};
+std::map<std::string, int> color_image_tags;
+
+using Color = std::array<uint8_t, 3>;
+using Observation = std::pair<std::string, point2D_t>;
+using Association = std::vector<Observation>;
+using ColorState = std::map<Association, Color>;
+
+struct ColorRunResult {
+  std::vector<std::pair<std::vector<std::string>, ColorState>> stages;
+  ColorState final;
+};
+
+std::string ColorPathKey(const std::filesystem::path& path) {
+  return path.lexically_normal().generic_string();
+}
+
+Color PointColor(const Point3D& point) {
+  return {point.color(0), point.color(1), point.color(2)};
+}
+
+// Each channel is affine over the raster, so bilinear sampling has a simple
+// independent oracle at the observation coordinate. Values stay in uint8.
+std::optional<Eigen::Vector3d> ExpectedSample(
+    const std::filesystem::path& root,
+    const Image& image,
+    const Point2D& point2D) {
+  const double x = point2D.xy(0) - 0.5;
+  const double y = point2D.xy(1) - 0.5;
+  if (!(x >= 0 && x < 127 && y >= 0 && y < 127)) return std::nullopt;
+  const int tag = color_image_tags.at(ColorPathKey(root / image.Name()));
+  return Eigen::Vector3d(static_cast<float>(11 + 3 * tag + y),
+                         static_cast<float>(29 + 3 * tag + x),
+                         static_cast<float>(43 + 2 * tag + y));
+}
+
+ColorState CaptureColors(const Reconstruction& reconstruction) {
+  ColorState state;
+  for (const auto& [id, point] : reconstruction.Points3D()) {
+    Association observations;
+    for (const TrackElement& element : point.track.Elements()) {
+      const Image& image = reconstruction.Image(element.image_id);
+      EXPECT_LT(element.point2D_idx, image.NumPoints2D());
+      if (element.point2D_idx >= image.NumPoints2D()) continue;
+      EXPECT_EQ(image.Point2D(element.point2D_idx).point3D_id, id);
+      observations.emplace_back(image.Name(), element.point2D_idx);
+    }
+    std::sort(observations.begin(), observations.end());
+    EXPECT_FALSE(observations.empty());
+    EXPECT_TRUE(
+        state.emplace(std::move(observations), PointColor(point)).second);
+  }
+  return state;
+}
+
+void CheckNewImageColors(const Reconstruction& reconstruction,
+                         const std::filesystem::path& root,
+                         const std::set<std::string>& new_images) {
+  for (const auto& [_, point] : reconstruction.Points3D()) {
+    bool eligible = false;
+    for (const TrackElement& element : point.track.Elements()) {
+      const Image& image = reconstruction.Image(element.image_id);
+      if (!new_images.count(image.Name()) ||
+          element.point2D_idx >= image.NumPoints2D()) {
+        continue;
+      }
+      eligible |= ExpectedSample(root, image, image.Point2D(element.point2D_idx))
+                      .has_value();
+    }
+    if (eligible) {
+      EXPECT_NE(PointColor(point), (Color{0, 0, 0}));
+    }
+  }
+}
+
+void CheckAssociatedColors(const Reconstruction& reconstruction,
+                           const std::filesystem::path& root,
+                           const bool require_all_colored) {
+  const auto registered_ids = reconstruction.RegImageIds();
+  const std::set<image_t> registered(registered_ids.begin(),
+                                    registered_ids.end());
+  std::set<Color> distinct_colors;
+  for (const auto& [id, point] : reconstruction.Points3D()) {
+    std::set<Color> observation_colors;
+    for (const TrackElement& element : point.track.Elements()) {
+      if (!registered.count(element.image_id)) continue;
+      const Image& image = reconstruction.Image(element.image_id);
+      EXPECT_LT(element.point2D_idx, image.NumPoints2D());
+      if (element.point2D_idx >= image.NumPoints2D()) continue;
+      const Point2D& point2D = image.Point2D(element.point2D_idx);
+      EXPECT_EQ(point2D.point3D_id, id);
+      if (const auto sample = ExpectedSample(root, image, point2D)) {
+        Color expected;
+        for (size_t channel = 0; channel < expected.size(); ++channel) {
+          expected[channel] =
+              static_cast<uint8_t>(std::round((*sample)(channel)));
+        }
+        observation_colors.insert(expected);
+      }
+    }
+    const Color color = PointColor(point);
+    if (require_all_colored) {
+      EXPECT_FALSE(observation_colors.empty());
+      EXPECT_NE(color, (Color{0, 0, 0}));
+    }
+    if (color != Color{0, 0, 0}) {
+      EXPECT_TRUE(observation_colors.count(color))
+          << "Color has no matching image/pixel observation";
+      distinct_colors.insert(color);
+    }
+  }
+  if (require_all_colored) {
+    EXPECT_GT(distinct_colors.size(), 1);
+  }
+}
 
 class MapperColorTestInput : public OIIO::ImageInput {
  public:
@@ -36,13 +156,18 @@ class MapperColorTestInput : public OIIO::ImageInput {
     if (std::filesystem::path(name).extension() != ".colmap_mapper_color") {
       return false;
     }
+    const auto tag = color_image_tags.find(
+        ColorPathKey(std::filesystem::path(name)));
+    if (tag == color_image_tags.end()) return false;
+    image_tag_ = tag->second;
     is_mapping_thread_ = std::this_thread::get_id() == mapping_thread;
     m_spec = OIIO::ImageSpec(128, 128, 3, OIIO::TypeDesc::UINT8);
     spec = m_spec;
     return true;
   }
   bool close() override { return true; }
-  bool read_native_scanline(int, int, int, int, void* data) override {
+  bool read_native_scanline(int, int, int y, int, void* data) override {
+    if (!is_mapping_thread_) ++async_scanlines;
     if (color_read_mode == ColorReadMode::kFailure ||
         (color_read_mode == ColorReadMode::kTransient && !is_mapping_thread_)) {
       if (color_read_mode == ColorReadMode::kTransient) {
@@ -51,18 +176,25 @@ class MapperColorTestInput : public OIIO::ImageInput {
       errorfmt("Injected mapper color read failure");
       return false;
     }
-    std::fill_n(static_cast<uint8_t*>(data), 128 * 3, uint8_t{73});
-    if (is_mapping_thread_) {
-      ++serial_successes;
+    auto* row = static_cast<uint8_t*>(data);
+    for (int x = 0; x < 128; ++x) {
+      row[3 * x + 0] = static_cast<uint8_t>(11 + 3 * image_tag_ + y);
+      row[3 * x + 1] = static_cast<uint8_t>(29 + 3 * image_tag_ + x);
+      row[3 * x + 2] = static_cast<uint8_t>(43 + 2 * image_tag_ + y);
     }
+    if (is_mapping_thread_) ++serial_successes;
     return true;
   }
 
  private:
   bool is_mapping_thread_ = false;
+  int image_tag_ = 0;
 };
 
-void CheckMapperColorReads(const ColorReadMode mode, const bool overlap) {
+void CheckMapperColorReads(const ColorReadMode mode,
+                           const bool overlap,
+                           const int cameras_per_rig,
+                           ColorRunResult* result) {
   static const char* extensions[] = {"colmap_mapper_color", nullptr};
   static const bool registered = [] {
     OIIO::declare_imageio_format(
@@ -75,13 +207,17 @@ void CheckMapperColorReads(const ColorReadMode mode, const bool overlap) {
     return true;
   }();
   (void)registered;
-  const auto root = CreateTestDir() / (overlap ? "overlap" : "serial");
+  // CreateTestDir cleans once per TEST, while the success test runs both rig
+  // sizes. Keep their databases separate so the second fixture starts empty.
+  const auto root = CreateTestDir() /
+                    ("cameras_" + std::to_string(cameras_per_rig)) /
+                    (overlap ? "overlap" : "serial");
   std::filesystem::create_directories(root);
   const auto database = Database::Open(root / "database.db");
   Reconstruction truth;
   SyntheticDatasetOptions synthetic;
   synthetic.num_rigs = 2;
-  synthetic.num_cameras_per_rig = 1;
+  synthetic.num_cameras_per_rig = cameras_per_rig;
   synthetic.num_frames_per_rig = 7;
   synthetic.num_points3D = 50;
   synthetic.camera_has_prior_focal_length = false;
@@ -91,9 +227,21 @@ void CheckMapperColorReads(const ColorReadMode mode, const bool overlap) {
   synthetic.image_extension = ".colmap_mapper_color";
   SetPRNGSeed(0);
   SynthesizeDataset(synthetic, &truth, database.get());
-  for (const auto& [id, image] : truth.Images()) {
+  std::vector<std::string> image_names;
+  for (const auto& [_, image] : truth.Images()) {
+    image_names.push_back(image.Name());
     std::ofstream(root / image.Name()).close();
   }
+  std::sort(image_names.begin(), image_names.end());
+  ASSERT_TRUE(std::adjacent_find(image_names.begin(), image_names.end()) ==
+              image_names.end());
+  color_image_tags.clear();
+  for (size_t i = 0; i < image_names.size(); ++i) {
+    color_image_tags.emplace(ColorPathKey(root / image_names[i]),
+                             static_cast<int>(i + 1));
+  }
+  ASSERT_LT(image_names.size(), 30);
+
   auto manager = std::make_shared<ReconstructionManager>();
   auto options = std::make_shared<IncrementalPipelineOptions>();
   options->image_path = root;
@@ -105,7 +253,10 @@ void CheckMapperColorReads(const ColorReadMode mode, const bool overlap) {
   mapping_thread = std::this_thread::get_id();
   injected_prefetch_failures = 0;
   serial_successes = 0;
+  async_scanlines = 0;
   int later_images = 0;
+  int prefinal_async_scanlines = 0;
+  std::set<std::string> registered_names;
   IncrementalPipeline mapper(options, database, manager);
   mapper.AddCallback(IncrementalPipeline::INITIAL_IMAGE_PAIR_REG_CALLBACK, [&] {
     ASSERT_EQ(manager->Size(), 1);
@@ -113,56 +264,82 @@ void CheckMapperColorReads(const ColorReadMode mode, const bool overlap) {
     for (const auto& [id, point] : reconstruction.Points3D()) {
       reconstruction.Point3D(id).color.setZero();
     }
+    for (const image_t id : reconstruction.RegImageIds()) {
+      registered_names.insert(reconstruction.Image(id).Name());
+    }
     serial_successes = 0;
+    async_scanlines = 0;
   });
-  mapper.AddCallback(IncrementalPipeline::NEXT_IMAGE_REG_CALLBACK,
-                     [&] { ++later_images; });
+  mapper.AddCallback(IncrementalPipeline::NEXT_IMAGE_REG_CALLBACK, [&] {
+    ++later_images;
+    const auto& reconstruction = *manager->Get(0);
+    std::set<std::string> new_images;
+    for (const image_t id : reconstruction.RegImageIds()) {
+      const std::string& name = reconstruction.Image(id).Name();
+      if (registered_names.insert(name).second) new_images.insert(name);
+    }
+    EXPECT_FALSE(new_images.empty());
+    if (mode != ColorReadMode::kFailure) {
+      CheckNewImageColors(reconstruction, root, new_images);
+      CheckAssociatedColors(reconstruction, root, /*require_all_colored=*/false);
+    }
+    result->stages.emplace_back(
+        std::vector<std::string>(new_images.begin(), new_images.end()),
+        CaptureColors(reconstruction));
+    prefinal_async_scanlines = async_scanlines.load();
+  });
   mapper.Run();
   ASSERT_EQ(manager->Size(), 1);
   ASSERT_GT(later_images, 0);
   const auto& reconstruction = *manager->Get(0);
   EXPECT_EQ(reconstruction.NumRegImages(), truth.NumImages());
-  size_t colored = 0;
-  for (const auto& [id, point] : reconstruction.Points3D()) {
-    if (point.color != decltype(point.color)::Zero()) {
-      ++colored;
-      EXPECT_EQ(point.color, decltype(point.color)::Constant(73));
-    }
-  }
+  result->final = CaptureColors(reconstruction);
+  ASSERT_FALSE(result->final.empty());
   if (mode == ColorReadMode::kFailure) {
-    EXPECT_EQ(colored, 0);
+    for (const auto& [_, color] : result->final) {
+      EXPECT_EQ(color, (Color{0, 0, 0}));
+    }
   } else {
-    EXPECT_GT(colored, 0);
-    if (!overlap || mode == ColorReadMode::kTransient) {
+    CheckAssociatedColors(reconstruction, root, /*require_all_colored=*/true);
+    if (!overlap || mode == ColorReadMode::kTransient || cameras_per_rig > 1) {
       EXPECT_GT(serial_successes.load(), 0);
     } else {
       EXPECT_EQ(serial_successes.load(), 0);
     }
+  }
+  if (overlap && mode != ColorReadMode::kFailure) {
+    EXPECT_GT(prefinal_async_scanlines, 0);
+  } else if (!overlap) {
+    EXPECT_EQ(prefinal_async_scanlines, 0);
   }
   if (overlap && mode == ColorReadMode::kTransient) {
     EXPECT_GT(injected_prefetch_failures.load(), 0);
   }
 }
 
+void CheckColorPair(const ColorReadMode mode, const int cameras_per_rig) {
+  ColorRunResult serial;
+  ColorRunResult overlap;
+  CheckMapperColorReads(mode, /*overlap=*/false, cameras_per_rig, &serial);
+  CheckMapperColorReads(mode, /*overlap=*/true, cameras_per_rig, &overlap);
+  ASSERT_FALSE(serial.stages.empty());
+  EXPECT_EQ(serial.stages, overlap.stages);
+  EXPECT_EQ(serial.final, overlap.final);
+}
+
 TEST(IncrementalPipeline, ColorReadStableSuccess) {
-  for (const bool overlap : {false, true}) {
-    SCOPED_TRACE(overlap);
-    CheckMapperColorReads(ColorReadMode::kSuccess, overlap);
+  for (const int cameras_per_rig : {1, 2}) {
+    SCOPED_TRACE(cameras_per_rig);
+    CheckColorPair(ColorReadMode::kSuccess, cameras_per_rig);
   }
 }
 
 TEST(IncrementalPipeline, ColorReadTransientPrefetchFailure) {
-  for (const bool overlap : {false, true}) {
-    SCOPED_TRACE(overlap);
-    CheckMapperColorReads(ColorReadMode::kTransient, overlap);
-  }
+  CheckColorPair(ColorReadMode::kTransient, /*cameras_per_rig=*/1);
 }
 
 TEST(IncrementalPipeline, ColorReadStableFailure) {
-  for (const bool overlap : {false, true}) {
-    SCOPED_TRACE(overlap);
-    CheckMapperColorReads(ColorReadMode::kFailure, overlap);
-  }
+  CheckColorPair(ColorReadMode::kFailure, /*cameras_per_rig=*/1);
 }
 
 TEST(IncrementalPipeline, WithoutNoise) {
@@ -846,6 +1023,17 @@ TEST(IncrementalPipeline, PriorBasedSfMWithRandomSeedStability) {
       run_mapper(/*num_threads=*/1, /*random_seed=*/kRandomSeed);
   EXPECT_THAT(*reconstruction_manager0->Get(0),
               ReconstructionEq(*reconstruction_manager1->Get(0)));
+}
+
+TEST(IncrementalPipelineOptions, DefaultPriorPositionLossScale) {
+  const IncrementalPipelineOptions options;
+  EXPECT_DOUBLE_EQ(options.prior_position_loss_scale,
+                   std::sqrt(kChiSquare95ThreeDof));
+  EXPECT_DOUBLE_EQ(IncrementalMapper::Options().prior_position_loss_scale,
+                   std::sqrt(kChiSquare95ThreeDof));
+  EXPECT_DOUBLE_EQ(
+      CeresPosePriorBundleAdjustmentOptions().prior_position_loss_scale,
+      std::sqrt(kChiSquare95ThreeDof));
 }
 
 TEST(IncrementalPipelineOptions, DefaultSolverThresholds) {

@@ -235,6 +235,49 @@ TEST(PlyReaderTest, RejectsScalarFacePropertyBeforeListDuplicate) {
   }
 }
 
+TEST(PlyReaderTest, RejectsTruncatedFaceListAndReadsValidList) {
+  const auto dir = colmap::CreateTestDir();
+  const std::vector<Vertex> vertices = {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}};
+  const std::vector<std::vector<int>> faces = {{0, 1, 2}};
+  for (const int format : {PLY_BINARY_LE, PLY_BINARY_BE}) {
+    SCOPED_TRACE(format);
+    const auto valid = dir / (std::to_string(format) + "-valid.ply");
+    const auto truncated = dir / (std::to_string(format) + "-truncated.ply");
+    PoissonRecon::PLY::WritePolygons<VertexFactory, int>(
+        valid.string(), VertexFactory{}, vertices, faces, format, {});
+    std::filesystem::copy_file(valid, truncated);
+    // Leave one index after the list count. LeakSanitizer must also verify
+    // cleanup when the reader throws after allocating the complete list.
+    std::filesystem::resize_file(
+        truncated, std::filesystem::file_size(truncated) - 2 * sizeof(int));
+    std::vector<Vertex> decoded;
+    std::vector<std::vector<int>> decoded_faces;
+    std::vector<std::string> comments;
+    int read_format = 0;
+    try {
+      PoissonRecon::PLY::ReadPolygons<VertexFactory, int>(truncated.string(),
+                                                          VertexFactory{},
+                                                          decoded,
+                                                          decoded_faces,
+                                                          read_format,
+                                                          comments);
+      FAIL() << "Expected a truncated face-list error";
+    } catch (const std::exception& error) {
+      EXPECT_NE(std::string(error.what()).find("fread() failed"),
+                std::string::npos);
+    }
+    PoissonRecon::PLY::ReadPolygons<VertexFactory, int>(valid.string(),
+                                                        VertexFactory{},
+                                                        decoded,
+                                                        decoded_faces,
+                                                        read_format,
+                                                        comments);
+    EXPECT_EQ(read_format, format);
+    EXPECT_EQ(decoded_faces, faces);
+    ASSERT_EQ(decoded.size(), vertices.size());
+  }
+}
+
 TEST(PlyReaderTest, ClosesFileAfterTruncatedBinaryBody) {
   const auto path = colmap::CreateTestDir() / "truncated.ply";
   {

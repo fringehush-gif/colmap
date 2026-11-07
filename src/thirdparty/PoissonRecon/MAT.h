@@ -27,6 +27,7 @@ DAMAGE.
 */
 #ifndef MAT_INCLUDED
 #define MAT_INCLUDED
+#include <cfloat>
 #include "Geometry.h"
 #include "Array.h"
 

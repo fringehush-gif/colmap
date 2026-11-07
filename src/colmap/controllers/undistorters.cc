@@ -8,11 +8,32 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
 
+#include <exception>
 #include <fstream>
 #include <thread>
 
 namespace colmap {
 namespace {
+
+// Drain task failures before unwinding destroys objects used by workers.
+class StopPoolOnException {
+ public:
+  explicit StopPoolOnException(ThreadPool& pool)
+      : pool_(pool), uncaught_(std::uncaught_exceptions()) {}
+  ~StopPoolOnException() {
+    if (std::uncaught_exceptions() > uncaught_) {
+      try {
+        pool_.Stop();
+      } catch (...) {  // NOLINT(bugprone-empty-catch)
+        // Preserve the exception that caused the unwind.
+      }
+    }
+  }
+
+ private:
+  ThreadPool& pool_;
+  const int uncaught_;
+};
 
 void MaybeSetJpegQuality(const std::filesystem::path& path,
                          Bitmap& bitmap,
@@ -159,6 +180,7 @@ void COLMAPUndistorter::Run() {
   const size_t num_images = image_ids.size();
 
   ThreadPool thread_pool(options_.num_threads);
+  StopPoolOnException stop_on_exception(thread_pool);
   std::vector<std::shared_future<bool>> futures;
   futures.reserve(num_images);
   for (const image_t image_id : image_ids) {
@@ -185,6 +207,7 @@ void COLMAPUndistorter::Run() {
       image_names.push_back(reconstruction_.Image(image_ids[i]).Name());
     }
   }
+  thread_pool.Wait();
   if (stopped) {
     LOG(WARNING) << "Stopped image undistortion before writing the sparse "
                     "model and stereo configuration files.";
@@ -229,10 +252,10 @@ bool COLMAPUndistorter::Undistort(const image_t image_id) const {
     return true;
   }
 
-  // Already-undistorted perspective images are copied through only when no
-  // rescaling is requested; with a max_image_size they still go through
-  // UndistortImage below so the size limit is applied.
+  // Already-undistorted perspective images are copied only when neither
+  // rescaling nor a region of interest is requested.
   if (camera.IsUndistorted() && camera_options_.max_image_size < 0 &&
+      (!camera.IsPerspective() || !camera_options_.HasRegionOfInterest()) &&
       ExistsFile(input_image_path)) {
     LOG(INFO) << "Copying already undistorted image to location: "
               << output_image_path;
@@ -320,6 +343,7 @@ void PMVSUndistorter::Run() {
   CreateDirIfNotExists(output_path_ / "pmvs" / "models");
 
   ThreadPool thread_pool(options_.num_threads);
+  StopPoolOnException stop_on_exception(thread_pool);
   std::vector<std::shared_future<bool>> futures;
   futures.reserve(reconstruction_.NumRegImages());
   for (size_t i = 0; i < reconstruction_.NumRegImages(); ++i) {
@@ -340,6 +364,7 @@ void PMVSUndistorter::Run() {
 
     (void)futures[i].get();
   }
+  thread_pool.Wait();
   if (stopped) {
     LOG(WARNING) << "Stopped image undistortion before writing the bundle and "
                     "configuration files.";
@@ -566,6 +591,7 @@ void CMPMVSUndistorter::Run() {
   run_timer.Start();
 
   ThreadPool thread_pool(options_.num_threads);
+  StopPoolOnException stop_on_exception(thread_pool);
   std::vector<std::shared_future<bool>> futures;
   futures.reserve(reconstruction_.NumRegImages());
   for (size_t i = 0; i < reconstruction_.NumRegImages(); ++i) {
@@ -584,6 +610,7 @@ void CMPMVSUndistorter::Run() {
 
     (void)futures[i].get();
   }
+  thread_pool.Wait();
 
   run_timer.PrintMinutes();
 }
@@ -642,6 +669,7 @@ void StandaloneImageUndistorter::Run() {
   CreateDirIfNotExists(output_path_);
 
   ThreadPool thread_pool(options_.num_threads);
+  StopPoolOnException stop_on_exception(thread_pool);
   std::vector<std::shared_future<bool>> futures;
   const size_t num_images = options_.image_names_and_cameras.size();
   futures.reserve(num_images);
@@ -661,6 +689,7 @@ void StandaloneImageUndistorter::Run() {
 
     (void)futures[i].get();
   }
+  thread_pool.Wait();
 
   run_timer.PrintMinutes();
 }
@@ -672,9 +701,9 @@ bool StandaloneImageUndistorter::Undistort(const size_t image_idx) const {
   const auto output_image_path = output_path_ / image_name;
   const auto input_image_path = image_path_ / image_name;
 
-  // Check if the image is already undistorted and copy from source if no
-  // scaling is needed
+  // Copy unchanged images unless scaling or a perspective ROI is requested.
   if (camera.IsUndistorted() && camera_options_.max_image_size < 0 &&
+      (!camera.IsPerspective() || !camera_options_.HasRegionOfInterest()) &&
       ExistsFile(input_image_path)) {
     FileCopy(input_image_path, output_image_path, options_.copy_type);
     return true;
@@ -722,6 +751,7 @@ void StereoImageRectifier::Run() {
   run_timer.Start();
 
   ThreadPool thread_pool(options_.num_threads);
+  StopPoolOnException stop_on_exception(thread_pool);
   std::vector<std::shared_future<void>> futures;
   futures.reserve(options_.stereo_pairs.size());
   for (const auto& stereo_pair : options_.stereo_pairs) {
@@ -742,6 +772,7 @@ void StereoImageRectifier::Run() {
 
     futures[i].get();
   }
+  thread_pool.Wait();
 
   run_timer.PrintMinutes();
 }

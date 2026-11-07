@@ -15,6 +15,8 @@
 #include "colmap/util/threading.h"
 
 #include <set>
+#include <type_traits>
+#include <utility>
 
 namespace colmap {
 
@@ -619,29 +621,79 @@ void Reconstruction::DeleteAllPoints2DAndPoints3D() {
 
 void Reconstruction::SetRigsAndFrames(std::vector<class Rig> rigs,
                                       std::vector<class Frame> frames) {
-  rigs_.clear();
-  rigs_.reserve(rigs.size());
+  SetRigsAndFramesPrepared(std::move(rigs), std::move(frames), {}, {});
+}
+
+void Reconstruction::SetRigsAndFramesPrepared(
+    std::vector<class Rig> rigs,
+    std::vector<class Frame> frames,
+    NodeHashMap<camera_t, struct Camera> camera_replacements,
+    const std::function<void()>& before_publish) {
+  // Use the existing AddRig/AddFrame validation and registration bookkeeping
+  // on a separate owner. No live rig, frame, or image link changes until the
+  // complete replacement and every image association have been checked.
+  Reconstruction staged;
+  staged.cameras_ = cameras_;
+  staged.rigs_.reserve(rigs.size());
   for (auto& rig : rigs) {
-    AddRig(std::move(rig));
+    staged.AddRig(std::move(rig));
   }
 
-  frames_.clear();
-  frames_.reserve(frames.size());
-  reg_frame_ids_.clear();
-  num_reg_images_ = 0;
+  staged.frames_.reserve(frames.size());
   NodeHashMap<image_t, frame_t> image_to_frame_ids;
+  image_to_frame_ids.reserve(images_.size());
   for (auto& frame : frames) {
     for (const data_t& data_id : frame.ImageIds()) {
       THROW_CHECK(
           image_to_frame_ids.emplace(data_id.id, frame.FrameId()).second);
     }
-    AddFrame(std::move(frame));
+    staged.AddFrame(std::move(frame));
   }
 
+  std::vector<std::pair<class Image*, class Frame*>> image_links;
+  image_links.reserve(images_.size());
   for (auto& [image_id, image] : images_) {
-    image.ResetFramePtr();
-    image.SetFrameId(image_to_frame_ids.at(image_id));
-    image.SetFramePtr(&Frame(image.FrameId()));
+    const frame_t frame_id = image_to_frame_ids.at(image_id);
+    class Frame& frame = staged.Frame(frame_id);
+    THROW_CHECK_NE(frame.FrameId(), kInvalidFrameId);
+    THROW_CHECK(frame.HasDataId(image.DataId()));
+    image_links.emplace_back(&image, &frame);
+  }
+
+  std::vector<std::pair<struct Camera*, struct Camera*>> camera_links;
+  camera_links.reserve(camera_replacements.size());
+  for (auto& [camera_id, camera] : camera_replacements) {
+    struct Camera& target = Camera(camera_id);
+    THROW_CHECK_EQ(camera.camera_id, camera_id);
+    THROW_CHECK_EQ(camera.width, target.width);
+    THROW_CHECK_EQ(camera.height, target.height);
+    THROW_CHECK(camera.VerifyParams());
+    camera_links.emplace_back(&target, &camera);
+  }
+
+  // The default allocators and hash/equality types make these swaps
+  // nonthrowing. Node-map swaps preserve the staged rig/frame node addresses,
+  // including Frame::RigPtr() and the prepared image link targets.
+  static_assert(noexcept(rigs_.swap(staged.rigs_)));
+  static_assert(noexcept(frames_.swap(staged.frames_)));
+  static_assert(noexcept(reg_frame_ids_.swap(staged.reg_frame_ids_)));
+  static_assert(std::is_nothrow_swappable_v<struct Camera>);
+  if (before_publish) {
+    before_publish();
+  }
+  for (const auto& [target, camera] : camera_links) {
+    std::swap(*target, *camera);
+  }
+  rigs_.swap(staged.rigs_);
+  frames_.swap(staged.frames_);
+  reg_frame_ids_.swap(staged.reg_frame_ids_);
+  num_reg_images_ = staged.num_reg_images_;
+  for (const auto& [image, frame] : image_links) {
+    // All checked setter preconditions were established above. These calls
+    // only replace scalar IDs and pointers; they cannot allocate on success.
+    image->ResetFramePtr();
+    image->SetFrameId(frame->FrameId());
+    image->SetFramePtr(frame);
   }
 }
 
@@ -865,7 +917,8 @@ void Reconstruction::TranscribeImageIdsToDatabase(const Database& database) {
   NodeHashMap<image_t, class Image> new_images;
   new_images.reserve(NumImages());
 
-  for (auto& [_, image] : images_) {
+  // Stage ID changes until every lookup and target-ID check has succeeded.
+  for (const auto& [_, image] : images_) {
     const std::optional<class Image> database_image =
         database.ReadImageWithName(image.Name());
     if (!database_image.has_value()) {
@@ -873,8 +926,10 @@ void Reconstruction::TranscribeImageIdsToDatabase(const Database& database) {
                        << " does not exist in database";
     }
     old_to_new_image_ids.emplace(image.ImageId(), database_image->ImageId());
-    image.SetImageId(database_image->ImageId());
-    THROW_CHECK(new_images.emplace(database_image->ImageId(), image).second);
+    auto [new_image_it, inserted] =
+        new_images.emplace(database_image->ImageId(), image);
+    THROW_CHECK(inserted);
+    new_image_it->second.SetImageId(database_image->ImageId());
   }
 
   images_ = std::move(new_images);
@@ -1142,9 +1197,12 @@ void Reconstruction::ExtractColorsForAllImages(
     Eigen::Vector3d sum = Eigen::Vector3d::Zero();
     int count = 0;
   };
-  ThreadPool thread_pool(GetEffectiveNumThreads(num_threads));
+  const int effective_num_threads = GetEffectiveNumThreads(num_threads);
+  // The pool must join active workers before destroying their accumulators,
+  // including when task submission throws before Wait() is reached.
   std::vector<FlatHashMap<point3D_t, ColorData>> thread_data(
-      thread_pool.NumThreads());
+      effective_num_threads);
+  ThreadPool thread_pool(effective_num_threads);
 
   for (const auto& image_id : RegImageIds()) {
     thread_pool.AddTask([&, image_id]() {

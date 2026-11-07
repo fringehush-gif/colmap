@@ -294,7 +294,11 @@ void InvertedIndex<kDescType, kDescDim, kEmbeddingDim>::FindMatches(
     const FlatHashSet<int>& image_ids,
     std::vector<const EntryType*>* matches) const {
   matches->clear();
-  const auto& entries = inverted_files_.at(word_id).Entries();
+  const auto& inverted_file = inverted_files_.at(word_id);
+  if (!inverted_file.IsUsable()) {
+    return;
+  }
+  const auto& entries = inverted_file.Entries();
   for (const auto& entry : entries) {
     if (image_ids.count(entry.image_id)) {
       matches->emplace_back(&entry);

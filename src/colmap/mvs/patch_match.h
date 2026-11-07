@@ -156,6 +156,7 @@ class PatchMatchController : public BaseController {
     const SparseSourceTestFailure* failure = nullptr;
     bool refuse_geometry_admission_once = false;
     size_t geometry_fallback_entries = 0;
+    bool sparse_bank_at_work_stream_refusal = false;
     struct MemoryQuery {
       const char* phase;
       size_t free_bytes, total_bytes;

@@ -31,9 +31,6 @@ namespace {
 std::atomic<uint64_t> next_bitmap_scope_identity{1};
 
 struct PythonBitmapReaderState {
-  explicit PythonBitmapReaderState(py::function loader)
-      : loader(std::move(loader)) {}
-  py::function loader;
   std::weak_ptr<ScopedBitmapReader> reader;
   const uint64_t identity =
       next_bitmap_scope_identity.fetch_add(1, std::memory_order_relaxed);
@@ -93,21 +90,23 @@ class PythonBitmapReadScope {
     }
     // A final in-flight native reader may release this owner on its worker
     // thread. Python callback destruction must still occur with the GIL held.
-    state_ = std::shared_ptr<PythonBitmapReaderState>(
-        new PythonBitmapReaderState(std::move(loader)),
-        [](PythonBitmapReaderState* state) {
+    auto owned_loader = std::shared_ptr<py::function>(
+        new py::function(std::move(loader)), [](py::function* function) {
           py::gil_scoped_acquire acquire;
-          delete state;
+          delete function;
         });
+    // Statistics outlive closure without retaining the pixel provider.
+    state_ = std::make_shared<PythonBitmapReaderState>();
     // Reader retains callback state for admitted in-flight reads. The reverse
     // state->reader edge is weak, so this does not create an ownership cycle.
     const auto state = state_;
     reader_ = ScopedBitmapReader::Create(
         paths,
-        [state, mode](const std::filesystem::path& path,
-                      bool as_rgb,
-                      bool linearize,
-                      Bitmap* target) {
+        [state, owned_loader = std::move(owned_loader), mode](
+            const std::filesystem::path& path,
+            bool as_rgb,
+            bool linearize,
+            Bitmap* target) {
           const bool gray_only = mode == PayloadMode::kGray8;
           if (gray_only && as_rgb) {
             throw std::invalid_argument(
@@ -121,7 +120,7 @@ class PythonBitmapReadScope {
           py::gil_scoped_acquire acquire;
           py::object pixels;
           try {
-            pixels = state->loader(path);
+            pixels = (*owned_loader)(path);
           } catch (const py::error_already_set& error) {
             throw std::runtime_error(std::string("Bitmap RGB8 loader: ") +
                                      error.what());
@@ -251,33 +250,57 @@ py::array_t<uint8_t> ArrayFromBitmap(const Bitmap& self) {
   return output;
 }
 
-Bitmap BitmapFromArray(py::array_t<uint8_t, py::array::c_style> array,
-                       bool linear_colorspace) {
-  int channels = 1;
+Bitmap BitmapFromArray(py::object input, bool linear_colorspace) {
+  // Retain NumPy's buffer view without requiring uint8 or contiguous storage.
+  // Validate that view before normalization can copy its pixels. Other array-
+  // like objects retain the existing typed conversion before shape inspection.
+  py::array array;
+  if (PyObject_CheckBuffer(input.ptr())) {
+    array = py::array::ensure(input);
+  } else {
+    array = py::array_t<uint8_t, py::array::c_style>::ensure(input);
+  }
+  if (!array) {
+    throw py::type_error("Input must be convertible to a uint8 array!");
+  }
+  py::ssize_t channels = 1;
   if (array.ndim() == 3) {
     channels = array.shape(2);
   } else if (array.ndim() != 2) {
     throw std::runtime_error("Input array must have 2 or 3 dimensions!");
   }
 
-  const int width = array.shape(1);
-  const int height = array.shape(0);
-  if (width == 0 || height == 0) {
+  const py::ssize_t width = array.shape(1);
+  const py::ssize_t height = array.shape(0);
+  if (width <= 0 || height <= 0 || width > std::numeric_limits<int>::max() ||
+      height > std::numeric_limits<int>::max()) {
     throw std::runtime_error(
-        "Input array must have positive width and height!");
+        "Input array dimensions must be positive and fit in int!");
   }
 
   if (channels != 1 && channels != 3) {
     throw std::runtime_error("Input array must have 1 or 3 channels!");
   }
 
-  const bool as_rgb = channels != 1;
-  Bitmap output(width,
-                height,
-                /*as_rgb=*/as_rgb,
+  const int bitmap_width = static_cast<int>(width);
+  const int bitmap_height = static_cast<int>(height);
+  if (!Bitmap::IsValidSize(
+          bitmap_width, bitmap_height, static_cast<int>(channels))) {
+    throw std::runtime_error("Input array exceeds bitmap storage capacity!");
+  }
+
+  // Validate the owner's storage domain before input normalization, then
+  // preserve the legacy dtype conversion before allocating the output raster.
+  auto contiguous = py::array_t<uint8_t, py::array::c_style>::ensure(array);
+  if (!contiguous) {
+    throw py::type_error("Input must be convertible to a uint8 array!");
+  }
+  Bitmap output(bitmap_width,
+                bitmap_height,
+                /*as_rgb=*/channels != 1,
                 /*linear_colorspace=*/linear_colorspace);
 
-  const uint8_t* input_row_ptr = static_cast<uint8_t*>(array.request().ptr);
+  const uint8_t* input_row_ptr = contiguous.data();
   std::memcpy(output.RowMajorData().data(), input_row_ptr, output.NumBytes());
   return output;
 }

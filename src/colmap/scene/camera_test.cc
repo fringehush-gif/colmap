@@ -404,6 +404,34 @@ TEST(Camera, CamRayFromImgWithJacUnprojectable) {
   EXPECT_FALSE(camera.CamRayFromImgWithJac(unprojectable).has_value());
 }
 
+TEST(Camera, RayApisRejectNonfiniteAndDegenerateBearings) {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  const std::vector<Eigen::Vector2d> invalid_pixels = {
+      {nan, 0}, {0, nan}, {inf, 0}, {-inf, 0}, {0, inf}, {0, -inf}};
+  for (const auto model_id :
+       {CameraModelId::kSimplePinhole, CameraModelId::kEquirectangular}) {
+    const Camera camera =
+        Camera::CreateFromModelId(1, model_id, 650, 1000, 500);
+    for (const auto& pixel : invalid_pixels) {
+      EXPECT_FALSE(camera.CamRayFromImg(pixel).has_value());
+      EXPECT_FALSE(camera.CamRayFromImgWithJac(pixel).has_value());
+    }
+  }
+  const Camera perspective = Camera::CreateFromModelId(
+      1, CameraModelId::kSimplePinhole, 650, 1000, 500);
+  const double huge = std::numeric_limits<double>::max();
+  for (const Eigen::Vector2d& pixel :
+       {Eigen::Vector2d(huge, 0), Eigen::Vector2d(0, -huge)}) {
+    EXPECT_FALSE(perspective.CamRayFromImg(pixel).has_value());
+    EXPECT_FALSE(perspective.CamRayFromImgWithJac(pixel).has_value());
+  }
+  const Camera unknown;
+  EXPECT_THROW(unknown.CamRayFromImg(Eigen::Vector2d::Zero()), std::domain_error);
+  EXPECT_THROW(unknown.CamRayFromImgWithJac(Eigen::Vector2d::Zero()),
+               std::domain_error);
+}
+
 TEST(Camera, Rescale) {
   Camera camera =
       Camera::CreateFromModelId(1, CameraModelId::kSimplePinhole, 1.0, 1, 1);

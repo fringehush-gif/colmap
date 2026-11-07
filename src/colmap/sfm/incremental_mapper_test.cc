@@ -9,6 +9,7 @@
 #include "colmap/util/hash_containers.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 #include <gtest/gtest.h>
 
@@ -324,6 +325,30 @@ TEST_F(IncrementalMapperTest, FindLocalBundle) {
   for (const auto image_id : local_bundle) {
     EXPECT_GT(reg_image_id_set.count(image_id), 0);
   }
+}
+
+TEST_F(IncrementalMapperTest, InitialPairWorkerErrorPreservesPublicException) {
+  options_.num_threads = 2;
+  const camera_t missing_camera_id = kInvalidCameraId - 1;
+  ASSERT_FALSE(cache_->ExistsCamera(missing_camera_id));
+  std::vector<std::pair<image_t, camera_t>> original_cameras;
+  for (const auto& [image_id, image] : cache_->Images()) {
+    original_cameras.emplace_back(image_id, image.CameraId());
+    // Cache images are separate from the reconstruction's camera-linked copies.
+    ASSERT_FALSE(image.HasCameraPtr());
+    cache_->Image(image_id).SetCameraId(missing_camera_id);
+  }
+  // Ranking uses the valid reconstruction; the missing cache camera is looked
+  // up in EstimateInitialTwoViewGeometry inside the actual pool worker.
+  EXPECT_THROW(mapper_->FindInitialImagePair(
+                   options_, image_id1_, image_id2_, cam2_from_cam1_),
+               std::out_of_range);
+  for (const auto& [image_id, camera_id] : original_cameras) {
+    cache_->Image(image_id).SetCameraId(camera_id);
+  }
+  mapper_->ResetInitializationStats();
+  EXPECT_TRUE(mapper_->FindInitialImagePair(
+      options_, image_id1_, image_id2_, cam2_from_cam1_));
 }
 
 TEST_F(IncrementalMapperTest, ResetInitializationStats) {

@@ -20,16 +20,9 @@ struct Stats {
 };
 
 bool Available(Stats& stats);
+
 // False means only a known unavailable device/kernel or a prelaunch resource
 // refusal. Once execution begins, CUDA and validation errors throw.
-bool Reduce(const Record* const* blocks,
-            const std::size_t* counts,
-            std::size_t block_count,
-            std::size_t node_count,
-            float* output,
-            std::uint32_t* touched,
-            Stats& stats);
-
 // Exact bounded host readback. False is returned only before either callback.
 // ready is called after synchronous GPU completion and invalid-value checks;
 // the input capture blocks are dead at that point and may be released.

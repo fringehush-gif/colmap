@@ -19,8 +19,24 @@
 
 namespace colmap {
 namespace mvs {
+namespace {
 
-TEST(GpuMat, FillWithVector) {
+class CudaTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    int num_devices = 0;
+    const cudaError_t status = cudaGetDeviceCount(&num_devices);
+    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver ||
+        (status == cudaSuccess && num_devices == 0)) {
+      GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
+    }
+    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
+  }
+};
+
+}  // namespace
+
+TEST_F(CudaTest, FillWithVector) {
   GpuMat<float> array(100, 100, 2);
   const std::vector<float> vector = {1.0f, 2.0f};
   array.FillWithVector(vector.data());
@@ -64,7 +80,7 @@ void TestTransposeImage(const size_t width,
   }
 }
 
-TEST(GpuMat, Transpose) {
+TEST_F(CudaTest, Transpose) {
   for (size_t w = 1; w <= 5; ++w) {
     for (size_t h = 1; h <= 5; ++h) {
       for (size_t d = 1; d <= 3; ++d) {
@@ -110,7 +126,7 @@ void TestFlipHorizontalImage(const size_t width,
   }
 }
 
-TEST(GpuMat, FlipHorizontal) {
+TEST_F(CudaTest, FlipHorizontal) {
   for (size_t w = 1; w <= 5; ++w) {
     for (size_t h = 1; h <= 5; ++h) {
       for (size_t d = 1; d <= 3; ++d) {
@@ -165,7 +181,7 @@ void TestRotateImage(const size_t width,
   }
 }
 
-TEST(GpuMat, Rotate) {
+TEST_F(CudaTest, Rotate) {
   for (size_t w = 1; w <= 5; ++w) {
     for (size_t h = 1; h <= 5; ++h) {
       for (size_t d = 1; d <= 3; ++d) {
@@ -182,7 +198,7 @@ TEST(GpuMat, Rotate) {
   }
 }
 
-TEST(GpuMat, RotateTileEdges) {
+TEST_F(CudaTest, RotateTileEdges) {
   for (const size_t width : {1, 7, 31, 32, 33, 63, 65}) {
     for (const size_t height : {1, 5, 31, 32, 33, 63, 65}) {
       for (const size_t depth : {1, 3}) {
@@ -271,7 +287,7 @@ void ExpectStateBits(const PatchMatchStateMap& actual,
 
 }  // namespace
 
-TEST(PatchMatchStateMap, RotatesRawBitsWithStableCapacity) {
+TEST_F(CudaTest, RotatesRawBitsWithStableCapacity) {
   const std::vector<std::array<size_t, 3>> shapes = {
       {1, 1, 1}, {1, 7, 3}, {9, 1, 2}, {3, 5, 4}, {129, 2, 3}};
   for (const auto& shape : shapes) {
@@ -307,7 +323,7 @@ TEST(PatchMatchStateMap, RotatesRawBitsWithStableCapacity) {
   }
 }
 
-TEST(PatchMatchStateMap, ThreeOwnerDeadRoleCycle) {
+TEST_F(CudaTest, ThreeOwnerDeadRoleCycle) {
   constexpr size_t kWidth = 5, kHeight = 3, kSources = 4;
   PatchMatchStateMap owner_a(kWidth, kHeight, kSources);
   PatchMatchStateMap owner_b(kWidth, kHeight, kSources);

@@ -49,7 +49,7 @@ TEST(PatchMatchInputReads, SubmissionFailureJoinsBorrowedSibling) {
     auto local_owner = std::make_shared<int>(42);
     std::weak_ptr<int> borrowed = local_owner;
     try {
-      RunPatchMatchInputReads(pool, [&](auto& futures) {
+      RunPatchMatchTasks(pool, [&](auto& futures) {
         futures.push_back(pool.AddTask([&, borrowed]() {
           sibling_started.set_value();
           release.wait();
@@ -87,7 +87,7 @@ TEST(PatchMatchInputReads, ReadFailureJoinsSiblingAndDrainsChecker) {
 
   auto caller = std::async(std::launch::async, [&]() {
     try {
-      RunPatchMatchInputReads(pool, [&](auto& futures) {
+      RunPatchMatchTasks(pool, [&](auto& futures) {
         futures.push_back(
             pool.AddTask([]() { throw std::runtime_error("read failure"); }));
         futures.push_back(pool.AddTask([&]() {
@@ -111,6 +111,22 @@ TEST(PatchMatchInputReads, ReadFailureJoinsSiblingAndDrainsChecker) {
   release_sibling.set_value();
   EXPECT_EQ(caller.get(), "read failure");
   EXPECT_TRUE(sibling_completed);
+  EXPECT_NO_THROW(pool.Wait());
+}
+
+TEST(PatchMatchTasks, UnretainedWorkerFailuresDrainCheckers) {
+  ThreadPool pool(2);
+  try {
+    RunPatchMatchTasks(pool, [&](auto&) {
+      pool.AddTask([]() { throw std::runtime_error("first worker failure"); });
+      pool.AddTask([]() { throw std::runtime_error("second worker failure"); });
+    });
+    FAIL() << "Expected both worker failures";
+  } catch (const AggregateException& errors) {
+    EXPECT_EQ(errors.exceptions().size(), 2);
+  }
+  EXPECT_NO_THROW(pool.Wait());
+  EXPECT_EQ(pool.AddTask([]() { return 42; }).get(), 42);
   EXPECT_NO_THROW(pool.Wait());
 }
 

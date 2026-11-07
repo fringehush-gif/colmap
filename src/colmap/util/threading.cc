@@ -260,13 +260,12 @@ void ThreadPool::Stop() {
       return;
     }
 
-    CheckFinishedTasks();
-
     stopped_ = true;
 
-    // Clear the queues.
-    tasks_ = {};
-    finished_task_checkers_ = {};
+    // Discard pending tasks without constructing a replacement queue.
+    while (!tasks_.empty()) {
+      tasks_.pop();
+    }
   }
 
   task_condition_.notify_all();
@@ -276,6 +275,9 @@ void ThreadPool::Stop() {
   }
 
   finished_condition_.notify_all();
+
+  std::unique_lock<std::mutex> lock(mutex_);
+  CheckFinishedTasks();
 }
 
 void ThreadPool::Wait() {

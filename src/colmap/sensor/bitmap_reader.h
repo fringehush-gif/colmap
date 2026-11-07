@@ -41,12 +41,13 @@ class ScopedBitmapReader {
       const std::filesystem::path& path) const;
 
  private:
-  ScopedBitmapReader(std::vector<std::string> paths,
+  using PathKey = std::filesystem::path::string_type;
+  ScopedBitmapReader(std::vector<PathKey> paths,
                      Callback callback,
-                     FlatHashMap<std::string, std::pair<int, int>> image_sizes);
-  const std::vector<std::string> paths_;
+                     FlatHashMap<PathKey, std::pair<int, int>> image_sizes);
+  const std::vector<PathKey> paths_;
   const Callback callback_;
-  const FlatHashMap<std::string, std::pair<int, int>> image_sizes_;
+  const FlatHashMap<PathKey, std::pair<int, int>> image_sizes_;
 };
 
 }  // namespace colmap

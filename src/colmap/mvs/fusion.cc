@@ -75,19 +75,23 @@ void FusionPixelMask::ExcludeNonpositiveDepth(const FusionFloatMapView& depth) {
     for (size_t bit = 0; bit < count; ++bit) {
       uint32_t bits;
       std::memcpy(&bits, depth.data + first + bit, sizeof(bits));
-      const uint32_t magnitude = bits & 0x7fffffffu;
-      // Leave NaNs and subnormals to the original worker-local comparison.
-      // In particular, classification must not depend on the initializer's
-      // floating-point flags or denormals-are-zero setting.
-      const bool nonpositive = magnitude == 0 || ((bits & 0x80000000u) != 0 &&
-                                                  magnitude >= 0x00800000u &&
-                                                  magnitude <= 0x7f800000u);
+      const bool nonpositive = IsDefinitelyNonpositiveDepth(bits);
       excluded |= static_cast<uint64_t>(nonpositive) << bit;
     }
     auto& word = data_[first / kWordBits];
     word.store(word.load(std::memory_order_relaxed) | excluded,
                std::memory_order_relaxed);
     first += count;
+  }
+}
+
+void FusionPixelMask::ExcludeNonpositiveDepth(const SparseDepth& depth) {
+  if (depth.Width() != width_ || depth.Size() != size_) return;
+  for (size_t word = 0; word < size_ / kWordBits + (size_ % kWordBits != 0);
+       ++word) {
+    data_[word].store(data_[word].load(std::memory_order_relaxed) |
+                          depth.NonpositiveWord(word),
+                      std::memory_order_relaxed);
   }
 }
 
@@ -235,9 +239,12 @@ int FindNextImage(const std::vector<std::vector<int>>& overlapping_images,
                   const int prev_image_idx) {
   THROW_CHECK_EQ(used_images.size(), fused_images.size());
 
-  for (const auto image_idx : overlapping_images.at(prev_image_idx)) {
-    if (used_images.at(image_idx) && !fused_images.at(image_idx)) {
-      return image_idx;
+  // A negative previous index selects the first eligible root.
+  if (prev_image_idx >= 0) {
+    for (const auto image_idx : overlapping_images.at(prev_image_idx)) {
+      if (used_images.at(image_idx) && !fused_images.at(image_idx)) {
+        return image_idx;
+      }
     }
   }
 
@@ -281,6 +288,7 @@ void StereoFusionOptions::Print() const {
   PrintOption(bounded_cache_neighborhood);
   PrintOption(bounded_cache_prefill_threads);
   PrintOption(bounded_cache_compact_rgb);
+  PrintOption(bounded_cache_compact_depth);
   PrintOption(cache_size);
   const auto& bbox_min = bounding_box.first.transpose().eval();
   const auto& bbox_max = bounding_box.second.transpose().eval();
@@ -299,6 +307,12 @@ bool StereoFusionOptions::Check() const {
   CHECK_OPTION_GT(check_num_images, 0);
   CHECK_OPTION_GT(cache_size, 0);
   CHECK_OPTION_EQ((bounded_cache_compact_rgb && !bounded_cache), false);
+  CHECK_OPTION_EQ(
+      (bounded_cache_compact_depth &&
+       (!bounded_cache || !bounded_cache_components ||
+        !bounded_cache_neighborhood || bounded_cache_normal_tile_size == 0 ||
+        bounded_cache_exact_depth)),
+      false);
   CHECK_OPTION_EQ((bounded_cache_components && !bounded_cache), false);
   CHECK_OPTION_EQ((bounded_cache_diagnostics && !bounded_cache), false);
   CHECK_OPTION_GE(bounded_cache_normal_tile_size, 0);
@@ -567,7 +581,9 @@ void StereoFusion::Run() {
   int num_threads = 1;
   bounded_workspace_ = nullptr;
   if (options_.bounded_cache) {
-    auto workspace = std::make_unique<BoundedWorkspace>(workspace_options);
+    const bool compact_depth = options_.bounded_cache_compact_depth;
+    auto workspace =
+        std::make_unique<BoundedWorkspace>(workspace_options, compact_depth);
     bounded_workspace_ = workspace.get();
     workspace_ = std::move(workspace);
     num_threads = GetEffectiveNumThreads(options_.num_threads);
@@ -575,23 +591,10 @@ void StereoFusion::Run() {
     workspace_ = std::make_unique<CachedWorkspace>(workspace_options);
   } else {
     if (options_.full_ram_load_threads != -1) {
-      // Workspace::Load writes one model slot per name. An opt-in parallel
-      // loader must not schedule the same slot twice for duplicate cfg rows.
-      std::vector<std::string> unique_names;
-      FlatHashSet<std::string> seen;
-      unique_names.reserve(image_names.size());
-      for (const auto& name : image_names) {
-        if (seen.insert(name).second) unique_names.push_back(name);
-      }
-      const size_t roster_size = std::max<size_t>(unique_names.size(), 1);
-      workspace_options.num_threads = static_cast<int>(std::min(
-          static_cast<size_t>(options_.full_ram_load_threads), roster_size));
-      workspace_ = std::make_unique<Workspace>(workspace_options);
-      workspace_->Load(unique_names);
-    } else {
-      workspace_ = std::make_unique<Workspace>(workspace_options);
-      workspace_->Load(image_names);
+      workspace_options.num_threads = options_.full_ram_load_threads;
     }
+    workspace_ = std::make_unique<Workspace>(workspace_options);
+    workspace_->Load(image_names);
     num_threads = GetEffectiveNumThreads(options_.num_threads);
   }
 
@@ -743,29 +746,38 @@ void StereoFusion::Run() {
   if (options_.bounded_cache_normal_tile_size > 0) {
     size_t largest_component = 0, largest_tile = 0;
     using Component = BoundedWorkspace::Component;
-    for (size_t index = 0; index < used_images_.size(); ++index) {
-      if (!used_images_[index]) continue;
-      const int view = static_cast<int>(index);
-      largest_tile =
-          std::max(largest_tile,
-                   bounded_workspace_->GetNormalTileResidentBytes(
-                       view, options_.bounded_cache_normal_tile_size));
-      largest_component = std::max(
-          {largest_component,
-           bounded_workspace_->GetNormalTileReservationBytes(
-               view, options_.bounded_cache_normal_tile_size),
-           bounded_workspace_->GetLoadReservationBytes(view, Component::kDepth),
-           bounded_workspace_->GetLoadReservationBytes(view,
-                                                       Component::kBitmap)});
-    }
     const size_t per_worker =
         bounded_workspace_->GetCacheStats().capacity_bytes /
         static_cast<size_t>(num_threads);
     const size_t slots =
         static_cast<size_t>(options_.bounded_cache_normal_tile_slots);
-    const bool tile_fallback_fits =
-        largest_component <= per_worker &&
-        largest_tile <= (per_worker - largest_component) / slots;
+    bool tile_fallback_fits = false;
+    for (;;) {
+      for (size_t index = 0; index < used_images_.size(); ++index) {
+        if (!used_images_[index]) continue;
+        const int view = static_cast<int>(index);
+        largest_tile =
+            std::max(largest_tile,
+                     bounded_workspace_->GetNormalTileResidentBytes(
+                         view, options_.bounded_cache_normal_tile_size));
+        largest_component =
+            std::max({largest_component,
+                      bounded_workspace_->GetNormalTileReservationBytes(
+                          view, options_.bounded_cache_normal_tile_size),
+                      bounded_workspace_->GetLoadReservationBytes(
+                          view, Component::kDepth),
+                      bounded_workspace_->GetLoadReservationBytes(
+                          view, Component::kBitmap)});
+      }
+      tile_fallback_fits =
+          largest_component <= per_worker &&
+          largest_tile <= (per_worker - largest_component) / slots;
+      if (tile_fallback_fits || !bounded_workspace_->UsesCompactDepth()) break;
+      // Packing must not make an otherwise valid raw-cache recipe inadmissible.
+      // Before workers start, discard header-only reservations.
+      bounded_workspace_->DisableCompactDepthBeforeLoading();
+      largest_component = largest_tile = 0;
+    }
     // A complete neighborhood borrows whole-image owners and needs no tile
     // fallback. Check fallback admission at each actual partial root.
     THROW_CHECK(options_.bounded_cache_neighborhood || tile_fallback_fits)
@@ -866,7 +878,9 @@ void StereoFusion::Run() {
     }
     size_t num_fused_images = 0;
     size_t total_fused_points = 0;
-    for (int image_idx = 0; image_idx >= 0;
+    for (int image_idx = internal::FindNextImage(
+             overlapping_images_, used_images_, fused_images_, -1);
+         image_idx >= 0;
          image_idx = internal::FindNextImage(
              overlapping_images_, used_images_, fused_images_, image_idx)) {
       if (CheckIfStopped()) {
@@ -895,8 +909,13 @@ void StereoFusion::Run() {
           for (size_t view = 0; view < neighborhood_data_.size(); ++view) {
             const auto* data = neighborhood_data_[view];
             if (!seeded_depth_masks[view] && data) {
-              fused_pixel_masks_[view].ExcludeNonpositiveDepth(
-                  internal::FusionFloatMapView(data->depth_map));
+              if (data->sparse_depth) {
+                fused_pixel_masks_[view].ExcludeNonpositiveDepth(
+                    *data->sparse_depth);
+              } else {
+                fused_pixel_masks_[view].ExcludeNonpositiveDepth(
+                    internal::FusionFloatMapView(data->depth_map));
+              }
               seeded_depth_masks[view] = 1;
             }
           }
@@ -1651,7 +1670,6 @@ void StereoFusion::Fuse(const int thread_id,
     std::vector<float> x, y, z, nx, ny, nz;
     std::vector<uint8_t> r, g, b;
     std::vector<int> visibility;
-    bool in_use = false;
 
     void Clear() {
       queue.clear();
@@ -1676,22 +1694,18 @@ void StereoFusion::Fuse(const int thread_id,
              visibility.capacity() * sizeof(int);
     }
   };
+  // Fuse runs only in row tasks; ThreadPool never executes tasks inline.
   thread_local Scratch worker_scratch;
-  // A bitmap reader can reenter Fusion; never lend its caller's scratch.
-  Scratch nested_scratch;
-  auto& scratch = worker_scratch.in_use ? nested_scratch : worker_scratch;
+  auto& scratch = worker_scratch;
   struct ScratchLease {
     Scratch& scratch;
     ~ScratchLease() {
       // Bound retained capacity without limiting the current traversal.
       if (scratch.CapacityBytes() > 256 * 1024) {
         scratch = Scratch();
-      } else {
-        scratch.in_use = false;
       }
     }
   } lease{scratch};
-  scratch.in_use = true;
   scratch.Clear();
 
   // Next points to fuse.
@@ -1773,7 +1787,7 @@ void StereoFusion::Fuse(const int thread_id,
         const bool exact_nonpositive =
             exact_depth && !image_data->HasPositiveDepth(row, col);
         depth = exact_depth ? 0.0f
-                            : (image_data ? image_data->depth_map.Get(row, col)
+                            : (image_data ? image_data->GetDepth(row, col)
                                           : depth_map->Get(row, col));
         if (options_.bounded_cache_components && image_lease && *image_lease) {
           image_lease.reset();
@@ -1874,7 +1888,6 @@ void StereoFusion::Fuse(const int thread_id,
           Eigen::Vector4f(col * depth, row * depth, depth, 1.0f);
 
       // Read the color of the pixel.
-      const auto& bitmap_scale = bitmap_scales_.at(image_idx);
       const auto* borrowed_bitmap =
           kResident ? nullptr
           : options_.bounded_cache_neighborhood &&
@@ -1907,21 +1920,15 @@ void StereoFusion::Fuse(const int thread_id,
       const Bitmap& bitmap_data = bitmap_image ? bitmap_image->bitmap
                                   : resident   ? *resident->bitmap
                                                : *bitmap;
-      // Unit-scale float coordinates preserve these integer pixel positions.
-      constexpr int kMaxExactFloatInteger = 1 << 24;
-      const bool resident_on_depth_grid =
-          resident && bitmap_scale.first == 1.0f &&
-          bitmap_scale.second == 1.0f && col >= 0 &&
-          col <= kMaxExactFloatInteger && row >= 0 &&
-          row <= kMaxExactFloatInteger;
+      const auto& depth_map_size = depth_map_sizes_.at(image_idx);
+      // The sampler owns the exact identity case for equal raster extents.
       const auto color =
-          ((bitmap_image && bitmap_image->bitmap_on_depth_grid) ||
-           resident_on_depth_grid)
-              ? bitmap_data.GetPixel(col, row).value_or(BitmapColor<uint8_t>(0))
-              : bitmap_data
-                    .InterpolateNearestNeighbor(col / bitmap_scale.first,
-                                                row / bitmap_scale.second)
-                    .value_or(BitmapColor<uint8_t>(0));
+          bitmap_data
+              .GetPixel(internal::RescalePixelCenter(
+                            col, depth_map_size.first, bitmap_data.Width()),
+                        internal::RescalePixelCenter(
+                            row, depth_map_size.second, bitmap_data.Height()))
+              .value_or(BitmapColor<uint8_t>(0));
       bitmap_lease.reset();
 
       // Set the current pixel as visited.

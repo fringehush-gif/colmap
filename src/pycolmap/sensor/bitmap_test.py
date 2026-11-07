@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import threading
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -83,6 +84,54 @@ def test_bitmap_from_array_rgb() -> None:
     assert bitmap.width == 64
     assert bitmap.height == 48
     assert bitmap.is_rgb
+
+
+@pytest.mark.parametrize("as_rgb", [False, True])
+def test_bitmap_from_array_noncontiguous(as_rgb: bool) -> None:
+    shape = (6, 8, 3) if as_rgb else (6, 8)
+    source = np.arange(np.prod(shape), dtype=np.uint8).reshape(shape)
+    view = source[::2, ::-1]
+    assert not view.flags.c_contiguous
+    bitmap = pycolmap.Bitmap.from_array(view)
+    np.testing.assert_array_equal(bitmap.to_array(), view)
+
+
+def test_bitmap_from_array_broadcast() -> None:
+    view = np.broadcast_to(np.array([[71]], dtype=np.uint8), (3, 5))
+    assert not view.flags.c_contiguous
+    bitmap = pycolmap.Bitmap.from_array(view)
+    np.testing.assert_array_equal(bitmap.to_array(), view)
+
+
+@pytest.mark.parametrize("as_rgb", [False, True])
+def test_bitmap_from_array_memoryview_noncontiguous(as_rgb: bool) -> None:
+    shape = (6, 8, 3) if as_rgb else (6, 8)
+    source = np.arange(np.prod(shape), dtype=np.uint8).reshape(shape)
+    view = source[::2, ::-1]
+    buffer = memoryview(view)
+    assert not buffer.c_contiguous
+    bitmap = pycolmap.Bitmap.from_array(buffer)
+    np.testing.assert_array_equal(bitmap.to_array(), view)
+
+
+@pytest.mark.parametrize("dtype", [np.int16, np.float32, object])
+def test_bitmap_from_array_memoryview_rejects_unsafe_dtype(dtype) -> None:
+    buffer = memoryview(np.zeros((3, 5), dtype=dtype))
+    with pytest.raises(TypeError):
+        pycolmap.Bitmap.from_array(buffer)
+
+
+def test_bitmap_from_array_sequence() -> None:
+    source = [[0, 17, 255], [71, 131, 3]]
+    bitmap = pycolmap.Bitmap.from_array(source)
+    np.testing.assert_array_equal(bitmap.to_array(), np.array(source, dtype=np.uint8))
+
+
+@pytest.mark.parametrize("dtype", [np.int16, np.float32, object])
+def test_bitmap_from_array_rejects_unsafe_dtype(dtype) -> None:
+    source = np.zeros((3, 5), dtype=dtype)
+    with pytest.raises(TypeError):
+        pycolmap.Bitmap.from_array(source)
 
 
 def test_bitmap_to_array_roundtrip_grey() -> None:
@@ -385,6 +434,8 @@ def test_gray_bitmap_read_scope_close_preserves_admitted_read(
     scope = pycolmap.BitmapReadScope.gray_only(
         [path], loader, True, True, [(3, 1)]
     )
+    loader_ref = weakref.ref(loader)
+    del loader
 
     def read() -> None:
         try:
@@ -397,6 +448,7 @@ def test_gray_bitmap_read_scope_close_preserves_admitted_read(
     try:
         assert entered.wait(timeout=5)
         scope.close()
+        assert loader_ref() is not None
     finally:
         release.set()
         worker.join(timeout=5)
@@ -404,3 +456,126 @@ def test_gray_bitmap_read_scope_close_preserves_admitted_read(
     assert errors == []
     assert len(outputs) == 1 and outputs[0] is not None
     np.testing.assert_array_equal(outputs[0].to_array(), gray)
+    assert loader_ref() is None
+    assert scope.stats()["bitmapReads"] == 1
+    assert scope.stats()["grayOutputBytes"] == gray.size
+    scope.close()
+
+
+@pytest.mark.parametrize("gray_only", [False, True])
+def test_bitmap_scope_close_releases_loader_but_preserves_stats(
+    tmp_path: Path, gray_only: bool
+) -> None:
+    path = tmp_path / "resident-lifetime.png"
+
+    class Loader:
+        def __init__(self) -> None:
+            shape = (2, 3) if gray_only else (2, 3, 3)
+            self.pixels = np.arange(np.prod(shape), dtype=np.uint8).reshape(shape)
+
+        def __call__(self, requested: Path) -> np.ndarray:
+            assert requested == path
+            return self.pixels
+
+    loader = Loader()
+    expected = loader.pixels.copy()
+    loader_ref = weakref.ref(loader)
+    factory = (
+        pycolmap.BitmapReadScope.gray_only if gray_only else pycolmap.BitmapReadScope
+    )
+    scope = factory([path], loader, True, True, [(3, 2)])
+    identity = scope.identity_token
+    del loader
+    bitmap = pycolmap.Bitmap.read(path, as_rgb=not gray_only)
+    assert bitmap is not None
+    assert loader_ref() is not None
+    before = scope.stats()
+    assert before["bitmapReads"] == 1
+    scope.close()
+    assert loader_ref() is None
+    assert scope.closed
+    assert scope.identity_token == identity
+    assert scope.stats() == before
+    scope.close()
+    np.testing.assert_array_equal(bitmap.to_array(), expected)
+
+
+@pytest.mark.parametrize("gray_only", [False, True])
+def test_bitmap_scope_constructor_failure_releases_loader(
+    tmp_path: Path, gray_only: bool
+) -> None:
+    path = tmp_path / "duplicate-scope.png"
+    pixels = np.zeros((2, 3) if gray_only else (2, 3, 3), dtype=np.uint8)
+    factory = (
+        pycolmap.BitmapReadScope.gray_only if gray_only else pycolmap.BitmapReadScope
+    )
+    owner = factory([path], lambda requested: pixels, True, True, [(3, 2)])
+
+    def loader(requested: Path) -> np.ndarray:
+        return pixels
+
+    loader_ref = weakref.ref(loader)
+    try:
+        with pytest.raises(ValueError, match="already has an owner"):
+            factory([path], loader, True, True, [(3, 2)])
+        del loader
+        assert loader_ref() is None
+        bitmap = pycolmap.Bitmap.read(path, as_rgb=not gray_only)
+        assert bitmap is not None
+        np.testing.assert_array_equal(bitmap.to_array(), pixels)
+        assert owner.stats()["bitmapReads"] == 1
+    finally:
+        owner.close()
+    with factory([path], lambda requested: pixels, True, True, [(3, 2)]) as replacement:
+        bitmap = pycolmap.Bitmap.read(path, as_rgb=not gray_only)
+        assert bitmap is not None
+        np.testing.assert_array_equal(bitmap.to_array(), pixels)
+        assert replacement.stats()["bitmapReads"] == 1
+
+
+@pytest.mark.parametrize("gray_only", [False, True])
+def test_bitmap_scope_loader_failure_preserves_stats_and_releases_on_close(
+    tmp_path: Path, gray_only: bool
+) -> None:
+    path = tmp_path / "raising-provider.png"
+
+    def loader(requested: Path) -> np.ndarray:
+        raise RuntimeError("deliberate scope loader failure")
+
+    loader_ref = weakref.ref(loader)
+    factory = (
+        pycolmap.BitmapReadScope.gray_only if gray_only else pycolmap.BitmapReadScope
+    )
+    scope = factory([path], loader, True, True, [(3, 2)])
+    del loader
+    try:
+        with pytest.raises(RuntimeError, match="deliberate scope loader failure"):
+            pycolmap.Bitmap.read(path, as_rgb=not gray_only)
+        assert loader_ref() is not None
+        assert scope.stats()["bitmapReads"] == 0
+    finally:
+        scope.close()
+    assert loader_ref() is None
+    assert scope.stats()["bitmapReads"] == 0
+
+
+@pytest.mark.parametrize(
+    ("shape", "strides"),
+    [
+        ((1, (1 << 32) + 1), (0, 1)),
+        (((1 << 32) + 1, 1), (1, 0)),
+        ((1, 1, (1 << 32) + 1), (0, 0, 1)),
+    ],
+)
+def test_bitmap_from_array_rejects_dimensions_before_narrowing(shape, strides):
+    if np.dtype(np.intp).itemsize <= 4:
+        pytest.skip("requires NumPy dimensions wider than a C++ int")
+    # Metadata-only view: validation must reject before accessing its pixels.
+    # Each oversized axis would otherwise narrow to one on a 32-bit int.
+    backing = np.zeros(1, dtype=np.uint8)
+    view = np.lib.stride_tricks.as_strided(
+        backing, shape=shape, strides=strides, writeable=False
+    )
+    assert view.flags.c_contiguous
+    with pytest.raises(RuntimeError):
+        pycolmap.Bitmap.from_array(view)

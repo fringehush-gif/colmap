@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#include "colmap/util/cuda_allocation.h"
+
 #include <algorithm>
-#include <chrono>
 #include <climits>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -14,13 +16,7 @@
 namespace PoissonTrimGpu {
 namespace {
 
-using Clock = std::chrono::steady_clock;
 constexpr std::uint64_t kWorkspaceLimit = 3ull * 1024 * 1024 * 1024;
-
-double ElapsedMs(Clock::time_point start) {
-  return std::chrono::duration<double, std::milli>(Clock::now() - start)
-      .count();
-}
 
 void Check(cudaError_t error) {
   if (error != cudaSuccess)
@@ -65,50 +61,91 @@ void CheckPrelaunch(cudaError_t error) {
   Check(error);
 }
 
+struct CleanupState {
+  cudaError_t error = cudaSuccess;
+  void Record(cudaError_t status) noexcept {
+    if (error == cudaSuccess && status != cudaSuccess) error = status;
+  }
+};
+
+void CheckAllocation(colmap::CudaAllocationResult result, bool has_output) {
+  if (result.origin == colmap::CudaAllocationOrigin::kSuccess) {
+    if (!has_output)
+      throw std::runtime_error("Poisson trim GPU: empty successful allocation");
+    return;
+  }
+  if (result.origin == colmap::CudaAllocationOrigin::kRefused)
+    throw PrelaunchAllocationFailure{};
+  if (result.origin == colmap::CudaAllocationOrigin::kRuntimeFailure)
+    CheckPrelaunch(result.code);
+  throw std::runtime_error("Poisson trim GPU: terminal allocation state " +
+                           std::to_string(static_cast<int>(result.origin)) +
+                           ": " +
+                           std::to_string(static_cast<int>(result.code)));
+}
+
 struct Stream {
   cudaStream_t value = nullptr;
-  Stream() {
-    CheckPrelaunch(cudaStreamCreateWithFlags(&value, cudaStreamNonBlocking));
-  }
-  ~Stream() {
-    if (value) {
-      cudaStreamSynchronize(value);
-      cudaStreamDestroy(value);
+  CleanupState& cleanup;
+  explicit Stream(CleanupState& state) : cleanup(state) {
+    const auto result = colmap::CudaTryAllocation(
+        [&] {
+          return cudaStreamCreateWithFlags(&value, cudaStreamNonBlocking);
+        },
+        [&] { return value == nullptr; });
+    if (result.origin != colmap::CudaAllocationOrigin::kSuccess && value) {
+      cleanup.Record(cudaStreamDestroy(value));
+      value = nullptr;
     }
+    CheckAllocation(result, value != nullptr);
+  }
+  ~Stream() noexcept {
+    if (value) cleanup.Record(cudaStreamDestroy(value));
   }
   Stream(const Stream&) = delete;
   Stream& operator=(const Stream&) = delete;
-};
-
-struct Event {
-  cudaEvent_t value = nullptr;
-  Event() { CheckPrelaunch(cudaEventCreate(&value)); }
-  ~Event() {
-    if (value) cudaEventDestroy(value);
-  }
-  Event(const Event&) = delete;
-  Event& operator=(const Event&) = delete;
 };
 
 template <class T>
 struct Device {
   T* value = nullptr;
   std::size_t bytes = 0;
-  explicit Device(std::size_t count) : bytes(count * sizeof(T)) {
-    if (bytes) CheckPrelaunch(cudaMalloc(&value, bytes));
+  CleanupState& cleanup;
+  Device(CleanupState& state, std::size_t count)
+      : bytes(count * sizeof(T)), cleanup(state) {
+    if (!bytes) return;
+    const auto result =
+        colmap::CudaTryAllocation([&] { return cudaMalloc(&value, bytes); },
+                                  [&] { return value == nullptr; });
+    if (result.origin != colmap::CudaAllocationOrigin::kSuccess && value) {
+      cleanup.Record(cudaFree(value));
+      value = nullptr;
+    }
+    CheckAllocation(result, value != nullptr);
   }
-  ~Device() {
-    if (value) cudaFree(value);
+  ~Device() noexcept {
+    if (value) cleanup.Record(cudaFree(value));
   }
   Device(const Device&) = delete;
   Device& operator=(const Device&) = delete;
 };
 
-double Duration(cudaEvent_t first, cudaEvent_t last) {
-  float ms = 0;
-  Check(cudaEventElapsedTime(&ms, first, last));
-  return ms;
-}
+// Declare after all resource acquisitions, before enqueuing work. Exceptional
+// exits must quiesce the stream before device or host readback storage expires.
+struct ScopedStreamSync {
+  Stream& stream;
+  bool complete = false;
+  explicit ScopedStreamSync(Stream& value) : stream(value) {}
+  ~ScopedStreamSync() noexcept {
+    if (!complete) stream.cleanup.Record(cudaStreamSynchronize(stream.value));
+  }
+  void Synchronize() {
+    Check(cudaStreamSynchronize(stream.value));
+    complete = true;
+  }
+  ScopedStreamSync(const ScopedStreamSync&) = delete;
+  ScopedStreamSync& operator=(const ScopedStreamSync&) = delete;
+};
 
 bool HasCapacity(std::uint64_t bytes, Stats& stats) {
   if (bytes > kWorkspaceLimit) {
@@ -271,12 +308,10 @@ void ValidateShape(std::size_t polygons,
 }  // namespace
 
 bool Available(Stats& stats) {
-  const auto began = Clock::now();
   const cudaError_t pending = cudaPeekAtLastError();
   if (DeviceUnavailable(pending)) {
     ClearExpected(pending);
     stats.reason = "device-unavailable";
-    stats.total_ms = ElapsedMs(began);
     return false;
   }
   Check(pending);
@@ -284,11 +319,9 @@ bool Available(Stats& stats) {
       !PreflightKernel(Flatten, stats) ||
       !PreflightKernel(BoundaryEdges, stats) ||
       !PreflightKernel(BoundaryPairs, stats)) {
-    stats.total_ms = ElapsedMs(began);
     return false;
   }
   stats.reason = "available";
-  stats.total_ms = ElapsedMs(began);
   return true;
 }
 
@@ -299,17 +332,14 @@ bool ConnectedComponents(std::size_t polygons,
                          std::uint32_t* roots,
                          Stats& stats) {
   stats = Stats{};
-  const auto began = Clock::now();
   auto reject = [&](const char* reason) {
     stats.reason = reason;
-    stats.total_ms = ElapsedMs(began);
     return false;
   };
   ValidateShape(polygons, entries, offsets, vertices);
   if (polygons && !roots) throw std::runtime_error("GPU component null output");
   if (!polygons) {
     stats.reason = "complete";
-    stats.total_ms = ElapsedMs(began);
     return true;
   }
   if (!Available(stats)) return reject(stats.reason);
@@ -346,19 +376,19 @@ bool ConnectedComponents(std::size_t polygons,
   stats.device_bytes = fixed_bytes + sort_bytes;
   if (!HasCapacity(stats.device_bytes, stats)) return reject(stats.reason);
 
+  CleanupState cleanup;
   try {
-    // Readback storage must outlive stream cleanup on exceptions.
-    std::vector<std::uint32_t> result(polygons);
-    Stream stream;
-    Event begin, uploaded, sorted, joined, downloaded;
-    Device<std::uint64_t> d_offsets(polygons + 1), keys_a(entries),
-        keys_b(entries);
-    Device<std::uint32_t> d_vertices(entries), faces_a(entries),
-        faces_b(entries), parents(polygons), d_roots(polygons);
-    Device<unsigned char> scratch(sort_bytes);
+    // Caller-owned readback storage outlives stream cleanup on exceptions.
+    Stream stream(cleanup);
+    Device<std::uint64_t> d_offsets(cleanup, polygons + 1),
+        keys_a(cleanup, entries), keys_b(cleanup, entries);
+    Device<std::uint32_t> d_vertices(cleanup, entries),
+        faces_a(cleanup, entries), faces_b(cleanup, entries),
+        parents(cleanup, polygons), d_roots(cleanup, polygons);
+    Device<unsigned char> scratch(cleanup, sort_bytes);
+    ScopedStreamSync stream_sync(stream);
 
     // From here, all CUDA failures are execution failures and remain visible.
-    Check(cudaEventRecord(begin.value, stream.value));
     Check(cudaMemcpyAsync(d_offsets.value,
                           offsets,
                           d_offsets.bytes,
@@ -377,7 +407,6 @@ bool ConnectedComponents(std::size_t polygons,
                                                             faces_a.value,
                                                             parents.value);
     Check(cudaGetLastError());
-    Check(cudaEventRecord(uploaded.value, stream.value));
     if (entries)
       Check(cub::DeviceRadixSort::SortPairs(scratch.value,
                                             sort_bytes,
@@ -389,7 +418,6 @@ bool ConnectedComponents(std::size_t polygons,
                                             0,
                                             64,
                                             stream.value));
-    Check(cudaEventRecord(sorted.value, stream.value));
     if (entries) {
       Unite<<<(entries + 255) / 256, 256, 0, stream.value>>>(
           keys_b.value, faces_b.value, entries, parents.value);
@@ -398,28 +426,28 @@ bool ConnectedComponents(std::size_t polygons,
     Flatten<<<(polygons + 255) / 256, 256, 0, stream.value>>>(
         parents.value, d_roots.value, polygons);
     Check(cudaGetLastError());
-    Check(cudaEventRecord(joined.value, stream.value));
-    Check(cudaMemcpyAsync(result.data(),
+    Check(cudaMemcpyAsync(roots,
                           d_roots.value,
                           d_roots.bytes,
                           cudaMemcpyDeviceToHost,
                           stream.value));
-    Check(cudaEventRecord(downloaded.value, stream.value));
-    Check(cudaStreamSynchronize(stream.value));
-    stats.upload_ms = Duration(begin.value, uploaded.value);
-    stats.sort_ms = Duration(uploaded.value, sorted.value);
-    stats.union_ms = Duration(sorted.value, joined.value);
-    stats.download_ms = Duration(joined.value, downloaded.value);
-    std::copy(result.begin(), result.end(), roots);
-  } catch (const PrelaunchAllocationFailure&) {
-    ClearExpected(cudaErrorMemoryAllocation);
-    return reject("device-allocation");
-  } catch (const PrelaunchUnavailable& unavailable) {
-    ClearExpected(unavailable.error);
-    return reject(unavailable.reason);
+    stream_sync.Synchronize();
+  } catch (...) {
+    if (cleanup.error != cudaSuccess)
+      std::throw_with_nested(
+          std::runtime_error("Poisson trim GPU cleanup failure: " +
+                             std::to_string(int(cleanup.error))));
+    try {
+      throw;
+    } catch (const PrelaunchAllocationFailure&) {
+      return reject("device-allocation");
+    } catch (const PrelaunchUnavailable& unavailable) {
+      ClearExpected(unavailable.error);
+      return reject(unavailable.reason);
+    }
   }
+  Check(cleanup.error);
   stats.reason = "complete";
-  stats.total_ms = ElapsedMs(began);
   return true;
 }
 
@@ -431,10 +459,8 @@ bool BoundaryGraph(std::size_t polygons,
                    std::vector<std::uint64_t>& graph,
                    Stats& stats) {
   stats = Stats{};
-  const auto began = Clock::now();
   auto reject = [&](const char* reason) {
     stats.reason = reason;
-    stats.total_ms = ElapsedMs(began);
     return false;
   };
   ValidateShape(polygons, entries, offsets, vertices);
@@ -443,7 +469,6 @@ bool BoundaryGraph(std::size_t polygons,
   if (!polygons || !entries) {
     graph.clear();
     stats.reason = "complete";
-    stats.total_ms = ElapsedMs(began);
     return true;
   }
   if (!Available(stats)) return reject(stats.reason);
@@ -479,27 +504,28 @@ bool BoundaryGraph(std::size_t polygons,
   const std::size_t scratch_bytes = std::max(sort_bytes, select_bytes);
   const std::uint64_t fixed_bytes =
       (polygons + 1ull) * sizeof(std::uint64_t) +
-      6ull * entries * sizeof(std::uint64_t) + entries * sizeof(std::uint32_t) +
+      4ull * entries * sizeof(std::uint64_t) + entries * sizeof(std::uint32_t) +
       polygons * sizeof(std::uint32_t) + sizeof(std::uint32_t) + sizeof(int);
   stats.device_bytes = fixed_bytes + scratch_bytes;
   if (!HasCapacity(stats.device_bytes, stats)) return reject(stats.reason);
 
+  bool nonmanifold = false;
+  CleanupState cleanup;
   try {
     // Readback storage must outlive stream cleanup on exceptions.
     std::vector<std::uint64_t> result;
     int count = 0;
     std::uint32_t rejected = 0;
-    Stream stream;
-    Event start, uploaded, sorted, joined, downloaded;
-    Device<std::uint64_t> d_offsets(polygons + 1), keys_a(entries),
-        keys_b(entries), values_a(entries), values_b(entries), pairs(entries),
-        d_selected(entries);
-    Device<std::uint32_t> d_vertices(entries), d_components(polygons),
-        invalid(1);
-    Device<int> d_count(1);
-    Device<unsigned char> scratch(scratch_bytes);
+    Stream stream(cleanup);
+    Device<std::uint64_t> d_offsets(cleanup, polygons + 1),
+        keys_a(cleanup, entries), keys_b(cleanup, entries),
+        values_a(cleanup, entries), values_b(cleanup, entries);
+    Device<std::uint32_t> d_vertices(cleanup, entries),
+        d_components(cleanup, polygons), invalid(cleanup, 1);
+    Device<int> d_count(cleanup, 1);
+    Device<unsigned char> scratch(cleanup, scratch_bytes);
+    ScopedStreamSync stream_sync(stream);
 
-    Check(cudaEventRecord(start.value, stream.value));
     Check(cudaMemcpyAsync(d_offsets.value,
                           offsets,
                           d_offsets.bytes,
@@ -524,7 +550,6 @@ bool BoundaryGraph(std::size_t polygons,
         keys_a.value,
         values_a.value);
     Check(cudaGetLastError());
-    Check(cudaEventRecord(uploaded.value, stream.value));
     Check(cub::DeviceRadixSort::SortPairs(scratch.value,
                                           sort_bytes,
                                           keys_a.value,
@@ -535,19 +560,21 @@ bool BoundaryGraph(std::size_t polygons,
                                           0,
                                           64,
                                           stream.value));
-    Check(cudaEventRecord(sorted.value, stream.value));
+    // Sort input storage is retired on this stream. Keep its sorted outputs
+    // distinct while reusing the inputs for pairs and compacted results.
+    auto* const pairs = keys_a.value;
+    auto* const selected_pairs = values_a.value;
     BoundaryPairs<<<(entries + 255) / 256, 256, 0, stream.value>>>(
-        keys_b.value, values_b.value, entries, pairs.value, invalid.value);
+        keys_b.value, values_b.value, entries, pairs, invalid.value);
     Check(cudaGetLastError());
     Check(cub::DeviceSelect::If(scratch.value,
                                 select_bytes,
-                                pairs.value,
-                                d_selected.value,
+                                pairs,
+                                selected_pairs,
                                 d_count.value,
                                 int(entries),
                                 ValidPair{},
                                 stream.value));
-    Check(cudaEventRecord(joined.value, stream.value));
     Check(cudaMemcpyAsync(&count,
                           d_count.value,
                           sizeof(count),
@@ -565,30 +592,35 @@ bool BoundaryGraph(std::size_t polygons,
       result.resize(count);
       if (count)
         Check(cudaMemcpyAsync(result.data(),
-                              d_selected.value,
+                              selected_pairs,
                               count * sizeof(std::uint64_t),
                               cudaMemcpyDeviceToHost,
                               stream.value));
     }
-    Check(cudaEventRecord(downloaded.value, stream.value));
-    Check(cudaStreamSynchronize(stream.value));
-    if (rejected) return reject("nonmanifold");
-    std::sort(result.begin(), result.end());
-    result.erase(std::unique(result.begin(), result.end()), result.end());
-    stats.upload_ms = Duration(start.value, uploaded.value);
-    stats.sort_ms = Duration(uploaded.value, sorted.value);
-    stats.union_ms = Duration(sorted.value, joined.value);
-    stats.download_ms = Duration(joined.value, downloaded.value);
-    graph.swap(result);
-  } catch (const PrelaunchAllocationFailure&) {
-    ClearExpected(cudaErrorMemoryAllocation);
-    return reject("device-allocation");
-  } catch (const PrelaunchUnavailable& unavailable) {
-    ClearExpected(unavailable.error);
-    return reject(unavailable.reason);
+    stream_sync.Synchronize();
+    nonmanifold = rejected != 0;
+    if (!nonmanifold) {
+      std::sort(result.begin(), result.end());
+      result.erase(std::unique(result.begin(), result.end()), result.end());
+      graph.swap(result);
+    }
+  } catch (...) {
+    if (cleanup.error != cudaSuccess)
+      std::throw_with_nested(
+          std::runtime_error("Poisson trim GPU cleanup failure: " +
+                             std::to_string(int(cleanup.error))));
+    try {
+      throw;
+    } catch (const PrelaunchAllocationFailure&) {
+      return reject("device-allocation");
+    } catch (const PrelaunchUnavailable& unavailable) {
+      ClearExpected(unavailable.error);
+      return reject(unavailable.reason);
+    }
   }
+  Check(cleanup.error);
+  if (nonmanifold) return reject("nonmanifold");
   stats.reason = "complete";
-  stats.total_ms = ElapsedMs(began);
   return true;
 }
 

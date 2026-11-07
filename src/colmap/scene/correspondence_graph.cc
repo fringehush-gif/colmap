@@ -84,10 +84,6 @@ void CorrespondenceGraph::AddTwoViewGeometry(
   struct Image& image1 = images_.at(image_id1);
   struct Image& image2 = images_.at(image_id2);
 
-  // Store number of correspondences for each image to find good initial pair.
-  image1.num_correspondences += two_view_geometry.inlier_matches.size();
-  image2.num_correspondences += two_view_geometry.inlier_matches.size();
-
   // Set the number of all correspondences for this image pair. Further below,
   // we will make sure that only unique correspondences are counted.
   const image_pair_t pair_id = ImagePairToPairId(image_id1, image_id2);
@@ -95,8 +91,13 @@ void CorrespondenceGraph::AddTwoViewGeometry(
   THROW_CHECK(inserted)
       << "Two view geometry for image pair was already added: image_id1="
       << image_id1 << ", image_id2=" << image_id2;
+
   image_pair_it->second.num_matches =
       static_cast<point2D_t>(two_view_geometry.inlier_matches.size());
+
+  // Store number of correspondences for each image to find good initial pair.
+  image1.num_correspondences += two_view_geometry.inlier_matches.size();
+  image2.num_correspondences += two_view_geometry.inlier_matches.size();
 
   // Store all matches in correspondence graph data structure. This data-
   // structure uses more memory than storing the raw match matrices, but is
@@ -111,15 +112,17 @@ void CorrespondenceGraph::AddTwoViewGeometry(
       auto& corrs1 = image1.corrs[match.point2D_idx1];
       auto& corrs2 = image2.corrs[match.point2D_idx2];
 
-      // We add valid correspondences bidirectionally, so checking from only one
-      // side is sufficient to detect duplicated matches.
-      const bool duplicate =
-          std::find_if(corrs1.begin(),
-                       corrs1.end(),
-                       [image_id2, &match](const Correspondence& corr) {
-                         return corr.image_id == image_id2 &&
-                                corr.point2D_idx == match.point2D_idx2;
-                       }) != corrs1.end();
+      // Each image pair is added once, so only the trailing run from this
+      // call can contain duplicates. Earlier entries target other images.
+      bool duplicate = false;
+      for (auto it = corrs1.rbegin();
+           it != corrs1.rend() && it->image_id == image_id2;
+           ++it) {
+        if (it->point2D_idx == match.point2D_idx2) {
+          duplicate = true;
+          break;
+        }
+      }
 
       if (duplicate) {
         image1.num_correspondences -= 1;

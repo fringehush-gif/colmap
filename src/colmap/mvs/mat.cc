@@ -19,7 +19,16 @@
 #include <type_traits>
 #include <vector>
 
-#if defined(__linux__)
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(__linux__)
+#include <sys/stat.h>
+#endif
+
+#if defined(__linux__) || defined(_WIN32)
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #endif
@@ -43,8 +52,8 @@ std::istream& ReadUnsignedDimension(std::istream& stream, size_t& value) {
   return stream >> value;
 }
 
-MappedFloatShape ReadMappedFloatShape(std::ifstream& file,
-                                      const std::filesystem::path& path) {
+std::array<size_t, 3> ReadFloatMapHeader(std::istream& file,
+                                         const std::filesystem::path& path) {
   std::string header;
   header.reserve(kMaxHeaderBytes);
   size_t delimiters = 0;
@@ -67,6 +76,13 @@ MappedFloatShape ReadMappedFloatShape(std::ifstream& file,
   THROW_CHECK_EQ(stream.peek(), std::char_traits<char>::eof()) << path;
   THROW_CHECK_GT(width, 0) << path;
   THROW_CHECK_GT(height, 0) << path;
+  THROW_CHECK_GT(depth, 0) << path;
+  return {width, height, depth};
+}
+
+MappedFloatShape ReadMappedFloatShape(std::ifstream& file,
+                                      const std::filesystem::path& path) {
+  const auto [width, height, depth] = ReadFloatMapHeader(file, path);
   THROW_CHECK(depth == 1 || depth == 3)
       << "FP32 depth/normal map channels: " << path;
   THROW_CHECK_LE(width, std::numeric_limits<size_t>::max() / height) << path;
@@ -94,7 +110,7 @@ MappedFloatShape ReadMappedFloatShape(std::ifstream& file,
 struct ImmutableMapSource::Impl {
   MappedFloatShape shape;
   size_t file_bytes = 0;
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   std::unique_ptr<boost::interprocess::file_mapping> file;
 #endif
 };
@@ -105,7 +121,7 @@ struct ImmutableMapRegion::Impl {
   size_t mapped_bytes = 0;
   size_t row_begin = 0, row_count = 0;
   size_t region_count = 1;
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   std::unique_ptr<boost::interprocess::mapped_region> region;
   std::array<std::unique_ptr<boost::interprocess::mapped_region>, 3> planes;
 #endif
@@ -114,7 +130,7 @@ struct ImmutableMapRegion::Impl {
 };
 
 bool ImmutableMapRegion::Supported() {
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   return IsLittleEndian();
 #else
   return false;
@@ -122,9 +138,15 @@ bool ImmutableMapRegion::Supported() {
 }
 
 namespace {
+size_t MappingExtentBytes(const MappedFloatShape& shape) {
+  THROW_CHECK_LE(shape.bytes,
+                 std::numeric_limits<size_t>::max() - shape.payload_start);
+  return shape.payload_start + shape.bytes;
+}
+
 size_t MappingPageCharge(const std::uintmax_t bytes) {
   THROW_CHECK(ImmutableMapRegion::Supported());
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   const size_t page = boost::interprocess::mapped_region::get_page_size();
   THROW_CHECK_GT(page, 0);
   THROW_CHECK_LE(bytes, std::numeric_limits<size_t>::max() - (page - 1));
@@ -146,7 +168,7 @@ WindowPlan PlanWindow(const MappedFloatShape& shape,
   THROW_CHECK_GT(row_count, 0);
   THROW_CHECK_LT(row_begin, shape.height);
   THROW_CHECK_LE(row_count, shape.height - row_begin);
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   const size_t page = boost::interprocess::mapped_region::get_page_size();
   THROW_CHECK_GT(page, 0);
   THROW_CHECK_LE(shape.width,
@@ -193,7 +215,10 @@ WindowPlan PlanWindow(const MappedFloatShape& shape,
 
 size_t ImmutableMapRegion::GetMappingReservationBytes(
     const std::filesystem::path& path) {
-  return MappingPageCharge(std::filesystem::file_size(path));
+  THROW_CHECK(Supported());
+  std::ifstream input(path, std::ios::binary);
+  THROW_CHECK_FILE_OPEN(input, path);
+  return MappingPageCharge(MappingExtentBytes(ReadMappedFloatShape(input, path)));
 }
 
 size_t ImmutableMapRegion::GetWindowReservationBytes(
@@ -215,17 +240,27 @@ ImmutableMapSource::ImmutableMapSource(const std::filesystem::path& path)
   impl_->shape = ReadMappedFloatShape(input, path);
   input.close();
   THROW_CHECK(input);
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   namespace bip = boost::interprocess;
   impl_->file =
       std::make_unique<bip::file_mapping>(path.c_str(), bip::read_only);
-  bip::offset_t file_bytes = 0;
-  THROW_CHECK(impl_->file->get_size(file_bytes));
+  // Query the same opened file, including on Boost versions before get_size().
+#if defined(_WIN32)
+  LARGE_INTEGER native_size;
+  THROW_CHECK(
+      GetFileSizeEx(impl_->file->get_mapping_handle().handle, &native_size));
+  const auto file_bytes = native_size.QuadPart;
+#else
+  struct stat native_stat{};
+  THROW_CHECK_EQ(fstat(impl_->file->get_mapping_handle().handle, &native_stat),
+                 0);
+  const auto file_bytes = native_stat.st_size;
+#endif
   THROW_CHECK_GE(file_bytes, 0);
-  const size_t start = impl_->shape.payload_start;
-  THROW_CHECK_LE(impl_->shape.bytes,
-                 std::numeric_limits<size_t>::max() - start);
-  THROW_CHECK_GE(static_cast<size_t>(file_bytes), start + impl_->shape.bytes);
+  THROW_CHECK_LE(static_cast<std::uintmax_t>(file_bytes),
+                 std::numeric_limits<size_t>::max());
+  THROW_CHECK_GE(static_cast<size_t>(file_bytes),
+                 MappingExtentBytes(impl_->shape));
   impl_->file_bytes = static_cast<size_t>(file_bytes);
 #endif
 }
@@ -235,7 +270,7 @@ std::array<size_t, 3> ImmutableMapSource::GetShape() const {
 }
 ImmutableMapSource::~ImmutableMapSource() = default;
 size_t ImmutableMapSource::GetMappingReservationBytes() const {
-  return MappingPageCharge(impl_->file_bytes);
+  return MappingPageCharge(MappingExtentBytes(impl_->shape));
 }
 size_t ImmutableMapSource::GetWindowReservationBytes(
     const size_t row_begin, const size_t row_count) const {
@@ -253,11 +288,9 @@ ImmutableMapRegion::ImmutableMapRegion(
   impl_->shape = impl_->source->impl_->shape;
   impl_->row_count = impl_->shape.height;
   const size_t start = impl_->shape.payload_start;
-  THROW_CHECK_LE(impl_->shape.bytes,
-                 std::numeric_limits<size_t>::max() - start);
-  const size_t mapped_bytes = start + impl_->shape.bytes;
+  const size_t mapped_bytes = MappingExtentBytes(impl_->shape);
   impl_->mapped_bytes = MappingPageCharge(mapped_bytes);
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   namespace bip = boost::interprocess;
   THROW_CHECK_LE(
       mapped_bytes,
@@ -289,7 +322,7 @@ ImmutableMapRegion::ImmutableMapRegion(
   impl_->row_begin = row_begin;
   impl_->row_count = row_count;
   impl_->region_count = 3;
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
   namespace bip = boost::interprocess;
   for (size_t channel = 0; channel < 3; ++channel) {
     THROW_CHECK_GE(impl_->source->impl_->file_bytes,
@@ -409,33 +442,7 @@ template <>
 void Mat<float>::Read(const std::filesystem::path& path) {
   std::ifstream file(path, std::ios::binary);
   THROW_CHECK_FILE_OPEN(file, path);
-  SetFullPrecTextStream(file);
-
-  std::string header;
-  header.reserve(kMaxHeaderBytes);
-  size_t num_delimiters = 0;
-  while (header.size() < kMaxHeaderBytes && num_delimiters < 3) {
-    char c = 0;
-    file.get(c);
-    THROW_CHECK(file) << path;
-    header.push_back(c);
-    if (c == '&') {
-      ++num_delimiters;
-    }
-  }
-  THROW_CHECK_EQ(num_delimiters, 3) << path;
-
-  std::istringstream header_stream(header);
-  size_t width = 0, height = 0, depth = 0;
-  char sx = 0, sy = 0, sz = 0;
-  ReadUnsignedDimension(header_stream, width) >> sx;
-  ReadUnsignedDimension(header_stream, height) >> sy;
-  ReadUnsignedDimension(header_stream, depth) >> sz;
-  THROW_CHECK(header_stream && sx == '&' && sy == '&' && sz == '&') << path;
-  THROW_CHECK_EQ(header_stream.peek(), std::char_traits<char>::eof()) << path;
-  THROW_CHECK_GT(width, 0) << path;
-  THROW_CHECK_GT(height, 0) << path;
-  THROW_CHECK_GT(depth, 0) << path;
+  const auto [width, height, depth] = ReadFloatMapHeader(file, path);
   THROW_CHECK_LE(width, std::numeric_limits<size_t>::max() / height) << path;
   const size_t pixels = width * height;
   THROW_CHECK_LE(pixels, std::numeric_limits<size_t>::max() / depth) << path;

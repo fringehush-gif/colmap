@@ -24,6 +24,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -530,6 +531,12 @@ struct StereoFusionExactDepthTestPeer {
   }
   static BoundedWorkspace& Cache(StereoFusion& fusion) {
     return *fusion.bounded_workspace_;
+  }
+  static bool HasPackedResident(const StereoFusion& fusion) {
+    return std::any_of(
+        fusion.neighborhood_data_.begin(),
+        fusion.neighborhood_data_.end(),
+        [](const auto* data) { return data && data->sparse_depth; });
   }
   static void PrepareNormalWindow(StereoFusion& fusion, size_t root = 0) {
     auto& cache = *fusion.bounded_workspace_;
@@ -1212,6 +1219,27 @@ TEST(StereoFusionOptions, BoundedDiagnosticPolicy) {
   EXPECT_TRUE(options.Check());
 }
 
+TEST(StereoFusionOptions, ExperimentalDepthCompactionPolicy) {
+  StereoFusionOptions options;
+  EXPECT_FALSE(options.bounded_cache_compact_depth);
+  options.bounded_cache_compact_depth = true;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 2;
+  EXPECT_TRUE(options.Check());
+  options.bounded_cache_neighborhood = false;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 0;
+  EXPECT_FALSE(options.Check());
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_exact_depth = true;
+  EXPECT_FALSE(options.Check());
+}
+
 TEST(StereoFusion, MappedNormalRingIndexReplacementAndClear) {
   internal::MappedNormalRingIndex index;
   index.Reset(3, 2);
@@ -1360,8 +1388,8 @@ TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
   ASSERT_EQ(serial.GetFusedPoints().size(), 30 * 40);
   ASSERT_EQ(serial.GetFusedPointsVisibility().size(), 30 * 40);
   const auto expected = capture(serial);
-  // Cached inputs retain nearest-neighbor sampling rather than the resident
-  // unit-grid shortcut. Compare all pixel attributes and visibility exactly.
+  // Compare resident and cached sampling, including every pixel attribute
+  // and visibility entry.
   options.use_cache = true;
   StereoFusion cached(options, root, "COLMAP", "", "geometric");
   cached.Run();
@@ -1643,6 +1671,52 @@ TEST(StereoFusion, Integration) {
       EXPECT_EQ(a.b, b.b);
     }
   };
+
+  // A reader may start another fusion while a worker is inside Fuse. The
+  // second Run uses its own ThreadPool, so its Fuse must have another TLS
+  // scratch even though the outer worker is still waiting in the callback.
+  {
+    const auto image_path = temp_dir / "images" / image_names.front();
+    Bitmap bitmap;
+    ASSERT_TRUE(bitmap.Read(image_path, true));
+    auto cached_options = options;
+    cached_options.bounded_cache = false;
+    cached_options.use_cache = true;
+    cached_options.num_threads = 1;
+    ASSERT_TRUE(cached_options.Check());
+    std::atomic<int> callback_calls{0};
+    std::thread::id outer_worker;
+    std::thread::id nested_worker;
+    std::unique_ptr<StereoFusion> nested;
+    auto reader = ScopedBitmapReader::Create(
+        {image_path},
+        [&](const std::filesystem::path&, bool as_rgb, bool linear,
+            Bitmap* target) {
+          EXPECT_TRUE(as_rgb);
+          EXPECT_FALSE(linear);
+          const int call = ++callback_calls;
+          if (call == 1) {
+            outer_worker = std::this_thread::get_id();
+            nested = std::make_unique<StereoFusion>(
+                cached_options, temp_dir, "COLMAP", "", "geometric");
+            nested->Run();
+          } else if (call == 2) {
+            nested_worker = std::this_thread::get_id();
+          }
+          *target = bitmap;
+          return true;
+        },
+        {{30, 20}});
+    StereoFusion outer(cached_options, temp_dir, "COLMAP", "", "geometric");
+    outer.Run();
+    ASSERT_TRUE(nested);
+    EXPECT_GE(callback_calls.load(), 2);
+    EXPECT_NE(outer_worker, std::this_thread::get_id());
+    EXPECT_NE(outer_worker, nested_worker);
+    expect_same_fusion(*nested, "nested_reader_fusion");
+    expect_same_fusion(outer, "outer_reader_fusion");
+    reader->Close();
+  }
 
   options.bounded_cache_neighborhood = true;
   options.cache_size = 50000.0 / (1024.0 * 1024.0 * 1024.0);
@@ -2623,6 +2697,167 @@ std::filesystem::path CreateTwoViewNormalDecisionFixture() {
   return root;
 }
 
+TEST(StereoFusion, SparseDepthCancellationFailureAndReuse) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  const auto names = ReadTextFileLines(root / "stereo/fusion.cfg");
+  for (const auto& name : names) {
+    Mat<float> depth(30, 20, 1);
+    depth.Fill(0.0f);
+    depth.Set(10, 15, 0, 5.0f);
+    depth.Write(root / "stereo/depth_maps" / (name + ".geometric.bin"));
+  }
+  StereoFusionOptions options;
+  options.num_threads = 1;
+  options.use_cache = false;
+  options.min_num_pixels = options.max_num_pixels = 2;
+  StereoFusion reference(options, root, "COLMAP", "", "geometric");
+  reference.Run();
+  ASSERT_EQ(reference.GetFusedPoints().size(), 1);
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = 4;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 4;
+  options.cache_size = 20000.0 / (1ULL << 30);
+  {
+    StereoFusion uncompressed(options, root, "COLMAP", "", "geometric");
+    uncompressed.Run();
+    EXPECT_FALSE(
+        StereoFusionExactDepthTestPeer::Cache(uncompressed).UsesCompactDepth());
+    EXPECT_EQ(uncompressed.GetFusedPointsVisibility(),
+              reference.GetFusedPointsVisibility());
+  }
+  options.bounded_cache_compact_depth = true;
+  StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+  bool cancelled = false;
+  fusion.SetCheckIfStoppedFunc([&] {
+    const auto stats = fusion.GetBoundedCacheStats();
+    cancelled |=
+        stats && stats->component_loads[1] > 0 && stats->reserved_bytes == 0;
+    return cancelled;
+  });
+  fusion.Run();
+  EXPECT_TRUE(cancelled);
+  EXPECT_TRUE(fusion.GetFusedPoints().empty());
+  ASSERT_TRUE(fusion.GetBoundedCacheStats());
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  const auto path = root / "stereo/normal_maps" / (names[0] + ".geometric.bin");
+  Mat<float> saved;
+  saved.Read(path);
+  bool injected = false;
+  fusion.SetCheckIfStoppedFunc([&] {
+    // Run replaces the old workspace before this callback. Windows cannot
+    // truncate inputs while that workspace still retains their mappings.
+    if (!injected) {
+      std::ofstream file;
+      file.exceptions(std::ios::failbit | std::ios::badbit);
+      file.open(path, std::ios::binary | std::ios::trunc);
+      file << "30&20&3&";
+      file.close();
+      injected = true;
+    }
+    return false;
+  });
+  EXPECT_THROW(fusion.Run(), std::exception);
+  ASSERT_TRUE(injected);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  saved.Write(path);
+  bool packed_observed = false;
+  fusion.SetCheckIfStoppedFunc([&] {
+    packed_observed |=
+        StereoFusionExactDepthTestPeer::HasPackedResident(fusion);
+    return false;
+  });
+  for (int repeat = 0; repeat < 2; ++repeat) {
+    packed_observed = false;
+    fusion.Run();
+    EXPECT_TRUE(packed_observed);
+    ASSERT_EQ(fusion.GetFusedPoints().size(), 1);
+    EXPECT_EQ(fusion.GetFusedPointsVisibility(),
+              reference.GetFusedPointsVisibility());
+    const auto& actual = fusion.GetFusedPoints()[0];
+    const auto& expected = reference.GetFusedPoints()[0];
+    EXPECT_EQ(actual.x, expected.x);
+    EXPECT_EQ(actual.y, expected.y);
+    EXPECT_EQ(actual.z, expected.z);
+    EXPECT_EQ(actual.nx, expected.nx);
+    EXPECT_EQ(actual.ny, expected.ny);
+    EXPECT_EQ(actual.nz, expected.nz);
+    EXPECT_EQ(actual.r, expected.r);
+    EXPECT_EQ(actual.g, expected.g);
+    EXPECT_EQ(actual.b, expected.b);
+    EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+  }
+}
+
+TEST(StereoFusion, SparseDepthKeepsWholeViewFallbackWithoutTileHeadroom) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  Workspace::Options workspace_options;
+  workspace_options.workspace_path = root;
+  workspace_options.workspace_format = "COLMAP";
+  workspace_options.input_type = "geometric";
+  BoundedWorkspace estimates(workspace_options);
+  using Component = BoundedWorkspace::Component;
+  size_t total = 0, extra = 0;
+  for (const int view : {0, 1}) {
+    const size_t resident = estimates.GetResidentBytesEstimate(view);
+    total += resident;
+    extra = std::max(extra, estimates.GetLoadReservationBytes(view) - resident);
+  }
+  StereoFusionOptions options;
+  options.num_threads = 24;
+  options.min_num_pixels = options.max_num_pixels = 2;
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_compact_depth = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = 4;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 2;
+  const size_t capacity = total + extra + 64;
+  options.cache_size = static_cast<double>(capacity) / (1ULL << 30);
+  ASSERT_GT(estimates.GetLoadReservationBytes(0, Component::kDepth),
+            capacity / 24);
+  StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+  ASSERT_NO_THROW(fusion.Run());
+  EXPECT_FALSE(fusion.GetFusedPoints().empty());
+  ASSERT_TRUE(fusion.GetBoundedCacheStats());
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->component_loads[0], 2);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->normal_tile_loads, 0);
+  EXPECT_EQ(fusion.GetBoundedCacheStats()->reserved_bytes, 0);
+}
+
+TEST(StereoFusion, SparseDepthKeepsRawPartialFallbackAtTightAdmission) {
+  if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  StereoFusionOptions options;
+  options.num_threads = 2;
+  options.min_num_pixels = options.max_num_pixels = 2;
+  options.bounded_cache = options.bounded_cache_components = true;
+  options.bounded_cache_neighborhood = true;
+  options.bounded_cache_compact_depth = true;
+  options.bounded_cache_normal_tile_size = 7;
+  options.bounded_cache_normal_tile_slots = 4;
+  options.bounded_cache_normal_mapped_bytes = 1 << 20;
+  options.bounded_cache_normal_mapped_files = 2;
+  options.cache_size = 14000.0 / (1ULL << 30);
+  StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+  ASSERT_NO_THROW(fusion.Run());
+  EXPECT_FALSE(fusion.GetFusedPoints().empty());
+  EXPECT_FALSE(
+      StereoFusionExactDepthTestPeer::Cache(fusion).UsesCompactDepth());
+  const auto stats = fusion.GetBoundedCacheStats();
+  ASSERT_TRUE(stats);
+  // The last remaining view fits whole after the initial partial root.
+  EXPECT_EQ(stats->component_loads[0], 1);
+  EXPECT_GT(stats->component_loads[1], 0);
+  EXPECT_EQ(stats->reserved_bytes, 0);
+  EXPECT_LE(stats->peak_charged_bytes, 14000);
+}
+
 TEST(StereoFusion, ZeroMinimumSkipsEmptySamples) {
   for (const bool valid_sample : {false, true}) {
     SCOPED_TRACE(valid_sample);
@@ -3142,6 +3377,106 @@ TEST(StereoFusion, RetiredEagerInputsSurviveInterruptionAndRepeat) {
   }
 }
 
+TEST(StereoFusion, EmptyModelProducesNoOutput) {
+  const auto root = CreateTestDir();
+  CreateDirIfNotExists(root / "sparse");
+  CreateDirIfNotExists(root / "images");
+  CreateDirIfNotExists(root / "stereo");
+  Reconstruction reconstruction;
+  reconstruction.Write(root / "sparse");
+  {
+    std::ofstream config(root / "stereo/fusion.cfg");
+    ASSERT_TRUE(config.is_open());
+  }
+  for (const int mode : {0, 1, 2, 3}) {
+    SCOPED_TRACE(mode);
+    StereoFusionOptions options;
+    options.num_threads = 1;
+    options.use_cache = mode == 1;
+    options.bounded_cache = mode >= 2;
+    options.bounded_cache_components = mode == 3;
+    options.bounded_cache_neighborhood = mode == 3;
+    StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+    ASSERT_NO_THROW(fusion.Run());
+    EXPECT_TRUE(fusion.GetFusedPoints().empty());
+    EXPECT_TRUE(fusion.GetFusedPointsVisibility().empty());
+  }
+}
+
+TEST(StereoFusion, ChangedRosterAfterCancellationSelectsOnlyCurrentRoots) {
+  const bool mapped_storage_supported = ImmutableMapRegion::Supported();
+  RecordProperty("mapped_storage_supported",
+                 mapped_storage_supported ? "true" : "false");
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  Model model;
+  model.Read(root, "COLMAP");
+  ASSERT_EQ(model.images.size(), 2);
+  const auto write_roster = [&](const std::vector<int>& image_indices) {
+    std::ofstream config(root / "stereo/fusion.cfg");
+    for (const int image_idx : image_indices) {
+      config << model.GetImageName(image_idx) << '\n';
+    }
+    config.close();
+    ASSERT_TRUE(config);
+  };
+
+  for (const std::string mode :
+       {"eager", "lru", "bounded", "components", "mapped"}) {
+    SCOPED_TRACE(mode);
+    if (mode == "mapped" && !mapped_storage_supported) continue;
+    StereoFusionOptions options;
+    options.num_threads = 1;
+    options.min_num_pixels = options.max_num_pixels = 1;
+    options.cache_size = 1.0 / 1024;
+    options.use_cache = mode == "lru";
+    options.bounded_cache =
+        mode == "bounded" || mode == "components" || mode == "mapped";
+    options.bounded_cache_components = mode == "components" || mode == "mapped";
+    options.bounded_cache_neighborhood = mode == "components";
+    options.bounded_cache_normal_tile_size = mode == "components" ? 4 : 0;
+    if (mode == "components" || mode == "mapped") {
+      options.bounded_cache_normal_mapped_bytes = 1 << 20;
+      options.bounded_cache_normal_mapped_files = 2;
+    }
+    StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+    write_roster({0, 1});
+    int stop_checks = 0;
+    fusion.SetCheckIfStoppedFunc([&] { return ++stop_checks == 2; });
+    fusion.Run();
+    ASSERT_EQ(stop_checks, 2);
+    ASSERT_TRUE(fusion.GetFusedPoints().empty());
+
+    // Cancellation has initialized both per-image rasters without consuming
+    // either root. Reusing that state must not admit a now-excluded image.
+    write_roster({1});
+    fusion.SetCheckIfStoppedFunc([] { return false; });
+    ASSERT_NO_THROW(fusion.Run());
+    EXPECT_EQ(fusion.GetFusedPoints().size(), 600);
+    ASSERT_EQ(fusion.GetFusedPointsVisibility().size(), 600);
+    for (const auto& visibility : fusion.GetFusedPointsVisibility()) {
+      EXPECT_EQ(visibility, (std::vector<int>{1}));
+    }
+
+    write_roster({});
+    ASSERT_NO_THROW(fusion.Run());
+    EXPECT_TRUE(fusion.GetFusedPoints().empty());
+    EXPECT_TRUE(fusion.GetFusedPointsVisibility().empty());
+
+    write_roster({0, 1});
+    ASSERT_NO_THROW(fusion.Run());
+    EXPECT_EQ(fusion.GetFusedPoints().size(), 1200);
+    ASSERT_EQ(fusion.GetFusedPointsVisibility().size(), 1200);
+    std::vector<size_t> coverage(2, 0);
+    for (const auto& visibility : fusion.GetFusedPointsVisibility()) {
+      ASSERT_EQ(visibility.size(), 1);
+      ASSERT_GE(visibility.front(), 0);
+      ASSERT_LT(visibility.front(), 2);
+      ++coverage[visibility.front()];
+    }
+    EXPECT_EQ(coverage, (std::vector<size_t>{600, 600}));
+  }
+}
+
 TEST(StereoFusion, RejectedRootsDoNotLeakVisibility) {
   const auto root = CreateTwoViewNormalDecisionFixture();
   for (const int num_samples : {3, 1, 2}) {
@@ -3177,6 +3512,129 @@ TEST(StereoFusion, RejectedRootsDoNotLeakVisibility) {
       }
     }
     EXPECT_EQ(counts, (std::vector<size_t>{600, 600}));
+  }
+}
+
+TEST(StereoFusion, MixedResolutionColorsFollowPixelCenters) {
+  const auto root = CreateTestDir();
+  for (const auto* dir : {"sparse",
+                          "images",
+                          "stereo",
+                          "stereo/depth_maps",
+                          "stereo/normal_maps"}) {
+    CreateDirIfNotExists(root / dir);
+  }
+  colmap::Camera camera;
+  camera.camera_id = 1;
+  camera.model_id = CameraModelId::kPinhole;
+  camera.width = 10;
+  camera.height = 5;
+  camera.params = {8.0, 11.0, 4.3, 2.2};
+  Reconstruction reconstruction;
+  reconstruction.AddCameraWithTrivialRig(camera);
+  colmap::Image image;
+  image.SetImageId(1);
+  image.SetCameraId(1);
+  image.SetName("view.png");
+  reconstruction.AddImageWithTrivialFrame(image, Rigid3d());
+  reconstruction.Write(root / "sparse");
+  Bitmap bitmap(10, 5, true);
+  for (int row = 0; row < 5; ++row) {
+    for (int col = 0; col < 10; ++col) {
+      bitmap.SetPixel(
+          col, row, BitmapColor<uint8_t>(20 * col, 30 * row, col + row));
+    }
+  }
+  ASSERT_TRUE(bitmap.Write(root / "images/view.png"));
+  {
+    std::ofstream config(root / "stereo/fusion.cfg");
+    config << "view.png\n";
+  }
+  struct Grid {
+    std::vector<int> source_columns;
+    std::vector<int> source_rows;
+  };
+  // Hand-derived nearest source indices. The 7x3 raster has unequal scales;
+  // 1x1 and 5x1 include exact halfway samples, including a non-binary ratio.
+  // Keeping every grid cell in the expected set makes lost coverage fail too.
+  const std::vector<Grid> grids = {
+      {{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, {0, 1, 2, 3, 4}},
+      {{0, 2, 3, 5, 6, 7, 9}, {0, 2, 4}},
+      {{5}, {2}},
+      {{1, 3, 5, 7, 9}, {2}},
+  };
+  for (const auto& grid : grids) {
+    const int width = grid.source_columns.size();
+    const int height = grid.source_rows.size();
+    SCOPED_TRACE(::testing::Message() << width << "x" << height);
+    Mat<float> depth(width, height, 1);
+    depth.Fill(5.0f);
+    depth.Write(root / "stereo/depth_maps/view.png.geometric.bin");
+    Mat<float> normal(width, height, 3);
+    normal.Fill(0.0f);
+    for (int row = 0; row < height; ++row) {
+      for (int col = 0; col < width; ++col) normal.Set(row, col, 2, -1.0f);
+    }
+    normal.Write(root / "stereo/normal_maps/view.png.geometric.bin");
+    for (const std::string mode : {"eager",
+                                   "lru",
+                                   "bounded",
+                                   "components",
+                                   "compact",
+                                   "compact_neighborhood"}) {
+      SCOPED_TRACE(mode);
+      StereoFusionOptions options;
+      options.num_threads = 1;
+      options.min_num_pixels = 1;
+      options.max_num_pixels = 1;
+      options.use_cache = mode == "lru";
+      options.bounded_cache = mode != "eager" && mode != "lru";
+      options.bounded_cache_components =
+          mode == "components" || mode == "compact_neighborhood";
+      options.bounded_cache_compact_rgb =
+          mode == "compact" || mode == "compact_neighborhood";
+      options.bounded_cache_neighborhood = mode == "compact_neighborhood";
+      options.cache_size = 1.0 / 1024;
+      StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+      fusion.Run();
+      const auto& points = fusion.GetFusedPoints();
+      const auto& visibility = fusion.GetFusedPointsVisibility();
+      ASSERT_EQ(points.size(), width * height);
+      ASSERT_EQ(visibility.size(), points.size());
+      std::vector<int> coverage(width * height, 0);
+      for (size_t index = 0; index < points.size(); ++index) {
+        const auto& point = points[index];
+        ASSERT_TRUE(std::isfinite(point.x));
+        ASSERT_TRUE(std::isfinite(point.y));
+        ASSERT_TRUE(std::isfinite(point.z));
+        ASSERT_GT(point.z, 0.0f);
+        // Project published XYZ with the original camera, independent of
+        // Fusion's float K and the integer rescaling helper.
+        const int col =
+            std::lround((8.0 * point.x / point.z + 4.3) * width / 10 - 0.5);
+        const int row =
+            std::lround((11.0 * point.y / point.z + 2.2) * height / 5 - 0.5);
+        ASSERT_GE(col, 0);
+        ASSERT_LT(col, width);
+        ASSERT_GE(row, 0);
+        ASSERT_LT(row, height);
+        ++coverage[row * width + col];
+        EXPECT_NEAR(point.x, 5 * ((col + 0.5) * 10 / width - 4.3) / 8, 2e-6);
+        EXPECT_NEAR(point.y, 5 * ((row + 0.5) * 5 / height - 2.2) / 11, 2e-6);
+        EXPECT_FLOAT_EQ(point.z, 5.0f);
+        EXPECT_FLOAT_EQ(point.nx, 0.0f);
+        EXPECT_FLOAT_EQ(point.ny, 0.0f);
+        EXPECT_FLOAT_EQ(point.nz, -1.0f);
+        const auto expected =
+            bitmap.GetPixel(grid.source_columns[col], grid.source_rows[row]);
+        ASSERT_TRUE(expected);
+        EXPECT_EQ(point.r, expected->r);
+        EXPECT_EQ(point.g, expected->g);
+        EXPECT_EQ(point.b, expected->b);
+        EXPECT_EQ(visibility[index], std::vector<int>{0});
+      }
+      EXPECT_EQ(coverage, std::vector<int>(width * height, 1));
+    }
   }
 }
 

@@ -12,6 +12,7 @@
 #include "colmap/controllers/undistorters.h"
 #include "colmap/estimators/view_graph_calibration.h"
 #include "colmap/feature/aliked.h"
+#include "colmap/feature/flexglue.h"
 #include "colmap/feature/loma.h"
 #include "colmap/feature/sift.h"
 #if defined(COLMAP_MVS_ENABLED)
@@ -41,9 +42,6 @@ AutomaticReconstructionController::AutomaticReconstructionController(
   option_manager_.AddAllOptions();
 
   *option_manager_.image_path = options_.image_path;
-  option_manager_.image_reader->image_names = options_.image_names;
-  option_manager_.mapper->image_names = {options_.image_names.begin(),
-                                         options_.image_names.end()};
   *option_manager_.database_path = options_.workspace_path / "database.db";
 
   if (options_.data_type == DataType::VIDEO) {
@@ -74,6 +72,14 @@ AutomaticReconstructionController::AutomaticReconstructionController(
   } else if (options_.feature == Feature::LOMA128) {
     option_manager_.feature_extraction->type = FeatureExtractorType::LOMA_B128;
     option_manager_.feature_matching->type = FeatureMatcherType::LOMA_B128;
+  } else if (options_.feature == Feature::FLEXGLUE) {
+    // FlexGlue only uses the keypoint locations. Use the same DaD keypoints as
+    // the LoMa presets, with the lightweight descriptor (unused by FlexGlue).
+    option_manager_.feature_extraction->type = FeatureExtractorType::LOMA_B128;
+    option_manager_.feature_matching->type = FeatureMatcherType::FLEXGLUE;
+    // FlexGlue reads the image pixels during matching.
+    option_manager_.feature_matching->flexglue->image_path =
+        options_.image_path.string();
   }
 
   // Apply quality preset (scales max_image_size relative to extractor default).
@@ -86,6 +92,12 @@ AutomaticReconstructionController::AutomaticReconstructionController(
   } else if (options_.quality == Quality::EXTREME) {
     option_manager_.ModifyForExtremeQuality();
   }
+
+  // Apply the requested image scope after presets, which can reset options.
+  option_manager_.image_reader->image_names = options_.image_names;
+  option_manager_.global_mapper->image_names = options_.image_names;
+  option_manager_.mapper->image_names = {options_.image_names.begin(),
+                                         options_.image_names.end()};
 
   // Must come after quality, which sets the number of SIFT features.
   if (options_.max_num_features > 0) {
@@ -100,8 +112,9 @@ AutomaticReconstructionController::AutomaticReconstructionController(
   // Feature-specific overrides that must come after quality.
   if (options_.feature == Feature::ALIKED ||
       options_.feature == Feature::LOMA ||
-      options_.feature == Feature::LOMA128) {
-    // Guided matching is not supported for ALIKED/LoMa
+      options_.feature == Feature::LOMA128 ||
+      options_.feature == Feature::FLEXGLUE) {
+    // Guided matching is not supported for ALIKED/LoMa/FlexGlue
     option_manager_.feature_matching->guided_matching = false;
   }
   option_manager_.feature_extraction->num_threads = options_.num_threads;
@@ -520,8 +533,8 @@ void AutomaticReconstructionController::RunDenseMapper() {
 
     if (!ExistsFile(meshing_path)) {
       if (options_.mesher == Mesher::POISSON) {
-        mvs::PoissonMeshing(
-            *option_manager_.poisson_meshing, fused_path, meshing_path);
+        THROW_CHECK(mvs::PoissonMeshing(
+            *option_manager_.poisson_meshing, fused_path, meshing_path));
       } else if (options_.mesher == Mesher::DELAUNAY) {
 #if defined(COLMAP_CGAL_ENABLED)
         mvs::DenseDelaunayMeshing(
