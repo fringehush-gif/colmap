@@ -14,6 +14,7 @@
 #include "colmap/util/ply.h"
 #include "colmap/util/threading.h"
 
+#include <exception>
 #include <set>
 #include <type_traits>
 #include <utility>
@@ -1204,35 +1205,47 @@ void Reconstruction::ExtractColorsForAllImages(
       effective_num_threads);
   ThreadPool thread_pool(effective_num_threads);
 
-  for (const auto& image_id : RegImageIds()) {
-    thread_pool.AddTask([&, image_id]() {
-      const class Image& image = Image(image_id);
-      const auto image_path = path / image.Name();
+  try {
+    for (const auto& image_id : RegImageIds()) {
+      thread_pool.AddTask([&, image_id]() {
+        const class Image& image = Image(image_id);
+        const auto image_path = path / image.Name();
 
-      Bitmap bitmap;
-      if (!bitmap.Read(image_path, /*as_rgb=*/true)) {
-        LOG(WARNING) << "Could not read image " << image.Name() << " at path "
-                     << image_path;
-        return;
-      }
+        Bitmap bitmap;
+        if (!bitmap.Read(image_path, /*as_rgb=*/true)) {
+          LOG(WARNING) << "Could not read image " << image.Name() << " at path "
+                       << image_path;
+          return;
+        }
 
-      auto& data = thread_data[thread_pool.GetThreadIndex()];
-      for (const Point2D& point2D : image.Points2D()) {
-        if (point2D.HasPoint3D()) {
-          // COLMAP assumes that the upper left pixel center is (0.5, 0.5).
-          if (const auto color = bitmap.InterpolateBilinear(
-                  point2D.xy(0) - 0.5, point2D.xy(1) - 0.5)) {
-            auto& color_data = data[point2D.point3D_id];
-            color_data.sum(0) += color->r;
-            color_data.sum(1) += color->g;
-            color_data.sum(2) += color->b;
-            ++color_data.count;
+        auto& data = thread_data[thread_pool.GetThreadIndex()];
+        for (const Point2D& point2D : image.Points2D()) {
+          if (point2D.HasPoint3D()) {
+            // COLMAP assumes that the upper left pixel center is (0.5, 0.5).
+            if (const auto color = bitmap.InterpolateBilinear(
+                    point2D.xy(0) - 0.5, point2D.xy(1) - 0.5)) {
+              auto& color_data = data[point2D.point3D_id];
+              color_data.sum(0) += color->r;
+              color_data.sum(1) += color->g;
+              color_data.sum(2) += color->b;
+              ++color_data.count;
+            }
           }
         }
-      }
-    });
+      });
+    }
+    thread_pool.Wait();
+  } catch (...) {
+    const auto error = std::current_exception();
+    // Discard pending work and join active workers while accumulators live.
+    try {
+      thread_pool.Stop();
+    } catch (...) {
+      // Stop consumes worker errors; preserve the original failure.
+      std::rethrow_exception(error);
+    }
+    std::rethrow_exception(error);
   }
-  thread_pool.Wait();
 
   // Merge per-thread results.
   FlatHashMap<point3D_t, ColorData> merged_data;
