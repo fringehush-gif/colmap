@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <queue>
+#include <utility>
 #include <variant>
 
 #include <Eigen/Core>
@@ -953,34 +954,25 @@ void ApplyGlobalColorCorrection(
 }
 
 void InpaintAtlas(Bitmap* atlas,
-                  const std::vector<bool>& baked_mask,
+                  std::vector<bool> visited,
                   const int inpaint_radius) {
   const int aw = atlas->Width();
   const int ah = atlas->Height();
 
   if (inpaint_radius <= 0 || aw == 0 || ah == 0) return;
 
-  const size_t num_pixels = static_cast<size_t>(aw) * ah;
-
-  std::vector<int> dist(num_pixels, std::numeric_limits<int>::max());
-  std::vector<BitmapColor<uint8_t>> fill_colors(num_pixels);
   std::queue<std::pair<int, int>> queue;
 
   for (int y = 0; y < ah; ++y) {
     for (int x = 0; x < aw; ++x) {
       const size_t idx = static_cast<size_t>(y) * aw + x;
-      if (baked_mask[idx]) {
-        dist[idx] = 0;
-        fill_colors[idx] =
-            atlas->GetPixel(x, y).value_or(BitmapColor<uint8_t>(0));
-        // Interior baked pixels cannot improve any neighbor's distance.
-        // Keep boundary seeds in their original scan order for equal distances.
-        if ((x > 0 && !baked_mask[idx - 1]) ||
-            (x + 1 < aw && !baked_mask[idx + 1]) ||
-            (y > 0 && !baked_mask[idx - aw]) ||
-            (y + 1 < ah && !baked_mask[idx + aw])) {
-          queue.push({x, y});
-        }
+      // Interior baked pixels cannot improve any neighbor's distance.
+      // Keep boundary seeds in their original scan order for equal distances.
+      if (visited[idx] &&
+          ((x > 0 && !visited[idx - 1]) || (x + 1 < aw && !visited[idx + 1]) ||
+           (y > 0 && !visited[idx - aw]) ||
+           (y + 1 < ah && !visited[idx + aw]))) {
+        queue.push({x, y});
       }
     }
   }
@@ -988,30 +980,25 @@ void InpaintAtlas(Bitmap* atlas,
   constexpr std::array<int, 4> kDx = {-1, 1, 0, 0};
   constexpr std::array<int, 4> kDy = {0, 0, -1, 1};
 
-  while (!queue.empty()) {
-    const auto [cx, cy] = queue.front();
-    queue.pop();
-    const size_t cidx = static_cast<size_t>(cy) * aw + cx;
-    const int cdist = dist[cidx];
-    if (cdist >= inpaint_radius) continue;
-
-    for (int d = 0; d < 4; ++d) {
-      const int nx = cx + kDx[d];
-      const int ny = cy + kDy[d];
-      if (nx < 0 || nx >= aw || ny < 0 || ny >= ah) continue;
-      const size_t nidx = static_cast<size_t>(ny) * aw + nx;
-      if (dist[nidx] <= cdist + 1) continue;
-      dist[nidx] = cdist + 1;
-      fill_colors[nidx] = fill_colors[cidx];
-      queue.push({nx, ny});
-    }
-  }
-
-  for (int y = 0; y < ah; ++y) {
-    for (int x = 0; x < aw; ++x) {
-      const size_t idx = static_cast<size_t>(y) * aw + x;
-      if (!baked_mask[idx] && dist[idx] <= inpaint_radius) {
-        atlas->SetPixel(x, y, fill_colors[idx]);
+  // FIFO layers preserve shortest distances and the first seed at equal
+  // distance.
+  for (int distance = 0; distance < inpaint_radius && !queue.empty();
+       ++distance) {
+    const size_t layer_size = queue.size();
+    for (size_t i = 0; i < layer_size; ++i) {
+      const auto [cx, cy] = queue.front();
+      queue.pop();
+      const auto color =
+          atlas->GetPixel(cx, cy).value_or(BitmapColor<uint8_t>(0));
+      for (int d = 0; d < 4; ++d) {
+        const int nx = cx + kDx[d];
+        const int ny = cy + kDy[d];
+        if (nx < 0 || nx >= aw || ny < 0 || ny >= ah) continue;
+        const size_t nidx = static_cast<size_t>(ny) * aw + nx;
+        if (visited[nidx]) continue;
+        visited[nidx] = true;
+        atlas->SetPixel(nx, ny, color);
+        queue.push({nx, ny});
       }
     }
   }
@@ -1148,7 +1135,8 @@ MeshTextureMappingResult MeshTextureMapping(
 
   if (options.inpaint_radius > 0) {
     LOG(INFO) << "Inpainting atlas...";
-    InpaintAtlas(&result.texture_atlas, baked_mask, options.inpaint_radius);
+    InpaintAtlas(
+        &result.texture_atlas, std::move(baked_mask), options.inpaint_radius);
   }
 
   LOG(INFO) << "Surface texture mapping complete";
