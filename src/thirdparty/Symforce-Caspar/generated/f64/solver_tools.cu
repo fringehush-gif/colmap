@@ -6,6 +6,9 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
+#include <stdexcept>
+#include <string>
+
 #include "solver_tools.h"
 
 namespace caspar {
@@ -38,8 +41,12 @@ T Sum(const T* start, const T* end, T* target_ptr, T* scratch_ptr, const bool co
 
 template <typename T>
 T ReadCuMem(const T* const data) {
-  T result;
-  cudaMemcpy(&result, data, sizeof(T), cudaMemcpyDeviceToHost);
+  T result{};
+  const cudaError_t status = cudaMemcpy(&result, data, sizeof(T), cudaMemcpyDeviceToHost);
+  if (status != cudaSuccess) {
+    throw std::runtime_error(std::string("ReadCuMem cudaMemcpy failed: ") +
+                             cudaGetErrorString(status));
+  }
   return result;
 }
 

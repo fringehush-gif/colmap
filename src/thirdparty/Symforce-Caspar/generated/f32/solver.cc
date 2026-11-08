@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
+#include <string>
 #include <stdexcept>
 
 #include "caspar_mappings.h"
@@ -249,6 +251,13 @@
 #include "kernel_simple_radial_split_fixed_principal_point_score.h"
 
 namespace {
+
+void CheckReadbackCuda(cudaError_t status, const char* operation) {
+  if (status != cudaSuccess) {
+    throw std::runtime_error(std::string(operation) +
+                             " failed: " + cudaGetErrorString(status));
+  }
+}
 
 void make_aligned(size_t &offset, size_t alignment_bytes) {
   offset = ((offset + alignment_bytes - 1) / alignment_bytes) * alignment_bytes;
@@ -4971,31 +4980,65 @@ void GraphSolver::SetPinholeCalibNodesFromStackedDevice(const float *const data,
                               PinholeCalib_num_max_, offset, num);
 }
 
-void GraphSolver::GetPinholeCalibNodesToStackedHost(float *const data,
+void GraphSolver::GetPinholeCalibNodesToStackedHost(float* const data,
                                                     const size_t offset,
                                                     const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholeCalib_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholeCalib_num_");
+  if (offset > PinholeCalib_num_ || num > PinholeCalib_num_ - offset) {
+    throw std::runtime_error("PinholeCalib readback range exceeds node count");
   }
-  PinholeCalibCasparToStacked(nodes__PinholeCalib__storage_current_,
-                              marker__scratch_inout_, PinholeCalib_num_max_,
-                              offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 4 * num * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 4;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (PinholeCalib_num_max_ > limit || offset > limit || num > limit - 31 ||
+      kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "PinholeCalib readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholeCalibCasparToStacked(nodes__PinholeCalib__storage_current_,
+                                  marker__scratch_inout_,
+                                  PinholeCalib_num_max_,
+                                  offset,
+                                  num),
+      "PinholeCalibCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data,
+                               marker__scratch_inout_,
+                               kDimension * num * sizeof(float),
+                               cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
-void GraphSolver::GetPinholeCalibNodesToStackedDevice(float *const data,
+void GraphSolver::GetPinholeCalibNodesToStackedDevice(float* const data,
                                                       const size_t offset,
                                                       const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholeCalib_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholeCalib_num_");
+  if (offset > PinholeCalib_num_ || num > PinholeCalib_num_ - offset) {
+    throw std::runtime_error("PinholeCalib readback range exceeds node count");
   }
-  PinholeCalibCasparToStacked(nodes__PinholeCalib__storage_current_, data,
-                              PinholeCalib_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 4;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (PinholeCalib_num_max_ > limit || offset > limit || num > limit - 31 ||
+      kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "PinholeCalib readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholeCalibCasparToStacked(nodes__PinholeCalib__storage_current_,
+                                  data,
+                                  PinholeCalib_num_max_,
+                                  offset,
+                                  num),
+      "PinholeCalibCasparToStacked");
 }
 
 void GraphSolver::SetPinholeFocalNum(const size_t num) {
@@ -5033,31 +5076,65 @@ void GraphSolver::SetPinholeFocalNodesFromStackedDevice(const float *const data,
                               PinholeFocal_num_max_, offset, num);
 }
 
-void GraphSolver::GetPinholeFocalNodesToStackedHost(float *const data,
+void GraphSolver::GetPinholeFocalNodesToStackedHost(float* const data,
                                                     const size_t offset,
                                                     const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholeFocal_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholeFocal_num_");
+  if (offset > PinholeFocal_num_ || num > PinholeFocal_num_ - offset) {
+    throw std::runtime_error("PinholeFocal readback range exceeds node count");
   }
-  PinholeFocalCasparToStacked(nodes__PinholeFocal__storage_current_,
-                              marker__scratch_inout_, PinholeFocal_num_max_,
-                              offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 2 * num * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 2;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (PinholeFocal_num_max_ > limit || offset > limit || num > limit - 31 ||
+      kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "PinholeFocal readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholeFocalCasparToStacked(nodes__PinholeFocal__storage_current_,
+                                  marker__scratch_inout_,
+                                  PinholeFocal_num_max_,
+                                  offset,
+                                  num),
+      "PinholeFocalCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data,
+                               marker__scratch_inout_,
+                               kDimension * num * sizeof(float),
+                               cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
-void GraphSolver::GetPinholeFocalNodesToStackedDevice(float *const data,
+void GraphSolver::GetPinholeFocalNodesToStackedDevice(float* const data,
                                                       const size_t offset,
                                                       const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholeFocal_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholeFocal_num_");
+  if (offset > PinholeFocal_num_ || num > PinholeFocal_num_ - offset) {
+    throw std::runtime_error("PinholeFocal readback range exceeds node count");
   }
-  PinholeFocalCasparToStacked(nodes__PinholeFocal__storage_current_, data,
-                              PinholeFocal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 2;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (PinholeFocal_num_max_ > limit || offset > limit || num > limit - 31 ||
+      kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "PinholeFocal readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholeFocalCasparToStacked(nodes__PinholeFocal__storage_current_,
+                                  data,
+                                  PinholeFocal_num_max_,
+                                  offset,
+                                  num),
+      "PinholeFocalCasparToStacked");
 }
 
 void GraphSolver::SetPinholePoseNum(const size_t num) {
@@ -5095,31 +5172,65 @@ void GraphSolver::SetPinholePoseNodesFromStackedDevice(const float *const data,
                              PinholePose_num_max_, offset, num);
 }
 
-void GraphSolver::GetPinholePoseNodesToStackedHost(float *const data,
+void GraphSolver::GetPinholePoseNodesToStackedHost(float* const data,
                                                    const size_t offset,
                                                    const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholePose_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholePose_num_");
+  if (offset > PinholePose_num_ || num > PinholePose_num_ - offset) {
+    throw std::runtime_error("PinholePose readback range exceeds node count");
   }
-  PinholePoseCasparToStacked(nodes__PinholePose__storage_current_,
-                             marker__scratch_inout_, PinholePose_num_max_,
-                             offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 7 * num * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 7;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (PinholePose_num_max_ > limit || offset > limit || num > limit - 31 ||
+      kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "PinholePose readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholePoseCasparToStacked(nodes__PinholePose__storage_current_,
+                                 marker__scratch_inout_,
+                                 PinholePose_num_max_,
+                                 offset,
+                                 num),
+      "PinholePoseCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data,
+                               marker__scratch_inout_,
+                               kDimension * num * sizeof(float),
+                               cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
-void GraphSolver::GetPinholePoseNodesToStackedDevice(float *const data,
+void GraphSolver::GetPinholePoseNodesToStackedDevice(float* const data,
                                                      const size_t offset,
                                                      const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholePose_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholePose_num_");
+  if (offset > PinholePose_num_ || num > PinholePose_num_ - offset) {
+    throw std::runtime_error("PinholePose readback range exceeds node count");
   }
-  PinholePoseCasparToStacked(nodes__PinholePose__storage_current_, data,
-                             PinholePose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 7;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (PinholePose_num_max_ > limit || offset > limit || num > limit - 31 ||
+      kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "PinholePose readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholePoseCasparToStacked(nodes__PinholePose__storage_current_,
+                                 data,
+                                 PinholePose_num_max_,
+                                 offset,
+                                 num),
+      "PinholePoseCasparToStacked");
 }
 
 void GraphSolver::SetPinholePrincipalPointNum(const size_t num) {
@@ -5158,29 +5269,66 @@ void GraphSolver::SetPinholePrincipalPointNodesFromStackedDevice(
 }
 
 void GraphSolver::GetPinholePrincipalPointNodesToStackedHost(
-    float *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholePrincipalPoint_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholePrincipalPoint_num_");
+    float* const data, const size_t offset, const size_t num) {
+  if (offset > PinholePrincipalPoint_num_ ||
+      num > PinholePrincipalPoint_num_ - offset) {
+    throw std::runtime_error(
+        "PinholePrincipalPoint readback range exceeds node count");
   }
-  PinholePrincipalPointCasparToStacked(
-      nodes__PinholePrincipalPoint__storage_current_, marker__scratch_inout_,
-      PinholePrincipalPoint_num_max_, offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 2 * num * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 2;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (PinholePrincipalPoint_num_max_ > limit || offset > limit ||
+      num > limit - 31 || kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "PinholePrincipalPoint readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(PinholePrincipalPointCasparToStacked(
+                        nodes__PinholePrincipalPoint__storage_current_,
+                        marker__scratch_inout_,
+                        PinholePrincipalPoint_num_max_,
+                        offset,
+                        num),
+                    "PinholePrincipalPointCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data,
+                               marker__scratch_inout_,
+                               kDimension * num * sizeof(float),
+                               cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
 void GraphSolver::GetPinholePrincipalPointNodesToStackedDevice(
-    float *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholePrincipalPoint_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholePrincipalPoint_num_");
+    float* const data, const size_t offset, const size_t num) {
+  if (offset > PinholePrincipalPoint_num_ ||
+      num > PinholePrincipalPoint_num_ - offset) {
+    throw std::runtime_error(
+        "PinholePrincipalPoint readback range exceeds node count");
   }
-  PinholePrincipalPointCasparToStacked(
-      nodes__PinholePrincipalPoint__storage_current_, data,
-      PinholePrincipalPoint_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 2;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (PinholePrincipalPoint_num_max_ > limit || offset > limit ||
+      num > limit - 31 || kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "PinholePrincipalPoint readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(PinholePrincipalPointCasparToStacked(
+                        nodes__PinholePrincipalPoint__storage_current_,
+                        data,
+                        PinholePrincipalPoint_num_max_,
+                        offset,
+                        num),
+                    "PinholePrincipalPointCasparToStacked");
 }
 
 void GraphSolver::SetPointNum(const size_t num) {
@@ -5215,28 +5363,59 @@ void GraphSolver::SetPointNodesFromStackedDevice(const float *const data,
                        offset, num);
 }
 
-void GraphSolver::GetPointNodesToStackedHost(float *const data,
+void GraphSolver::GetPointNodesToStackedHost(float* const data,
                                              const size_t offset,
                                              const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > Point_num_) {
-    throw std::runtime_error(std::to_string(offset + num) + " > Point_num_");
+  if (offset > Point_num_ || num > Point_num_ - offset) {
+    throw std::runtime_error("Point readback range exceeds node count");
   }
-  PointCasparToStacked(nodes__Point__storage_current_, marker__scratch_inout_,
-                       Point_num_max_, offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 3 * num * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 3;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (Point_num_max_ > limit || offset > limit || num > limit - 31 ||
+      kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error("Point readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(PointCasparToStacked(nodes__Point__storage_current_,
+                                         marker__scratch_inout_,
+                                         Point_num_max_,
+                                         offset,
+                                         num),
+                    "PointCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data,
+                               marker__scratch_inout_,
+                               kDimension * num * sizeof(float),
+                               cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
-void GraphSolver::GetPointNodesToStackedDevice(float *const data,
+void GraphSolver::GetPointNodesToStackedDevice(float* const data,
                                                const size_t offset,
                                                const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > Point_num_) {
-    throw std::runtime_error(std::to_string(offset + num) + " > Point_num_");
+  if (offset > Point_num_ || num > Point_num_ - offset) {
+    throw std::runtime_error("Point readback range exceeds node count");
   }
-  PointCasparToStacked(nodes__Point__storage_current_, data, Point_num_max_,
-                       offset, num);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 3;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (Point_num_max_ > limit || offset > limit || num > limit - 31 ||
+      kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error("Point readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PointCasparToStacked(
+          nodes__Point__storage_current_, data, Point_num_max_, offset, num),
+      "PointCasparToStacked");
 }
 
 void GraphSolver::SetSimpleRadialCalibNum(const size_t num) {
@@ -5274,32 +5453,69 @@ void GraphSolver::SetSimpleRadialCalibNodesFromStackedDevice(
                                    SimpleRadialCalib_num_max_, offset, num);
 }
 
-void GraphSolver::GetSimpleRadialCalibNodesToStackedHost(float *const data,
+void GraphSolver::GetSimpleRadialCalibNodesToStackedHost(float* const data,
                                                          const size_t offset,
                                                          const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialCalib_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialCalib_num_");
+  if (offset > SimpleRadialCalib_num_ ||
+      num > SimpleRadialCalib_num_ - offset) {
+    throw std::runtime_error(
+        "SimpleRadialCalib readback range exceeds node count");
   }
-  SimpleRadialCalibCasparToStacked(nodes__SimpleRadialCalib__storage_current_,
-                                   marker__scratch_inout_,
-                                   SimpleRadialCalib_num_max_, offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 4 * num * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 4;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (SimpleRadialCalib_num_max_ > limit || offset > limit ||
+      num > limit - 31 || kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "SimpleRadialCalib readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(SimpleRadialCalibCasparToStacked(
+                        nodes__SimpleRadialCalib__storage_current_,
+                        marker__scratch_inout_,
+                        SimpleRadialCalib_num_max_,
+                        offset,
+                        num),
+                    "SimpleRadialCalibCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data,
+                               marker__scratch_inout_,
+                               kDimension * num * sizeof(float),
+                               cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
-void GraphSolver::GetSimpleRadialCalibNodesToStackedDevice(float *const data,
+void GraphSolver::GetSimpleRadialCalibNodesToStackedDevice(float* const data,
                                                            const size_t offset,
                                                            const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialCalib_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialCalib_num_");
+  if (offset > SimpleRadialCalib_num_ ||
+      num > SimpleRadialCalib_num_ - offset) {
+    throw std::runtime_error(
+        "SimpleRadialCalib readback range exceeds node count");
   }
-  SimpleRadialCalibCasparToStacked(nodes__SimpleRadialCalib__storage_current_,
-                                   data, SimpleRadialCalib_num_max_, offset,
-                                   num);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 4;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (SimpleRadialCalib_num_max_ > limit || offset > limit ||
+      num > limit - 31 || kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "SimpleRadialCalib readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(SimpleRadialCalibCasparToStacked(
+                        nodes__SimpleRadialCalib__storage_current_,
+                        data,
+                        SimpleRadialCalib_num_max_,
+                        offset,
+                        num),
+                    "SimpleRadialCalibCasparToStacked");
 }
 
 void GraphSolver::SetSimpleRadialFocalAndExtraNum(const size_t num) {
@@ -5339,29 +5555,66 @@ void GraphSolver::SetSimpleRadialFocalAndExtraNodesFromStackedDevice(
 }
 
 void GraphSolver::GetSimpleRadialFocalAndExtraNodesToStackedHost(
-    float *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialFocalAndExtra_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialFocalAndExtra_num_");
+    float* const data, const size_t offset, const size_t num) {
+  if (offset > SimpleRadialFocalAndExtra_num_ ||
+      num > SimpleRadialFocalAndExtra_num_ - offset) {
+    throw std::runtime_error(
+        "SimpleRadialFocalAndExtra readback range exceeds node count");
   }
-  SimpleRadialFocalAndExtraCasparToStacked(
-      nodes__SimpleRadialFocalAndExtra__storage_current_,
-      marker__scratch_inout_, SimpleRadialFocalAndExtra_num_max_, offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 2 * num * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 2;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (SimpleRadialFocalAndExtra_num_max_ > limit || offset > limit ||
+      num > limit - 31 || kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "SimpleRadialFocalAndExtra readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(SimpleRadialFocalAndExtraCasparToStacked(
+                        nodes__SimpleRadialFocalAndExtra__storage_current_,
+                        marker__scratch_inout_,
+                        SimpleRadialFocalAndExtra_num_max_,
+                        offset,
+                        num),
+                    "SimpleRadialFocalAndExtraCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data,
+                               marker__scratch_inout_,
+                               kDimension * num * sizeof(float),
+                               cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
 void GraphSolver::GetSimpleRadialFocalAndExtraNodesToStackedDevice(
-    float *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialFocalAndExtra_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialFocalAndExtra_num_");
+    float* const data, const size_t offset, const size_t num) {
+  if (offset > SimpleRadialFocalAndExtra_num_ ||
+      num > SimpleRadialFocalAndExtra_num_ - offset) {
+    throw std::runtime_error(
+        "SimpleRadialFocalAndExtra readback range exceeds node count");
   }
-  SimpleRadialFocalAndExtraCasparToStacked(
-      nodes__SimpleRadialFocalAndExtra__storage_current_, data,
-      SimpleRadialFocalAndExtra_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 2;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (SimpleRadialFocalAndExtra_num_max_ > limit || offset > limit ||
+      num > limit - 31 || kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "SimpleRadialFocalAndExtra readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(SimpleRadialFocalAndExtraCasparToStacked(
+                        nodes__SimpleRadialFocalAndExtra__storage_current_,
+                        data,
+                        SimpleRadialFocalAndExtra_num_max_,
+                        offset,
+                        num),
+                    "SimpleRadialFocalAndExtraCasparToStacked");
 }
 
 void GraphSolver::SetSimpleRadialPoseNum(const size_t num) {
@@ -5399,31 +5652,67 @@ void GraphSolver::SetSimpleRadialPoseNodesFromStackedDevice(
                                   SimpleRadialPose_num_max_, offset, num);
 }
 
-void GraphSolver::GetSimpleRadialPoseNodesToStackedHost(float *const data,
+void GraphSolver::GetSimpleRadialPoseNodesToStackedHost(float* const data,
                                                         const size_t offset,
                                                         const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialPose_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialPose_num_");
+  if (offset > SimpleRadialPose_num_ || num > SimpleRadialPose_num_ - offset) {
+    throw std::runtime_error(
+        "SimpleRadialPose readback range exceeds node count");
   }
-  SimpleRadialPoseCasparToStacked(nodes__SimpleRadialPose__storage_current_,
-                                  marker__scratch_inout_,
-                                  SimpleRadialPose_num_max_, offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 7 * num * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 7;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (SimpleRadialPose_num_max_ > limit || offset > limit || num > limit - 31 ||
+      kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "SimpleRadialPose readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      SimpleRadialPoseCasparToStacked(nodes__SimpleRadialPose__storage_current_,
+                                      marker__scratch_inout_,
+                                      SimpleRadialPose_num_max_,
+                                      offset,
+                                      num),
+      "SimpleRadialPoseCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data,
+                               marker__scratch_inout_,
+                               kDimension * num * sizeof(float),
+                               cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
-void GraphSolver::GetSimpleRadialPoseNodesToStackedDevice(float *const data,
+void GraphSolver::GetSimpleRadialPoseNodesToStackedDevice(float* const data,
                                                           const size_t offset,
                                                           const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialPose_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialPose_num_");
+  if (offset > SimpleRadialPose_num_ || num > SimpleRadialPose_num_ - offset) {
+    throw std::runtime_error(
+        "SimpleRadialPose readback range exceeds node count");
   }
-  SimpleRadialPoseCasparToStacked(nodes__SimpleRadialPose__storage_current_,
-                                  data, SimpleRadialPose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 7;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (SimpleRadialPose_num_max_ > limit || offset > limit || num > limit - 31 ||
+      kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "SimpleRadialPose readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      SimpleRadialPoseCasparToStacked(nodes__SimpleRadialPose__storage_current_,
+                                      data,
+                                      SimpleRadialPose_num_max_,
+                                      offset,
+                                      num),
+      "SimpleRadialPoseCasparToStacked");
 }
 
 void GraphSolver::SetSimpleRadialPrincipalPointNum(const size_t num) {
@@ -5463,29 +5752,66 @@ void GraphSolver::SetSimpleRadialPrincipalPointNodesFromStackedDevice(
 }
 
 void GraphSolver::GetSimpleRadialPrincipalPointNodesToStackedHost(
-    float *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialPrincipalPoint_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialPrincipalPoint_num_");
+    float* const data, const size_t offset, const size_t num) {
+  if (offset > SimpleRadialPrincipalPoint_num_ ||
+      num > SimpleRadialPrincipalPoint_num_ - offset) {
+    throw std::runtime_error(
+        "SimpleRadialPrincipalPoint readback range exceeds node count");
   }
-  SimpleRadialPrincipalPointCasparToStacked(
-      nodes__SimpleRadialPrincipalPoint__storage_current_,
-      marker__scratch_inout_, SimpleRadialPrincipalPoint_num_max_, offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 2 * num * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 2;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (SimpleRadialPrincipalPoint_num_max_ > limit || offset > limit ||
+      num > limit - 31 || kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "SimpleRadialPrincipalPoint readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(SimpleRadialPrincipalPointCasparToStacked(
+                        nodes__SimpleRadialPrincipalPoint__storage_current_,
+                        marker__scratch_inout_,
+                        SimpleRadialPrincipalPoint_num_max_,
+                        offset,
+                        num),
+                    "SimpleRadialPrincipalPointCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data,
+                               marker__scratch_inout_,
+                               kDimension * num * sizeof(float),
+                               cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
 void GraphSolver::GetSimpleRadialPrincipalPointNodesToStackedDevice(
-    float *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialPrincipalPoint_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialPrincipalPoint_num_");
+    float* const data, const size_t offset, const size_t num) {
+  if (offset > SimpleRadialPrincipalPoint_num_ ||
+      num > SimpleRadialPrincipalPoint_num_ - offset) {
+    throw std::runtime_error(
+        "SimpleRadialPrincipalPoint readback range exceeds node count");
   }
-  SimpleRadialPrincipalPointCasparToStacked(
-      nodes__SimpleRadialPrincipalPoint__storage_current_, data,
-      SimpleRadialPrincipalPoint_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = 2;
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if (SimpleRadialPrincipalPoint_num_max_ > limit || offset > limit ||
+      num > limit - 31 || kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof(float) / kDimension) {
+    throw std::runtime_error(
+        "SimpleRadialPrincipalPoint readback exceeds mapping argument limits");
+  }
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(SimpleRadialPrincipalPointCasparToStacked(
+                        nodes__SimpleRadialPrincipalPoint__storage_current_,
+                        data,
+                        SimpleRadialPrincipalPoint_num_max_,
+                        offset,
+                        num),
+                    "SimpleRadialPrincipalPointCasparToStacked");
 }
 
 void GraphSolver::SetSimpleRadialNum(const size_t num) {
@@ -12201,7 +12527,37 @@ size_t GraphSolver::get_nbytes() {
                          4 * SimpleRadialCalib_num_max_,
                          2 * SimpleRadialFocalAndExtra_num_max_,
                          7 * SimpleRadialPose_num_max_,
-                         2 * SimpleRadialPrincipalPoint_num_max_}) *
+                         2 * SimpleRadialPrincipalPoint_num_max_,
+                         7 * simple_radial_num_max_,
+                         7 * simple_radial_fixed_pose_num_max_,
+                         7 * simple_radial_fixed_point_num_max_,
+                         7 * simple_radial_fixed_pose_fixed_point_num_max_,
+                         7 * pinhole_num_max_,
+                         7 * pinhole_fixed_pose_num_max_,
+                         7 * pinhole_fixed_point_num_max_,
+                         7 * pinhole_fixed_pose_fixed_point_num_max_,
+                         7 * simple_radial_split_fixed_focal_and_extra_num_max_,
+                         7 * simple_radial_split_fixed_principal_point_num_max_,
+                         7 * simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_,
+                         7 * simple_radial_split_fixed_pose_fixed_principal_point_num_max_,
+                         7 * simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_,
+                         7 * simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_,
+                         7 * simple_radial_split_fixed_principal_point_fixed_point_num_max_,
+                         7 * simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
+                         7 * simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_,
+                         7 * simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
+                         7 * simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
+                         7 * pinhole_split_fixed_focal_num_max_,
+                         7 * pinhole_split_fixed_principal_point_num_max_,
+                         7 * pinhole_split_fixed_pose_fixed_focal_num_max_,
+                         7 * pinhole_split_fixed_pose_fixed_principal_point_num_max_,
+                         7 * pinhole_split_fixed_focal_fixed_principal_point_num_max_,
+                         7 * pinhole_split_fixed_focal_fixed_point_num_max_,
+                         7 * pinhole_split_fixed_principal_point_fixed_point_num_max_,
+                         7 * pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_,
+                         7 * pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_,
+                         7 * pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
+                         7 * pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_}) *
                    sizeof(float));
   increment_offset<float>(offset, 0 * 0, 4);
   increment_offset<float>(offset, 2 * simple_radial_num_, 4);

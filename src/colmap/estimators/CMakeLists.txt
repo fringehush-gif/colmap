@@ -76,6 +76,17 @@ if(CASPAR_ENABLED)
         SRCS bundle_adjustment_caspar_test.cc
         LINK_LIBS colmap_estimators
     )
+    # Wrap only the static GNU/Linux Caspar test link; other configurations
+    # retain an explicit skipped fault test rather than claiming coverage.
+    if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+       AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT BUILD_SHARED_LIBS)
+        target_compile_definitions(colmap_estimators_bundle_adjustment_caspar_test PRIVATE
+            COLMAP_TEST_CASPAR_READBACK_WRAPPING=1)
+        target_link_options(colmap_estimators_bundle_adjustment_caspar_test PRIVATE
+            "LINKER:--wrap=cudaSetDevice"
+            "LINKER:--wrap=cudaGetLastError"
+            "LINKER:--wrap=cudaMemcpy")
+    endif()
 endif()
 COLMAP_ADD_TEST(
     NAME coordinate_frame_test
