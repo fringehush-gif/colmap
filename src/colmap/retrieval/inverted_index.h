@@ -74,6 +74,14 @@ class InvertedIndex {
       const DescType& descriptor,
       std::bitset<kEmbeddingDim>* binary_descriptor) const;
 
+  // The projection is independent of the visual word; thresholds are not.
+  ProjDescType ProjectDescriptor(
+      const Eigen::Ref<const DescType>& descriptor) const;
+  void ConvertProjectedToBinaryDescriptor(
+      int64_t word_id,
+      const ProjDescType& projected_descriptor,
+      std::bitset<kEmbeddingDim>* binary_descriptor) const;
+
   float SquaredIDFWeight(int64_t word_id) const;
 
   void FindMatches(int64_t word_id,
@@ -276,9 +284,24 @@ void InvertedIndex<kDescType, kDescDim, kEmbeddingDim>::
         const int64_t word_id,
         const DescType& descriptor,
         std::bitset<kEmbeddingDim>* binary_descriptor) const {
-  const ProjDescType proj_desc =
-      proj_matrix_ * descriptor.transpose().template cast<float>();
-  inverted_files_.at(word_id).ConvertToBinaryDescriptor(proj_desc,
+  ConvertProjectedToBinaryDescriptor(
+      word_id, ProjectDescriptor(descriptor), binary_descriptor);
+}
+
+template <typename kDescType, int kDescDim, int kEmbeddingDim>
+typename InvertedIndex<kDescType, kDescDim, kEmbeddingDim>::ProjDescType
+InvertedIndex<kDescType, kDescDim, kEmbeddingDim>::ProjectDescriptor(
+    const Eigen::Ref<const DescType>& descriptor) const {
+  return proj_matrix_ * descriptor.transpose().template cast<float>();
+}
+
+template <typename kDescType, int kDescDim, int kEmbeddingDim>
+void InvertedIndex<kDescType, kDescDim, kEmbeddingDim>::
+    ConvertProjectedToBinaryDescriptor(
+        const int64_t word_id,
+        const ProjDescType& projected_descriptor,
+        std::bitset<kEmbeddingDim>* binary_descriptor) const {
+  inverted_files_.at(word_id).ConvertToBinaryDescriptor(projected_descriptor,
                                                         binary_descriptor);
 }
 

@@ -193,6 +193,8 @@ class FaissVisualIndex : public VisualIndex {
 
     for (Eigen::Index i = 0; i < descriptors.data.rows(); ++i) {
       const auto& descriptor = descriptors.data.row(i);
+      typename InvertedIndexType::ProjDescType projected_descriptor;
+      bool has_projection = false;
 
       EntryType query_entry;
       query_entry.feature_idx = i;
@@ -211,8 +213,13 @@ class FaissVisualIndex : public VisualIndex {
         const int word_id = word_ids(i, j);
 
         if (word_id != InvertedIndexType::kInvalidWordId) {
-          inverted_index_.ConvertToBinaryDescriptor(
-              word_id, descriptor, &query_entries[i].descriptor);
+          if (!has_projection) {
+            projected_descriptor =
+                inverted_index_.ProjectDescriptor(descriptor);
+            has_projection = true;
+          }
+          inverted_index_.ConvertProjectedToBinaryDescriptor(
+              word_id, projected_descriptor, &query_entries[i].descriptor);
 
           const float squared_idf_weight =
               inverted_index_.SquaredIDFWeight(word_id);
