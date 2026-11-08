@@ -182,6 +182,7 @@ void CheckMeshProperties(const std::filesystem::path& path,
   std::vector<PoissonRecon::PlyProperty> properties;
   PoissonRecon::PLY::ReadVertexHeader(path.string(), properties);
   std::vector<std::string> names;
+  names.reserve(properties.size());
   for (const auto& property : properties) {
     names.push_back(property.name);
   }
@@ -378,6 +379,7 @@ TEST_P(PoissonMeshingGenericDeathTest,
                                    "--fullDepth",
                                    "3"};
   std::vector<char*> argv;
+  argv.reserve(args.size());
   for (auto& arg : args) {
     argv.push_back(arg.data());
   }
