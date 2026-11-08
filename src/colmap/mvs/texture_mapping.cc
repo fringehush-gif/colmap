@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <queue>
+#include <utility>
 #include <variant>
 
 #include <Eigen/Core>
@@ -102,12 +103,6 @@ float ProjectPointDepth(const float* P, const Eigen::Vector3f& point) {
   const Eigen::Map<const Eigen::Matrix<float, 3, 4, Eigen::RowMajor>> P_m(P);
   const Eigen::Vector4f ph(point.x(), point.y(), point.z(), 1.0f);
   return (P_m.row(2) * ph)(0, 0);
-}
-
-Eigen::Vector3f ComputeCameraCenter(const float* R, const float* T) {
-  const Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>> R_m(R);
-  const Eigen::Map<const Eigen::Vector3f> T_m(T);
-  return -R_m.transpose() * T_m;
 }
 
 std::vector<Eigen::Vector3f> ComputeFaceNormals(const PlyMesh& mesh) {
@@ -263,8 +258,18 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
   occlusion_tester.Build(mesh);
 #endif
 
-  // Flat score buffer: scores[fi * num_images + ii].
-  std::vector<double> scores(num_faces * num_images, -1.0);
+  std::vector<Eigen::Vector3f> camera_centers(num_images);
+  for (size_t ii = 0; ii < num_images; ++ii) {
+    ComputeProjectionCenter(
+        images[ii].GetR(), images[ii].GetT(), camera_centers[ii].data());
+  }
+
+  std::vector<int> view_per_face(num_faces, -1);
+  // Smoothing only needs positive-score eligibility, not the scores themselves.
+  std::vector<uint8_t> eligible_views;
+  if (options.view_selection_smoothing_iterations > 0) {
+    eligible_views.resize(num_faces * num_images, 0);
+  }
 
 #ifdef _OPENMP
   [[maybe_unused]] const int num_threads =
@@ -283,11 +288,11 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
     const Eigen::Vector3f v2 = GetVertex(mesh, idx[2]);
     const Eigen::Vector3f centroid = (v0 + v1 + v2) / 3.0f;
     const std::array<Eigen::Vector3f, 3> verts = {v0, v1, v2};
+    double best_score = -1.0;
 
     for (size_t ii = 0; ii < num_images; ++ii) {
       const Image& img = images[ii];
-      const Eigen::Vector3f cam_center =
-          ComputeCameraCenter(img.GetR(), img.GetT());
+      const Eigen::Vector3f& cam_center = camera_centers[ii];
 
       const Eigen::Vector3f view_dir = (cam_center - centroid).normalized();
       const float cos_angle = normal.dot(view_dir);
@@ -331,17 +336,11 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
       const double area =
           std::abs(static_cast<double>(e1.x()) * static_cast<double>(e2.y()) -
                    static_cast<double>(e1.y()) * static_cast<double>(e2.x()));
-      scores[fi * num_images + ii] = area;
-    }
-  }
-
-  std::vector<int> view_per_face(num_faces, -1);
-  for (size_t fi = 0; fi < num_faces; ++fi) {
-    double best_score = -1.0;
-    for (size_t ii = 0; ii < num_images; ++ii) {
-      const double s = scores[fi * num_images + ii];
-      if (s > best_score) {
-        best_score = s;
+      if (!eligible_views.empty()) {
+        eligible_views[fi * num_images + ii] = area > 0;
+      }
+      if (area > best_score) {
+        best_score = area;
         view_per_face[fi] = static_cast<int>(ii);
       }
     }
@@ -364,7 +363,7 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
       int best_count =
           label_counts.count(best_label) ? label_counts[best_label] : 0;
       for (const auto& [label, count] : label_counts) {
-        if (count > best_count && scores[fi * num_images + label] > 0) {
+        if (count > best_count && eligible_views[fi * num_images + label]) {
           best_count = count;
           best_label = label;
         }
@@ -955,26 +954,24 @@ void ApplyGlobalColorCorrection(
 }
 
 void InpaintAtlas(Bitmap* atlas,
-                  const std::vector<bool>& baked_mask,
+                  std::vector<bool> visited,
                   const int inpaint_radius) {
   const int aw = atlas->Width();
   const int ah = atlas->Height();
 
   if (inpaint_radius <= 0 || aw == 0 || ah == 0) return;
 
-  const size_t num_pixels = static_cast<size_t>(aw) * ah;
-
-  std::vector<int> dist(num_pixels, std::numeric_limits<int>::max());
-  std::vector<BitmapColor<uint8_t>> fill_colors(num_pixels);
   std::queue<std::pair<int, int>> queue;
 
   for (int y = 0; y < ah; ++y) {
     for (int x = 0; x < aw; ++x) {
       const size_t idx = static_cast<size_t>(y) * aw + x;
-      if (baked_mask[idx]) {
-        dist[idx] = 0;
-        fill_colors[idx] =
-            atlas->GetPixel(x, y).value_or(BitmapColor<uint8_t>(0));
+      // Interior baked pixels cannot improve any neighbor's distance.
+      // Keep boundary seeds in their original scan order for equal distances.
+      if (visited[idx] &&
+          ((x > 0 && !visited[idx - 1]) || (x + 1 < aw && !visited[idx + 1]) ||
+           (y > 0 && !visited[idx - aw]) ||
+           (y + 1 < ah && !visited[idx + aw]))) {
         queue.push({x, y});
       }
     }
@@ -983,30 +980,25 @@ void InpaintAtlas(Bitmap* atlas,
   constexpr std::array<int, 4> kDx = {-1, 1, 0, 0};
   constexpr std::array<int, 4> kDy = {0, 0, -1, 1};
 
-  while (!queue.empty()) {
-    const auto [cx, cy] = queue.front();
-    queue.pop();
-    const size_t cidx = static_cast<size_t>(cy) * aw + cx;
-    const int cdist = dist[cidx];
-    if (cdist >= inpaint_radius) continue;
-
-    for (int d = 0; d < 4; ++d) {
-      const int nx = cx + kDx[d];
-      const int ny = cy + kDy[d];
-      if (nx < 0 || nx >= aw || ny < 0 || ny >= ah) continue;
-      const size_t nidx = static_cast<size_t>(ny) * aw + nx;
-      if (dist[nidx] <= cdist + 1) continue;
-      dist[nidx] = cdist + 1;
-      fill_colors[nidx] = fill_colors[cidx];
-      queue.push({nx, ny});
-    }
-  }
-
-  for (int y = 0; y < ah; ++y) {
-    for (int x = 0; x < aw; ++x) {
-      const size_t idx = static_cast<size_t>(y) * aw + x;
-      if (!baked_mask[idx] && dist[idx] <= inpaint_radius) {
-        atlas->SetPixel(x, y, fill_colors[idx]);
+  // FIFO layers preserve shortest distances and the first seed at equal
+  // distance.
+  for (int distance = 0; distance < inpaint_radius && !queue.empty();
+       ++distance) {
+    const size_t layer_size = queue.size();
+    for (size_t i = 0; i < layer_size; ++i) {
+      const auto [cx, cy] = queue.front();
+      queue.pop();
+      const auto color =
+          atlas->GetPixel(cx, cy).value_or(BitmapColor<uint8_t>(0));
+      for (int d = 0; d < 4; ++d) {
+        const int nx = cx + kDx[d];
+        const int ny = cy + kDy[d];
+        if (nx < 0 || nx >= aw || ny < 0 || ny >= ah) continue;
+        const size_t nidx = static_cast<size_t>(ny) * aw + nx;
+        if (visited[nidx]) continue;
+        visited[nidx] = true;
+        atlas->SetPixel(nx, ny, color);
+        queue.push({nx, ny});
       }
     }
   }
@@ -1143,7 +1135,8 @@ MeshTextureMappingResult MeshTextureMapping(
 
   if (options.inpaint_radius > 0) {
     LOG(INFO) << "Inpainting atlas...";
-    InpaintAtlas(&result.texture_atlas, baked_mask, options.inpaint_radius);
+    InpaintAtlas(
+        &result.texture_atlas, std::move(baked_mask), options.inpaint_radius);
   }
 
   LOG(INFO) << "Surface texture mapping complete";
