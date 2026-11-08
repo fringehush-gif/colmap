@@ -16,3 +16,21 @@ endif()
 if(MSVC)
     target_compile_options(colmap_poisson_recon PRIVATE /bigobj)
 endif()
+
+COLMAP_ADD_TEST(
+    NAME point_evaluation_test
+    SRCS point_evaluation_test.cc
+    LINK_LIBS colmap_poisson_recon
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_thirdparty_point_evaluation_test
+        PRIVATE RELEASE)
+    if(MSVC)
+        target_compile_options(colmap_thirdparty_point_evaluation_test
+            PRIVATE /bigobj)
+    endif()
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_thirdparty_point_evaluation_test
+            OpenMP::OpenMP_CXX)
+    endif()
+endif()
