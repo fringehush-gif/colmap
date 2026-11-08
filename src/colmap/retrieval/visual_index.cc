@@ -233,7 +233,7 @@ class FaissVisualIndex : public VisualIndex {
                   feature_matches.find(match->feature_idx);
 
               if (feature_match == feature_matches.end() ||
-                  feature_match->first < dist) {
+                  feature_match->second.first < dist) {
                 feature_matches[match->feature_idx] =
                     std::make_pair(dist, match);
               }
