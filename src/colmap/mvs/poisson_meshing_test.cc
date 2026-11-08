@@ -7,7 +7,9 @@
 #include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
 
+// clang-format off
 #include "thirdparty/PoissonRecon/PreProcessor.h"
+// clang-format on
 
 #include "thirdparty/PoissonRecon/MultiThreading.h"
 #include "thirdparty/PoissonRecon/Ply.h"
@@ -279,16 +281,14 @@ TEST_P(PoissonMeshingRgbDeathTest,
     WriteBinaryPlyPoints(input, points, true, true);
   } else {
     const std::vector<std::string> order =
-        layout == 1 ? std::vector<std::string>{"blue", "red", "green"}
-                    : colors;
+        layout == 1 ? std::vector<std::string>{"blue", "red", "green"} : colors;
     ASSERT_TRUE(WriteAuxiliaryAsciiPly(input, points, order, false));
   }
   const auto options = ColorTestOptions(color);
-  ASSERT_EXIT(
-      std::_Exit(PoissonMeshing(options, input, output) ? EXIT_SUCCESS
-                                                       : EXIT_FAILURE),
-      testing::ExitedWithCode(EXIT_SUCCESS),
-      "");
+  ASSERT_EXIT(std::_Exit(PoissonMeshing(options, input, output) ? EXIT_SUCCESS
+                                                                : EXIT_FAILURE),
+              testing::ExitedWithCode(EXIT_SUCCESS),
+              "");
   ASSERT_TRUE(ExistsFile(output));
   CheckMeshProperties(output, color ? colors : std::vector<std::string>{});
 }
@@ -300,18 +300,18 @@ INSTANTIATE_TEST_SUITE_P(StandardReorderedAliases,
 
 using PoissonMeshingColorlessDeathTest = IsolatedPoissonTest<bool>;
 
-TEST_P(PoissonMeshingColorlessDeathTest, ColorlessInputRetainsGeometryOnlyOutput) {
+TEST_P(PoissonMeshingColorlessDeathTest,
+       ColorlessInputRetainsGeometryOnlyOutput) {
   const auto test_dir = CreateTestDir();
   const auto input = test_dir / "points.ply";
   const auto output = test_dir / "mesh.ply";
   WriteBinaryPlyPoints(
       input, MakeDeterministicColoredCubePoints(), true, false);
   const auto options = ColorTestOptions(GetParam());
-  ASSERT_EXIT(
-      std::_Exit(PoissonMeshing(options, input, output) ? EXIT_SUCCESS
-                                                       : EXIT_FAILURE),
-      testing::ExitedWithCode(EXIT_SUCCESS),
-      "");
+  ASSERT_EXIT(std::_Exit(PoissonMeshing(options, input, output) ? EXIT_SUCCESS
+                                                                : EXIT_FAILURE),
+              testing::ExitedWithCode(EXIT_SUCCESS),
+              "");
   ASSERT_TRUE(ExistsFile(output));
   CheckMeshProperties(output, {});
 }
@@ -339,11 +339,10 @@ TEST_P(PoissonMeshingAuxiliaryDeathTest,
   ASSERT_TRUE(WriteAuxiliaryAsciiPly(
       input, MakeDeterministicColoredCubePoints(), layouts[layout], true));
   const auto options = ColorTestOptions(color);
-  ASSERT_EXIT(
-      std::_Exit(PoissonMeshing(options, input, output) ? EXIT_SUCCESS
-                                                       : EXIT_FAILURE),
-      testing::ExitedWithCode(EXIT_SUCCESS),
-      "");
+  ASSERT_EXIT(std::_Exit(PoissonMeshing(options, input, output) ? EXIT_SUCCESS
+                                                                : EXIT_FAILURE),
+              testing::ExitedWithCode(EXIT_SUCCESS),
+              "");
   ASSERT_TRUE(ExistsFile(output));
   std::vector<std::string> expected{"quality"};
   if (color) {
