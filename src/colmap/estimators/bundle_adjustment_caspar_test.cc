@@ -4,10 +4,20 @@
 
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 #include "colmap/geometry/rigid3_matchers.h"
+#include "colmap/math/random.h"
 #include "colmap/scene/reconstruction_matchers.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/models.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include <cuda_runtime_api.h>
 #include <gtest/gtest.h>
 
 // Due to pose normalization operations, constant variables may not be perfectly
@@ -77,6 +87,92 @@ TEST(DefaultBundleAdjuster, RigThrowsErrorOnVariableSensorFromRig) {
   EXPECT_THROW(
       CreateDefaultCasparBundleAdjuster(options, config, reconstruction),
       std::invalid_argument);
+}
+
+TEST(DefaultBundleAdjuster, MixedCameraModelsRespectFramePoseCapability) {
+  enum class Case {
+    kVariable,
+    kFixed,
+    kGloballyFixed,
+    kSeparate,
+    kUnsupported
+  };
+  for (const Case test : {Case::kVariable,
+                          Case::kFixed,
+                          Case::kGloballyFixed,
+                          Case::kSeparate,
+                          Case::kUnsupported}) {
+    SCOPED_TRACE(static_cast<int>(test));
+    Reconstruction reconstruction;
+    SyntheticDatasetOptions dataset;
+    dataset.num_rigs = 1;
+    dataset.num_cameras_per_rig = 2;
+    dataset.num_frames_per_rig = 2;
+    SynthesizeDataset(dataset, &reconstruction);
+
+    const camera_t camera_id = 2;
+    const Camera old_camera = reconstruction.Camera(camera_id);
+    reconstruction.Camera(camera_id) = Camera::CreateFromModelId(
+        camera_id,
+        test == Case::kUnsupported ? CameraModelId::kOpenCV
+                                   : CameraModelId::kPinhole,
+        old_camera.MeanFocalLength(),
+        old_camera.width,
+        old_camera.height);
+    const Reconstruction original = reconstruction;
+
+    BundleAdjustmentConfig config;
+    for (const image_t image_id : reconstruction.RegImageIds()) {
+      const Image& image = reconstruction.Image(image_id);
+      if (test != Case::kSeparate ||
+          (image.FrameId() == 1 && image.CameraId() == 1) ||
+          (image.FrameId() == 2 && image.CameraId() == 2)) {
+        config.AddImage(image_id);
+      }
+    }
+    ASSERT_EQ(config.Images().size(), test == Case::kSeparate ? 2 : 4);
+    if (test == Case::kVariable) {
+      // Gauge fixing pins frame 1, leaving the mixed frame 2 variable.
+      config.FixGauge(BundleAdjustmentGauge::TWO_CAMS_FROM_WORLD);
+      ASSERT_EQ(reconstruction.Image(1).FrameId(), 1);
+      ASSERT_TRUE(reconstruction.Image(1).IsRefInFrame());
+      ASSERT_EQ(reconstruction.Image(3).FrameId(), 2);
+      ASSERT_EQ(reconstruction.Image(4).FrameId(), 2);
+      ASSERT_NE(reconstruction.Image(3).CameraId(),
+                reconstruction.Image(4).CameraId());
+    } else if (test == Case::kFixed) {
+      config.SetConstantRigFromWorldPose(1);
+      config.SetConstantRigFromWorldPose(2);
+    }
+    BundleAdjustmentOptions options;
+    options.refine_sensor_from_rig = false;
+    options.refine_rig_from_world = test != Case::kGloballyFixed;
+
+    if (test == Case::kVariable) {
+      try {
+        CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+        FAIL() << "Expected a mixed-model variable-frame refusal";
+      } catch (const std::invalid_argument& error) {
+        EXPECT_NE(
+            std::string(error.what())
+                .find(
+                    "Caspar cannot refine a frame with multiple camera models"),
+            std::string::npos);
+      }
+    } else {
+      EXPECT_NO_THROW({
+        const auto adjuster =
+            CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+        EXPECT_NE(adjuster, nullptr);
+      });
+    }
+    for (const frame_t frame_id : {frame_t{1}, frame_t{2}}) {
+      EXPECT_THAT(reconstruction.Frame(frame_id).RigFromWorld(),
+                  Rigid3dEq(original.Frame(frame_id).RigFromWorld()));
+    }
+    EXPECT_EQ(reconstruction.Camera(1), original.Camera(1));
+    EXPECT_EQ(reconstruction.Camera(2), original.Camera(2));
+  }
 }
 
 TEST(DefaultBundleAdjuster, MultiCameraRigLargeConstantSensorFromRig) {
@@ -280,6 +376,248 @@ TEST(DefaultBundleAdjuster, ExternalImagePoseIsInvariant) {
 
   CheckConstantCamFromWorld(reconstruction.Image(3),
                             orig_reconstruction.Image(3));
+}
+
+// Evaluate the selected observations from the published reconstruction, not
+// the solver's internal cost or the cached Point3D error.
+double SelectedMeanSquaredReprojectionError(
+    const Reconstruction& reconstruction,
+    const std::vector<point3D_t>& point_ids,
+    const std::vector<image_t>& image_ids) {
+  double sum = 0;
+  size_t count = 0;
+  for (const point3D_t point_id : point_ids) {
+    const Point3D& point = reconstruction.Point3D(point_id);
+    for (const auto& element : point.track.Elements()) {
+      if (std::find(image_ids.begin(), image_ids.end(), element.image_id) ==
+          image_ids.end()) {
+        continue;
+      }
+      const Image& image = reconstruction.Image(element.image_id);
+      const auto projected =
+          image.CameraPtr()->ImgFromCam(image.CamFromWorld() * point.xyz);
+      if (!projected || !projected->allFinite()) {
+        return std::numeric_limits<double>::infinity();
+      }
+      const Eigen::Vector2d residual =
+          *projected - image.Point2D(element.point2D_idx).xy;
+      if (!residual.allFinite()) {
+        return std::numeric_limits<double>::infinity();
+      }
+      sum += residual.squaredNorm();
+      ++count;
+    }
+  }
+  return count == 0 ? std::numeric_limits<double>::infinity() : sum / count;
+}
+
+std::vector<point3D_t> SelectCommonPoints(const Reconstruction& reconstruction,
+                                          BundleAdjustmentConfig& config,
+                                          bool variable) {
+  std::vector<point3D_t> selected;
+  for (const auto& [id, point] : reconstruction.Points3D()) {
+    bool has_first = false;
+    bool has_second = false;
+    for (const auto& element : point.track.Elements()) {
+      has_first |= element.image_id == 1;
+      has_second |= element.image_id == 2;
+    }
+    if (has_first && has_second && point.track.Length() == 2) {
+      selected.push_back(id);
+      if (variable) {
+        config.AddVariablePoint(id);
+      } else {
+        config.AddConstantPoint(id);
+      }
+    } else {
+      config.IgnorePoint(id);
+    }
+  }
+  return selected;
+}
+
+TEST(DefaultBundleAdjuster, SharedCameraWithExternalObservations) {
+  int device_count = 0;
+  if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable";
+  }
+  enum class Case { kPrincipalPoint, kMerged, kConstantCamera };
+  for (const Case test :
+       {Case::kPrincipalPoint, Case::kMerged, Case::kConstantCamera}) {
+    SCOPED_TRACE(static_cast<int>(test));
+    SetPRNGSeed(0);
+    Reconstruction reconstruction;
+    SyntheticDatasetOptions dataset;
+    dataset.num_rigs = 1;
+    dataset.num_cameras_per_rig = 1;
+    dataset.num_frames_per_rig = 2;
+    dataset.num_points3D = 100;
+    dataset.num_points2D_without_point3D = 0;
+    SynthesizeDataset(dataset, &reconstruction);
+    ASSERT_EQ(reconstruction.Image(1).CameraId(),
+              reconstruction.Image(2).CameraId());
+    ASSERT_NE(reconstruction.Image(1).FrameId(),
+              reconstruction.Image(2).FrameId());
+    const Reconstruction truth = reconstruction;
+    Camera& camera = reconstruction.Camera(reconstruction.Image(1).CameraId());
+    camera.params[1] += 5;
+    camera.params[2] -= 7;
+    if (test == Case::kMerged) {
+      camera.params[0] += 30;
+      camera.params[3] += 0.03;
+    }
+    BundleAdjustmentConfig config;
+    config.AddImage(1);
+    const bool constant_camera = test == Case::kConstantCamera;
+    const auto selected =
+        SelectCommonPoints(reconstruction, config, constant_camera);
+    ASSERT_GE(selected.size(), 20);
+    if (constant_camera) {
+      config.SetConstantCamIntrinsics(camera.camera_id);
+      for (const point3D_t id : selected) {
+        reconstruction.Point3D(id).xyz.x() += 0.03;
+      }
+    }
+    const Reconstruction before = reconstruction;
+    const double error_before =
+        SelectedMeanSquaredReprojectionError(before, selected, {1, 2});
+    ASSERT_TRUE(std::isfinite(error_before));
+    ASSERT_GT(error_before, 0.0);
+    BundleAdjustmentOptions options;
+    options.refine_focal_length = test != Case::kPrincipalPoint;
+    options.refine_extra_params = test != Case::kPrincipalPoint;
+    options.refine_principal_point = true;
+    options.refine_rig_from_world = false;
+    options.refine_sensor_from_rig = false;
+    options.refine_points3D = constant_camera;
+    auto adjuster =
+        CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+    const auto summary = adjuster->Solve();
+    ASSERT_NE(summary->termination_type,
+              BundleAdjustmentTerminationType::FAILURE);
+    ASSERT_NE(summary->termination_type,
+              BundleAdjustmentTerminationType::USER_FAILURE);
+    EXPECT_EQ(summary->num_residuals, 4 * selected.size());
+    for (const double parameter : camera.params) {
+      ASSERT_TRUE(std::isfinite(parameter));
+    }
+    const double error_after =
+        SelectedMeanSquaredReprojectionError(reconstruction, selected, {1, 2});
+    ASSERT_TRUE(std::isfinite(error_after));
+    if (constant_camera) {
+      EXPECT_EQ(camera, before.Camera(camera.camera_id));
+    } else {
+      // Demand a substantial published reprojection improvement and improvement
+      // of every enabled calibration component toward the synthetic truth.
+      EXPECT_LT(error_after, 0.5 * error_before);
+      const auto& true_params = truth.Camera(camera.camera_id).params;
+      const auto& initial_params = before.Camera(camera.camera_id).params;
+      for (const size_t idx : {size_t{1}, size_t{2}}) {
+        EXPECT_LT(std::abs(camera.params[idx] - true_params[idx]),
+                  0.9 * std::abs(initial_params[idx] - true_params[idx]));
+      }
+      // Match the precision-specific tolerances of MergedCalibMatchesCeres.
+#ifdef CASPAR_USE_DOUBLE
+      constexpr double kFocalTol = 1.0;
+      constexpr double kPPTol = 2.0;
+      constexpr double kExtraTol = 5e-4;
+#else
+      constexpr double kFocalTol = 20.0;
+      constexpr double kPPTol = 10.0;
+      constexpr double kExtraTol = 1.5e-2;
+#endif
+      EXPECT_NEAR(camera.params[1], true_params[1], kPPTol);
+      EXPECT_NEAR(camera.params[2], true_params[2], kPPTol);
+      if (test == Case::kMerged) {
+        EXPECT_NEAR(camera.params[0], true_params[0], kFocalTol);
+        EXPECT_NEAR(camera.params[3], true_params[3], kExtraTol);
+        for (const size_t idx : {size_t{0}, size_t{3}}) {
+          EXPECT_LT(std::abs(camera.params[idx] - true_params[idx]),
+                    0.9 * std::abs(initial_params[idx] - true_params[idx]));
+        }
+      } else {
+        EXPECT_EQ(camera.params[0], initial_params[0]);
+        EXPECT_EQ(camera.params[3], initial_params[3]);
+      }
+      for (const point3D_t id : selected) {
+        CheckConstantPoint(reconstruction.Point3D(id), before.Point3D(id));
+      }
+    }
+    for (const image_t image_id : reconstruction.RegImageIds()) {
+      CheckConstantCamFromWorld(reconstruction.Image(image_id),
+                                before.Image(image_id));
+    }
+  }
+}
+
+TEST(DefaultBundleAdjuster, ExternalSensorDoesNotFreezeConfiguredFrame) {
+  int device_count = 0;
+  if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable";
+  }
+  SetPRNGSeed(0);
+  Reconstruction reconstruction;
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 2;
+  dataset.num_frames_per_rig = 1;
+  dataset.num_points3D = 100;
+  dataset.num_points2D_without_point3D = 0;
+  dataset.sensor_from_rig_rotation_stddev = 0;
+  dataset.sensor_from_rig_translation_stddev = 0;
+  SynthesizeDataset(dataset, &reconstruction);
+  ASSERT_EQ(reconstruction.Image(1).FrameId(),
+            reconstruction.Image(2).FrameId());
+  ASSERT_TRUE(reconstruction.Image(1).IsRefInFrame());
+  ASSERT_FALSE(reconstruction.Image(2).IsRefInFrame());
+  const Reconstruction truth = reconstruction;
+  const frame_t frame_id = reconstruction.Image(1).FrameId();
+  reconstruction.Frame(frame_id).RigFromWorld().translation().x() += 0.1;
+  BundleAdjustmentConfig config;
+  config.AddImage(1);
+  const auto selected = SelectCommonPoints(reconstruction, config, false);
+  ASSERT_GE(selected.size(), 20);
+  const Reconstruction before = reconstruction;
+  const double error_before =
+      SelectedMeanSquaredReprojectionError(before, selected, {1});
+  ASSERT_TRUE(std::isfinite(error_before));
+  ASSERT_GT(error_before, 0.0);
+  BundleAdjustmentOptions options;
+  options.refine_focal_length = false;
+  options.refine_extra_params = false;
+  options.refine_principal_point = false;
+  options.refine_sensor_from_rig = false;
+  options.refine_points3D = false;
+  auto adjuster =
+      CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+  const auto summary = adjuster->Solve();
+  ASSERT_NE(summary->termination_type,
+            BundleAdjustmentTerminationType::FAILURE);
+  ASSERT_NE(summary->termination_type,
+            BundleAdjustmentTerminationType::USER_FAILURE);
+  EXPECT_EQ(summary->num_residuals, 2 * selected.size());
+  const Rigid3d& pose = reconstruction.Frame(frame_id).RigFromWorld();
+  ASSERT_TRUE(pose.rotation().coeffs().allFinite());
+  ASSERT_TRUE(pose.translation().allFinite());
+  const double error_after =
+      SelectedMeanSquaredReprojectionError(reconstruction, selected, {1});
+  ASSERT_TRUE(std::isfinite(error_after));
+  EXPECT_LT(error_after, 0.5 * error_before);
+  const Eigen::Vector3d true_translation =
+      truth.Frame(frame_id).RigFromWorld().translation();
+  const double translation_error =
+      (pose.translation() - true_translation).norm();
+  const double initial_translation_error =
+      (before.Frame(frame_id).RigFromWorld().translation() - true_translation)
+          .norm();
+  EXPECT_LT(translation_error, 0.9 * initial_translation_error);
+  ASSERT_TRUE(std::isfinite(
+      SelectedMeanSquaredReprojectionError(reconstruction, selected, {1, 2})));
+  for (const point3D_t id : selected) {
+    CheckConstantPoint(reconstruction.Point3D(id), before.Point3D(id));
+  }
+  EXPECT_EQ(reconstruction.Camera(1), before.Camera(1));
+  EXPECT_EQ(reconstruction.Camera(2), before.Camera(2));
 }
 
 TEST(DefaultBundleAdjuster, ExternalCameraIntrinsicsOrderingIsConsistent) {
