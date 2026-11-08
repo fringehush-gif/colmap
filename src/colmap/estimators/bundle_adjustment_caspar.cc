@@ -138,7 +138,17 @@ class CasparBundleAdjuster : public BundleAdjuster {
     for (const image_t image_id : config_.Images()) {
       const Image& image = reconstruction_.Image(image_id);
       const Camera& camera = reconstruction_.Camera(image.CameraId());
-      frame_to_model.emplace(image.FrameId(), camera.model_id);
+      if (!GetAdapter(camera.model_id)) {
+        continue;
+      }
+      const auto [it, inserted] =
+          frame_to_model.emplace(image.FrameId(), camera.model_id);
+      if (!inserted && it->second != camera.model_id &&
+          IsPoseVariable(image.FrameId())) {
+        LOG(FATAL_THROW)
+            << "Caspar cannot refine a frame with multiple camera models. "
+               "Use Ceres or hold the frame's rig_from_world pose constant.";
+      }
     }
     for (const auto& [frame_id, model_id] : frame_to_model) {
       GetOrCreatePose(frame_id, model_id);
@@ -263,11 +273,10 @@ class CasparBundleAdjuster : public BundleAdjuster {
                      << camera.ModelName();
         continue;
       }
-      // Mark frame and camera as external so that IsPoseVariable and
-      // IsFocalAndExtraVariable return false for all external
-      // observations.
-      frames_from_outside_config_.insert(image.FrameId());
-      cameras_from_outside_config_.insert(camera.camera_id);
+      // Configured cameras remain shared; only external-only cameras are fixed.
+      if (!camera_to_calib_index_.count(camera.camera_id)) {
+        cameras_from_outside_config_.insert(camera.camera_id);
+      }
       if (options_.refine_sensor_from_rig) {
         const Frame& frame = *image.FramePtr();
         if (frame.HasRigPtr() && !image.IsRefInFrame()) {
@@ -284,8 +293,8 @@ class CasparBundleAdjuster : public BundleAdjuster {
                     point2D,
                     point3D,
                     /*pose_var=*/false,
-                    /*focal_and_extra=*/false,
-                    /*principal_point_var=*/false,
+                    IsFocalAndExtraVariable(camera.camera_id),
+                    IsPrincipalPointVariable(camera.camera_id),
                     calib_idx,
                     *adapter);
     }
@@ -459,7 +468,6 @@ class CasparBundleAdjuster : public BundleAdjuster {
   bool IsPoseVariable(const frame_t frame_id) const {
     return options_.refine_rig_from_world &&
            !config_.HasConstantRigFromWorldPose(frame_id) &&
-           !frames_from_outside_config_.count(frame_id) &&
            !gauge_fixed_frames_.count(frame_id);
   }
 
@@ -1004,7 +1012,6 @@ class CasparBundleAdjuster : public BundleAdjuster {
   FlatHashMap<point3D_t, size_t> point3D_id_to_idx_;
   std::vector<point3D_t> point3D_idx_to_id_;
 
-  FlatHashSet<frame_t> frames_from_outside_config_;
   FlatHashSet<camera_t> cameras_from_outside_config_;
   FlatHashSet<frame_t> gauge_fixed_frames_;
   FlatHashSet<point3D_t> gauge_fixed_points_;
