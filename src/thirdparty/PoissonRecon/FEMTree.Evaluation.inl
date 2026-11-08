@@ -176,15 +176,19 @@ CumulativeDerivativeValues< V , Dim , _PointD > FEMTree< Dim , Real >::_getValue
 		}
 	};
 
-	LocalDepth depth = _localDepth( node );
-	while( GetGhostFlag< Dim >( node ) ) node = node->parent , depth--;
+	while( GetGhostFlag< Dim >( node ) ) node = node->parent;
+	LocalDepth depth ; LocalOffset offset;
+	_localDepthAndOffset( node , depth , offset );
 
 	{
-		evaluator._pointEvaluator->initEvaluationState( p , depth , state );
+		// Match polynomial pieces to the neighbor cell, including points on its faces.
+		evaluator._pointEvaluator->initEvaluationState( p , depth , offset , state );
 		AddToValues( neighborKey.neighbors[ node->depth() ] , solution );
 		if( depth>0 )
 		{
-			evaluator._pointEvaluator->initEvaluationState( p , depth-1 , state );
+			LocalDepth parentDepth ; LocalOffset parentOffset;
+			_localDepthAndOffset( node->parent , parentDepth , parentOffset );
+			evaluator._pointEvaluator->initEvaluationState( p , parentDepth , parentOffset , state );
 			AddToValues( neighborKey.neighbors[ node->parent->depth() ] , coarseSolution );
 		}
 	}
@@ -198,7 +202,9 @@ CumulativeDerivativeValues< V , Dim , _PointD > FEMTree< Dim , Real >::_getValue
 		for( int d=0 ; d<Dim ; d++ ) if( p[d]>c[d] ) cIdx |= (1<<d);
 		if( neighborKey.getChildNeighbors( cIdx , node->depth() , cNeighbors ) )
 		{
-			evaluator._pointEvaluator->initEvaluationState( p , depth+1 , state );
+			LocalOffset childOffset;
+			for( int d=0 ; d<Dim ; d++ ) childOffset[d] = 2*offset[d] + ( (cIdx>>d)&1 );
+			evaluator._pointEvaluator->initEvaluationState( p , depth+1 , childOffset , state );
 			AddToValues( cNeighbors , solution );
 		}
 	}
@@ -599,7 +605,9 @@ void FEMTree< Dim , Real >::_accumulate( const Coefficients& coefficients , Poin
 		{
 			const FEMTreeNode* node = dataKey.neighbors[d].neighbors.data[ WindowIndex< UIntPack< BSplineSupportSizes< FEMSignature< DataSigs >::Degree >::SupportSize ... > , UIntPack< BSplineSupportSizes< FEMSignature< DataSigs >::Degree >::SupportEnd ... > >::Index ];
 			if( !node ) MK_THROW( "Point is not centered on a node: " , p , " " , WindowIndex< UIntPack< BSplineSupportSizes< FEMSignature< DataSigs >::Degree >::SupportSize ... > , UIntPack< BSplineSupportSizes< FEMSignature< DataSigs >::Degree >::SupportEnd ... > >::Index , " @ " , d );
-			pointEvaluator.initEvaluationState( p , _localDepth( node ) , state );
+			LocalDepth depth ; LocalOffset offset;
+			_localDepthAndOffset( node , depth , offset );
+			pointEvaluator.initEvaluationState( p , depth , offset , state );
 		}
 		double scratch[Dim+1];
 		scratch[0] = 1;
