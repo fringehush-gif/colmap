@@ -9,7 +9,11 @@
 #include "colmap/util/eigen_matchers.h"
 #include "colmap/util/testing.h"
 
+#include <atomic>
+#include <chrono>
 #include <fstream>
+#include <future>
+#include <thread>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -61,6 +65,141 @@ std::unique_ptr<retrieval::VisualIndex> CreateSyntheticVisualIndex() {
       FeatureDescriptorsFloat(FeatureExtractorType::SIFT,
                               FeatureDescriptorsFloatData::Random(50, 128)));
   return visual_index;
+}
+
+void CheckFullConsumption(const int num_threads) {
+  constexpr int kNumImages = 3;
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  CreateSyntheticDatabase(kNumImages, *database);
+  std::vector<image_t> query_ids;
+  for (const auto& image : database->ReadAllImages()) {
+    query_ids.push_back(image.ImageId());
+  }
+  VocabTreePairingOptions options;
+  options.num_threads = num_threads;
+  options.num_images = kNumImages;
+  options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
+  CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
+  const std::vector<image_t> requested_ids =
+      num_threads == 0 ? std::vector<image_t>{} : query_ids;
+  VocabTreePairGenerator generator(options, database, requested_ids);
+  std::vector<image_t> seen;
+  for (int i = 0; i < kNumImages; ++i) {
+    const auto pairs = generator.Next();
+    ASSERT_EQ(pairs.size(), kNumImages);
+    seen.push_back(pairs.front().first);
+    for (const auto& pair : pairs) {
+      EXPECT_EQ(pair.first, pairs.front().first);
+    }
+  }
+  EXPECT_THAT(seen, ::testing::UnorderedElementsAreArray(query_ids));
+  EXPECT_TRUE(generator.Next().empty());
+  EXPECT_TRUE(generator.HasFinished());
+}
+
+TEST(VocabTreePairGenerator, ZeroThreadsFirstPass) { CheckFullConsumption(0); }
+
+TEST(VocabTreePairGenerator, FullConsumptionWithOneThread) {
+  CheckFullConsumption(1);
+}
+
+TEST(VocabTreePairGenerator, ResetAfterPartialConsumptionDiscardsOldResults) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  CreateSyntheticDatabase(3, *database);
+  std::vector<image_t> query_ids;
+  for (const auto& image : database->ReadAllImages()) {
+    query_ids.push_back(image.ImageId());
+  }
+  VocabTreePairingOptions options;
+  options.num_threads = 1;
+  options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
+  CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
+  VocabTreePairGenerator generator(options, database, query_ids);
+  ASSERT_FALSE(generator.Next().empty());
+  generator.Reset();
+  std::vector<image_t> seen;
+  for (size_t i = 0; i < query_ids.size(); ++i) {
+    const auto pairs = generator.Next();
+    ASSERT_FALSE(pairs.empty());
+    seen.push_back(pairs.front().first);
+    for (const auto& pair : pairs) {
+      EXPECT_EQ(pair.first, pairs.front().first);
+    }
+  }
+  EXPECT_THAT(seen, ::testing::UnorderedElementsAreArray(query_ids));
+  EXPECT_TRUE(generator.Next().empty());
+  EXPECT_TRUE(generator.HasFinished());
+}
+
+TEST(VocabTreePairGenerator, DestructionWithFullQueueAndActiveCallback) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  CreateSyntheticDatabase(3, *database);
+  std::vector<image_t> query_ids;
+  for (const auto& image : database->ReadAllImages()) {
+    query_ids.push_back(image.ImageId());
+  }
+  ASSERT_EQ(query_ids.size(), 3);
+  VocabTreePairingOptions options;
+  options.num_threads = 1;
+  options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
+  CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
+  std::promise<void> entered, release, destroying, destroyed;
+  auto entered_future = entered.get_future();
+  const auto release_future = release.get_future().share();
+  auto destroying_future = destroying.get_future();
+  auto destroyed_future = destroyed.get_future();
+  std::atomic_bool blocked = false;
+  std::atomic_bool callback_released = false;
+  std::atomic_bool filter_destroyed_after_release = false;
+  auto filter_lifetime = std::shared_ptr<void>(nullptr, [&](void*) {
+    filter_destroyed_after_release = callback_released.load();
+  });
+  auto generator = std::make_unique<VocabTreePairGenerator>(
+      options, database, query_ids, [&, filter_lifetime](image_t id, image_t) {
+        if (id == query_ids[2] && !blocked.exchange(true)) {
+          // One worker has already queued query 2 before entering query 3.
+          entered.set_value();
+          release_future.wait();
+          callback_released = true;
+        }
+        return true;
+      });
+  filter_lifetime.reset();
+  const auto first_pairs = generator->Next();
+  const bool reached_barrier =
+      entered_future.wait_for(std::chrono::seconds(10)) ==
+      std::future_status::ready;
+  std::thread destroyer(
+      [generator = std::move(generator), &destroying, &destroyed]() mutable {
+        destroying.set_value();
+        generator.reset();
+        destroyed.set_value();
+      });
+  destroying_future.wait();
+  const bool waited_for_callback =
+      destroyed_future.wait_for(std::chrono::milliseconds(100)) ==
+      std::future_status::timeout;
+  release.set_value();
+  destroyer.join();
+  EXPECT_FALSE(first_pairs.empty());
+  EXPECT_TRUE(reached_barrier);
+  EXPECT_TRUE(waited_for_callback);
+  EXPECT_TRUE(callback_released);
+  EXPECT_TRUE(filter_destroyed_after_release);
+}
+
+TEST(VocabTreePairGenerator, UnexpectedQueryErrorStopsWorkers) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  CreateSyntheticDatabase(3, *database);
+  VocabTreePairingOptions options;
+  options.num_threads = 1;
+  options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
+  CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
+  VocabTreePairGenerator generator(
+      options, database, {}, [](image_t, image_t) -> bool { throw 17; });
+  EXPECT_THROW(generator.Next(), int);
+  EXPECT_TRUE(generator.HasFinished());
+  EXPECT_ANY_THROW(generator.Reset());
 }
 
 TEST(VocabTreePairGenerator, Nominal) {
@@ -311,37 +450,40 @@ TEST(SequentialPairGenerator, LoopDetectionMinIndexDistance) {
   options.loop_detection_period = 2;
   options.loop_detection_num_images = 2;
   options.loop_detection_min_index_distance = 2;
-  options.num_threads = 1;
   options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
   CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
 
-  SequentialPairGenerator generator(options, database);
-  for (int i = 0; i < kNumImages; ++i) {
-    generator.Next();
-  }
-
-  FlatHashMap<image_t, size_t> image_id_to_idx;
-  for (size_t i = 0; i < images.size(); ++i) {
-    image_id_to_idx.emplace(images[i].ImageId(), i);
-  }
-
-  const int num_loop_detection_queries =
-      (kNumImages + options.loop_detection_period - 1) /
-      options.loop_detection_period;
-  for (int i = 0; i < num_loop_detection_queries; ++i) {
-    const auto pairs = generator.Next();
-    ASSERT_EQ(pairs.size(), options.loop_detection_num_images);
-    for (const auto& [image_id1, image_id2] : pairs) {
-      const size_t image_idx1 = image_id_to_idx.at(image_id1);
-      const size_t image_idx2 = image_id_to_idx.at(image_id2);
-      const size_t image_idx_distance = image_idx1 > image_idx2
-                                            ? image_idx1 - image_idx2
-                                            : image_idx2 - image_idx1;
-      EXPECT_GE(image_idx_distance, options.loop_detection_min_index_distance);
+  for (const int num_threads : {0, 1}) {
+    SCOPED_TRACE(num_threads);
+    options.num_threads = num_threads;
+    SequentialPairGenerator generator(options, database);
+    for (int i = 0; i < kNumImages; ++i) {
+      generator.Next();
     }
+
+    FlatHashMap<image_t, size_t> image_id_to_idx;
+    for (size_t i = 0; i < images.size(); ++i) {
+      image_id_to_idx.emplace(images[i].ImageId(), i);
+    }
+
+    const int num_loop_detection_queries =
+        (kNumImages + options.loop_detection_period - 1) /
+        options.loop_detection_period;
+    for (int i = 0; i < num_loop_detection_queries; ++i) {
+      const auto pairs = generator.Next();
+      ASSERT_EQ(pairs.size(), options.loop_detection_num_images);
+      for (const auto& [image_id1, image_id2] : pairs) {
+        const size_t image_idx1 = image_id_to_idx.at(image_id1);
+        const size_t image_idx2 = image_id_to_idx.at(image_id2);
+        const size_t image_idx_distance = image_idx1 > image_idx2
+                                              ? image_idx1 - image_idx2
+                                              : image_idx2 - image_idx1;
+        EXPECT_GE(image_idx_distance, options.loop_detection_min_index_distance);
+      }
+    }
+    EXPECT_TRUE(generator.Next().empty());
+    EXPECT_TRUE(generator.HasFinished());
   }
-  EXPECT_TRUE(generator.Next().empty());
-  EXPECT_TRUE(generator.HasFinished());
 }
 
 TEST(SpatialPairGenerator, Nominal) {
