@@ -5,15 +5,14 @@
 #include "colmap/math/graph_cut.h"
 #include "colmap/math/math.h"
 #include "colmap/math/random.h"
+#include "colmap/mvs/delaunay_meshing_worker.h"
 #include "colmap/mvs/fusion.h"
 #include "colmap/scene/reconstruction.h"
 #include "colmap/util/file.h"
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/logging.h"
 
-#include <atomic>
 #include <cmath>
-#include <exception>
 #include <fstream>
 #include <mutex>
 #include <vector>
@@ -760,43 +759,11 @@ PlyMesh DelaunayMeshing(const DelaunayMeshingOptions& options,
                              input_data.images.size());
   };
 
-  // A fixed number of tasks dynamically claim images. An exception stops new
-  // claims; Wait joins all current images and reports the worker failures.
-  std::atomic<size_t> next_image_idx{0};
-  auto IntegrateImages = [&]() {
-    try {
-      while (true) {
-        const size_t image_idx =
-            next_image_idx.fetch_add(1, std::memory_order_relaxed);
-        if (image_idx >= input_data.images.size()) return;
-        IntegrateImage(image_idx);
-      }
-    } catch (...) {
-      next_image_idx.store(input_data.images.size(), std::memory_order_relaxed);
-      throw;
-    }
-  };
-
-  // The pool dies before the state and lambdas referenced by its tasks.
-  ThreadPool thread_pool(GetEffectiveNumThreads(options.num_threads));
-  try {
-    const size_t num_tasks =
-        std::min(input_data.images.size(), thread_pool.NumThreads());
-    for (size_t i = 0; i < num_tasks; ++i) {
-      thread_pool.AddTask(IntegrateImages);
-    }
-    thread_pool.Wait();
-  } catch (...) {
-    const auto error = std::current_exception();
-    next_image_idx.store(input_data.images.size(), std::memory_order_relaxed);
-    // Also join after an enqueue failure, before releasing captured state.
-    try {
-      thread_pool.Wait();
-    } catch (...) {
-      // Preserve the original failure; Wait has consumed task exceptions.
-    }
-    std::rethrow_exception(error);
-  }
+  internal::RunDelaunayImageWorkers(
+      input_data.images.size(),
+      GetEffectiveNumThreads(options.num_threads),
+      IntegrateImage,
+      [](ThreadPool& pool, const auto& worker) { pool.AddTask(worker); });
 
   // Setup the min-cut (max-flow) graph optimization.
 
