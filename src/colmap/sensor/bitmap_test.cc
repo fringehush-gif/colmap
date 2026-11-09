@@ -1487,6 +1487,72 @@ INSTANTIATE_TEST_SUITE_P(
                                       /*supports_rgba=*/false,
                                       /*supports_grey_alpha=*/false)));
 
+TEST(Bitmap, RejectUnrepresentableReadOutputPreservesSource) {
+  static int large_scanlines = 0;
+  large_scanlines = 0;
+  class GrayInput : public OIIO::ImageInput {
+   public:
+    const char* format_name() const override { return "colmap_size_gray"; }
+    bool open(const std::string& name, OIIO::ImageSpec& spec) override {
+      const std::filesystem::path path(name);
+      if (path.extension() != ".colmap_size_gray") return false;
+      const int width =
+          path.stem() == "small" ? 2 : std::numeric_limits<int>::max() / 3 + 1;
+      m_spec = OIIO::ImageSpec(width, 1, 1, OIIO::TypeDesc::UINT8);
+      spec = m_spec;
+      return true;
+    }
+    bool close() override { return true; }
+    bool read_native_scanline(int, int, int, int, void* data) override {
+      if (m_spec.width != 2) {
+        ++large_scanlines;
+        return false;
+      }
+      const std::array<uint8_t, 2> pixels = {17, 34};
+      std::copy(pixels.begin(), pixels.end(), static_cast<uint8_t*>(data));
+      return true;
+    }
+  };
+  static const char* extensions[] = {"colmap_size_gray", nullptr};
+  OIIO::declare_imageio_format(
+      "colmap_size_gray",
+      []() -> OIIO::ImageInput* { return new GrayInput; },
+      extensions,
+      nullptr,
+      nullptr,
+      "test");
+  const auto directory = CreateTestDir();
+  const auto small_path = directory / "small.colmap_size_gray";
+  const auto large_path = directory / "large.colmap_size_gray";
+  std::ofstream(small_path).close();
+  std::ofstream(large_path).close();
+  Bitmap control;
+  ASSERT_TRUE(control.Read(small_path, /*as_rgb=*/true));
+  EXPECT_EQ(control.RowMajorData(),
+            (std::vector<uint8_t>{17, 17, 17, 34, 34, 34}));
+  const auto input = OIIO::ImageInput::open(large_path.string());
+  ASSERT_NE(input, nullptr);
+  ASSERT_EQ(input->spec().nchannels, 1);
+  ASSERT_TRUE(Bitmap::IsValidSize(input->spec().width, 1, 1));
+  ASSERT_FALSE(Bitmap::IsValidSize(input->spec().width, 1, 3));
+  ASSERT_TRUE(input->close());
+  for (const bool as_rgb : {false, true}) {
+    Bitmap bitmap(3, 2, as_rgb);
+    bitmap.Fill(BitmapColor<uint8_t>(71));
+    bitmap.SetMetaData("TestSentinel", "preserved");
+    const auto sentinel = bitmap.RowMajorData();
+    const auto colorspace = bitmap.GetMetaData("oiio:ColorSpace");
+    EXPECT_FALSE(bitmap.Read(large_path, /*as_rgb=*/true));
+    EXPECT_EQ(large_scanlines, 0);
+    EXPECT_EQ(bitmap.Width(), 3);
+    EXPECT_EQ(bitmap.Height(), 2);
+    EXPECT_EQ(bitmap.Channels(), as_rgb ? 3 : 1);
+    EXPECT_EQ(bitmap.RowMajorData(), sentinel);
+    EXPECT_EQ(bitmap.GetMetaData("TestSentinel"), "preserved");
+    EXPECT_EQ(bitmap.GetMetaData("oiio:ColorSpace"), colorspace);
+  }
+}
+
 TEST(Bitmap, RejectVolumePreservesSource) {
   if (!OIIO::ImageInput::create("dds")) {
     GTEST_SKIP() << "OpenImageIO DDS input plugin unavailable";

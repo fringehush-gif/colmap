@@ -446,7 +446,9 @@ bool Bitmap::Read(const std::filesystem::path& path,
       !Bitmap::IsValidSize(
           image_spec.width,
           image_spec.height,
-          image_spec.nchannels == 2 || image_spec.nchannels == 1 ? 1 : 3)) {
+          image_spec.nchannels == 2 || image_spec.nchannels == 1 ? 1 : 3) ||
+      !Bitmap::IsValidSize(
+          image_spec.width, image_spec.height, as_rgb ? 3 : 1)) {
     VLOG(3) << "Unsupported bitmap storage layout or dimensions";
     return false;
   }
