@@ -168,9 +168,8 @@ void ObservationManager::IncrementCorrespondenceHasPoint3D(
   stats.num_correspondences_have_point3D[point2D_idx] += 1;
   if (stats.num_correspondences_have_point3D[point2D_idx] == 1) {
     stats.num_visible_points3D += 1;
+    stats.point3D_visibility_pyramid.SetPoint(point2D.xy(0), point2D.xy(1));
   }
-
-  stats.point3D_visibility_pyramid.SetPoint(point2D.xy(0), point2D.xy(1));
 
   THROW_CHECK_LE(stats.num_visible_points3D, stats.num_observations);
 }
@@ -187,9 +186,8 @@ void ObservationManager::DecrementCorrespondenceHasPoint3D(
   stats.num_correspondences_have_point3D[point2D_idx] -= 1;
   if (stats.num_correspondences_have_point3D[point2D_idx] == 0) {
     stats.num_visible_points3D -= 1;
+    stats.point3D_visibility_pyramid.ResetPoint(point2D.xy(0), point2D.xy(1));
   }
-
-  stats.point3D_visibility_pyramid.ResetPoint(point2D.xy(0), point2D.xy(1));
 
   THROW_CHECK_LE(stats.num_visible_points3D, stats.num_observations);
 }
