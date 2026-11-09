@@ -103,6 +103,32 @@ OWNER_HEADER = HEADER.replace(
 
 
 class CasparSolverTemplateTest(unittest.TestCase):
+    def test_buildfile_precision_profile(self) -> None:
+        from jinja2 import Environment
+
+        source = "add_library({{caslib.name}}_core STATIC ${CUDA_SOURCES} ${CUDA_HEADERS})\n"
+        self.assertEqual(template.buildfile_overrides(source, "f32"), {})
+        override = template.buildfile_overrides(source, "f64")
+        rendered = (
+            Environment()
+            .from_string(override["buildfiles/CMakeLists.txt.jinja"])
+            .render(caslib=type("Caslib", (), {"name": "caspar_lib"})())
+        )
+        self.assertIn(
+            "target_compile_definitions(caspar_lib_core PUBLIC CASPAR_LEGACY_DOUBLE_SHARED_SUM=1)",
+            rendered,
+        )
+        for invalid in (
+            "",
+            source + source,
+            source + "CASPAR_LEGACY_DOUBLE_SHARED_SUM",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(RuntimeError):
+                    template.buildfile_overrides(invalid, "f64")
+        with self.assertRaises(ValueError):
+            template.buildfile_overrides(source, "other")
+
     def test_repairs_scored_proposals_and_both_norm_totals(self) -> None:
         result, _ = template.patch_solver_templates(SOURCE, HEADER)
         for expected in (

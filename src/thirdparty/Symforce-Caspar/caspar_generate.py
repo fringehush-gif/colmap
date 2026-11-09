@@ -8,7 +8,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Annotated, Any, get_type_hints
 
-from caspar_solver_template import patch_solver_templates
+from caspar_solver_template import buildfile_overrides, patch_solver_templates
 from jinja2 import ChoiceLoader, DictLoader
 
 # Must be set before importing symforce.symbolic
@@ -410,17 +410,15 @@ if original_loader is None:
 source, _, _ = original_loader.get_source(template_env, "solver.cc.jinja")
 header, _, _ = original_loader.get_source(template_env, "solver.h.jinja")
 source, header = patch_solver_templates(source, header)
-template_env.loader = ChoiceLoader(
-    [
-        DictLoader(
-            {
-                "solver.cc.jinja": source,
-                "solver.h.jinja": header,
-            }
-        ),
-        original_loader,
-    ]
+buildfile, _, _ = original_loader.get_source(
+    template_env, "buildfiles/CMakeLists.txt.jinja"
 )
+overrides = {
+    "solver.cc.jinja": source,
+    "solver.h.jinja": header,
+    **buildfile_overrides(buildfile, precision),
+}
+template_env.loader = ChoiceLoader([DictLoader(overrides), original_loader])
 try:
     caslib.generate(out_dir, use_symlinks=False, python_bindings=False)
 finally:

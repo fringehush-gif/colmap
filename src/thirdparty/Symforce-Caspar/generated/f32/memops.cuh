@@ -246,6 +246,67 @@ __forceinline__ __device__ void WriteSum4(StorageT* const inout_shared, const Ke
   inout_shared[threadIdx.x * 4 + 3] = w;
 }
 
+namespace detail {
+template <typename StorageT>
+class SharedSumGroup {
+ public:
+  __forceinline__ __device__ explicit SharedSumGroup(const uint unique)
+      : group_(cg::labeled_partition(cg::coalesced_threads(), unique)) {}
+
+  __forceinline__ __device__ StorageT Reduce(const StorageT value) {
+    return cg::reduce(group_, value, cg::plus<StorageT>());
+  }
+
+  __forceinline__ __device__ bool IsLeader() const {
+    return group_.thread_rank() == 0;
+  }
+
+ private:
+  cg::coalesced_group group_;
+};
+
+// All translation units in one program must use the same compatibility profile.
+#if defined(CASPAR_LEGACY_DOUBLE_SHARED_SUM) && CASPAR_LEGACY_DOUBLE_SHARED_SUM
+template <>
+class SharedSumGroup<double> {
+ public:
+  __forceinline__ __device__ explicit SharedSumGroup(const uint unique)
+      : unique_(unique), lane_id_(threadIdx.x & 31), group_leader_(-1) {}
+
+  __forceinline__ __device__ double Reduce(const double my_val) {
+    double tot = 0;
+    group_leader_ = -1;
+    const unsigned int active_mask = __activemask();
+    for (int lane = 0; lane < 32; ++lane) {
+      if ((active_mask & (1u << lane)) == 0) {
+        continue;
+      }
+      const uint other_unique = __shfl_sync(active_mask, unique_, lane);
+      const double other_tot = __shfl_sync(active_mask, my_val, lane);
+      if (other_unique == unique_) {
+        if (group_leader_ == -1) {
+          group_leader_ = lane;
+        }
+        if (lane_id_ == static_cast<unsigned int>(group_leader_)) {
+          tot += other_tot;
+        }
+      }
+    }
+    return tot;
+  }
+
+  __forceinline__ __device__ bool IsLeader() const {
+    return lane_id_ == static_cast<unsigned int>(group_leader_);
+  }
+
+ private:
+  const uint unique_;
+  const unsigned int lane_id_;
+  int group_leader_;
+};
+#endif  // CASPAR_LEGACY_DOUBLE_SHARED_SUM
+}  // namespace detail
+
 /**
  * Function used to perform collaborative reductions. Read more on caspar.argtypes.accessors.Sum.
  */
@@ -260,21 +321,21 @@ __forceinline__ __device__ void FlushSumShared(StorageT* const output, const uin
   if (idx.argsort != 0xffff) {  // 0xffff indicates the thread is not used.
     unique = indices[indices[idx.argsort].target].unique;
   }
-  const cg::coalesced_group group = cg::labeled_partition(cg::coalesced_threads(), unique);
+  detail::SharedSumGroup<StorageT> group(unique);
 
 #pragma unroll
   for (int i = 0; i < dim_target; i++) {
     const SharedIndex idx = indices[threadIdx.x];
-    StorageT tot;
+    StorageT tot = 0;
     if (idx.argsort != 0xffff) {  // 0xffff indicates the thread is not used.
-      tot = cg::reduce(group, inout_shared[idx.argsort * dim_target + i], cg::plus<StorageT>());
+      tot = group.Reduce(inout_shared[idx.argsort * dim_target + i]);
     }
     __syncthreads();
     inout_shared[threadIdx.x * dim_target + i] = 0.0f;
     __syncthreads();
 
     // 0xffff indicates the thread is not used.
-    if (idx.argsort != 0xffff && group.thread_rank() == 0) {
+    if (idx.argsort != 0xffff && group.IsLeader()) {
       atomicAdd_block(&inout_shared[indices[idx.argsort].target * dim_target + i], tot);
     }
     __syncthreads();
@@ -308,7 +369,7 @@ __forceinline__ __device__ void FlushSumBlock(StorageT* const output, StorageT* 
 
 #pragma unroll
   for (int i = 0; i < dim_target; i++) {
-    StorageT tot;
+    StorageT tot = 0;
 
     if (valid) {
       tot = cg::reduce(group, inout_shared[threadIdx.x * dim_target + i], cg::plus<StorageT>());
@@ -369,7 +430,7 @@ __forceinline__ __device__ void FlushSumBlockAdd(StorageT* const output,
 
 #pragma unroll
   for (int i = 0; i < dim_target; i++) {
-    StorageT tot;
+    StorageT tot = 0;
 
     if (valid) {
       tot = cg::reduce(group, inout_shared[threadIdx.x * dim_target + i], cg::plus<StorageT>());

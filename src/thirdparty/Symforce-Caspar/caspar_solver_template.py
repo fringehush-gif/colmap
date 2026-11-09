@@ -171,3 +171,23 @@ void {{ solver.struct_name }}::DoBeta() {""",
     ):
         header = _replace_once(header, old, new)
     return source, header
+
+
+def buildfile_overrides(source: str, precision: str) -> dict[str, str]:
+    """Select the legacy double reduction for this generated COLMAP profile."""
+    if precision == "f32":
+        return {}
+    if precision != "f64":
+        raise ValueError(f"Unexpected Caspar precision: {precision}")
+    anchor = "add_library({{caslib.name}}_core STATIC ${CUDA_SOURCES} ${CUDA_HEADERS})"
+    macro = "CASPAR_LEGACY_DOUBLE_SHARED_SUM"
+    if source.count(anchor) != 1 or macro in source:
+        raise RuntimeError(
+            "Caspar build template changed; review double compatibility profile"
+        )
+    return {
+        "buildfiles/CMakeLists.txt.jinja": source.rstrip()
+        + "\n\ntarget_compile_definitions({{caslib.name}}_core PUBLIC "
+        + macro
+        + "=1)\n"
+    }
