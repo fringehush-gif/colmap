@@ -837,14 +837,35 @@ TEST(Bitmap, CropOutOfBounds) {
   EXPECT_THROW(bitmap.Crop(0, 0, 5, 0), std::invalid_argument);
   EXPECT_THROW(bitmap.Crop(6, 0, 5, 5), std::invalid_argument);
   EXPECT_THROW(bitmap.Crop(0, 2, 5, 5), std::invalid_argument);
-  const int kMax = std::numeric_limits<int>::max();
-  EXPECT_THROW(bitmap.Crop(kMax, 0, 1, 1), std::invalid_argument);
-  EXPECT_THROW(bitmap.Crop(0, kMax, 1, 1), std::invalid_argument);
-  EXPECT_THROW(bitmap.Crop(1, 0, kMax, 1), std::invalid_argument);
-  EXPECT_THROW(bitmap.Crop(0, 1, 1, kMax), std::invalid_argument);
   // Failed crops leave the bitmap unmodified.
   EXPECT_EQ(bitmap.Width(), 10);
   EXPECT_EQ(bitmap.Height(), 6);
+}
+
+TEST(Bitmap, CropOverflowRejectedAtBounds) {
+  Bitmap bitmap(10, 6, /*as_rgb=*/true);
+  bitmap.Fill(BitmapColor<uint8_t>(17, 71, 131));
+  const auto original_data = bitmap.RowMajorData();
+  const auto expect_rejected = [&](int left,
+                                   int top,
+                                   int width,
+                                   int height,
+                                   const char* expected_check) {
+    try {
+      bitmap.Crop(left, top, width, height);
+      FAIL() << "Crop unexpectedly accepted an out-of-range rectangle";
+    } catch (const std::invalid_argument& error) {
+      EXPECT_THAT(error.what(), ::testing::HasSubstr(expected_check));
+    }
+    EXPECT_EQ(bitmap.Width(), 10);
+    EXPECT_EQ(bitmap.Height(), 6);
+    EXPECT_EQ(bitmap.RowMajorData(), original_data);
+  };
+  const int max = std::numeric_limits<int>::max();
+  expect_rejected(max, 0, 1, 1, "left <= width_");
+  expect_rejected(0, max, 1, 1, "top <= height_");
+  expect_rejected(1, 0, max, 1, "width <= width_ - left");
+  expect_rejected(0, 1, 1, max, "height <= height_ - top");
 }
 
 TEST(Bitmap, Clone) {
