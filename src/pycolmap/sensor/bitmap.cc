@@ -163,17 +163,18 @@ class PythonBitmapReadScope {
                 "Bitmap payload grid differs from declared resident "
                 "dimensions");
           }
-          Bitmap owned(static_cast<int>(info.shape[1]),
-                       static_cast<int>(info.shape[0]),
-                       as_rgb,
-                       false);
           const size_t source_bytes = static_cast<size_t>(info.shape[0]) *
                                       info.shape[1] * (gray_only ? 1 : 3);
-          const size_t bytes = owned.NumBytes();
           {
-            // Buffer export/pixels/state retain the source lease allocation
-            // while memcpy and the native grayscale conversion release the GIL.
+            // Buffer export/pixels/state retain the source lease through native
+            // allocation, copy/conversion and target publication without the
+            // GIL.
             py::gil_scoped_release release;
+            Bitmap owned(static_cast<int>(info.shape[1]),
+                         static_cast<int>(info.shape[0]),
+                         as_rgb,
+                         false);
+            const size_t bytes = owned.NumBytes();
             if (gray_only || as_rgb) {
               std::memcpy(owned.RowMajorData().data(), info.ptr, bytes);
             } else {
@@ -188,7 +189,8 @@ class PythonBitmapReadScope {
             state->rgb_copy_bytes.fetch_add(source_bytes,
                                             std::memory_order_relaxed);
           else
-            state->gray_bytes.fetch_add(bytes, std::memory_order_relaxed);
+            state->gray_bytes.fetch_add(target->NumBytes(),
+                                        std::memory_order_relaxed);
           return true;
         },
         image_sizes_wh);
