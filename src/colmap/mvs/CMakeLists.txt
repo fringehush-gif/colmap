@@ -238,6 +238,10 @@ if(CUDA_ENABLED)
                 "LINKER:--wrap=cudaFreeArray"
                 "LINKER:--wrap=cudaStreamCreateWithFlags"
                 "LINKER:--wrap=cudaStreamDestroy"
+                "LINKER:--wrap=cudaStreamSynchronize_ptsz"
+                "LINKER:--wrap=cudaStreamQuery_ptsz"
+                "LINKER:--wrap=cudaStreamSynchronize"
+                "LINKER:--wrap=cudaMemcpy3D_ptds"
                 "LINKER:--wrap=cudaPeekAtLastError"
                 "LINKER:--wrap=cudaGetLastError")
             COLMAP_ADD_TEST(
