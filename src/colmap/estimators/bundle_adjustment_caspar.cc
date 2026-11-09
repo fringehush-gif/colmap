@@ -3,6 +3,7 @@
 #include "colmap/estimators/bundle_adjustment_caspar.h"
 
 #include "colmap/estimators/bundle_adjustment.h"
+#include "colmap/estimators/bundle_adjustment_internal.h"
 #include "colmap/geometry/rigid3.h"
 #include "colmap/scene/camera.h"
 #include "colmap/scene/image.h"
@@ -552,29 +553,36 @@ class CasparBundleAdjuster : public BundleAdjuster {
                     "frame found, gauge left unfixed.";
   }
 
+  // Additional implicit anchors must observe a variable pose. Calibration-only
+  // factors do not anchor the similarity of variable scene geometry.
+  bool HasVariablePoseObservation(const Point3D& point3D) const {
+    for (const auto& track_el : point3D.track.Elements()) {
+      if (!config_.HasImage(track_el.image_id)) continue;
+      const Image& image = reconstruction_.Image(track_el.image_id);
+      const Camera& camera = reconstruction_.Camera(image.CameraId());
+      if (!adapters_.count(camera.model_id)) continue;
+      if (IsPoseVariable(image.FrameId())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // Three-point gauge fix: mirrors the Ceres BA equivalent but promotes points
   // into gauge_fixed_points_ instead of calling SetParameterBlockConstant.
   void FixGaugeWithThreePoints() {
-    Eigen::Index num_fixed = 0;
-    Eigen::Matrix3d fixed_pts = Eigen::Matrix3d::Zero();
+    internal::FixedGaugeWithThreePoints fixed_gauge;
 
-    auto maybe_add = [&](const Eigen::Vector3d& xyz) -> bool {
-      if (num_fixed >= 3) return false;
-      fixed_pts.col(num_fixed) = xyz;
-      if (fixed_pts.colPivHouseholderQr().rank() > num_fixed) {
-        ++num_fixed;
-        return true;
-      }
-      fixed_pts.col(num_fixed).setZero();
-      return false;
-    };
-
-    // First pass: count already-constant points.
+    // First pass: include effective constants attached to variable poses while
+    // preserving the existing treatment of explicitly constant points.
     for (const auto& [point3D_id, _] : point3D_num_observations_) {
-      if (!config_.HasConstantPoint(point3D_id)) continue;
+      const bool explicitly_constant = config_.HasConstantPoint(point3D_id);
+      if (!explicitly_constant && IsPointVariable(point3D_id)) continue;
       const Point3D& pt = reconstruction_.Point3D(point3D_id);
-      if (maybe_add(pt.xyz) && num_fixed >= 3) {
-        VLOG(1) << "Gauge fix: 3 linearly independent constant points found, "
+      if (!explicitly_constant && !HasVariablePoseObservation(pt)) continue;
+      if (fixed_gauge.MaybeAddFixedPoint(pt.xyz) &&
+          fixed_gauge.num_fixed_points >= 3) {
+        VLOG(1) << "Gauge fix: 3 non-collinear constant points found, "
                    "THREE_POINTS gauge fixed";
         return;
       }
@@ -584,9 +592,9 @@ class CasparBundleAdjuster : public BundleAdjuster {
     for (const auto& [point3D_id, _] : point3D_num_observations_) {
       if (!IsPointVariable(point3D_id)) continue;
       const Point3D& pt = reconstruction_.Point3D(point3D_id);
-      if (maybe_add(pt.xyz)) {
+      if (fixed_gauge.MaybeAddFixedPoint(pt.xyz)) {
         gauge_fixed_points_.insert(point3D_id);
-        if (num_fixed >= 3) {
+        if (fixed_gauge.num_fixed_points >= 3) {
           VLOG(1) << "Gauge fix: fixed " << gauge_fixed_points_.size()
                   << " points for THREE_POINTS gauge";
           return;
@@ -594,8 +602,9 @@ class CasparBundleAdjuster : public BundleAdjuster {
       }
     }
 
-    LOG(WARNING) << "Caspar THREE_POINTS gauge fix: only " << num_fixed
-                 << " of 3 linearly independent points found.";
+    LOG(WARNING) << "Caspar THREE_POINTS gauge fix: only "
+                 << fixed_gauge.num_fixed_points
+                 << " of 3 non-collinear points found.";
   }
 
   void SetupSolverData(caspar::GraphSolver& solver) {
