@@ -4,11 +4,22 @@
 
 #include "colmap/feature/types.h"
 #include "colmap/math/random_eigen.h"
+#include "colmap/retrieval/inverted_index.h"
+#include "colmap/retrieval/vote_and_verify.h"
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
+#include <bitset>
+#include <fstream>
 #include <sstream>
+#include <utility>
+#include <vector>
 
+#include <faiss/IndexFlat.h>
+#include <faiss/IndexIVFFlat.h>
+#include <faiss/impl/io.h>
+#include <faiss/index_io.h>
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -21,6 +32,301 @@ FeatureDescriptorsFloat CreateRandomDescriptors(int num_rows,
                                                 FeatureExtractorType type) {
   return FeatureDescriptorsFloat(
       type, FeatureDescriptorsFloatData::Random(num_rows, desc_dim));
+}
+
+FeatureDescriptorsFloat CreateScalarDescriptors(
+    const std::vector<float>& values) {
+  FeatureDescriptorsFloatData descriptors =
+      FeatureDescriptorsFloatData::Zero(values.size(), 128);
+  for (size_t i = 0; i < values.size(); ++i) {
+    descriptors(i, 0) = values[i];
+  }
+  return FeatureDescriptorsFloat(FeatureExtractorType::SIFT,
+                                 std::move(descriptors));
+}
+
+void WriteExactVocabulary(const std::filesystem::path& path) {
+  using Index = InvertedIndex<float, 128, 64>;
+  // H/L/M come first; each remaining triple isolates one anchor feature.
+  const std::vector<float> centers = {
+      100, 200, 300, 1000, 1010, 1020, 2000, 2010, 2020, 3000, 3010, 3020};
+  std::vector<float> samples;
+  Index::WordIds word_ids(5 * centers.size(), 1);
+  for (size_t word = 0; word < centers.size(); ++word) {
+    for (int i = 0; i < 5; ++i) {
+      word_ids(samples.size(), 0) = word;
+      samples.push_back(centers[word]);
+    }
+  }
+  const Index::DescType training = CreateScalarDescriptors(samples).data;
+  const Index::DescType words = CreateScalarDescriptors(centers).data;
+  faiss::IndexFlatL2 quantizer(128);
+  // Borrow the quantizer, which outlives the IVF index. One flat list gives
+  // exact word routing without depending on spectral-hash ordering.
+  faiss::IndexIVFFlat vocabulary(&quantizer, 128, 1);
+  vocabulary.train(training.rows(), training.data());
+  vocabulary.add(words.rows(), words.data());
+  const auto check_words = [&vocabulary](
+                               const float value,
+                               const std::vector<faiss::idx_t>& expected) {
+    const Index::DescType descriptor = CreateScalarDescriptors({value}).data;
+    std::vector<float> distances(expected.size());
+    std::vector<faiss::idx_t> actual(expected.size());
+    faiss::IVFSearchParameters options;
+    options.nprobe = 64;
+    vocabulary.search(1,
+                      descriptor.data(),
+                      expected.size(),
+                      distances.data(),
+                      actual.data(),
+                      &options);
+    ASSERT_EQ(actual, expected);
+  };
+  ASSERT_NO_FATAL_FAILURE(check_words(175, {1, 0, 2}));
+  ASSERT_NO_FATAL_FAILURE(check_words(160, {1, 0}));
+  ASSERT_NO_FATAL_FAILURE(check_words(240, {1, 2}));
+
+  Index inverted;
+  inverted.Initialize(centers.size());
+  inverted.GenerateHammingEmbeddingProjection();
+  inverted.ComputeHammingEmbedding(training, word_ids);
+  const Index::DescType query = CreateScalarDescriptors({175}).data;
+  const Index::DescType db_d = CreateScalarDescriptors({160}).data;
+  const Index::DescType db_e = CreateScalarDescriptors({240}).data;
+  std::bitset<64> query_bits, db_bits;
+  for (const int word : {0, 1}) {
+    inverted.ConvertToBinaryDescriptor(word, query, &query_bits);
+    inverted.ConvertToBinaryDescriptor(word, db_d, &db_bits);
+    ASSERT_EQ((query_bits ^ db_bits).count(), 0);
+  }
+  inverted.ConvertToBinaryDescriptor(1, db_e, &db_bits);
+  ASSERT_GT((query_bits ^ db_bits).count(),
+            HammingDistWeightFunctor<64>::kMaxHammingDistance);
+  inverted.ConvertToBinaryDescriptor(2, query, &query_bits);
+  inverted.ConvertToBinaryDescriptor(2, db_e, &db_bits);
+  ASSERT_EQ((query_bits ^ db_bits).count(), 0);
+
+  faiss::VectorIOWriter serialized;
+  faiss::write_index(&vocabulary, &serialized);
+  std::ofstream file(path, std::ios::binary);
+  ASSERT_TRUE(file);
+  const int metadata[] = {
+      2, 128, 64, static_cast<int>(FeatureExtractorType::SIFT)};
+  file.write(reinterpret_cast<const char*>(metadata), sizeof(metadata));
+  file.write(reinterpret_cast<const char*>(serialized.data.data()),
+             serialized.data.size());
+  inverted.Write(&file);
+  file.close();
+  ASSERT_TRUE(file);
+}
+
+TEST(VisualIndex, VerificationWithNoAssignedWords) {
+  using Index = InvertedIndex<float, 128, 64>;
+  const auto path = CreateTestDir() / "empty_ivf_list.bin";
+  const Index::DescType centers = CreateScalarDescriptors({-100, 100}).data;
+  const Index::DescType words = CreateScalarDescriptors({80, 120}).data;
+  const Index::DescType query_descriptor = CreateScalarDescriptors({-100}).data;
+  faiss::IndexFlatL2 quantizer(128);
+  quantizer.add(centers.rows(), centers.data());
+  faiss::IndexIVFFlat vocabulary(&quantizer, 128, 2);
+  // Supply the trained coarse centroids directly; only the positive list
+  // receives a visual word. Searching the negative list must return -1.
+  vocabulary.is_trained = true;
+  vocabulary.add(words.rows(), words.data());
+  faiss::IVFSearchParameters search;
+  search.nprobe = 1;
+  float distance = 0;
+  faiss::idx_t word = 0;
+  vocabulary.search(1, query_descriptor.data(), 1, &distance, &word, &search);
+  ASSERT_EQ(word, -1);
+
+  Index inverted;
+  inverted.Initialize(2);
+  inverted.GenerateHammingEmbeddingProjection();
+  Index::WordIds training_words(10, 1);
+  training_words.topRows(5).setZero();
+  training_words.bottomRows(5).setOnes();
+  const Index::DescType training =
+      CreateScalarDescriptors({80, 80, 80, 80, 80, 120, 120, 120, 120, 120})
+          .data;
+  inverted.ComputeHammingEmbedding(training, training_words);
+  faiss::VectorIOWriter serialized;
+  faiss::write_index(&vocabulary, &serialized);
+  std::ofstream file(path, std::ios::binary);
+  ASSERT_TRUE(file);
+  const int metadata[] = {
+      2, 128, 64, static_cast<int>(FeatureExtractorType::SIFT)};
+  file.write(reinterpret_cast<const char*>(metadata), sizeof(metadata));
+  file.write(reinterpret_cast<const char*>(serialized.data.data()),
+             serialized.data.size());
+  inverted.Write(&file);
+  file.close();
+  ASSERT_TRUE(file);
+
+  auto index = VisualIndex::Read(path);
+  VisualIndex::IndexOptions indexing;
+  indexing.num_threads = 1;
+  indexing.num_checks = 1;
+  index->Add(indexing,
+             0,
+             FeatureKeypoints{FeatureKeypoint(0, 0, 1, 0)},
+             CreateScalarDescriptors({80}));
+  index->Add(indexing,
+             1,
+             FeatureKeypoints{FeatureKeypoint(0, 0, 1, 0)},
+             CreateScalarDescriptors({120}));
+  index->Prepare();
+  VisualIndex::QueryOptions options;
+  options.num_threads = 1;
+  options.num_checks = 1;
+  options.num_neighbors = 1;
+  options.num_images_after_verification = 1;
+  // The populated list must be live after serialization and preparation.
+  // Two distinct indexed words keep their IDF weights nonzero.
+  ASSERT_EQ(index->NumImages(), 2);
+  auto scoring_options = options;
+  scoring_options.num_images_after_verification = 0;
+  std::vector<ImageScore> positive_scores;
+  index->Query(
+      scoring_options, CreateScalarDescriptors({80}), &positive_scores);
+  ASSERT_EQ(positive_scores.size(), 1);
+  EXPECT_EQ(positive_scores[0].image_id, 0);
+  EXPECT_GT(positive_scores[0].score, 0);
+
+  std::vector<ImageScore> scores(1);
+  index->Query(options,
+               FeatureKeypoints{FeatureKeypoint(0, 0, 1, 0)},
+               CreateScalarDescriptors({-100}),
+               &scores);
+  EXPECT_TRUE(scores.empty());
+}
+
+TEST(VisualIndex, MultiwordMatchesRetainMaximumScore) {
+  const auto path = CreateTestDir() / "multiword.bin";
+  ASSERT_NO_FATAL_FAILURE(WriteExactVocabulary(path));
+  auto index = VisualIndex::Read(path);
+  ASSERT_EQ(index->NumVisualWords(), 12);
+  ASSERT_EQ(index->NumImages(), 0);
+  FeatureKeypoints query_keypoints(5);
+  const std::vector<Eigen::Vector2f> points = {
+      {120, 100}, {1000, 180}, {180, 1100}, {1150, 950}, {650, 500}};
+  std::vector<FeatureGeometryMatch> identity_matches;
+  for (size_t i = 0; i < points.size(); ++i) {
+    query_keypoints[i] =
+        FeatureKeypoint(points[i].x(), points[i].y(), 1.0f, 0.0f);
+    FeatureGeometry geometry;
+    geometry.x = points[i].x();
+    geometry.y = points[i].y();
+    geometry.scale = 1;
+    identity_matches.push_back({geometry, geometry});
+  }
+  const int expected = VoteAndVerify(VoteAndVerifyOptions(), identity_matches);
+  ASSERT_EQ(expected, 5);
+  FeatureKeypoints target_keypoints = query_keypoints;
+  std::swap(target_keypoints[2], target_keypoints[3]);
+  VisualIndex::IndexOptions indexing;
+  indexing.num_threads = 1;
+  indexing.num_neighbors = 2;
+  // D at index2 matches words L/H; E at index3 matches L/M. The query
+  // encounters L then H, so D must retain H rather than its first score L.
+  index->Add(indexing,
+             0,
+             target_keypoints,
+             CreateScalarDescriptors({1003, 2003, 160, 240, 3003}));
+  indexing.num_neighbors = 1;
+  // Eight images give document counts H=4, L=7, M=5 and hence
+  // 0 < log(8/7)^2 < log(8/5)^2 < log(8/4)^2 < D's feature index2.
+  for (int image = 1; image <= 7; ++image) {
+    std::vector<float> values;
+    if (image <= 3) {
+      values.push_back(100);
+    }
+    if (image <= 4) {
+      values.push_back(300);
+    }
+    if (image <= 6) {
+      values.push_back(200);
+    }
+    if (image == 7) {
+      values.push_back(1003);
+    }
+    index->Add(indexing,
+               image,
+               FeatureKeypoints(values.size(), FeatureKeypoint(0, 0, 1, 0)),
+               CreateScalarDescriptors(values));
+  }
+  index->Prepare();
+  ASSERT_EQ(index->NumImages(), 8);
+  VisualIndex::QueryOptions query;
+  query.num_threads = 1;
+  query.num_neighbors = 3;
+  query.image_id_filter = [](const int image) { return image == 0; };
+  // The two ambiguous query features have equal degree; index3 is chosen
+  // first. Correct weighting selects D, giving the identity geometry above.
+  const auto descriptors =
+      CreateScalarDescriptors({1003, 2003, 175, 175, 3003});
+  std::vector<ImageScore> plain, verified;
+  index->Query(query, query_keypoints, descriptors, &plain);
+  query.num_images_after_verification = 1;
+  index->Query(query, query_keypoints, descriptors, &verified);
+  ASSERT_EQ(plain.size(), 1);
+  ASSERT_EQ(verified.size(), 1);
+  EXPECT_EQ(plain[0].image_id, 0);
+  EXPECT_EQ(verified[0].image_id, 0);
+  EXPECT_NEAR(verified[0].score - plain[0].score, expected, 1e-5);
+
+  // FAISS pads the extra neighbor slots with invalid word IDs. They must not
+  // change the weighted spatial matches or the final verified score.
+  query.num_neighbors = 12;
+  std::vector<ImageScore> all_words;
+  index->Query(query, query_keypoints, descriptors, &all_words);
+  query.num_neighbors = 16;
+  std::vector<ImageScore> padded_words;
+  index->Query(query, query_keypoints, descriptors, &padded_words);
+  ASSERT_EQ(all_words.size(), 1);
+  ASSERT_EQ(padded_words.size(), 1);
+  EXPECT_EQ(all_words[0].image_id, padded_words[0].image_id);
+  EXPECT_FLOAT_EQ(all_words[0].score, padded_words[0].score);
+
+  // Empty descriptors and an empty candidate set remain valid with spatial
+  // verification enabled.
+  std::vector<ImageScore> empty(1);
+  index->Query(query, FeatureKeypoints{}, CreateScalarDescriptors({}), &empty);
+  EXPECT_TRUE(empty.empty());
+  query.image_id_filter = [](const int) { return false; };
+  index->Query(query, query_keypoints, descriptors, &empty);
+  EXPECT_TRUE(empty.empty());
+
+  // Identical database images must remain a score tie after verification.
+  // Compare by image ID rather than depending on an order among equal scores.
+  for (const int image_id : {8, 9}) {
+    index->Add(indexing,
+               image_id,
+               target_keypoints,
+               CreateScalarDescriptors({1003, 2003, 160, 240, 3003}));
+  }
+  index->Prepare();
+  query.num_images_after_verification = 2;
+  query.image_id_filter = [](const int image) {
+    return image == 8 || image == 9;
+  };
+  query.num_neighbors = 12;
+  std::vector<ImageScore> tied, padded_tied;
+  index->Query(query, query_keypoints, descriptors, &tied);
+  query.num_neighbors = 16;
+  index->Query(query, query_keypoints, descriptors, &padded_tied);
+  ASSERT_EQ(tied.size(), 2);
+  ASSERT_EQ(padded_tied.size(), 2);
+  EXPECT_NE(tied[0].image_id, tied[1].image_id);
+  EXPECT_FLOAT_EQ(tied[0].score, tied[1].score);
+  for (const auto& score : tied) {
+    const auto match = std::find_if(
+        padded_tied.begin(), padded_tied.end(), [&score](const auto& other) {
+          return other.image_id == score.image_id;
+        });
+    ASSERT_NE(match, padded_tied.end());
+    EXPECT_FLOAT_EQ(score.score, match->score);
+  }
 }
 
 class ParameterizedVisualIndexTests
