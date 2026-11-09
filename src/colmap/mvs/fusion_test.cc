@@ -2697,6 +2697,98 @@ std::filesystem::path CreateTwoViewNormalDecisionFixture() {
   return root;
 }
 
+TEST(StereoFusion, BoundingBoxControlsLazyRgbDemand) {
+  const auto root = CreateTwoViewNormalDecisionFixture();
+  const auto names = ReadTextFileLines(root / "stereo/fusion.cfg");
+  ASSERT_EQ(names.size(), 2);
+  std::vector<std::filesystem::path> paths;
+  paths.reserve(names.size());
+  for (const auto& name : names) paths.push_back(root / "images" / name);
+  Bitmap rgb(30, 20, true);
+  rgb.Fill(BitmapColor<uint8_t>(0, 64, 128));
+  for (const bool fail_rgb : {false, true}) {
+    // Check included geometry first in both the successful and failing cases.
+    for (const bool excluded : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "excluded=" << excluded << ", fail_rgb=" << fail_rgb);
+      std::atomic<int> reads{0};
+      auto reader = ScopedBitmapReader::Create(
+          paths,
+          [&](const std::filesystem::path&, bool, bool, Bitmap* target) {
+            ++reads;
+            if (fail_rgb) return false;
+            *target = rgb;
+            return true;
+          },
+          std::vector<std::pair<int, int>>(paths.size(), {30, 20}));
+      StereoFusionOptions options;
+      options.num_threads = 1;
+      options.min_num_pixels = options.max_num_pixels = 2;
+      options.bounded_cache = options.bounded_cache_components = true;
+      if (excluded) {
+        options.bounding_box.first.setConstant(1e6f);
+        options.bounding_box.second.setConstant(2e6f);
+      }
+      StereoFusion fusion(options, root, "COLMAP", "", "geometric");
+      if (fail_rgb && !excluded) {
+        try {
+          fusion.Run();
+          FAIL() << "Expected required RGB input to report the read failure";
+        } catch (const AggregateException& error) {
+          ASSERT_FALSE(error.exceptions().empty());
+          for (const auto& exception : error.exceptions()) {
+            try {
+              std::rethrow_exception(exception);
+            } catch (const std::invalid_argument& cause) {
+              EXPECT_NE(std::string(cause.what()).find("data->bitmap.Read"),
+                        std::string::npos);
+            }
+          }
+        }
+        EXPECT_GT(reads.load(), 0);
+      } else {
+        ASSERT_NO_THROW(fusion.Run());
+        if (excluded) {
+          EXPECT_TRUE(fusion.GetFusedPoints().empty());
+          EXPECT_TRUE(fusion.GetFusedPointsVisibility().empty());
+          EXPECT_EQ(reads.load(), 0);
+        } else {
+          EXPECT_EQ(reads.load(), 2);
+          EXPECT_EQ(fusion.GetFusedPoints().size(), 600);
+          EXPECT_EQ(fusion.GetFusedPointsVisibility().size(), 600);
+          for (const auto& point : fusion.GetFusedPoints()) {
+            EXPECT_FLOAT_EQ(point.z, 5.0f);
+            EXPECT_EQ(point.r, 0);
+            EXPECT_EQ(point.g, 64);
+            EXPECT_EQ(point.b, 128);
+          }
+        }
+      }
+      const auto stats = fusion.GetBoundedCacheStats();
+      ASSERT_TRUE(stats);
+      const auto bitmap_loads = stats->component_loads[static_cast<size_t>(
+          BoundedWorkspace::Component::kBitmap)];
+      if (fail_rgb && !excluded) {
+        EXPECT_GT(bitmap_loads, 0);
+      } else {
+        EXPECT_EQ(bitmap_loads, excluded ? 0 : 2);
+      }
+      EXPECT_EQ(stats->reserved_bytes, 0);
+      // Rejection still visits; required-color failure must not visit pixels.
+      for (size_t view = 0; view < names.size(); ++view) {
+        for (size_t row = 0; row < 20; ++row) {
+          for (size_t col = 0; col < 30; ++col) {
+            EXPECT_EQ(StereoFusionExactDepthTestPeer::PixelMaskValue(
+                          fusion, view, row, col),
+                      fail_rgb && !excluded ? 0 : 1);
+          }
+        }
+      }
+      reader->Close();
+    }
+  }
+}
+
 TEST(StereoFusion, SparseDepthCancellationFailureAndReuse) {
   if (!ImmutableMapRegion::Supported()) GTEST_SKIP();
   const auto root = CreateTwoViewNormalDecisionFixture();

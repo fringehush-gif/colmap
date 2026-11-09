@@ -1887,6 +1887,17 @@ void StereoFusion::Fuse(const int thread_id,
           inv_P_.at(image_idx) *
           Eigen::Vector4f(col * depth, row * depth, depth, 1.0f);
 
+      // Excluded geometry needs no RGB input. Keep rejected pixels visited.
+      if (xyz(0) < options_.bounding_box.first(0) ||
+          xyz(1) < options_.bounding_box.first(1) ||
+          xyz(2) < options_.bounding_box.first(2) ||
+          xyz(0) > options_.bounding_box.second(0) ||
+          xyz(1) > options_.bounding_box.second(1) ||
+          xyz(2) > options_.bounding_box.second(2)) {
+        fused_pixel_mask.Set(row, col, 1);
+        continue;
+      }
+
       // Read the color of the pixel.
       const auto* borrowed_bitmap =
           kResident ? nullptr
@@ -1933,16 +1944,6 @@ void StereoFusion::Fuse(const int thread_id,
 
       // Set the current pixel as visited.
       fused_pixel_mask.Set(row, col, 1);
-
-      // Pixels out of bounds are filtered
-      if (xyz(0) < options_.bounding_box.first(0) ||
-          xyz(1) < options_.bounding_box.first(1) ||
-          xyz(2) < options_.bounding_box.first(2) ||
-          xyz(0) > options_.bounding_box.second(0) ||
-          xyz(1) > options_.bounding_box.second(1) ||
-          xyz(2) > options_.bounding_box.second(2)) {
-        continue;
-      }
 
       // Accumulate statistics for fused point.
       fused_point_x.push_back(xyz(0));
