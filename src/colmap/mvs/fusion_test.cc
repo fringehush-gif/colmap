@@ -3433,8 +3433,10 @@ TEST(StereoFusion, ChangedRosterAfterCancellationSelectsOnlyCurrentRoots) {
         mode == "bounded" || mode == "components" || mode == "mapped";
     options.bounded_cache_components = mode == "components" || mode == "mapped";
     options.bounded_cache_neighborhood = mode == "components";
-    options.bounded_cache_normal_tile_size = mode == "components" ? 4 : 0;
-    if (mode == "components" || mode == "mapped") {
+    options.bounded_cache_normal_tile_size =
+        mode == "components" && mapped_storage_supported ? 4 : 0;
+    if ((mode == "components" || mode == "mapped") &&
+        mapped_storage_supported) {
       options.bounded_cache_normal_mapped_bytes = 1 << 20;
       options.bounded_cache_normal_mapped_files = 2;
     }
