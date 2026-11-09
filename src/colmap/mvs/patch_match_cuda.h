@@ -14,8 +14,6 @@
 #include "colmap/mvs/patch_match_state_map.h"
 #include "colmap/util/cuda_to_hip.h"
 
-#include <cstdio>
-#include <exception>
 #include <iostream>
 #include <memory>
 #include <utility>
@@ -28,35 +26,6 @@ template <typename T>
 class PatchMatchSourceArray;
 class PatchMatchSparseSources;
 struct SparseSourceTestFailure;
-
-#ifndef COLMAP_HIP_ENABLED
-class PatchMatchBatchExecution;
-
-// A submitted execution could not establish completion. Its device storage is
-// retained, and PatchMatch refuses further work on that device in this process.
-class PatchMatchCompletionError : public std::exception {
- public:
-  PatchMatchCompletionError(int device,
-                           int code,
-                           std::exception_ptr cause = {}) noexcept
-      : device_(device), code_(code), cause_(std::move(cause)) {
-    std::snprintf(message_, sizeof(message_),
-                  "CUDA device %d completion is unknown (code %d); "
-                  "PatchMatch storage retained and device retired until process exit",
-                  device_, code_);
-  }
-  const char* what() const noexcept override { return message_; }
-  int Device() const noexcept { return device_; }
-  int Code() const noexcept { return code_; }
-  const std::exception_ptr& Cause() const noexcept { return cause_; }
-
- private:
-  int device_;
-  int code_;
-  std::exception_ptr cause_;
-  char message_[192]{};
-};
-#endif
 
 class PatchMatchCuda {
  public:
@@ -86,8 +55,12 @@ class PatchMatchCuda {
 
  private:
 #ifndef COLMAP_HIP_ENABLED
-  friend class PatchMatchBatchExecution;
-  int device_index_ = -1;
+  friend void RunPatchMatchPair(PatchMatchCuda& first,
+                                PatchMatchCuda& second,
+                                cudaStream_t first_stream,
+                                cudaStream_t second_stream);
+  friend void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
+                                 const std::vector<cudaStream_t>& streams);
 #endif
   template <int kWindowSize, int kWindowStep, bool kCheckpointHmm>
   void RunWithWindowSizeAndStep();
@@ -197,16 +170,14 @@ class PatchMatchCuda {
   // so this is workspace memory in global memory.
   std::unique_ptr<GpuMat<float>> global_workspace_;
 
+#ifndef COLMAP_HIP_ENABLED
   // Per-problem storage for the opposite reference-image orientation.
-  // Non-reuse rotation also uses these as temporary owners, so an execution
-  // failure cannot destroy storage below its owning completion boundary.
   std::unique_ptr<GpuMat<float>> alternate_depth_map_;
   std::unique_ptr<GpuMat<float>> alternate_normal_map_;
   std::unique_ptr<GpuMat<uint8_t>> alternate_ref_image_;
   std::unique_ptr<GpuMat<float>> alternate_ref_sum_image_;
   std::unique_ptr<GpuMat<float>> alternate_ref_squared_sum_image_;
   std::unique_ptr<GpuMat<uint8_t>> alternate_consistency_mask_;
-#ifndef COLMAP_HIP_ENABLED
   std::unique_ptr<CudaArrayLayeredTexture<uint8_t>>
       alternate_ref_image_texture_;
   // Non-owning array caches; the two owning textures outlive every use. Swap
@@ -231,18 +202,13 @@ bool CanPairPatchMatchViews(size_t first_width,
                             bool geometric,
                             bool checkpoint_hmm);
 
-// Internal API: owners and streams belong to the current runtime CUDA context,
-// with exclusive submission on the invoking thread. Raw aliases must not access
-// transferred solvers. Retained stream handles are never queried again.
-// Ownership returns only on success. Execution failure consumes the owners:
-// confirmed completion destroys them; unknown completion retains them until
-// process exit. Pre-transfer rejection leaves the inputs intact.
-void RunPatchMatchPair(std::unique_ptr<PatchMatchCuda>& first,
-                       std::unique_ptr<PatchMatchCuda>& second,
+// Both instances own prepared, independent real inputs on one CUDA device.
+void RunPatchMatchPair(PatchMatchCuda& first,
+                       PatchMatchCuda& second,
                        cudaStream_t first_stream,
                        cudaStream_t second_stream);
 // Same native kernels and per-view state; controller admits groups of 3 to 5.
-void RunPatchMatchBatch(std::vector<std::unique_ptr<PatchMatchCuda>>& owners,
+void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
                         const std::vector<cudaStream_t>& streams);
 // The resource query is device-specific and preserves the pair admission.
 bool CanBatchPatchMatchViews(

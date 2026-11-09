@@ -53,15 +53,6 @@ namespace colmap::mvs::internal {
 bool IsPatchMatchWorkStreamConstructionActive() noexcept __attribute__((weak));
 }
 namespace {
-// Synthetic statuses follow successful real operations; no GPU fault is induced.
-thread_local cudaStream_t completion_stream = nullptr;
-thread_local bool completion_unknown = false, completion_triggered = false;
-thread_local size_t completion_syncs = 0, completion_queries = 0;
-thread_local size_t completion_other_waits = 0, completion_releases = 0;
-thread_local size_t completion_allocations = 0, completion_work_waits = 0;
-// 0: work-stream wait; 1: first depth rotation; 2: reference texture upload.
-thread_local int completion_stage = 0;
-thread_local size_t completion_work_count = 2;
 enum class StreamFault {
   kNone,
   kRefuse,
@@ -161,60 +152,6 @@ void ResetAllocationInjection(size_t ordinal,
   wrapped_fail_at = ordinal;
 }
 }  // namespace
-extern "C" cudaError_t __real_cudaStreamSynchronize_ptsz(cudaStream_t);
-extern "C" cudaError_t __real_cudaStreamQuery_ptsz(cudaStream_t);
-extern "C" cudaError_t __wrap_cudaStreamSynchronize_ptsz(cudaStream_t stream) {
-  const auto actual = __real_cudaStreamSynchronize_ptsz(stream);
-  if (completion_stream == nullptr) return actual;
-  if (!completion_triggered && completion_stage != 0) {
-    if (actual == cudaSuccess && stream != colmap::CudaDefaultStream())
-      ++completion_work_waits;
-    return actual;
-  }
-  if (stream != completion_stream) {
-    if (completion_triggered) ++completion_other_waits;
-    return actual;
-  }
-  if (actual != cudaSuccess) return actual;
-  completion_triggered = true;
-  ++completion_syncs;
-  return cudaErrorUnknown;
-}
-extern "C" cudaError_t __wrap_cudaStreamQuery_ptsz(cudaStream_t stream) {
-  const auto actual = __real_cudaStreamQuery_ptsz(stream);
-  if (stream != completion_stream || !completion_triggered ||
-      actual != cudaSuccess) return actual;
-  ++completion_queries;
-  return completion_unknown ? cudaErrorNotReady : actual;
-}
-extern "C" cudaError_t __real_cudaStreamSynchronize(cudaStream_t);
-extern "C" cudaError_t __real_cudaMemcpy3D_ptds(const cudaMemcpy3DParms*);
-extern "C" cudaError_t __wrap_cudaStreamSynchronize(cudaStream_t stream) {
-  const auto actual = __real_cudaStreamSynchronize(stream);
-  if (actual == cudaSuccess && completion_stream && !completion_triggered &&
-      completion_stage == 1 && completion_work_waits >= completion_work_count &&
-      stream == colmap::CudaDefaultStream()) {
-    completion_stream = stream;
-    completion_triggered = true;
-    ++completion_syncs;
-    return cudaErrorUnknown;
-  }
-  return actual;
-}
-extern "C" cudaError_t __wrap_cudaMemcpy3D_ptds(const cudaMemcpy3DParms* params) {
-  const auto actual = __real_cudaMemcpy3D_ptds(params);
-  if (actual == cudaSuccess && completion_stream && !completion_triggered &&
-      completion_stage == 2 && completion_work_waits >= completion_work_count &&
-      params->kind == cudaMemcpyDeviceToDevice && params->dstArray) {
-    // Finish the real upload before reporting a conservative policy error.
-    const auto done = __real_cudaStreamSynchronize_ptsz(colmap::CudaDefaultStream());
-    if (done != cudaSuccess) return done;
-    completion_stream = colmap::CudaDefaultStream();
-    completion_triggered = true;
-    return cudaErrorUnknown;
-  }
-  return actual;
-}
 extern "C" cudaError_t __real_cudaMalloc(void**, size_t);
 extern "C" cudaError_t __real_cudaMallocPitch(void**, size_t*, size_t, size_t);
 extern "C" cudaError_t __real_cudaMalloc3DArray(cudaArray_t*,
@@ -287,7 +224,6 @@ extern "C" cudaError_t __wrap_cudaGetLastError() {
   return actual;
 }
 extern "C" cudaError_t __wrap_cudaMalloc(void** out, size_t size) {
-  if (completion_stream) ++completion_allocations;
   if (InjectAllocation()) {
     *out = nullptr;
     return static_cast<cudaError_t>(wrapped_status.load());
@@ -298,7 +234,6 @@ extern "C" cudaError_t __wrap_cudaMallocPitch(void** out,
                                               size_t* pitch,
                                               size_t width,
                                               size_t height) {
-  if (completion_stream) ++completion_allocations;
   if (InjectAllocation()) {
     *out = nullptr;
     return static_cast<cudaError_t>(wrapped_status.load());
@@ -310,7 +245,6 @@ extern "C" cudaError_t __wrap_cudaMalloc3DArray(
     const cudaChannelFormatDesc* desc,
     cudaExtent extent,
     unsigned int flags) {
-  if (completion_stream) ++completion_allocations;
   if (InjectAllocation()) {
     *out = nullptr;
     return static_cast<cudaError_t>(wrapped_status.load());
@@ -338,12 +272,10 @@ extern "C" cudaError_t __wrap_cudaMemGetInfo(size_t* free, size_t* total) {
   return status;
 }
 extern "C" cudaError_t __wrap_cudaFree(void* ptr) {
-  if (completion_triggered && ptr) ++completion_releases;
   const cudaError_t actual = __real_cudaFree(ptr);
   return ptr ? MaybeInjectCleanup(actual) : actual;
 }
 extern "C" cudaError_t __wrap_cudaFreeArray(cudaArray_t ptr) {
-  if (completion_triggered && ptr) ++completion_releases;
   const cudaError_t actual = __real_cudaFreeArray(ptr);
   if (actual == cudaSuccess && ptr && wrapped_track_initial_dense &&
       wrapped_worker_armed && ptr == wrapped_initial_dense) {
@@ -1180,8 +1112,8 @@ void ExpectPairedDefaultSweepOutputs(const bool reuse,
       const auto& second_mask = std::get<3>(expected_second);
       EXPECT_FALSE(first_mask.empty() && second_mask.empty());
     }
-    auto first = std::make_unique<PatchMatchCuda>(options, first_problem);
-    auto second = std::make_unique<PatchMatchCuda>(options, second_problem);
+    PatchMatchCuda first(options, first_problem);
+    PatchMatchCuda second(options, second_problem);
     Streams streams;
     ASSERT_EQ(cudaStreamCreateWithFlags(&streams.first, cudaStreamNonBlocking),
               cudaSuccess);
@@ -1200,163 +1132,10 @@ void ExpectPairedDefaultSweepOutputs(const bool reuse,
                               [](float depth) { return depth > 0.0f; }),
                 0);
     };
-    compare(expected_first, *first);
-    compare(expected_second, *second);
+    compare(expected_first, first);
+    compare(expected_second, second);
   }
 }
-
-#ifdef COLMAP_TEST_CUDA_ALLOCATION_WRAPPING
-int CheckPairCompletionPolicy(bool unknown, bool reuse, int stage = 0,
-                              size_t count = 2) {
-  Inputs input = MakeInputs(0, 2, 256, 128);
-  auto options = MakeOptions(count == 3, count == 3, reuse);
-  const PatchMatchOptions defaults;
-  options.window_radius = defaults.window_radius;
-  options.window_step = defaults.window_step;
-  options.num_samples = defaults.num_samples;
-  options.num_iterations = defaults.num_iterations;
-  options.sigma_spatial = options.window_radius;
-  PatchMatch::Problem problem;
-  problem.ref_image_idx = 0;
-  problem.src_image_idxs = {1, 2};
-  problem.images = &input.images;
-  problem.depth_maps = &input.depths;
-  problem.normal_maps = &input.normals;
-  auto first = std::make_unique<PatchMatchCuda>(options, problem);
-  auto second = std::make_unique<PatchMatchCuda>(options, problem);
-  std::vector<cudaStream_t> streams(count, nullptr);
-  struct Cleanup {
-    std::vector<cudaStream_t>& streams;
-    ~Cleanup() {
-      completion_stream = nullptr;
-      completion_triggered = false;
-      for (auto stream : streams)
-        if (stream) (void)cudaStreamDestroy(stream);
-    }
-  } cleanup{streams};
-  for (auto& stream : streams)
-    if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess)
-      return 1;
-  const auto rejected_by = [](const auto& operation, const char* condition) {
-    try {
-      operation();
-    } catch (const std::exception& error) {
-      return std::string(error.what()).find(condition) != std::string::npos;
-    }
-    return false;
-  };
-  auto* original = first.get();
-  if (!rejected_by(
-          [&] { RunPatchMatchPair(first, first, streams[0], streams[1]); },
-          "&first != &second"))
-    return 2;
-  if (first.get() != original || !second) return 3;
-  if (!rejected_by(
-          [&] { RunPatchMatchPair(first, second, nullptr, streams[1]); },
-          "streams[i] != nullptr"))
-    return 4;
-  if (first.get() != original || !second) return 5;
-
-  auto unsupported_options = options;
-  --unsupported_options.num_iterations;
-  auto unsupported = std::make_unique<PatchMatchCuda>(unsupported_options, problem);
-  if (!rejected_by(
-          [&] { RunPatchMatchPair(first, unsupported, streams[0], streams[1]); },
-          "p.options_.num_iterations"))
-    return 13;
-  if (first.get() != original || !unsupported) return 14;
-  unsupported.reset();
-  std::vector<std::unique_ptr<PatchMatchCuda>> batch;
-  if (count == 3) {
-    batch.push_back(std::move(first));
-    batch.push_back(std::move(second));
-    batch.push_back(std::make_unique<PatchMatchCuda>(options, problem));
-  }
-  completion_stage = stage;
-  completion_work_count = count;
-  completion_work_waits = 0;
-  completion_unknown = unknown;
-  completion_syncs = completion_queries = completion_other_waits = 0;
-  completion_releases = completion_allocations = 0;
-  completion_triggered = false;
-  completion_stream = streams[0];
-  bool retained_error = false, original_error = false;
-  std::exception_ptr retained_cause;
-  int retired_device = -1;
-  try {
-    if (count == 3)
-      RunPatchMatchBatch(batch, streams);
-    else
-      RunPatchMatchPair(first, second, streams[0], streams[1]);
-    return 6;
-  } catch (const PatchMatchCompletionError& error) {
-    retained_error = error.Cause() && error.Code() == cudaErrorUnknown;
-    retained_cause = error.Cause();
-    retired_device = error.Device();
-  } catch (const std::exception&) {
-    original_error = true;
-  }
-  if (first || second || !batch.empty() || completion_syncs < 1 ||
-      completion_queries != 1 || completion_other_waits < count) return 7;
-  if (unknown) {
-    if (!retained_error || original_error || completion_releases != 0) return 8;
-    const auto allocations = completion_allocations;
-    bool refused_for_retained_failure = false;
-    try {
-      auto refused = std::make_unique<PatchMatchCuda>(options, problem);
-      return 9;
-    } catch (const PatchMatchCompletionError& error) {
-      refused_for_retained_failure = error.Device() == retired_device &&
-                                    error.Code() == cudaErrorUnknown &&
-                                    error.Cause() == retained_cause;
-    }
-    if (!refused_for_retained_failure || completion_allocations != allocations ||
-        completion_releases != 0)
-      return 10;
-  } else if (retained_error || !original_error || completion_releases == 0) {
-    return 11;
-  }
-  completion_stream = nullptr;
-  completion_triggered = false;
-  for (auto& stream : streams) {
-    if (cudaStreamDestroy(stream) != cudaSuccess) return 12;
-    stream = nullptr;
-  }
-  return 0;
-}
-
-TEST_F(CudaTest, PairFailedWaitWithSuccessfulQueryReleasesOnlyAfterCompletion) {
-  for (const bool reuse : {false, true}) {
-    SCOPED_TRACE(reuse);
-    EXPECT_EQ(CheckPairCompletionPolicy(false, reuse), 0);
-  }
-}
-
-TEST_F(CudaTest, PairUnknownCompletionRetainsOwnersAndRefusesDevice) {
-  // Re-exec each case: retirement is intentionally permanent in this process.
-  GTEST_FLAG_SET(death_test_style, "threadsafe");
-  for (const bool reuse : {false, true}) {
-    SCOPED_TRACE(reuse);
-    EXPECT_EXIT(std::_Exit(CheckPairCompletionPolicy(true, reuse)),
-                ::testing::ExitedWithCode(0), "");
-  }
-}
-
-TEST_F(CudaTest, RotationAndTextureUnknownCompletionRetainNestedOwners) {
-  GTEST_FLAG_SET(death_test_style, "threadsafe");
-  for (const int stage : {1, 2}) {
-    SCOPED_TRACE(stage);
-    EXPECT_EXIT(std::_Exit(CheckPairCompletionPolicy(true, false, stage)),
-                ::testing::ExitedWithCode(0), "");
-  }
-}
-
-TEST_F(CudaTest, BatchUnknownCompletionRetainsSharedGeometryBank) {
-  GTEST_FLAG_SET(death_test_style, "threadsafe");
-  EXPECT_EXIT(std::_Exit(CheckPairCompletionPolicy(true, true, 0, 3)),
-              ::testing::ExitedWithCode(0), "");
-}
-#endif
 
 TEST_F(CudaTest, PairedDefaultSweepsPreserveIndependentOutputs) {
   ExpectPairedDefaultSweepOutputs(false);
@@ -1431,8 +1210,8 @@ void ExpectReferenceBatchOutputs(const size_t count,
   auto incumbent = construct();
   for (size_t i = 0; i < count; i += 2) {
     if (i + 1 < count) {
-      RunPatchMatchPair(incumbent[i],
-                        incumbent[i + 1],
+      RunPatchMatchPair(*incumbent[i],
+                        *incumbent[i + 1],
                         streams.values[i],
                         streams.values[i + 1]);
     } else {
@@ -1451,7 +1230,10 @@ void ExpectReferenceBatchOutputs(const size_t count,
     for (size_t i = 0; i < count; ++i)
       EXPECT_LT(batch[i]->PairPeakBytes(), incumbent[i]->PairPeakBytes());
   }
-  RunPatchMatchBatch(batch, streams.values);
+  std::vector<PatchMatchCuda*> views;
+  views.reserve(batch.size());
+  for (auto& owner : batch) views.push_back(owner.get());
+  RunPatchMatchBatch(views, streams.values);
   for (size_t i = 0; i < count; ++i) {
     SCOPED_TRACE(::testing::Message() << "count=" << count << " view=" << i
                                       << " geometry=" << geometry << " reuse="
@@ -1540,6 +1322,7 @@ TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {
         EXPECT_EQ(candidate.back()->PairPeakBytes(),
                   control.back()->PairPeakBytes());
       }
+      std::vector<PatchMatchCuda*> views;
       std::vector<cudaStream_t> streams(3, nullptr);
       struct Cleanup {
         std::vector<cudaStream_t>& streams;
@@ -1549,6 +1332,7 @@ TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {
         }
       } cleanup{streams};
       for (size_t i = 0; i < 3; ++i) {
+        views.push_back(candidate[i].get());
         CUDA_SAFE_CALL(
             cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
       }
@@ -1563,7 +1347,7 @@ TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {
       };
       for (int repeat = 0; repeat < 2; ++repeat) {
         for (auto& owner : control) owner->Run();
-        RunPatchMatchBatch(candidate, streams);
+        RunPatchMatchBatch(views, streams);
         for (size_t i = 0; i < 3; ++i) compare(*control[i], *candidate[i]);
       }
       // Non-first owners have no private alternate pair when leaving the batch.
@@ -1575,7 +1359,7 @@ TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {
       }
       control[0]->Run();
       control[1]->Run();
-      RunPatchMatchPair(candidate[0], candidate[1], streams[0], streams[1]);
+      RunPatchMatchPair(*candidate[0], *candidate[1], streams[0], streams[1]);
       compare(*control[0], *candidate[0]);
       compare(*control[1], *candidate[1]);
     }
@@ -2712,6 +2496,7 @@ TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
         owners.push_back(
             std::make_unique<PatchMatchCuda>(options, problems[i], shared));
       shared.reset();  // Owners, not the caller, must retain the bank.
+      std::vector<PatchMatchCuda*> views;
       std::vector<cudaStream_t> streams(owners.size(), nullptr);
       struct StreamCleanup {
         std::vector<cudaStream_t>& values;
@@ -2727,7 +2512,8 @@ TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
       for (auto& stream : streams)
         CUDA_SAFE_CALL(
             cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-      RunPatchMatchBatch(owners, streams);
+      for (auto& owner : owners) views.push_back(owner.get());
+      RunPatchMatchBatch(views, streams);
       for (size_t i = 0; i < owners.size(); ++i) {
         const auto actual = read(*owners[i]);
         ExpectExactlyEqual(std::get<0>(expected[i]), std::get<0>(actual));
@@ -2825,6 +2611,7 @@ TEST_F(CudaTest, ImmutableSourceDepthLeasesPreserveThreeViewGeoOutput) {
     owners.push_back(
         std::make_unique<PatchMatchCuda>(options, new_problems[ref], shared));
   shared.reset();
+  std::vector<PatchMatchCuda*> views;
   std::vector<cudaStream_t> streams(kReferences, nullptr);
   struct StreamCleanup {
     std::vector<cudaStream_t>& values;
@@ -2839,7 +2626,8 @@ TEST_F(CudaTest, ImmutableSourceDepthLeasesPreserveThreeViewGeoOutput) {
   } cleanup{streams};
   for (auto& stream : streams)
     CUDA_SAFE_CALL(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-  RunPatchMatchBatch(owners, streams);
+  for (auto& owner : owners) views.push_back(owner.get());
+  RunPatchMatchBatch(views, streams);
   for (int ref = 0; ref < kReferences; ++ref) {
     const auto actual = read(*owners[ref]);
     ExpectExactlyEqual(std::get<0>(expected[ref]), std::get<0>(actual));

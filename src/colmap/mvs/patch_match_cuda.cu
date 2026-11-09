@@ -19,12 +19,10 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <exception>
 #include <limits>
 #include <sstream>
 #include <type_traits>
@@ -44,10 +42,6 @@ namespace colmap {
 namespace mvs {
 
 namespace {
-
-#ifndef COLMAP_HIP_ENABLED
-void EnsurePatchMatchDeviceAvailable(int device);
-#endif
 
 // An immutable value copied into each kernel launch's parameter state.
 struct RefCamera {
@@ -2135,10 +2129,10 @@ PatchMatchCuda::PatchMatchCuda(
 #endif
   SetBestCudaDevice(std::stoi(options_.gpu_index));
 #ifndef COLMAP_HIP_ENABLED
-  CUDA_SAFE_CALL(cudaGetDevice(&device_index_));
-  EnsurePatchMatchDeviceAvailable(device_index_);
+  int device = 0;
+  CUDA_SAFE_CALL(cudaGetDevice(&device));
   cudaDeviceProp properties{};
-  CUDA_SAFE_CALL(cudaGetDeviceProperties(&properties, device_index_));
+  CUDA_SAFE_CALL(cudaGetDeviceProperties(&properties, device));
   cooperative_sample_batch_size_ =
       CooperativeSampleBatchSizeForDevice(properties.major, properties.minor);
 #endif
@@ -2188,7 +2182,6 @@ void PatchMatchCuda::UseSparseSources(
 
 void PatchMatchCuda::Run() {
 #ifndef COLMAP_HIP_ENABLED
-  EnsurePatchMatchDeviceAvailable(device_index_);
   if (options_.rotation_buffer_reuse) EnsureGeometryRotationMemory();
 #endif
   // Only publish masks after a completed filtered sweep and final rotation.
@@ -2920,88 +2913,10 @@ bool CanBatchPatchMatchViews(
   return true;
 }
 
-// Own every submitted resource before beginning the batch schedule.
-class PatchMatchBatchExecution {
- public:
-  PatchMatchBatchExecution(
-      std::vector<std::unique_ptr<PatchMatchCuda>>& incoming,
-      const std::vector<cudaStream_t>& work_streams) : streams(work_streams) {
-    THROW_CHECK_GE(incoming.size(), 2);
-    THROW_CHECK_LE(incoming.size(), 5);
-    THROW_CHECK_EQ(streams.size(), incoming.size());
-    CUDA_SAFE_CALL(cudaGetDevice(&device));
-    EnsurePatchMatchDeviceAvailable(device);
-    views.reserve(incoming.size());
-    for (size_t i = 0; i < incoming.size(); ++i) {
-      THROW_CHECK(incoming[i] != nullptr);
-      THROW_CHECK(streams[i] != nullptr);
-      THROW_CHECK_EQ(incoming[i]->device_index_, device);
-      for (size_t j = 0; j < i; ++j) THROW_CHECK(streams[i] != streams[j]);
-      views.push_back(incoming[i].get());
-    }
-    Validate();
-    owners.swap(incoming);
-  }
-  void Validate() const;
-  void Run();
-  bool Complete() noexcept;
-  std::vector<std::unique_ptr<PatchMatchCuda>> owners;
-  std::vector<PatchMatchCuda*> views;
-  const std::vector<cudaStream_t> streams;
-  std::unique_ptr<GpuMat<float>> geometry_depth, geometry_normal;
-  int device = -1;
-  cudaError_t failure = cudaSuccess;
-  std::exception_ptr cause;
-  PatchMatchBatchExecution* next = nullptr;
-};
-
-namespace {
-// Never delete retained nodes, including during static teardown. Already
-// admitted executions finish or retain their own storage independently.
-std::atomic<PatchMatchBatchExecution*> incomplete_executions{nullptr};
-void EnsurePatchMatchDeviceAvailable(int device) {
-  for (const auto* execution = incomplete_executions.load(std::memory_order_acquire);
-       execution != nullptr; execution = execution->next) {
-    if (execution->device == device)
-      throw PatchMatchCompletionError(
-          device, static_cast<int>(execution->failure), execution->cause);
-  }
-}
-void RetainIncompleteExecution(PatchMatchBatchExecution* execution) noexcept {
-  execution->next = incomplete_executions.load(std::memory_order_relaxed);
-  while (!incomplete_executions.compare_exchange_weak(
-      execution->next, execution,
-      std::memory_order_release, std::memory_order_relaxed)) {}
-}
-}  // namespace
-
-bool PatchMatchBatchExecution::Complete() noexcept {
-  bool complete = true;
-  const auto wait = [&](cudaStream_t stream) {
-    const auto status = cudaStreamSynchronize(stream);
-    if (status == cudaSuccess) return;
-    // Only a successful query establishes completion after a failed wait.
-    const auto query = cudaStreamQuery(stream);
-    if (query != cudaSuccess) {
-      complete = false;
-      if (failure == cudaSuccess) failure = status;
-    }
-    try {
-      if (!CudaCleanupScope::ObserveCleanup(
-              "cudaStreamSynchronize PatchMatch unwind", status))
-        LOG(ERROR) << "PatchMatch unwind synchronization failed: "
-                   << GetCudaErrorMessage(status)
-                   << "; completion query: " << GetCudaErrorMessage(query);
-    } catch (...) {
-      // Diagnostic failure must not skip independent waits.
-    }
-  };
-  for (cudaStream_t stream : streams) wait(stream);
-  wait(CudaDefaultStream());
-  return complete;
-}
-
-void PatchMatchBatchExecution::Validate() const {
+// Common host schedule. The two-view wrapper retains its original one-wave
+// admission; the controller admits larger groups separately.
+void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
+                        const std::vector<cudaStream_t>& streams) {
   THROW_CHECK_GE(views.size(), 2);
   THROW_CHECK_LE(views.size(), 5);
   THROW_CHECK_EQ(streams.size(), views.size());
@@ -3033,19 +2948,6 @@ void PatchMatchBatchExecution::Validate() const {
     }
     validate(*views[i]);
   }
-  if (views.size() == 2) {
-    THROW_CHECK(CanPairPatchMatchViews(first.ref_width_,
-                                       first.ref_height_,
-                                       views[1]->ref_width_,
-                                       views[1]->ref_height_,
-                                       first.options_.geom_consistency,
-                                       first.options_.checkpoint_hmm));
-  }
-}
-
-// Common host schedule; the controller separately admits larger groups.
-void PatchMatchBatchExecution::Run() {
-  PatchMatchCuda& first = *views.front();
   VLOG(2) << "PatchMatch batch checkpoint_hmm: "
           << first.options_.checkpoint_hmm << ", references: " << views.size();
   bool shared_geometry = first.CanShareGeometryRotation();
@@ -3053,6 +2955,7 @@ void PatchMatchBatchExecution::Run() {
     shared_geometry = shared_geometry && p->CanShareGeometryRotation() &&
                       p->ref_width_ == first.ref_width_ &&
                       p->ref_height_ == first.ref_height_;
+  std::unique_ptr<GpuMat<float>> geometry_depth, geometry_normal;
   if (shared_geometry) {
     geometry_depth = std::move(first.alternate_depth_map_);
     geometry_normal = std::move(first.alternate_normal_map_);
@@ -3072,6 +2975,14 @@ void PatchMatchBatchExecution::Run() {
       if (p->options_.rotation_buffer_reuse) p->EnsureGeometryRotationMemory();
   }
   const bool is_pair = views.size() == 2;
+  if (is_pair) {
+    THROW_CHECK(CanPairPatchMatchViews(first.ref_width_,
+                                       first.ref_height_,
+                                       views[1]->ref_width_,
+                                       views[1]->ref_height_,
+                                       first.options_.geom_consistency,
+                                       first.options_.checkpoint_hmm));
+  }
   const bool final_together =
       !is_pair || !first.options_.geom_consistency ||
       PairFitsResidentWaves(
@@ -3221,13 +3132,12 @@ void PatchMatchBatchExecution::Run() {
       // Rotate() swapped the produced mask into the alternate owner.
       p.alternate_consistency_mask_->Rotate(p.consistency_mask_.get());
     } else {
-      p.alternate_consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
+      std::unique_ptr<GpuMat<uint8_t>> rotated(new GpuMat<uint8_t>(
           p.cost_map_->GetWidth(),
           p.cost_map_->GetHeight(),
-          PackedConsistencyMaskDepth(p.cost_map_->GetDepth()));
-      p.consistency_mask_->Rotate(p.alternate_consistency_mask_.get());
-      p.consistency_mask_.swap(p.alternate_consistency_mask_);
-      p.alternate_consistency_mask_.reset();
+          PackedConsistencyMaskDepth(p.cost_map_->GetDepth())));
+      p.consistency_mask_->Rotate(rotated.get());
+      p.consistency_mask_.swap(rotated);
     }
     p.consistency_mask_valid_ = true;
   };
@@ -3275,51 +3185,11 @@ void PatchMatchBatchExecution::Run() {
   CUDA_SYNC_AND_CHECK();
 }
 
-void RunPatchMatchBatch(
-    std::vector<std::unique_ptr<PatchMatchCuda>>& owners,
-    const std::vector<cudaStream_t>& streams) {
-  auto execution = std::make_unique<PatchMatchBatchExecution>(owners, streams);
-  try {
-    execution->Run();
-  } catch (...) {
-    execution->cause = std::current_exception();
-    if (!execution->Complete()) {
-      auto* retained = execution.release();
-      RetainIncompleteExecution(retained);
-      throw PatchMatchCompletionError(
-          retained->device, static_cast<int>(retained->failure), retained->cause);
-    }
-    // Failed solvers are destroyed only after positive completion proof.
-    throw;
-  }
-  owners = std::move(execution->owners);
-}
-
-void RunPatchMatchPair(std::unique_ptr<PatchMatchCuda>& first,
-                       std::unique_ptr<PatchMatchCuda>& second,
+void RunPatchMatchPair(PatchMatchCuda& first,
+                       PatchMatchCuda& second,
                        cudaStream_t first_stream,
                        cudaStream_t second_stream) {
-  THROW_CHECK(&first != &second);
-  THROW_CHECK(first != nullptr);
-  THROW_CHECK(second != nullptr);
-  const std::vector<cudaStream_t> streams{first_stream, second_stream};
-  std::vector<std::unique_ptr<PatchMatchCuda>> owners;
-  owners.reserve(2);
-  owners.push_back(std::move(first));
-  owners.push_back(std::move(second));
-  const auto restore = [&] {
-    if (owners.size() == 2) {
-      first = std::move(owners[0]);
-      second = std::move(owners[1]);
-    }
-  };
-  try {
-    RunPatchMatchBatch(owners, streams);
-  } catch (...) {
-    restore();  // Pre-transfer rejection preserves inputs.
-    throw;
-  }
-  restore();
+  RunPatchMatchBatch({&first, &second}, {first_stream, second_stream});
 }
 
 #endif
@@ -3357,20 +3227,8 @@ void PatchMatchCuda::BindRefImageTexture() {
   texture_desc.filterMode = cudaFilterModePoint;
   texture_desc.readMode = cudaReadModeNormalizedFloat;
   texture_desc.normalizedCoords = false;
-#ifdef COLMAP_HIP_ENABLED
   ref_image_texture_ =
       CudaArrayLayeredTexture<uint8_t>::FromGpuMat(texture_desc, *ref_image_);
-#else
-  // GpuMat::Rotate completed previous users of the old texture. Retain both
-  // owners until upload succeeds, rather than unwinding a factory-local target.
-  alternate_ref_image_texture_ =
-      std::make_unique<CudaArrayLayeredTexture<uint8_t>>(
-          texture_desc, ref_image_->GetWidth(), ref_image_->GetHeight(),
-          ref_image_->GetDepth());
-  alternate_ref_image_texture_->CopyFromGpuMat(*ref_image_);
-  ref_image_texture_.swap(alternate_ref_image_texture_);
-  alternate_ref_image_texture_.reset();
-#endif
 }
 
 #ifndef COLMAP_HIP_ENABLED
@@ -3947,41 +3805,39 @@ void PatchMatchCuda::Rotate(bool pack_geometry) {
 
   // Rotate depth map.
   {
-    alternate_depth_map_ = std::make_unique<GpuMat<float>>(width, height);
-    depth_map_->Rotate(alternate_depth_map_.get());
-    depth_map_.swap(alternate_depth_map_);
-    alternate_depth_map_.reset();
+    std::unique_ptr<GpuMat<float>> rotated_depth_map(
+        new GpuMat<float>(width, height));
+    depth_map_->Rotate(rotated_depth_map.get());
+    depth_map_.swap(rotated_depth_map);
   }
 
   // Rotate normal map.
   {
     RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
         normal_map_->View());
-    alternate_normal_map_ = std::make_unique<GpuMat<float>>(width, height, 3);
-    normal_map_->Rotate(alternate_normal_map_.get());
-    normal_map_.swap(alternate_normal_map_);
-    alternate_normal_map_.reset();
+    std::unique_ptr<GpuMat<float>> rotated_normal_map(
+        new GpuMat<float>(width, height, 3));
+    normal_map_->Rotate(rotated_normal_map.get());
+    normal_map_.swap(rotated_normal_map);
   }
 
   // Rotate reference image.
   {
-    alternate_ref_image_ = std::make_unique<GpuMat<uint8_t>>(width, height);
+    std::unique_ptr<GpuMat<uint8_t>> rotated_ref_image(
+        new GpuMat<uint8_t>(width, height));
+    std::unique_ptr<GpuMat<float>> rotated_sum, rotated_squared_sum;
     if (ref_sum_image_) {
-      alternate_ref_sum_image_ = std::make_unique<GpuMat<float>>(width, height);
-      alternate_ref_squared_sum_image_ =
-          std::make_unique<GpuMat<float>>(width, height);
+      rotated_sum = std::make_unique<GpuMat<float>>(width, height);
+      rotated_squared_sum = std::make_unique<GpuMat<float>>(width, height);
     }
-    ref_image_->Rotate(alternate_ref_image_.get());
+    ref_image_->Rotate(rotated_ref_image.get());
     if (ref_sum_image_) {
-      ref_sum_image_->Rotate(alternate_ref_sum_image_.get());
-      ref_squared_sum_image_->Rotate(alternate_ref_squared_sum_image_.get());
-      ref_sum_image_.swap(alternate_ref_sum_image_);
-      ref_squared_sum_image_.swap(alternate_ref_squared_sum_image_);
-      alternate_ref_sum_image_.reset();
-      alternate_ref_squared_sum_image_.reset();
+      ref_sum_image_->Rotate(rotated_sum.get());
+      ref_squared_sum_image_->Rotate(rotated_squared_sum.get());
+      ref_sum_image_.swap(rotated_sum);
+      ref_squared_sum_image_.swap(rotated_squared_sum);
     }
-    ref_image_.swap(alternate_ref_image_);
-    alternate_ref_image_.reset();
+    ref_image_.swap(rotated_ref_image);
     BindRefImageTexture();
   }
 

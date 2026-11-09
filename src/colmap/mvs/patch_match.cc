@@ -936,7 +936,7 @@ void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
   LOG(INFO) << "Running paired PatchMatch references " << first_problem_idx
             << " and " << second_problem_idx;
   RunPatchMatchPair(
-      first_cuda, second_cuda, streams->values[0], streams->values[1]);
+      *first_cuda, *second_cuda, streams->values[0], streams->values[1]);
   write_cuda(first, *first_cuda);
   write_cuda(second, *second_cuda);
   CheckedCudaCleanup([&] {
@@ -1071,8 +1071,8 @@ void PatchMatchController::ProcessProblemBatch(
                     << error.what();
               }
               if (streams) {
-                RunPatchMatchPair(owners[i],
-                                  owners[i + 1],
+                RunPatchMatchPair(*owners[i],
+                                  *owners[i + 1],
                                   streams->values[0],
                                   streams->values[1]);
                 write_cuda(*input[i], *owners[i]);
@@ -1276,6 +1276,9 @@ void PatchMatchController::ProcessProblemBatch(
     pair_or_single_fallback();
     return;
   }
+  std::vector<PatchMatchCuda*> views;
+  views.reserve(owners.size());
+  for (auto& owner : owners) views.push_back(owner.get());
   std::optional<WorkStreams> streams;
   try {
     streams.emplace(input.size(), /*synchronize_on_close=*/true);
@@ -1288,7 +1291,7 @@ void PatchMatchController::ProcessProblemBatch(
   }
   LOG(INFO) << "Running " << input.size() << " reference PatchMatch batch"
             << (shared ? " (sparse source aliases)" : "");
-  RunPatchMatchBatch(owners, streams->values);
+  RunPatchMatchBatch(views, streams->values);
   for (size_t i = 0; i < input.size(); ++i) write_cuda(*input[i], *owners[i]);
   CheckedCudaCleanup([&] {
     for (auto& owner : owners) owner.reset();

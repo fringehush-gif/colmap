@@ -38,9 +38,6 @@ class CudaArrayLayeredTexture {
       const size_t depth,
       const T* data);
 
-  // The caller owns the destination before a possibly failing device copy.
-  void CopyFromGpuMat(const GpuMat<T>& mat);
-
   cudaTextureObject_t GetObj() const;
 
   size_t GetWidth() const;
@@ -80,22 +77,17 @@ CudaArrayLayeredTexture<T>::FromGpuMat(const cudaTextureDesc& texture_desc,
   auto array = std::make_unique<CudaArrayLayeredTexture<T>>(
       texture_desc, mat.GetWidth(), mat.GetHeight(), mat.GetDepth());
 
-  array->CopyFromGpuMat(mat);
-  return array;
-}
-
-template <typename T>
-void CudaArrayLayeredTexture<T>::CopyFromGpuMat(const GpuMat<T>& mat) {
-  THROW_CHECK_EQ(mat.GetWidth(), width_);
-  THROW_CHECK_EQ(mat.GetHeight(), height_);
-  THROW_CHECK_EQ(mat.GetDepth(), depth_);
-  cudaMemcpy3DParms params = {};
-  params.extent = make_cudaExtent(width_, height_, depth_);
+  cudaMemcpy3DParms params;
+  memset(&params, 0, sizeof(params));
+  params.extent =
+      make_cudaExtent(mat.GetWidth(), mat.GetHeight(), mat.GetDepth());
   params.kind = cudaMemcpyDeviceToDevice;
   params.srcPtr = make_cudaPitchedPtr(
       (void*)mat.GetPtr(), mat.GetPitch(), mat.GetWidth(), mat.GetHeight());
-  params.dstArray = array_;
+  params.dstArray = array->array_;
   CUDA_SAFE_CALL(cudaMemcpy3D(&params));
+
+  return array;
 }
 
 template <typename T>
