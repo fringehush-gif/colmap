@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
+import numpy as np
+
 import pycolmap
 
 
@@ -106,3 +108,32 @@ def test_feature_extraction_options_check() -> None:
 def test_feature_extractor_create() -> None:
     extractor = pycolmap.FeatureExtractor.create(device=pycolmap.Device.cpu)
     assert extractor is not None
+
+
+def test_feature_extractor_array_paths_match_bitmap() -> None:
+    # Binary pixels normalize exactly to float32 zero/one. This isolates the
+    # shared Bitmap conversion from float-to-byte quantization differences.
+    y, x = np.indices((128, 128))
+    pattern = (37 * x + 17 * y + (x * y) % 251) % 13
+    image = (pattern < 6).astype(np.uint8) * np.uint8(255)
+    normalized = image.astype(np.float32) / np.float32(255)
+    options = pycolmap.FeatureExtractionOptions()
+    options.num_threads = 1
+    options.use_gpu = False
+    extractor = pycolmap.FeatureExtractor.create(
+        options=options, device=pycolmap.Device.cpu
+    )
+    reference_keypoints, reference_descriptors = extractor.extract(
+        pycolmap.Bitmap.from_array(image)
+    )
+    assert len(reference_keypoints) > 0
+    reference = pycolmap.keypoints_to_matrix(reference_keypoints)
+    for keypoints, descriptors in (
+        extractor.extract_from_uint8_array(image),
+        extractor.extract_from_float32_array(normalized),
+    ):
+        np.testing.assert_array_equal(
+            pycolmap.keypoints_to_matrix(keypoints), reference
+        )
+        assert descriptors.type == reference_descriptors.type
+        np.testing.assert_array_equal(descriptors.data, reference_descriptors.data)
