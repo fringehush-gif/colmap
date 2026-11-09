@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include <OpenImageIO/color.h>
 #include <OpenImageIO/imagebufalgo.h>
@@ -151,6 +152,17 @@ bool IsEquivalentColorSpace(const std::string_view& colorspace1,
 
 }  // namespace
 
+// Pixel access, pitch and interpolation still use signed int offsets. Keep
+// every stored raster in that domain; widening allocation alone is unsafe.
+bool Bitmap::IsValidSize(const int width,
+                         const int height,
+                         const int channels) {
+  return width >= 0 && height >= 0 && (channels == 1 || channels == 3) &&
+         width <= std::numeric_limits<int>::max() / channels &&
+         (width == 0 ||
+          height <= std::numeric_limits<int>::max() / (width * channels));
+}
+
 Bitmap::Bitmap()
     : width_(0), height_(0), channels_(0), linear_colorspace_(false) {
   EnsureOpenImageIOInitialized();
@@ -160,6 +172,7 @@ Bitmap::Bitmap(const int width,
                const int height,
                const bool as_rgb,
                const bool linear_colorspace) {
+  THROW_CHECK(Bitmap::IsValidSize(width, height, as_rgb ? 3 : 1));
   EnsureOpenImageIOInitialized();
   width_ = width;
   height_ = height;
@@ -285,7 +298,9 @@ std::optional<double> Bitmap::ExifFocalLength() const {
       //   (Diagonal distance of image area in the 35 mm camera (43.27 mm) /
       //    Diagonal distance of image area on the image sensor of the DSC)
       //    * focal length of the lens of the DSC.
-      const double diagonal = std::sqrt(width_ * width_ + height_ * height_);
+      const double width = width_;
+      const double height = height_;
+      const double diagonal = std::sqrt(width * width + height * height);
       return focal_length_35mm / 43.27 * diagonal;
     }
   }
@@ -426,6 +441,15 @@ bool Bitmap::Read(const std::filesystem::path& path,
   }
 
   const OIIO::ImageSpec& image_spec = input->spec();
+  if (image_spec.width <= 0 || image_spec.height <= 0 ||
+      image_spec.depth != 1 || image_spec.deep ||
+      !Bitmap::IsValidSize(
+          image_spec.width,
+          image_spec.height,
+          image_spec.nchannels == 2 || image_spec.nchannels == 1 ? 1 : 3)) {
+    VLOG(3) << "Unsupported bitmap storage layout or dimensions";
+    return false;
+  }
   width_ = image_spec.width;
   height_ = image_spec.height;
   const int file_channels = image_spec.nchannels;
@@ -443,6 +467,10 @@ bool Bitmap::Read(const std::filesystem::path& path,
     return false;
   }
 
+  if (!Bitmap::IsValidSize(width_, height_, channels_)) {
+    VLOG(3) << "Unsupported bitmap dimensions";
+    return false;
+  }
   data_.resize(width_ * height_ * channels_);
   // Note that OIIO supports reading a subset of channels.
   input->read_image(0, 0, 0, channels_, OIIO::TypeDesc::UINT8, data_.data());
@@ -548,6 +576,7 @@ void Bitmap::SetImageData(int width, int height, std::vector<uint8_t>&& data) {
 void Bitmap::Rescale(const int new_width,
                      const int new_height,
                      RescaleFilter filter) {
+  THROW_CHECK(Bitmap::IsValidSize(new_width, new_height, channels_));
   const OIIO::ImageBuf buf(
       OIIO::ImageSpec(width_, height_, channels_, OIIO::TypeDesc::UINT8),
       data_.data());
@@ -689,6 +718,7 @@ Bitmap Bitmap::CloneAsRGB() const {
     return Clone();
   } else {
     THROW_CHECK_EQ(channels_, 1);
+    THROW_CHECK(Bitmap::IsValidSize(width_, height_, 3));
     Bitmap cloned;
     cloned.width_ = width_;
     cloned.height_ = height_;
