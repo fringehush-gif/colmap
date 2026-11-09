@@ -493,6 +493,17 @@ struct StereoFusionExactDepthTestPeer {
   static bool HasFullRamInputs(const StereoFusion& fusion) {
     return !fusion.full_ram_inputs_.empty();
   }
+  static bool HasCompactFullRamInputs(const StereoFusion& fusion) {
+    return std::any_of(fusion.full_ram_inputs_.begin(),
+                       fusion.full_ram_inputs_.end(),
+                       [](const auto& input) {
+                         return input.bitmap && input.depth.width > 0 &&
+                                static_cast<size_t>(input.bitmap->Width()) ==
+                                    input.depth.width &&
+                                static_cast<size_t>(input.bitmap->Height()) ==
+                                    input.depth.plane / input.depth.width;
+                       });
+  }
   static void PrepareRing(StereoFusion& fusion,
                           const Workspace::Options& options,
                           size_t slots,
@@ -1420,6 +1431,425 @@ TEST(StereoFusion, IndependentPixelsPreserveCompleteWorkerOutput) {
   masked.Run();
   EXPECT_TRUE(masked.GetFusedPoints().empty());
   EXPECT_TRUE(masked.GetFusedPointsVisibility().empty());
+}
+
+// Analytic rays and planes provide an oracle independent of Fusion's helpers.
+class StereoFusionPlaneOracle : public testing::Test {
+ protected:
+  struct ExpectedPoint {
+    Eigen::Vector3d xyz;
+    Eigen::Vector3d normal;
+    std::array<int, 3> rgb;
+    std::vector<int> visibility;
+  };
+
+  void SetUp() override {
+    root_ = CreateTestDir();
+    for (const auto* dir :
+         {"sparse", "images", "stereo/depth_maps", "stereo/normal_maps"}) {
+      CreateDirIfNotExists(root_ / dir, true);
+    }
+    constexpr int kWidth = 41, kHeight = 29;
+    constexpr int kBitmapWidth = 83, kBitmapHeight = 61;
+    constexpr double kFx = 90, kFy = 75, kCx = 43.2, kCy = 28.4;
+    const std::array<image_t, 4> image_ids{31, 7, 99, 42};
+    const std::array<double, 4> yaw{-0.03, -0.01, 0.015, 0.04};
+    const std::array<double, 4> roll{0.015, -0.01, 0.02, -0.015};
+    std::array<Eigen::Matrix3d, 4> rotations;
+    std::array<Eigen::Vector3d, 4> centers;
+    std::array<std::string, 4> names;
+    std::array<Mat<float>, 4> depths, normals;
+    for (size_t view = 0; view < names.size(); ++view) {
+      rotations[view] =
+          (Eigen::AngleAxisd(roll[view], Eigen::Vector3d::UnitZ()) *
+           Eigen::AngleAxisd(yaw[view], Eigen::Vector3d::UnitY()))
+              .toRotationMatrix();
+      centers[view] =
+          Eigen::Vector3d(-0.15 + 0.1 * view, 0.025 * (view % 2), 0.015 * view);
+      names[view] = "view_" + std::to_string(image_ids[view]) + ".png";
+      depths[view] = Mat<float>(kWidth, kHeight, 1);
+      normals[view] = Mat<float>(kWidth, kHeight, 3);
+      depths[view].Fill(0);
+      normals[view].Fill(0);
+    }
+    const auto project = [&](int view, const Eigen::Vector3d& xyz) {
+      const Eigen::Vector3d q = rotations[view] * (xyz - centers[view]);
+      return Eigen::Vector2d(
+          (kFx * q.x() / q.z() + kCx) * kWidth / kBitmapWidth - 0.5,
+          (kFy * q.y() / q.z() + kCy) * kHeight / kBitmapHeight - 0.5);
+    };
+    const auto intersect = [&](int view,
+                               int col,
+                               int row,
+                               const Eigen::Vector3d& normal,
+                               double offset) {
+      const Eigen::Vector3d ray =
+          rotations[view].transpose() *
+          Eigen::Vector3d(((col + 0.5) * kBitmapWidth / kWidth - kCx) / kFx,
+                          ((row + 0.5) * kBitmapHeight / kHeight - kCy) / kFy,
+                          1);
+      return Eigen::Vector3d(
+          centers[view] +
+          ((offset - normal.dot(centers[view])) / normal.dot(ray)) * ray);
+    };
+    const auto rgb = [](int view, int col, int row) {
+      return std::array<int, 3>{(13 * view + 3 * col + 5 * row) % 256,
+                                (47 * view + 11 * col + 7 * row) % 256,
+                                (91 * view + col + 17 * row) % 256};
+    };
+    Reconstruction reconstruction;
+    colmap::Camera camera;
+    camera.camera_id = 5;
+    camera.model_id = CameraModelId::kPinhole;
+    camera.width = kBitmapWidth;
+    camera.height = kBitmapHeight;
+    camera.params = {kFx, kFy, kCx, kCy};
+    reconstruction.AddCameraWithTrivialRig(camera);
+    const std::array<Eigen::Vector3d, 3> sparse_points{
+        Eigen::Vector3d(-1, -0.4, 6),
+        Eigen::Vector3d(0, 0.5, 6.5),
+        Eigen::Vector3d(1, 0, 7)};
+    for (size_t view = 0; view < names.size(); ++view) {
+      colmap::Image image;
+      image.SetImageId(image_ids[view]);
+      image.SetName(names[view]);
+      image.SetCameraId(camera.camera_id);
+      std::vector<Eigen::Vector2d> observations;
+      for (const auto& xyz : sparse_points) {
+        const Eigen::Vector2d pixel = project(view, xyz);
+        observations.emplace_back((pixel.x() + 0.5) * kBitmapWidth / kWidth,
+                                  (pixel.y() + 0.5) * kBitmapHeight / kHeight);
+      }
+      image.SetPoints2D(observations);
+      reconstruction.AddImageWithTrivialFrame(
+          image,
+          Rigid3d(Eigen::Quaterniond(rotations[view]),
+                  -rotations[view] * centers[view]));
+    }
+    // Only adjacent physical views share sparse tracks.
+    for (size_t edge = 0; edge < sparse_points.size(); ++edge) {
+      Track track;
+      track.AddElement(image_ids[edge], edge);
+      track.AddElement(image_ids[edge + 1], edge);
+      reconstruction.AddPoint3D(sparse_points[edge], std::move(track));
+    }
+    reconstruction.Write(root_ / "sparse");
+    Model model;
+    model.Read(root_, "COLMAP");
+    std::array<int, 4> image_indices;
+    for (size_t view = 0; view < names.size(); ++view) {
+      image_indices[view] = model.GetImageIdx(names[view]);
+    }
+    const auto overlap = model.GetMaxOverlappingImages(3, 0);
+    for (int view = 0; view < 4; ++view) {
+      std::vector<int> expected;
+      if (view > 0) expected.push_back(image_indices[view - 1]);
+      if (view < 3) expected.push_back(image_indices[view + 1]);
+      auto actual = overlap[image_indices[view]];
+      std::sort(expected.begin(), expected.end());
+      std::sort(actual.begin(), actual.end());
+      ASSERT_EQ(actual, expected);
+    }
+    const std::array<std::vector<int>, 4> support{
+        std::vector<int>{0, 1}, {0, 1, 2}, {1, 2, 3}, {2, 3}};
+    const std::array<std::array<std::pair<int, int>, 3>, 4> anchors{{
+        {{{4, 5}, {11, 14}, {11, 23}}},
+        {{{12, 5}, {12, 13}, {12, 23}}},
+        {{{17, 8}, {20, 14}, {29, 21}}},
+        {{{35, 5}, {30, 14}, {28, 23}}},
+    }};
+    for (size_t group = 0; group < support.size(); ++group) {
+      const Eigen::Vector3d plane = group % 2 == 0
+                                        ? Eigen::Vector3d(-0.12, 0.18, 1)
+                                        : Eigen::Vector3d(0.16, -0.09, 1);
+      const double offset = group % 2 == 0 ? 5 : 7.5;
+      for (const auto& [anchor_col, anchor_row] : anchors[group]) {
+        const Eigen::Vector3d truth =
+            intersect(0, anchor_col, anchor_row, plane, offset);
+        ExpectedPoint expected;
+        expected.normal = plane.normalized();
+        std::array<std::vector<double>, 3> coordinates;
+        std::array<std::vector<int>, 3> colors;
+        std::vector<Eigen::Vector3d> samples;
+        std::vector<Eigen::Vector2i> pixels;
+        for (const int view : support[group]) {
+          const Eigen::Vector2d projected = project(view, truth);
+          const int col = std::lround(projected.x());
+          const int row = std::lround(projected.y());
+          ASSERT_GT(col, 0);
+          ASSERT_LT(col, kWidth - 1);
+          ASSERT_GT(row, 0);
+          ASSERT_LT(row, kHeight - 1);
+          ASSERT_EQ(depths[view].Get(row, col), 0);
+          const Eigen::Vector3d xyz = intersect(view, col, row, plane, offset);
+          const Eigen::Vector3d q = rotations[view] * (xyz - centers[view]);
+          const Eigen::Vector3d normal = rotations[view] * expected.normal;
+          depths[view].Set(row, col, q.z());
+          for (int axis = 0; axis < 3; ++axis) {
+            normals[view].Set(row, col, axis, normal[axis]);
+            coordinates[axis].push_back(xyz[axis]);
+          }
+          // Nearest bitmap centers at ((pixel+.5)/scale-.5). Integer arithmetic
+          // fixes expected source indices independently of either RGB reader.
+          const auto color = rgb(view,
+                                 (2 * col + 1) * kBitmapWidth / (2 * kWidth),
+                                 (2 * row + 1) * kBitmapHeight / (2 * kHeight));
+          for (int axis = 0; axis < 3; ++axis)
+            colors[axis].push_back(color[axis]);
+          expected.visibility.push_back(image_indices[view]);
+          samples.push_back(xyz);
+          pixels.emplace_back(col, row);
+        }
+        // Establish unambiguous correspondence and depth acceptance before
+        // running Fusion. Every permitted traversal order must reach this set.
+        for (size_t index = 0; index < support[group].size(); ++index) {
+          const int view = support[group][index];
+          const double depth =
+              (rotations[view] * (samples[index] - centers[view])).z();
+          for (const auto& xyz : samples) {
+            ASSERT_LT((project(view, xyz) - pixels[index].cast<double>())
+                          .cwiseAbs()
+                          .maxCoeff(),
+                      0.45);
+            ASSERT_LT(std::abs((rotations[view] * (xyz - centers[view])).z() -
+                               depth) /
+                          depth,
+                      0.005);
+          }
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+          auto& xyz = coordinates[axis];
+          auto& color = colors[axis];
+          std::sort(xyz.begin(), xyz.end());
+          std::sort(color.begin(), color.end());
+          const size_t lower = (xyz.size() - 1) / 2, upper = xyz.size() / 2;
+          expected.xyz[axis] = (xyz[lower] + xyz[upper]) / 2;
+          expected.rgb[axis] = (color[lower] + color[upper] + 1) / 2;
+        }
+        ASSERT_LT((expected.xyz - truth).norm(), 0.12);
+        std::sort(expected.visibility.begin(), expected.visibility.end());
+        expected_.push_back(std::move(expected));
+      }
+    }
+    // An exact plane sample without a second supporting view must not become
+    // output. Check its intended support before writing the production inputs.
+    const Eigen::Vector3d plane(-0.12, 0.18, 1);
+    const Eigen::Vector3d orphan = intersect(0, 3, 26, plane, 5);
+    depths[0].Set(26, 3, (rotations[0] * (orphan - centers[0])).z());
+    const Eigen::Vector3d orphan_normal = rotations[0] * plane.normalized();
+    for (int axis = 0; axis < 3; ++axis) {
+      normals[0].Set(26, 3, axis, orphan_normal[axis]);
+    }
+    const Eigen::Vector2d orphan_pixel = project(1, orphan);
+    ASSERT_EQ(depths[1].Get(std::lround(orphan_pixel.y()),
+                            std::lround(orphan_pixel.x())),
+              0);
+    std::ofstream config(root_ / "stereo/fusion.cfg");
+    for (int view = 3; view >= 0; --view) {
+      config << names[view] << '\n';
+      depths[view].Write(root_ / "stereo/depth_maps" /
+                         (names[view] + ".geometric.bin"));
+      normals[view].Write(root_ / "stereo/normal_maps" /
+                          (names[view] + ".geometric.bin"));
+      Bitmap bitmap(kBitmapWidth, kBitmapHeight, true);
+      for (int row = 0; row < kBitmapHeight; ++row) {
+        for (int col = 0; col < kBitmapWidth; ++col) {
+          const auto color = rgb(view, col, row);
+          ASSERT_TRUE(bitmap.SetPixel(
+              col, row, BitmapColor<uint8_t>(color[0], color[1], color[2])));
+        }
+      }
+      ASSERT_TRUE(bitmap.Write(root_ / "images" / names[view]));
+    }
+  }
+  StereoFusionOptions Options() const {
+    StereoFusionOptions options;
+    options.num_threads = 1;
+    options.min_num_pixels = 2;
+    options.max_num_pixels = 4;
+    options.max_traversal_depth = 4;
+    options.check_num_images = 3;
+    options.max_reproj_error = 1;
+    options.max_depth_error = 0.005;
+    options.max_normal_error = 1;
+    return options;
+  }
+
+  void ExpectPoints(const StereoFusion& fusion, bool first_root_only = false) {
+    ExpectPoints(fusion.GetFusedPoints(),
+                 fusion.GetFusedPointsVisibility(),
+                 first_root_only);
+  }
+
+  void ExpectPoints(const std::vector<PlyPoint>& points,
+                    const std::vector<std::vector<int>>& visibility,
+                    bool first_root_only = false) {
+    std::vector<const ExpectedPoint*> expected;
+    for (const auto& point : expected_) {
+      if (!first_root_only ||
+          std::find(point.visibility.begin(), point.visibility.end(), 0) !=
+              point.visibility.end())
+        expected.push_back(&point);
+    }
+    if (first_root_only) {
+      ASSERT_GT(expected.size(), 0);
+      ASSERT_LT(expected.size(), expected_.size());
+    }
+    ASSERT_EQ(points.size(), expected.size());
+    ASSERT_EQ(visibility.size(), expected.size());
+    std::vector<int> counts(expected.size(), 0);
+    for (size_t index = 0; index < points.size(); ++index) {
+      const auto& point = points[index];
+      const Eigen::Vector3d xyz(point.x, point.y, point.z);
+      const auto closest =
+          std::min_element(expected.begin(),
+                           expected.end(),
+                           [&](const auto* lhs, const auto* rhs) {
+                             return (xyz - lhs->xyz).squaredNorm() <
+                                    (xyz - rhs->xyz).squaredNorm();
+                           });
+      ASSERT_NE(closest, expected.end());
+      ++counts[closest - expected.begin()];
+      // At depths 5--8, 5e-5 permits FP32 pose/inverse rounding while remaining
+      // over 1000 times smaller than a pixel. Normals have unit magnitude.
+      for (int axis = 0; axis < 3; ++axis) {
+        EXPECT_NEAR(xyz[axis], (*closest)->xyz[axis], 5e-5);
+      }
+      EXPECT_NEAR(point.nx, (*closest)->normal.x(), 2e-6);
+      EXPECT_NEAR(point.ny, (*closest)->normal.y(), 2e-6);
+      EXPECT_NEAR(point.nz, (*closest)->normal.z(), 2e-6);
+      EXPECT_EQ(point.r, (*closest)->rgb[0]);
+      EXPECT_EQ(point.g, (*closest)->rgb[1]);
+      EXPECT_EQ(point.b, (*closest)->rgb[2]);
+      auto actual_visibility = visibility[index];
+      std::sort(actual_visibility.begin(), actual_visibility.end());
+      EXPECT_EQ(actual_visibility, (*closest)->visibility);
+    }
+    for (const int count : counts) EXPECT_EQ(count, 1);
+  }
+
+  std::filesystem::path root_;
+  std::vector<ExpectedPoint> expected_;
+};
+
+TEST_F(StereoFusionPlaneOracle, WorkspaceModes) {
+  std::vector<std::pair<std::string, StereoFusionOptions>> variants;
+  auto options = Options();
+  variants.emplace_back("eager", options);
+  options.num_threads = 3;
+  options.full_ram_load_threads = 2;
+  variants.emplace_back("eager_parallel", options);
+  options = Options();
+  options.use_cache = true;
+  options.cache_size = 40000.0 / (1024.0 * 1024.0 * 1024.0);
+  variants.emplace_back("legacy_cache", options);
+  options.use_cache = false;
+  options.bounded_cache = true;
+  options.cache_size = 60000.0 / (1024.0 * 1024.0 * 1024.0);
+  variants.emplace_back("bounded_whole", options);
+  options.bounded_cache_components = true;
+  variants.emplace_back("bounded_components", options);
+  options.bounded_cache_compact_rgb = true;
+  options.bounded_cache_neighborhood = true;
+  options.cache_size = 200000.0 / (1024.0 * 1024.0 * 1024.0);
+  variants.emplace_back("complete_neighborhood_compact_rgb", options);
+  if (ImmutableMapRegion::Supported()) {
+    options.cache_size = 50000.0 / (1024.0 * 1024.0 * 1024.0);
+    options.bounded_cache_neighborhood = false;
+    options.bounded_cache_normal_mapped_bytes = 1 << 20;
+    options.bounded_cache_normal_mapped_files = 2;
+    variants.emplace_back("direct_mapped_compact_rgb", options);
+    options.num_threads = 2;
+    options.bounded_cache_neighborhood = true;
+    options.bounded_cache_prefill_threads = 3;
+    options.bounded_cache_normal_tile_size = 7;
+    options.bounded_cache_compact_depth = true;
+    variants.emplace_back("tiled_neighborhood_compact_depth_rgb", options);
+  }
+  for (const auto& [name, variant] : variants) {
+    SCOPED_TRACE(name);
+    ASSERT_TRUE(variant.Check());
+    StereoFusion fusion(variant, root_, "COLMAP", "", "geometric");
+    bool compact_borrowed = false, sparse_pinned = false;
+    fusion.SetCheckIfStoppedFunc([&] {
+      compact_borrowed |=
+          StereoFusionExactDepthTestPeer::HasCompactFullRamInputs(fusion);
+      sparse_pinned |=
+          StereoFusionExactDepthTestPeer::HasPackedResident(fusion);
+      return false;
+    });
+    fusion.Run();
+    ASSERT_NO_FATAL_FAILURE(ExpectPoints(fusion));
+    if (name == "eager") {
+      const auto path = root_ / "fused.ply";
+      WriteFusedPointCloud(
+          path, fusion.GetFusedPoints(), fusion.GetFusedPointsVisibility());
+      ASSERT_NO_FATAL_FAILURE(
+          ExpectPoints(ReadPly(path),
+                       ReadPointsVisibility(AddFileExtension(path, ".vis"),
+                                            expected_.size())));
+    }
+    if (!variant.use_cache && !variant.bounded_cache) {
+      EXPECT_EQ(StereoFusionExactDepthTestPeer::NumRetiredFullRamInputs(fusion),
+                4);
+    }
+    if (variant.bounded_cache) {
+      const auto stats = fusion.GetBoundedCacheStats();
+      ASSERT_TRUE(stats);
+      EXPECT_GT(stats->loads, 0);
+      EXPECT_EQ(stats->reserved_bytes, 0);
+      EXPECT_LE(stats->peak_charged_bytes, stats->capacity_bytes);
+      if (name == "bounded_whole" || name == "bounded_components") {
+        EXPECT_GT(stats->evictions, 0);
+      }
+      if (name == "complete_neighborhood_compact_rgb") {
+        // The current complete compact-RGB neighborhood stays on the generic
+        // path. A change to borrowed traversal must qualify the same oracle.
+        EXPECT_FALSE(compact_borrowed);
+        EXPECT_GT(stats->component_loads[static_cast<size_t>(
+                      BoundedWorkspace::Component::kImage)],
+                  0);
+      }
+      if (variant.bounded_cache_normal_tile_size > 0) {
+        EXPECT_GT(stats->normal_tile_loads, 0);
+        EXPECT_TRUE(sparse_pinned);
+        EXPECT_GT(fusion.GetMaxBoundedPrefillLanesScheduled(), 1);
+        EXPECT_LE(fusion.GetMaxBoundedPrefillLanesScheduled(),
+                  static_cast<size_t>(variant.bounded_cache_prefill_threads));
+      }
+    }
+    if (variant.bounded_cache_normal_mapped_bytes > 0) {
+      const auto stats = fusion.GetMappedNormalStats();
+      EXPECT_GT(stats.loads, 0);
+      EXPECT_EQ(stats.active_copies, 0);
+      EXPECT_LE(stats.peak_charged_bytes,
+                static_cast<size_t>(variant.bounded_cache_normal_mapped_bytes));
+    }
+  }
+}
+
+TEST_F(StereoFusionPlaneOracle, RetirementCancellationAndRepeat) {
+  for (const int workers : {1, 3}) {
+    SCOPED_TRACE(workers);
+    auto options = Options();
+    options.num_threads = workers;
+    StereoFusion fusion(options, root_, "COLMAP", "", "geometric");
+    fusion.SetCheckIfStoppedFunc([&] {
+      return StereoFusionExactDepthTestPeer::NumRetiredFullRamInputs(fusion) >
+             0;
+    });
+    fusion.Run();
+    EXPECT_EQ(StereoFusionExactDepthTestPeer::NumRetiredFullRamInputs(fusion),
+              1);
+    ASSERT_NO_FATAL_FAILURE(ExpectPoints(fusion, true));
+    fusion.SetCheckIfStoppedFunc([] { return false; });
+    for (int run = 0; run < 2; ++run) {
+      fusion.Run();
+      ASSERT_NO_FATAL_FAILURE(ExpectPoints(fusion));
+      EXPECT_EQ(StereoFusionExactDepthTestPeer::NumRetiredFullRamInputs(fusion),
+                4);
+    }
+  }
 }
 
 TEST(StereoFusion, Integration) {

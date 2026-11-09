@@ -592,14 +592,14 @@ TEST_F(WorkspaceTests, EagerLoadSkipsMissingNormalBeforeReadingAnyInput) {
   reader->Close();
 }
 
-TEST_F(WorkspaceTests, EagerLoadDrainsWorkersAfterNormalMetadataError) {
+TEST_F(WorkspaceTests, EagerReloadDrainsWorkersAndRetriesAfterMetadataError) {
 #ifdef _WIN32
   GTEST_SKIP() << "Self-referential symlink creation needs Windows privilege";
 #else
   SyntheticDatasetOptions synthetic_options;
   synthetic_options.num_rigs = 1;
   synthetic_options.num_cameras_per_rig = 1;
-  synthetic_options.num_frames_per_rig = 3;
+  synthetic_options.num_frames_per_rig = 4;
   synthetic_options.camera_width = 10;
   synthetic_options.camera_height = 5;
   Reconstruction reconstruction;
@@ -621,9 +621,18 @@ TEST_F(WorkspaceTests, EagerLoadDrainsWorkersAfterNormalMetadataError) {
   Workspace workspace(options);
   std::vector<std::filesystem::path> bitmap_paths;
   std::vector<std::string> names;
-  for (int image_idx = 0; image_idx < 3; ++image_idx) {
+  for (int image_idx = 0; image_idx < 4; ++image_idx) {
     bitmap_paths.push_back(workspace.GetBitmapPath(image_idx));
     names.push_back(workspace.GetModel().GetImageName(image_idx));
+  }
+  workspace.Load(names);
+  const auto* untouched_bitmap = &workspace.GetBitmap(3);
+  const auto* untouched_depth = &workspace.GetDepthMap(3);
+  const auto* untouched_normal = &workspace.GetNormalMap(3);
+  Mat<float> replacement_depth(10, 5, 1);
+  replacement_depth.Fill(2.0f);
+  for (int image_idx = 0; image_idx < 3; ++image_idx) {
+    replacement_depth.Write(workspace.GetDepthMapPath(image_idx));
   }
   const auto bad_normal = workspace.GetNormalMapPath(2);
   ASSERT_TRUE(std::filesystem::remove(bad_normal));
@@ -650,7 +659,7 @@ TEST_F(WorkspaceTests, EagerLoadDrainsWorkersAfterNormalMetadataError) {
         ++finished;
         return true;
       },
-      {{10, 5}, {10, 5}, {10, 5}});
+      {{10, 5}, {10, 5}, {10, 5}, {10, 5}});
   std::atomic<bool> started_in_time{false};
   std::thread releaser([&] {
     started_in_time =
@@ -660,7 +669,7 @@ TEST_F(WorkspaceTests, EagerLoadDrainsWorkersAfterNormalMetadataError) {
 
   std::exception_ptr failure;
   try {
-    workspace.Load(names);
+    workspace.Load({names[0], names[1], names[2]});
   } catch (...) {
     failure = std::current_exception();
   }
@@ -671,9 +680,40 @@ TEST_F(WorkspaceTests, EagerLoadDrainsWorkersAfterNormalMetadataError) {
   EXPECT_TRUE(started_in_time);
   EXPECT_EQ(reads.load(), 2);
   EXPECT_EQ(finished.load(), 2);  // Both callbacks finished before return.
-  EXPECT_THROW(workspace.GetBitmap(0), std::invalid_argument);
-  EXPECT_EQ(workspace.GetBitmap(1).Width(), 10);
-  EXPECT_THROW(workspace.GetBitmap(2), std::invalid_argument);
+  for (const int image_idx : {0, 2}) {
+    SCOPED_TRACE(image_idx);
+    EXPECT_THROW(workspace.GetBitmap(image_idx), std::invalid_argument);
+    EXPECT_THROW(workspace.GetDepthMap(image_idx), std::invalid_argument);
+    EXPECT_THROW(workspace.GetNormalMap(image_idx), std::invalid_argument);
+  }
+  EXPECT_EQ(workspace.GetBitmap(1).GetPixel(0, 0)->g, 8);
+  EXPECT_FLOAT_EQ(workspace.GetDepthMap(1).Get(0, 0), 2.0f);
+  EXPECT_FLOAT_EQ(workspace.GetNormalMap(1).Get(0, 0, 2), 1.0f);
+  EXPECT_EQ(&workspace.GetBitmap(3), untouched_bitmap);
+  EXPECT_EQ(&workspace.GetDepthMap(3), untouched_depth);
+  EXPECT_EQ(&workspace.GetNormalMap(3), untouched_normal);
+  EXPECT_FLOAT_EQ(workspace.GetDepthMap(3).Get(0, 0), 1.0f);
+
+  // Repair and reorder the failed subset. The accepted sibling and the image
+  // outside the reload roster keep their complete resident inputs.
+  const auto* accepted_depth = &workspace.GetDepthMap(1);
+  ASSERT_TRUE(std::filesystem::remove(bad_normal));
+  Mat<float> repaired_normal(10, 5, 3);
+  repaired_normal.Fill(1.0f);
+  repaired_normal.Write(bad_normal);
+  workspace.Load({names[2], names[0]});
+  EXPECT_EQ(reads.load(), 4);
+  EXPECT_EQ(finished.load(), 4);
+  for (const int image_idx : {0, 2}) {
+    SCOPED_TRACE(image_idx);
+    EXPECT_EQ(workspace.GetBitmap(image_idx).GetPixel(0, 0)->g, 8);
+    EXPECT_FLOAT_EQ(workspace.GetDepthMap(image_idx).Get(0, 0), 2.0f);
+    EXPECT_FLOAT_EQ(workspace.GetNormalMap(image_idx).Get(0, 0, 2), 1.0f);
+  }
+  EXPECT_EQ(&workspace.GetDepthMap(1), accepted_depth);
+  EXPECT_EQ(&workspace.GetBitmap(3), untouched_bitmap);
+  EXPECT_EQ(&workspace.GetDepthMap(3), untouched_depth);
+  EXPECT_EQ(&workspace.GetNormalMap(3), untouched_normal);
   reader->Close();
 #endif
 }
