@@ -248,6 +248,12 @@ if(CUDA_ENABLED)
     endif()
 
     COLMAP_ADD_TEST(
+        NAME patch_match_hmm_test
+        SRCS patch_match_hmm_test.cc
+        LINK_LIBS colmap_mvs_cuda
+    )
+
+    COLMAP_ADD_TEST(
         NAME gpu_mat_test
         SRCS gpu_mat_test.cu
         LINK_LIBS colmap_mvs_cuda

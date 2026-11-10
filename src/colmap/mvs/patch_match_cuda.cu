@@ -952,8 +952,9 @@ __global__ void SweepFromTopToBottom(
       float beta = kUniformProb;
       for (int row = cost_map.GetHeight() - 1; row >= 0; --row) {
         const float cost = cost_map.Get(row, col, image_idx);
-        beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
+        // The current emission belongs to alpha; beta contains only the suffix.
         sel_prob_map.Set(row, col, image_idx, beta);
+        beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
       }
 
       // Initialize forward message.
