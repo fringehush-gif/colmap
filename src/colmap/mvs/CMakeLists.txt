@@ -110,6 +110,7 @@ if(CUDA_ENABLED)
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu patch_match_geometry.cuh
+            patch_match_sampling.cuh
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
@@ -275,6 +276,7 @@ if(HIP_ENABLED)
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu patch_match_geometry.cuh
+            patch_match_sampling.cuh
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
