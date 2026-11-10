@@ -225,12 +225,11 @@ TEST_F(PatchMatchHmmCuda, IdentityBrightSingletonControl) {
   }
 }
 
-// Row/column zero exclude the impulse, giving ideal cost two; all other
-// patches contain it and have ideal cost zero. At each checked diagonal pixel,
-// horizontal/vertical chains are [2, 0, 0, 0]. Symmetric transitions and
-// uniform boundaries give the same marginal in reverse, so every sweep's convex
-// blend retains that value. No rotated arrays or temporal weights enter the
-// oracle.
+// Row/column zero exclude the impulse (NCC cost two). Every other patch
+// contains the matched impulse (cost zero). The first sweep follows columns,
+// and each rotation switches axes. Symmetric transitions and uniform boundaries
+// make reversal preserve the marginal. For one iteration the four blends give
+// combined weights 15/32 to vertical and 17/32 to horizontal marginals.
 TEST_F(PatchMatchHmmCuda, CornerImpulseSweepsMatchEnumeratedPosteriors) {
   constexpr double kProbabilityTolerance = 2e-5;
   for (const float sigma : {0.6f, 1.2f}) {
@@ -243,18 +242,29 @@ TEST_F(PatchMatchHmmCuda, CornerImpulseSweepsMatchEnumeratedPosteriors) {
     for (const float probability : selection.GetData()) {
       ASSERT_TRUE(std::isfinite(probability));
     }
-    const std::array<double, 4> emissions = {NccEmission(2, sigma),
-                                             NccEmission(0, sigma),
-                                             NccEmission(0, sigma),
-                                             NccEmission(0, sigma)};
-    for (unsigned position = 1; position < 4; ++position) {
-      SCOPED_TRACE(::testing::Message() << "diagonal=" << position);
-      const double expected = FourPixelPosterior(emissions, position);
-      ASSERT_GT(expected, kProbabilityTolerance);  // Zero outputs must fail.
-      ASSERT_GT(std::abs(expected - SingletonPosterior(emissions[position])),
-                kProbabilityTolerance);  // Ignoring the chain must fail.
-      EXPECT_NEAR(
-          selection.Get(position, position), expected, kProbabilityTolerance);
+    const double dark = NccEmission(2, sigma);
+    const double bright = NccEmission(0, sigma);
+    const std::array<double, 4> dark_chain = {dark, dark, dark, dark};
+    const std::array<double, 4> mixed_chain = {dark, bright, bright, bright};
+    const auto expected_at = [&](const unsigned row, const unsigned col) {
+      const double vertical =
+          FourPixelPosterior(col == 0 ? dark_chain : mixed_chain, row);
+      const double horizontal =
+          FourPixelPosterior(row == 0 ? dark_chain : mixed_chain, col);
+      return (15 * vertical + 17 * horizontal) / 32;
+    };
+    // Distinguish transposition, zero output, and independent pixel inference.
+    ASSERT_GT(std::abs(expected_at(0, 3) - expected_at(3, 0)),
+              2 * kProbabilityTolerance);
+    ASSERT_GT(expected_at(3, 3), kProbabilityTolerance);
+    ASSERT_GT(std::abs(expected_at(3, 3) - SingletonPosterior(bright)),
+              kProbabilityTolerance);
+    for (unsigned row = 0; row < 4; ++row) {
+      for (unsigned col = 0; col < 4; ++col) {
+        SCOPED_TRACE(::testing::Message() << "row=" << row << " col=" << col);
+        const double expected = expected_at(row, col);
+        EXPECT_NEAR(selection.Get(row, col), expected, kProbabilityTolerance);
+      }
     }
   }
 }
