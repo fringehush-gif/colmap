@@ -279,4 +279,10 @@ if(CUDA_ENABLED OR HIP_ENABLED)
         SRCS cudacc_test.cc
         LINK_LIBS colmap_util_cuda
     )
+
+    COLMAP_ADD_TEST(
+        NAME cudacc_allocation_test
+        SRCS cudacc_allocation_test.cc
+        LINK_LIBS colmap_util_cuda
+    )
 endif()
