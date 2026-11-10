@@ -30,14 +30,25 @@ usage and hardware information and send it to Microsoft. Official ONNX Runtime
 binaries enable telemetry by default; the version number alone does not identify
 the telemetry configuration of a custom build.
 
-For ONNX Runtime builds using 1DS telemetry, set ``ORT_DISABLE_TELEMETRY=1`` in the
-environment **before starting** COLMAP or the Python process using PyCOLMAP.
-Setting it only while configuring or installing COLMAP does not configure later
-processes. The telemetry-disable API suppresses nonessential events but may not
-prevent initialization telemetry. The legacy Windows ETW backend ignores this
-environment variable and records events when an external collector is active.
-To omit telemetry at build time, build ONNX Runtime with ``--no_telemetry`` and
-configure COLMAP with ``FETCH_ONNX=OFF`` to use that dependency. See ONNX Runtime's
+For ONNX Runtime builds using 1DS telemetry, including ordinary native Windows
+builds in ORT 1.31.1, set ``ORT_DISABLE_TELEMETRY=1`` in the environment **before
+starting** COLMAP or the Python process using PyCOLMAP. Setting it only while
+configuring or installing COLMAP does not configure later processes. The
+telemetry-disable API suppresses nonessential events but may not prevent
+initialization telemetry. The legacy Windows ETW backend, used by ORT 1.30's
+Windows builds and later builds selecting that backend, ignores this variable
+and records events when an external collector is active.
+
+For a pre-runtime opt-out covering both backends, build each platform's ONNX
+Runtime dependency with ``--no_telemetry``: a Linux library for WSL/Linux, and a
+Windows library for native Windows. Configure COLMAP with ``FETCH_ONNX=OFF``
+and point its ORT package discovery at that installation.
+``FETCH_ONNX=OFF`` only selects an externally provided dependency; it does not
+disable telemetry in the library found by CMake. Verify that the selected ORT
+configuration, headers and libraries belong to the telemetry-disabled build.
+The existing ``onnxruntime_CONFIG_DIR_HINTS``, ``onnxruntime_INCLUDE_DIR_HINTS``
+and ``onnxruntime_LIBRARY_DIR_HINTS`` variables can help locate that installation.
+See ONNX Runtime's
 `privacy documentation <https://github.com/microsoft/onnxruntime/blob/main/docs/Privacy.md>`__
 for details.
 
