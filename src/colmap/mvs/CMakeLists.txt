@@ -246,6 +246,9 @@ if(CUDA_ENABLED)
                 LINK_LIBS colmap_util_cuda
             )
             target_link_options(colmap_mvs_cuda_texture_constructor_test PRIVATE
+                "LINKER:--wrap=cudaMemcpy3D"
+                "LINKER:--wrap=cudaMemcpy2D"
+                "LINKER:--wrap=cudaMemset"
                 "LINKER:--wrap=cudaPeekAtLastError"
                 "LINKER:--wrap=cudaGetLastError"
                 "LINKER:--wrap=cudaMallocPitch"

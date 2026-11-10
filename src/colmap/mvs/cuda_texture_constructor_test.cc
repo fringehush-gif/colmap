@@ -46,11 +46,28 @@ int allocation_token;
 void* allocation_id = &allocation_token;
 cudaError_t peek_error = cudaSuccess;
 cudaError_t last_error = cudaSuccess;
+int copy_3d_attempts = 0;
+int copy_2d_attempts = 0;
+int memset_attempts = 0;
+int first_copy_pitched_attempts = -1;
 
 }  // namespace
 
 extern "C" cudaError_t __wrap_cudaPeekAtLastError() { return peek_error; }
 extern "C" cudaError_t __wrap_cudaGetLastError() { return last_error; }
+extern "C" cudaError_t __wrap_cudaMemcpy3D(const cudaMemcpy3DParms*) {
+  if (copy_3d_attempts++ == 0) first_copy_pitched_attempts = pitched_attempts;
+  return cudaSuccess;
+}
+extern "C" cudaError_t __wrap_cudaMemcpy2D(
+    void*, size_t, const void*, size_t, size_t, size_t, cudaMemcpyKind) {
+  ++copy_2d_attempts;
+  return cudaSuccess;
+}
+extern "C" cudaError_t __wrap_cudaMemset(void*, int, size_t) {
+  ++memset_attempts;
+  return cudaSuccess;
+}
 extern "C" cudaError_t __wrap_cudaMallocPitch(void** ptr,
                                               size_t* pitch,
                                               size_t width,
@@ -174,6 +191,8 @@ class CudaTextureConstructor : public testing::Test {
     free_successes = 0;
     malloc_attempts = pitched_attempts = device_free_attempts = 0;
     peek_error = last_error = cudaSuccess;
+    copy_3d_attempts = copy_2d_attempts = memset_attempts = 0;
+    first_copy_pitched_attempts = -1;
     description_.addressMode[0] = cudaAddressModeBorder;
     description_.filterMode = cudaFilterModePoint;
     description_.readMode = cudaReadModeElementType;
@@ -220,6 +239,51 @@ TEST_F(CudaTextureConstructor, DestroysTextureAndFreesArray) {
   EXPECT_TRUE(reported_errors.empty());
   EXPECT_EQ(free_attempts, 1);
   EXPECT_EQ(free_successes, 1);
+}
+
+TEST_F(CudaTextureConstructor, PaddingAllocationPrecedesSliceCopies) {
+  using Texture = CudaArrayLayeredTexture<uint8_t>;
+  const uint8_t pixels[6] = {};
+  std::vector<Texture::HostSlice> slices(4, {pixels, 3, 2, 3});
+  slices[1] = {pixels, 2, 1, 3};
+  failure = Failure::kPitch;
+  EXPECT_THROW(Texture::FromHostSlices(description_, 3, 2, slices),
+               CudaAllocationRefused);
+  EXPECT_EQ(copy_3d_attempts, 0);
+}
+
+TEST_F(CudaTextureConstructor, MixedSlicesPreparePaddingOnce) {
+  using Texture = CudaArrayLayeredTexture<uint8_t>;
+  const uint8_t pixels[6] = {};
+  std::vector<Texture::HostSlice> slices(4, {pixels, 3, 2, 3});
+  slices[1] = {pixels, 2, 1, 3};
+  auto texture = Texture::FromHostSlices(description_, 3, 2, slices);
+  EXPECT_EQ(pitched_attempts, 1);
+  EXPECT_EQ(memset_attempts, 1);
+  EXPECT_EQ(copy_3d_attempts, 5);
+  EXPECT_EQ(first_copy_pitched_attempts, 1);
+}
+
+TEST_F(CudaTextureConstructor, EqualSlicesNeedNoPadding) {
+  using Texture = CudaArrayLayeredTexture<uint8_t>;
+  const uint8_t pixels[6] = {};
+  std::vector<Texture::HostSlice> slices(4, {pixels, 3, 2, 3});
+  auto texture = Texture::FromHostSlices(description_, 3, 2, slices);
+  EXPECT_EQ(pitched_attempts, 0);
+  EXPECT_EQ(memset_attempts, 0);
+  EXPECT_EQ(copy_3d_attempts, 4);
+}
+
+TEST_F(CudaTextureConstructor, DeviceArrayAndGpuMatCopyConsumers) {
+  const uint8_t pixels[24] = {};
+  uint8_t output[24] = {};
+  GpuMat<uint8_t> mat(3, 2, 4);
+  mat.CopyToDevice(pixels, 3);
+  mat.CopyToHost(output, 3);
+  auto texture =
+      CudaArrayLayeredTexture<uint8_t>::FromGpuMat(description_, mat);
+  EXPECT_EQ(copy_2d_attempts, 2);
+  EXPECT_EQ(copy_3d_attempts, 1);
 }
 
 TEST_F(CudaTextureConstructor, AllocationFailureDoesNotFreeArray) {

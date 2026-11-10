@@ -128,6 +128,7 @@ CudaArrayLayeredTexture<T>::FromHostSlices(
   THROW_CHECK_LE(width, max_bytes / sizeof(T));
   const size_t row_bytes = width * sizeof(T);
   THROW_CHECK_LE(height, max_bytes / row_bytes);
+  bool needs_padding = false;
   for (const auto& slice : slices) {
     THROW_CHECK(slice.data != nullptr);
     THROW_CHECK_GT(slice.width, 0);
@@ -139,6 +140,8 @@ CudaArrayLayeredTexture<T>::FromHostSlices(
     // Refuse a wrapped last-row offset before any CUDA allocation or copy.
     THROW_CHECK_LE(slice.height - 1,
                    (max_bytes - slice_row_bytes) / slice.pitch_bytes);
+    needs_padding =
+        needs_padding || slice.width != width || slice.height != height;
   }
 
   auto array = std::make_unique<CudaArrayLayeredTexture<T>>(
@@ -146,18 +149,19 @@ CudaArrayLayeredTexture<T>::FromHostSlices(
   // Equal-sized slices need no padding or additional device allocation.
   // Mixed sizes reuse one device-zero plane rather than a full host stack.
   std::unique_ptr<GpuMat<T>> zero_plane;
+  if (needs_padding) {
+    zero_plane = std::make_unique<GpuMat<T>>(width, height);
+    THROW_CHECK_GT(zero_plane->GetPitch(), 0);
+    THROW_CHECK_LE(height, max_bytes / zero_plane->GetPitch());
+    // Prepare padding before submitting any slice copies.
+    ::colmap::internal::CudaSafeCallWithLocation(
+        cudaMemset(zero_plane->GetPtr(), 0, zero_plane->GetPitch() * height),
+        __FILE__,
+        __LINE__);
+  }
   for (size_t layer = 0; layer < slices.size(); ++layer) {
     const auto& slice = slices[layer];
     if (slice.width != width || slice.height != height) {
-      if (!zero_plane) {
-        zero_plane = std::make_unique<GpuMat<T>>(width, height);
-        THROW_CHECK_GT(zero_plane->GetPitch(), 0);
-        THROW_CHECK_LE(height, max_bytes / zero_plane->GetPitch());
-        // Clear the complete allocated pitched plane, including row padding.
-        // cudaMemset is also provided by the existing CUDA-to-HIP shim.
-        CUDA_SAFE_CALL(cudaMemset(
-            zero_plane->GetPtr(), 0, zero_plane->GetPitch() * height));
-      }
       cudaMemcpy3DParms clear = {};
       clear.srcPtr = make_cudaPitchedPtr(
           zero_plane->GetPtr(), zero_plane->GetPitch(), row_bytes, height);
@@ -165,7 +169,8 @@ CudaArrayLayeredTexture<T>::FromHostSlices(
       clear.dstPos = make_cudaPos(0, 0, layer);
       clear.extent = make_cudaExtent(width, height, 1);
       clear.kind = cudaMemcpyDeviceToDevice;
-      CUDA_SAFE_CALL(cudaMemcpy3D(&clear));
+      ::colmap::internal::CudaSafeCallWithLocation(
+          cudaMemcpy3D(&clear), __FILE__, __LINE__);
     }
 
     cudaMemcpy3DParms copy = {};
@@ -177,7 +182,8 @@ CudaArrayLayeredTexture<T>::FromHostSlices(
     copy.dstPos = make_cudaPos(0, 0, layer);
     copy.extent = make_cudaExtent(slice.width, slice.height, 1);
     copy.kind = cudaMemcpyHostToDevice;
-    CUDA_SAFE_CALL(cudaMemcpy3D(&copy));
+    ::colmap::internal::CudaSafeCallWithLocation(
+        cudaMemcpy3D(&copy), __FILE__, __LINE__);
   }
   return array;
 }
