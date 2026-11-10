@@ -13,6 +13,7 @@
 #endif
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -188,6 +189,9 @@ class PatchMatchController : public BaseController {
                       size_t problem_idx,
                       PreparedProblem* prepared,
                       bool retain_sparse_sources = false);
+  static void PublishOutput(
+      const PreparedProblem& prepared,
+      const std::function<void(const std::filesystem::path&)>& write_output);
   static void WriteOutput(const PreparedProblem& prepared,
                           const PatchMatch& patch_match);
 #ifndef COLMAP_HIP_ENABLED

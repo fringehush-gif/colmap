@@ -86,17 +86,13 @@ void ConsistencyGraph::Read(const std::filesystem::path& path) {
 }
 
 void ConsistencyGraph::Write(const std::filesystem::path& path) const {
-  std::fstream text_file(path, std::ios::out);
-  THROW_CHECK_FILE_OPEN(text_file, path);
-  SetFullPrecTextStream(text_file);
-  text_file << map_.cols() << "&" << map_.rows() << "&" << 1 << "&";
-  text_file.close();
-
-  std::fstream binary_file(path,
-                           std::ios::out | std::ios::binary | std::ios::app);
-  THROW_CHECK_FILE_OPEN(binary_file, path);
-  WriteBinaryLittleEndian<int>(&binary_file, {data_.data(), data_.size()});
-  binary_file.close();
+  std::ofstream file(path, std::ios::binary);
+  THROW_CHECK_FILE_OPEN(file, path);
+  file.exceptions(std::ios::failbit | std::ios::badbit);
+  SetFullPrecTextStream(file);
+  file << map_.cols() << "&" << map_.rows() << "&" << 1 << "&";
+  WriteBinaryLittleEndian<int>(&file, {data_.data(), data_.size()});
+  file.close();
 }
 
 void ConsistencyGraph::InitializeMap(const size_t width, const size_t height) {

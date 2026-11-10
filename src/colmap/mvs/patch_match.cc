@@ -16,6 +16,8 @@
 #include "colmap/util/threading.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -778,27 +780,95 @@ bool PatchMatchController::PrepareProblem(const PatchMatchOptions& options,
   return true;
 }
 
+void PatchMatchController::PublishOutput(
+    const PreparedProblem& prepared,
+    const std::function<void(const std::filesystem::path&)>& write_output) {
+  const auto inspect = [](const std::filesystem::path& path,
+                          const bool required) {
+    std::error_code ec;
+    const auto status = std::filesystem::symlink_status(path, ec);
+    if (ec == std::errc::no_such_file_or_directory) return false;
+    if (ec) throw std::filesystem::filesystem_error("stat output", path, ec);
+    if (status.type() == std::filesystem::file_type::not_found) return false;
+    if (!std::filesystem::is_regular_file(status)) {
+      // A dangling graph symlink may later resolve to a different reference's
+      // graph and satisfy the filename-based resume predicate.
+      THROW_CHECK(!required && !std::filesystem::is_symlink(status) &&
+                  !ExistsFile(path))
+          << "Refusing to replace non-regular output: " << path;
+      return false;
+    }
+    return true;
+  };
+  // Refuse unsuitable destinations before invalidating a complete result.
+  const bool old_normal = inspect(prepared.normal_path, true);
+  const bool old_depth = inspect(prepared.depth_path, true);
+  const bool old_graph = inspect(prepared.consistency_path,
+                                 prepared.options.write_consistency_graph);
+  // Own a fresh directory next to the completion name, so only the final
+  // normal-map rename must be atomic. This is not a concurrent-writer protocol
+  // or a durability guarantee across power loss.
+  static std::atomic<uint64_t> sequence{0};
+  const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
+  std::filesystem::path stage;
+  for (int attempt = 0; attempt < 128; ++attempt) {
+    stage = prepared.normal_path.parent_path() /
+            (".patchmatch-stage-" + std::to_string(tick) + "-" +
+             std::to_string(sequence.fetch_add(1)));
+    if (std::filesystem::create_directory(stage)) break;
+    stage.clear();
+  }
+  THROW_CHECK(!stage.empty()) << "Cannot create PatchMatch staging directory";
+  std::filesystem::path stage_normal;
+  try {
+    stage_normal = stage / "normal.bin";
+    // PrepareProblem requires the normal map in every mode. Invalidate it
+    // before changing any other final output; failed writes must remain
+    // eligible for retry even when old results already exist. Also invalidate
+    // an old graph when graph output is disabled, so a later enabled run cannot
+    // accept a graph from a different generation.
+    if (old_normal) std::filesystem::remove(prepared.normal_path);
+    if (old_depth) std::filesystem::remove(prepared.depth_path);
+    if (old_graph) std::filesystem::remove(prepared.consistency_path);
+    write_output(stage_normal);
+    std::filesystem::rename(stage_normal, prepared.normal_path);
+  } catch (...) {
+    // A failed cleanup must not mask the writer's error or restore completion.
+    std::error_code ignored;
+    std::filesystem::remove(stage_normal, ignored);
+    std::filesystem::remove(stage, ignored);
+    throw;
+  }
+  std::error_code ignored;
+  std::filesystem::remove(stage, ignored);
+}
+
 void PatchMatchController::WriteOutput(const PreparedProblem& prepared,
                                        const PatchMatch& patch_match) {
-  patch_match.GetDepthMap().Write(prepared.depth_path);
-  patch_match.GetNormalMap().Write(prepared.normal_path);
-  if (prepared.options.write_consistency_graph) {
-    patch_match.GetConsistencyGraph().Write(prepared.consistency_path);
-  }
+  PublishOutput(prepared, [&](const auto& normal_path) {
+    // Keep readbacks sequential, with only one temporary map alive at a time.
+    patch_match.GetDepthMap().Write(prepared.depth_path);
+    if (prepared.options.write_consistency_graph) {
+      patch_match.GetConsistencyGraph().Write(prepared.consistency_path);
+    }
+    patch_match.GetNormalMap().Write(normal_path);
+  });
 }
 
 #ifndef COLMAP_HIP_ENABLED
 void PatchMatchController::WriteOutput(const PreparedProblem& prepared,
                                        const PatchMatchCuda& patch_match) {
-  patch_match.GetDepthMap().Write(prepared.depth_path);
-  patch_match.GetNormalMap().Write(prepared.normal_path);
-  if (prepared.options.write_consistency_graph) {
-    const auto& ref =
-        prepared.problem.images->at(prepared.problem.ref_image_idx);
-    ConsistencyGraph(
-        ref.GetWidth(), ref.GetHeight(), patch_match.GetConsistentImageIdxs())
-        .Write(prepared.consistency_path);
-  }
+  PublishOutput(prepared, [&](const auto& normal_path) {
+    patch_match.GetDepthMap().Write(prepared.depth_path);
+    if (prepared.options.write_consistency_graph) {
+      const auto& ref =
+          prepared.problem.images->at(prepared.problem.ref_image_idx);
+      ConsistencyGraph(
+          ref.GetWidth(), ref.GetHeight(), patch_match.GetConsistentImageIdxs())
+          .Write(prepared.consistency_path);
+    }
+    patch_match.GetNormalMap().Write(normal_path);
+  });
 }
 #endif
 

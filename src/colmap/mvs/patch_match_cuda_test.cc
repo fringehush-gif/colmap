@@ -45,6 +45,14 @@
 #include <cuda_runtime_api.h>
 #endif
 
+#ifdef __linux__
+#include <cstdio>
+#include <csignal>
+
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
+
 // Selection is process-global because controller work runs on a pool thread.
 // The production cleanup observer itself remains thread-local.
 #ifdef COLMAP_TEST_CUDA_ALLOCATION_WRAPPING
@@ -308,12 +316,37 @@ std::pair<std::vector<int>, std::vector<float>> ProbeSampledSources(
 class PatchMatchControllerTestAccess {
  public:
   using Hooks = PatchMatchController::SparseTestHooks;
+  using Prepared = PatchMatchController::PreparedProblem;
   static void Run(PatchMatchController& controller, Hooks& hooks) {
     controller.sparse_test_hooks_ = &hooks;
     controller.Run();
     controller.sparse_test_hooks_ = nullptr;
   }
 #ifndef COLMAP_HIP_ENABLED
+  static std::unique_ptr<Prepared> Prepare(PatchMatchController& controller,
+                                           const PatchMatchOptions& options,
+                                           size_t index = 0) {
+    if (!controller.workspace_) {
+      controller.ReadWorkspace();
+      controller.ReadProblems();
+      controller.ReadGpuIndices();
+      controller.thread_pool_ = std::make_unique<ThreadPool>(1);
+      controller.io_thread_pool_ = std::make_unique<ThreadPool>(2);
+    }
+    auto prepared = std::make_unique<Prepared>();
+    bool ready = false;
+    RunPatchMatchTasks(*controller.thread_pool_, [&](auto& futures) {
+      futures.push_back(controller.thread_pool_->AddTask([&] {
+        ready = controller.PrepareProblem(options, index, prepared.get());
+      }));
+    });
+    return ready ? std::move(prepared) : nullptr;
+  }
+  static void Publish(
+      const Prepared& prepared,
+      const std::function<void(const std::filesystem::path&)>& write_output) {
+    PatchMatchController::PublishOutput(prepared, write_output);
+  }
   static ThreadPool& InitializeScheduler(PatchMatchController& controller) {
     controller.problems_.resize(1);
     controller.problems_.front().ref_image_idx = 42;
@@ -1708,6 +1741,391 @@ class ControllerWorkspaceFixture {
   Reconstruction reconstruction;
   std::vector<std::string> names;
 };
+
+PatchMatchOptions PublicationOptions(const bool graph) {
+  auto options = ControllerWorkspaceFixture::Options();
+  options.geom_consistency = false;
+  options.depth_min = 1;
+  options.depth_max = 10;
+  options.write_consistency_graph = graph;
+  return options;
+}
+
+PatchMatchOptions PublicationGpuOptions() {
+  auto options = PublicationOptions(true);
+  options.num_iterations = 5;
+  options.geom_consistency = true;
+  options.filter = true;
+  options.filter_min_ncc = -1.0;
+  options.filter_min_num_consistent = 1;
+  options.filter_min_triangulation_angle = 0.0;
+  options.filter_geom_consistency_max_cost = 1000000.0;
+  return options;
+}
+
+std::filesystem::path MakePublicationGpuWorkspace() {
+  constexpr size_t width = 96, height = 64;
+  ControllerWorkspaceFixture fixture(width, height);
+  const auto root = fixture.Workspace();
+  // Build a calibrated, common textured plane instead of the generic fixture's
+  // unrelated views and 1024x768 camera intrinsics.
+  Reconstruction model;
+  model.Read(root / "sparse");
+  for (const auto& [id, camera] : model.Cameras()) {
+    model.Camera(id).params = {80.0, 48.0, 32.0, 0.0};
+  }
+  for (const auto& [id, frame] : model.Frames()) {
+    Rigid3d pose;
+    pose.translation() = Eigen::Vector3d(-0.1 * id, 0.0, 0.0);
+    model.Frame(id).SetRigFromWorld(pose);
+  }
+  model.Write(root / "sparse");
+  for (const auto& [id, image] : model.Images()) {
+    const double camera_x = 0.1 * image.FrameId();
+    Bitmap bitmap(width, height, false);
+    for (int row = 0; row < height; ++row) {
+      for (int col = 0; col < width; ++col) {
+        const double x = camera_x + 4.0 * (col + 0.5 - 48.0) / 80.0;
+        const double y = 4.0 * (row + 0.5 - 32.0) / 80.0;
+        const double value = 128.0 + 42.0 * std::sin(8.0 * x + 3.0 * y) +
+                             35.0 * std::cos(5.0 * x - 11.0 * y) +
+                             24.0 * std::sin(17.0 * x + 13.0 * y);
+        bitmap.SetPixel(col, row, BitmapColor<uint8_t>(static_cast<uint8_t>(
+                                      std::clamp(std::round(value), 0.0, 255.0))));
+      }
+    }
+    bitmap.Write(root / "images" / image.Name());
+    const auto name = image.Name() + ".photometric.bin";
+    DepthMap depth(width, height, 1, 10);
+    std::fill_n(depth.GetPtr(), width * height, 4.0f);
+    depth.Write(root / "stereo" / "depth_maps" / name);
+    NormalMap normal(width, height);
+    std::fill_n(normal.GetPtr(), 3 * width * height, 0.0f);
+    std::fill_n(normal.GetPtr() + 2 * width * height, width * height, -1.0f);
+    normal.Write(root / "stereo" / "normal_maps" / name);
+  }
+  return root;
+}
+
+void ExpectPublicationGpuFiles(const std::filesystem::path& root,
+                               const size_t expected) {
+  constexpr size_t width = 96, height = 64;
+  for (const auto* family : {"depth_maps", "normal_maps"}) {
+    size_t count = 0;
+    for (const auto& f : std::filesystem::directory_iterator(
+             root / "stereo" / family)) {
+      if (f.path().filename().string().find(".geometric.bin") ==
+          std::string::npos) {
+        continue;
+      }
+      EXPECT_GT(std::filesystem::file_size(f.path()), 0u);
+      ++count;
+    }
+    EXPECT_EQ(count, expected);
+  }
+  size_t graphs = 0, nonempty = 0;
+  for (const auto& f : std::filesystem::directory_iterator(
+           root / "stereo" / "consistency_graphs")) {
+    if (!f.is_regular_file()) continue;
+    ++graphs;
+    ConsistencyGraph graph;
+    ASSERT_NO_THROW(graph.Read(f.path()));
+    const auto header = std::to_string(width) + "&" +
+                        std::to_string(height) + "&1&";
+    if (std::filesystem::file_size(f.path()) > header.size()) ++nonempty;
+  }
+  EXPECT_EQ(graphs, expected);
+  EXPECT_EQ(nonempty, expected);
+}
+
+TEST_F(CudaTest, PublicationRealCudaPair) {
+  constexpr size_t width = 96, height = 64;
+  const auto options = PublicationGpuOptions();
+  ASSERT_TRUE(CanPairPatchMatchViews(
+      width, height, width, height, true, options.checkpoint_hmm));
+  const auto root = MakePublicationGpuWorkspace();
+  PatchMatchController controller(options, root, "COLMAP", "");
+  PatchMatchControllerTestAccess::Hooks hooks;
+  ASSERT_NO_THROW(PatchMatchControllerTestAccess::RunPair(
+      controller, hooks, options, 0, 1));
+  ExpectPublicationGpuFiles(root, 2);
+}
+
+TEST_F(CudaTest, PublicationRealPatchMatchSingle) {
+  const auto options = PublicationGpuOptions();
+  const auto root = MakePublicationGpuWorkspace();
+  PatchMatchController controller(options, root, "COLMAP", "");
+  PatchMatchControllerTestAccess::Hooks hooks;
+  ASSERT_NO_THROW(PatchMatchControllerTestAccess::RunSingles(
+      controller, hooks, options, 1));
+  ExpectPublicationGpuFiles(root, 1);
+}
+
+void WritePublicationFiles(
+    const PatchMatchControllerTestAccess::Prepared& prepared,
+    const std::filesystem::path& normal_path) {
+  {
+    DepthMap depth(8, 8, 1, 10);
+    std::fill_n(depth.GetPtr(), 64, 4.0f);
+    depth.Write(prepared.depth_path);
+  }
+  if (prepared.options.write_consistency_graph) {
+    std::vector<int> graph;
+    for (int row = 0; row < 8; ++row)
+      for (int col = 0; col < 8; ++col)
+        graph.insert(graph.end(), {col, row, 4, 1, 2, 3, 4});
+    ConsistencyGraph(8, 8, graph).Write(prepared.consistency_path);
+  }
+  {
+    NormalMap normal(8, 8);
+    std::fill_n(normal.GetPtr() + 128, 64, -1.0f);
+    normal.Write(normal_path);
+  }
+}
+
+TEST(PatchMatchController, PublicationCompletesBeforeResumeSkips) {
+  ControllerWorkspaceFixture fixture(8, 8);
+  for (const bool graph : {false, true}) {
+    const auto options = PublicationOptions(graph);
+    PatchMatchController controller(options, fixture.Workspace(), "COLMAP", "");
+    const auto prepared =
+        PatchMatchControllerTestAccess::Prepare(controller, options);
+    ASSERT_TRUE(prepared);
+    if (!graph) std::filesystem::create_directory(prepared->consistency_path);
+    PatchMatchControllerTestAccess::Publish(*prepared, [&](const auto& normal) {
+      WritePublicationFiles(*prepared, normal);
+      EXPECT_FALSE(ExistsFile(prepared->normal_path));
+    });
+    EXPECT_FALSE(PatchMatchControllerTestAccess::Prepare(controller, options));
+    DepthMap depth;
+    depth.Read(prepared->depth_path);
+    EXPECT_EQ(depth.Get(7, 7), 4.0f);
+    NormalMap normal;
+    normal.Read(prepared->normal_path);
+    EXPECT_EQ(normal.Get(7, 7, 2), -1.0f);
+    EXPECT_EQ(ExistsFile(prepared->consistency_path), graph);
+    if (!graph)
+      EXPECT_TRUE(std::filesystem::is_directory(prepared->consistency_path));
+  }
+}
+
+TEST(PatchMatchController, PublicationWithoutGraphInvalidatesPreviousGraph) {
+  ControllerWorkspaceFixture fixture(8, 8);
+  auto options = PublicationOptions(true);
+  PatchMatchController controller(options, fixture.Workspace(), "COLMAP", "");
+  const auto first =
+      PatchMatchControllerTestAccess::Prepare(controller, options);
+  ASSERT_TRUE(first);
+  PatchMatchControllerTestAccess::Publish(*first, [&](const auto& normal) {
+    WritePublicationFiles(*first, normal);
+  });
+  ASSERT_TRUE(ExistsFile(first->consistency_path));
+  std::filesystem::remove(first->depth_path);
+  options.write_consistency_graph = false;
+  const auto next =
+      PatchMatchControllerTestAccess::Prepare(controller, options);
+  ASSERT_TRUE(next);
+  PatchMatchControllerTestAccess::Publish(
+      *next, [&](const auto& normal) { WritePublicationFiles(*next, normal); });
+  EXPECT_FALSE(ExistsFile(next->consistency_path));
+  EXPECT_FALSE(PatchMatchControllerTestAccess::Prepare(controller, options));
+  options.write_consistency_graph = true;
+  EXPECT_TRUE(PatchMatchControllerTestAccess::Prepare(controller, options));
+}
+
+TEST(PatchMatchController, PublicationPreservesNonRegularCompletionPath) {
+  ControllerWorkspaceFixture fixture(8, 8);
+  const auto options = PublicationOptions(false);
+  PatchMatchController controller(options, fixture.Workspace(), "COLMAP", "");
+  const auto prepared =
+      PatchMatchControllerTestAccess::Prepare(controller, options);
+  ASSERT_TRUE(prepared);
+  std::filesystem::create_directory(prepared->normal_path);
+  bool called = false;
+  EXPECT_THROW(PatchMatchControllerTestAccess::Publish(
+                   *prepared, [&](const auto&) { called = true; }),
+               std::exception);
+  EXPECT_FALSE(called);
+  EXPECT_TRUE(std::filesystem::is_directory(prepared->normal_path));
+  EXPECT_TRUE(PatchMatchControllerTestAccess::Prepare(controller, options));
+#ifdef __linux__
+  std::filesystem::remove(prepared->normal_path);
+  const auto target = prepared->normal_path.parent_path() / "external.bin";
+  NormalMap(8, 8).Write(target);
+  std::filesystem::create_symlink(target, prepared->normal_path);
+  EXPECT_THROW(PatchMatchControllerTestAccess::Publish(
+                   *prepared, [&](const auto&) { called = true; }),
+               std::exception);
+  EXPECT_FALSE(called);
+  EXPECT_TRUE(std::filesystem::is_symlink(prepared->normal_path));
+  EXPECT_EQ(std::filesystem::file_size(target), 774);
+#endif
+}
+
+TEST(PatchMatchController, PublicationCleanupKeepsOriginalErrorAndRetry) {
+  ControllerWorkspaceFixture fixture(8, 8);
+  const auto options = PublicationOptions(false);
+  PatchMatchController controller(options, fixture.Workspace(), "COLMAP", "");
+  const auto prepared =
+      PatchMatchControllerTestAccess::Prepare(controller, options);
+  ASSERT_TRUE(prepared);
+  std::filesystem::path stage;
+  try {
+    PatchMatchControllerTestAccess::Publish(*prepared, [&](const auto& normal) {
+      WritePublicationFiles(*prepared, normal);
+      stage = normal.parent_path();
+      // A nonempty directory makes cleanup fail portably, even as root. Only
+      // owned temporary names may be removed; recursive cleanup is forbidden.
+      std::filesystem::remove(normal);
+      std::filesystem::create_directory(normal);
+      std::ofstream(normal / "keep").put('x');
+      throw std::runtime_error("original output failure");
+    });
+    FAIL() << "Expected the original output error";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(), "original output failure");
+  }
+  EXPECT_FALSE(ExistsFile(prepared->normal_path));
+  EXPECT_TRUE(ExistsFile(stage / "normal.bin" / "keep"));
+  const auto retry =
+      PatchMatchControllerTestAccess::Prepare(controller, options);
+  ASSERT_TRUE(retry);
+  PatchMatchControllerTestAccess::Publish(*retry, [&](const auto& normal) {
+    WritePublicationFiles(*retry, normal);
+  });
+  EXPECT_FALSE(PatchMatchControllerTestAccess::Prepare(controller, options));
+  EXPECT_TRUE(ExistsFile(stage / "normal.bin" / "keep"));
+}
+
+#ifdef __linux__
+TEST(PatchMatchController, PublicationRejectsDanglingGraphBeforeRetry) {
+  ControllerWorkspaceFixture fixture(8, 8);
+  auto options = PublicationOptions(false);
+  PatchMatchController controller(options, fixture.Workspace(), "COLMAP", "");
+  const auto a = PatchMatchControllerTestAccess::Prepare(controller, options, 0);
+  const auto b = PatchMatchControllerTestAccess::Prepare(controller, options, 1);
+  ASSERT_TRUE(a);
+  ASSERT_TRUE(b);
+  DepthMap(8, 8, 1, 10).Write(a->depth_path);
+  const auto depth_size = std::filesystem::file_size(a->depth_path);
+  ASSERT_FALSE(ExistsFile(a->normal_path));
+  ASSERT_FALSE(std::filesystem::exists(b->consistency_path));
+  std::filesystem::create_symlink(b->consistency_path, a->consistency_path);
+  bool called = false;
+  EXPECT_THROW(PatchMatchControllerTestAccess::Publish(
+                   *a,
+                   [&](const auto& normal) {
+                     called = true;
+                     WritePublicationFiles(*a, normal);
+                   }),
+               std::exception);
+  EXPECT_FALSE(called);
+  EXPECT_FALSE(ExistsFile(a->normal_path));
+  EXPECT_EQ(std::filesystem::file_size(a->depth_path), depth_size);
+  EXPECT_TRUE(std::filesystem::is_symlink(a->consistency_path));
+  EXPECT_FALSE(std::filesystem::exists(b->consistency_path));
+  // A later graph-enabled publication for B materializes A's old target.
+  ConsistencyGraph(8, 8, {}).Write(b->consistency_path);
+  EXPECT_EQ(std::filesystem::file_size(b->consistency_path), 6);
+  options.write_consistency_graph = true;
+  EXPECT_TRUE(PatchMatchControllerTestAccess::Prepare(controller, options, 0));
+}
+
+TEST(PatchMatchController, PublicationPreservesDepthAndGraphSymlinkTargets) {
+  ControllerWorkspaceFixture fixture(8, 8);
+  for (const bool graph : {false, true}) {
+    for (const bool depth : {false, true}) {
+      const auto options = PublicationOptions(graph);
+      PatchMatchController controller(
+          options, fixture.Workspace(), "COLMAP", "");
+      const auto prepared =
+          PatchMatchControllerTestAccess::Prepare(controller, options);
+      ASSERT_TRUE(prepared);
+      NormalMap(8, 8).Write(prepared->normal_path);
+      const auto& link =
+          depth ? prepared->depth_path : prepared->consistency_path;
+      const auto target = link.parent_path() / "external.bin";
+      ConsistencyGraph(8, 8, {}).Write(target);
+      std::filesystem::create_symlink(target, link);
+      const bool was_ready =
+          bool(PatchMatchControllerTestAccess::Prepare(controller, options));
+      bool called = false;
+      EXPECT_THROW(PatchMatchControllerTestAccess::Publish(
+                       *prepared, [&](const auto&) { called = true; }),
+                   std::exception);
+      EXPECT_FALSE(called);
+      EXPECT_TRUE(ExistsFile(prepared->normal_path));
+      EXPECT_TRUE(std::filesystem::is_symlink(link));
+      EXPECT_EQ(std::filesystem::file_size(target), 6);
+      EXPECT_EQ(bool(PatchMatchControllerTestAccess::Prepare(controller, options)),
+                was_ready);
+    }
+  }
+}
+
+TEST(PatchMatchController, PublicationPartialWritesRemainEligibleForRetry) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  // The native 8x8 depth, normal and graph files are 262, 774 and 1798 bytes.
+  // Exercise an empty depth, partial normal and partial graph with old siblings
+  // present. Limit writes only in a child, restoring its limit before retry.
+  for (const rlim_t limit : {0, 512, 1024}) {
+    SCOPED_TRACE(limit);
+    EXPECT_EXIT(
+        {
+          ControllerWorkspaceFixture fixture(8, 8);
+          const auto options = PublicationOptions(limit != 512);
+          PatchMatchController controller(
+              options, fixture.Workspace(), "COLMAP", "");
+          const auto prepared =
+              PatchMatchControllerTestAccess::Prepare(controller, options);
+          if (!prepared) _exit(2);
+          NormalMap(8, 8).Write(prepared->normal_path);
+          ConsistencyGraph(8, 8, {}).Write(prepared->consistency_path);
+          struct rlimit previous;
+          if (getrlimit(RLIMIT_FSIZE, &previous) != 0) _exit(3);
+          auto restricted = previous;
+          restricted.rlim_cur = limit;
+          if (signal(SIGXFSZ, SIG_IGN) == SIG_ERR ||
+              setrlimit(RLIMIT_FSIZE, &restricted) != 0) {
+            _exit(4);
+          }
+          bool failed = false;
+          uintmax_t partial_bytes = std::numeric_limits<uintmax_t>::max();
+          try {
+            PatchMatchControllerTestAccess::Publish(
+                *prepared, [&](const auto& normal) {
+                  try {
+                    WritePublicationFiles(*prepared, normal);
+                  } catch (...) {
+                    partial_bytes = std::filesystem::file_size(
+                        limit == 0     ? prepared->depth_path
+                        : limit == 512 ? normal
+                                       : prepared->consistency_path);
+                    throw;
+                  }
+                });
+          } catch (const std::exception&) {
+            failed = true;
+          }
+          if (setrlimit(RLIMIT_FSIZE, &previous) != 0) _exit(5);
+          if (!failed || partial_bytes != limit) _exit(6);
+          if (!PatchMatchControllerTestAccess::Prepare(controller, options)) {
+            std::fputs("Partial output was accepted as completed on retry\n",
+                       stderr);
+            _exit(7);
+          }
+          if (ExistsFile(prepared->normal_path)) {
+            std::fputs("Publication exposed completion after failure\n", stderr);
+            _exit(8);
+          }
+          _exit(0);
+        },
+        testing::ExitedWithCode(0),
+        "");
+  }
+}
+#endif
+
 
 TEST(PatchMatchController, PreparePreservesConfiguredSourceOrder) {
   for (const int missing_source : {-1, 4}) {
