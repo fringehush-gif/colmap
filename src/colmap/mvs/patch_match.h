@@ -12,6 +12,7 @@
 #endif
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -109,10 +110,17 @@ class PatchMatchController : public BaseController {
   void Run();
 
  private:
+  friend class PatchMatchControllerTestAccess;
   void ReadWorkspace();
   void ReadProblems();
   void ReadGpuIndices();
   void ProcessProblem(const PatchMatchOptions& options, size_t problem_idx);
+  static void PublishOutput(
+      const std::filesystem::path& depth_path,
+      const std::filesystem::path& normal_path,
+      const std::filesystem::path& graph_path,
+      bool write_graph,
+      const std::function<void(const std::filesystem::path&)>& write_output);
 
   const PatchMatchOptions options_;
   const std::filesystem::path workspace_path_;
