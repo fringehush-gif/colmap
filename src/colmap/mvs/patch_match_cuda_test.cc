@@ -317,6 +317,20 @@ class PatchMatchControllerTestAccess {
  public:
   using Hooks = PatchMatchController::SparseTestHooks;
   using Prepared = PatchMatchController::PreparedProblem;
+  using ConfigProblem = std::pair<std::string, std::vector<std::string>>;
+  static std::vector<ConfigProblem> ReadConfig(PatchMatchController& controller) {
+    controller.ReadWorkspace();
+    controller.ReadProblems();
+    const auto& model = controller.workspace_->GetModel();
+    std::vector<ConfigProblem> result;
+    for (const auto& problem : controller.problems_) {
+      ConfigProblem entry{model.GetImageName(problem.ref_image_idx), {}};
+      for (const auto source : problem.src_image_idxs)
+        entry.second.push_back(model.GetImageName(source));
+      result.push_back(std::move(entry));
+    }
+    return result;
+  }
   static void Run(PatchMatchController& controller, Hooks& hooks) {
     controller.sparse_test_hooks_ = &hooks;
     controller.Run();
@@ -1710,6 +1724,7 @@ class ControllerWorkspaceFixture {
     config.close();
     return root;
   }
+  const std::vector<std::string>& ImageNames() const { return names; }
   static auto Outputs(const std::filesystem::path& root) {
     std::map<std::filesystem::path, std::vector<char> > maps;
     for (const auto* family : {"depth_maps", "normal_maps"}) {
@@ -1741,6 +1756,47 @@ class ControllerWorkspaceFixture {
   Reconstruction reconstruction;
   std::vector<std::string> names;
 };
+
+TEST(PatchMatchController, RejectsDuplicateConfiguredReferences) {
+  ControllerWorkspaceFixture fixture(8, 8);
+  const auto& names = fixture.ImageNames();
+  for (const bool different_sources : {false, true}) {
+    SCOPED_TRACE(different_sources);
+    const auto root = fixture.Workspace();
+    {
+      std::ofstream config(root / "stereo/patch-match.cfg");
+      config << names[0] << "\n" << names[1] << "\n"
+             << names[0] << "\n" << names[different_sources ? 2 : 1]
+             << "\n";
+    }
+    PatchMatchController controller(
+        ControllerWorkspaceFixture::Options(), root, "COLMAP", "");
+    try {
+      PatchMatchControllerTestAccess::ReadConfig(controller);
+      FAIL() << "Expected duplicate reference rejection";
+    } catch (const std::exception& error) {
+      const std::string message = error.what();
+      EXPECT_NE(message.find("Duplicate reference image"), std::string::npos);
+      EXPECT_NE(message.find(names[0]), std::string::npos);
+    }
+  }
+}
+
+TEST(PatchMatchController, PreservesUniqueReferenceAndSourceOrder) {
+  ControllerWorkspaceFixture fixture(8, 8);
+  const auto& names = fixture.ImageNames();
+  const auto root = fixture.Workspace();
+  {
+    std::ofstream config(root / "stereo/patch-match.cfg");
+    config << names[2] << "\n" << names[4] << "," << names[0] << "\n"
+           << names[0] << "\n" << names[3] << "," << names[2] << "\n";
+  }
+  PatchMatchController controller(
+      ControllerWorkspaceFixture::Options(), root, "COLMAP", "");
+  const std::vector<PatchMatchControllerTestAccess::ConfigProblem> expected = {
+      {names[2], {names[4], names[0]}}, {names[0], {names[3], names[2]}}};
+  EXPECT_EQ(PatchMatchControllerTestAccess::ReadConfig(controller), expected);
+}
 
 PatchMatchOptions PublicationOptions(const bool graph) {
   auto options = ControllerWorkspaceFixture::Options();

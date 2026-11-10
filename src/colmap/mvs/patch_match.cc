@@ -491,7 +491,9 @@ void PatchMatchController::ReadProblems() {
       continue;
     }
 
-    ref_image_idxs.insert(model.GetImageIdx(ref_image_name));
+    THROW_CHECK(ref_image_idxs.insert(model.GetImageIdx(ref_image_name)).second)
+        << "Duplicate reference image in PatchMatch configuration: "
+        << ref_image_name;
 
     ProblemConfig problem_config;
     problem_config.ref_image_name = ref_image_name;
