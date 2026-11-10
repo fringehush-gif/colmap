@@ -9,11 +9,63 @@
 #include <string>
 #include <utility>
 
+#ifdef __linux__
+#include <csignal>
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
+
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace mvs {
 namespace {
+
+#ifdef __linux__
+TEST(ConsistencyGraph, WritePreservesExistingHardLink) {
+  const auto dir = CreateTestDir();
+  const auto path = dir / "graph.bin";
+  const auto link = dir / "alias.bin";
+  ConsistencyGraph(2, 1, {}).Write(path);
+  std::filesystem::create_hard_link(path, link);
+  ConsistencyGraph(2, 1, {1, 0, 1, 7}).Write(path);
+  EXPECT_TRUE(std::filesystem::equivalent(path, link));
+  ConsistencyGraph read;
+  read.Read(link);
+  int count;
+  const int* ids;
+  read.GetImageIdxs(0, 1, &count, &ids);
+  ASSERT_EQ(count, 1);
+  EXPECT_EQ(ids[0], 7);
+}
+
+TEST(ConsistencyGraph, WriteReportsIncompleteHeaderAndPayload) {
+  const auto path = CreateTestDir() / "consistency_graph.bin";
+  for (const rlim_t limit : {0, 16}) {
+    SCOPED_TRACE(limit);
+    EXPECT_EXIT(
+        {
+          struct rlimit file_limit;
+          file_limit.rlim_cur = limit;
+          file_limit.rlim_max = limit;
+          if (signal(SIGXFSZ, SIG_IGN) == SIG_ERR ||
+              setrlimit(RLIMIT_FSIZE, &file_limit) != 0) _exit(2);
+          try {
+            const auto graph =
+                limit == 0 ? ConsistencyGraph(2, 1, {})
+                           : ConsistencyGraph(2, 1, {0, 0, 3, 5, 7, 33});
+            graph.Write(path);
+          } catch (const std::exception&) {
+            _exit(0);
+          }
+          _exit(1);
+        },
+        testing::ExitedWithCode(0),
+        "");
+  }
+}
+#endif
+
 
 TEST(ConsistencyGraph, Empty) {
   const std::vector<int> data;
