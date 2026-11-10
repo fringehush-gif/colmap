@@ -15,6 +15,7 @@ class DepthMap : public Mat<float> {
   DepthMap();
   DepthMap(size_t width, size_t height, float depth_min, float depth_max);
   DepthMap(const Mat<float>& mat, float depth_min, float depth_max);
+  DepthMap(Mat<float>&& mat, float depth_min, float depth_max);
 
   inline float GetDepthMin() const;
   inline float GetDepthMax() const;

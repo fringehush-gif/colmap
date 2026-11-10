@@ -2,6 +2,10 @@
 
 #include "colmap/mvs/mat.h"
 
+#include "colmap/util/testing.h"
+
+#include <filesystem>
+
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -67,6 +71,35 @@ TEST(Mat, Fill) {
   mat.Set(1, 0, 1, 10);
   mat.Set(1, 0, 2, 10);
 }
+
+#ifdef __linux__
+TEST(Mat, WriteReportsIncompleteOutput) {
+  if (!std::filesystem::exists("/dev/full")) {
+    GTEST_SKIP() << "Linux failure sink unavailable";
+  }
+  Mat<float> mat(2, 3, 1);
+  mat.Fill(4.0f);
+  EXPECT_THROW(mat.Write("/dev/full"), std::exception);
+  Mat<float> larger(8192, 1, 1);
+  EXPECT_THROW(larger.Write("/dev/full"), std::exception);
+}
+
+TEST(Mat, WritePreservesExistingHardLink) {
+  const auto root = CreateTestDir();
+  const auto path = root / "map.bin";
+  const auto alias = root / "alias.bin";
+  Mat<float> mat(2, 3, 1);
+  mat.Fill(4.0f);
+  mat.Write(path);
+  std::filesystem::create_hard_link(path, alias);
+  mat.Fill(7.0f);
+  mat.Write(path);
+  EXPECT_TRUE(std::filesystem::equivalent(path, alias));
+  Mat<float> readback;
+  readback.Read(alias);
+  EXPECT_EQ(readback.Get(0, 0, 0), 7.0f);
+}
+#endif
 
 }  // namespace
 }  // namespace mvs

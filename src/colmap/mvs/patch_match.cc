@@ -12,6 +12,10 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <functional>
 #include <numeric>
 #include <set>
 
@@ -19,6 +23,59 @@
 
 namespace colmap {
 namespace mvs {
+
+void PatchMatchController::PublishOutput(
+    const std::filesystem::path& depth_path,
+    const std::filesystem::path& normal_path,
+    const std::filesystem::path& graph_path,
+    const bool write_graph,
+    const std::function<void(const std::filesystem::path&)>& write_output) {
+  const auto inspect = [](const std::filesystem::path& path,
+                          const bool required) {
+    std::error_code ec;
+    const auto status = std::filesystem::symlink_status(path, ec);
+    if (ec == std::errc::no_such_file_or_directory) return false;
+    if (ec) throw std::filesystem::filesystem_error("stat output", path, ec);
+    if (status.type() == std::filesystem::file_type::not_found) return false;
+    if (!std::filesystem::is_regular_file(status)) {
+      THROW_CHECK(!required && !std::filesystem::is_symlink(status) &&
+                  !ExistsFile(path))
+          << "Refusing to replace non-regular output: " << path;
+      return false;
+    }
+    return true;
+  };
+  const bool old_normal = inspect(normal_path, true);
+  const bool old_depth = inspect(depth_path, true);
+  const bool old_graph = inspect(graph_path, write_graph);
+  static std::atomic<uint64_t> sequence{0};
+  const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
+  std::filesystem::path stage;
+  for (int attempt = 0; attempt < 128; ++attempt) {
+    stage = normal_path.parent_path() /
+            (".patchmatch-stage-" + std::to_string(tick) + "-" +
+             std::to_string(sequence.fetch_add(1)));
+    if (std::filesystem::create_directory(stage)) break;
+    stage.clear();
+  }
+  THROW_CHECK(!stage.empty()) << "Cannot create PatchMatch staging directory";
+  std::filesystem::path stage_normal;
+  try {
+    stage_normal = stage / "normal.bin";
+    if (old_normal) std::filesystem::remove(normal_path);
+    if (old_depth) std::filesystem::remove(depth_path);
+    if (old_graph) std::filesystem::remove(graph_path);
+    write_output(stage_normal);
+    std::filesystem::rename(stage_normal, normal_path);
+  } catch (...) {
+    std::error_code ignored;
+    std::filesystem::remove(stage_normal, ignored);
+    std::filesystem::remove(stage, ignored);
+    throw;
+  }
+  std::error_code ignored;
+  std::filesystem::remove(stage, ignored);
+}
 
 PatchMatch::PatchMatch(const PatchMatchOptions& options, const Problem& problem)
     : options_(options), problem_(problem) {}
@@ -251,7 +308,9 @@ void PatchMatchController::ReadProblems() {
       continue;
     }
 
-    ref_image_idxs.insert(model.GetImageIdx(ref_image_name));
+    THROW_CHECK(ref_image_idxs.insert(model.GetImageIdx(ref_image_name)).second)
+        << "Duplicate reference image in PatchMatch configuration: "
+        << ref_image_name;
 
     ProblemConfig problem_config;
     problem_config.ref_image_name = ref_image_name;
@@ -500,11 +559,18 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
                             output_type.c_str(),
                             image_name.c_str());
 
-  patch_match.GetDepthMap().Write(depth_map_path);
-  patch_match.GetNormalMap().Write(normal_map_path);
-  if (options.write_consistency_graph) {
-    patch_match.GetConsistencyGraph().Write(consistency_graph_path);
-  }
+  PublishOutput(
+      depth_map_path,
+      normal_map_path,
+      consistency_graph_path,
+      options.write_consistency_graph,
+      [&](const auto& staged_normal_path) {
+        patch_match.GetDepthMap().Write(depth_map_path);
+        if (options.write_consistency_graph) {
+          patch_match.GetConsistencyGraph().Write(consistency_graph_path);
+        }
+        patch_match.GetNormalMap().Write(staged_normal_path);
+      });
 }
 
 }  // namespace mvs
