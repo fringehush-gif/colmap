@@ -20,6 +20,7 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/ply.h"
 
+#include <exception>
 #include <utility>
 
 namespace colmap {
@@ -228,20 +229,25 @@ int RunPatchMatchStereo(int argc, char** argv) {
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
   }
-  if (blocking_cuda_wait) {
+  try {
+    if (blocking_cuda_wait) {
 #if defined(COLMAP_CUDA_ENABLED)
-    SetCudaDevicesBlockingSync(
-        CSVToVector<int>(options.patch_match_stereo->gpu_index));
+      SetCudaDevicesBlockingSync(
+          CSVToVector<int>(options.patch_match_stereo->gpu_index));
 #else
-    LOG(ERROR) << "Blocking CUDA host synchronization requires CUDA >= 12";
-    return EXIT_FAILURE;
+      LOG(ERROR) << "Blocking CUDA host synchronization requires CUDA >= 12";
+      return EXIT_FAILURE;
 #endif
+    }
+    RunPatchMatchStereoImpl(workspace_path,
+                            workspace_format,
+                            pmvs_option_name,
+                            *options.patch_match_stereo,
+                            config_path);
+  } catch (const std::exception& error) {
+    LOG(ERROR) << "PatchMatch stereo failed: " << error.what();
+    return EXIT_FAILURE;
   }
-  RunPatchMatchStereoImpl(workspace_path,
-                          workspace_format,
-                          pmvs_option_name,
-                          *options.patch_match_stereo,
-                          config_path);
   return EXIT_SUCCESS;
 }
 
