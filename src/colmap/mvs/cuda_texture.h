@@ -85,7 +85,8 @@ CudaArrayLayeredTexture<T>::FromGpuMat(const cudaTextureDesc& texture_desc,
   params.srcPtr = make_cudaPitchedPtr(
       (void*)mat.GetPtr(), mat.GetPitch(), mat.GetWidth(), mat.GetHeight());
   params.dstArray = array->array_;
-  CUDA_SAFE_CALL(cudaMemcpy3D(&params));
+  ::colmap::internal::CudaSafeCallWithLocation(
+      cudaMemcpy3D(&params), __FILE__, __LINE__);
 
   return array;
 }
@@ -107,7 +108,8 @@ CudaArrayLayeredTexture<T>::FromHostArray(const cudaTextureDesc& texture_desc,
   params.srcPtr =
       make_cudaPitchedPtr((void*)data, width * sizeof(T), width, height);
   params.dstArray = array->array_;
-  CUDA_SAFE_CALL(cudaMemcpy3D(&params));
+  ::colmap::internal::CudaSafeCallWithLocation(
+      cudaMemcpy3D(&params), __FILE__, __LINE__);
 
   return array;
 }

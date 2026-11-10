@@ -210,24 +210,30 @@ GpuMatView<T> GpuMat<T>::View() const {
 
 template <typename T>
 void GpuMat<T>::CopyToDevice(const T* data, const size_t pitch) {
-  CUDA_SAFE_CALL(cudaMemcpy2D((void*)array_ptr_,
-                              (size_t)pitch_,
-                              (void*)data,
-                              pitch,
-                              width_ * sizeof(T),
-                              height_ * depth_,
-                              cudaMemcpyHostToDevice));
+  ::colmap::internal::CudaSafeCallWithLocation(
+      cudaMemcpy2D((void*)array_ptr_,
+                   (size_t)pitch_,
+                   (void*)data,
+                   pitch,
+                   width_ * sizeof(T),
+                   height_ * depth_,
+                   cudaMemcpyHostToDevice),
+      __FILE__,
+      __LINE__);
 }
 
 template <typename T>
 void GpuMat<T>::CopyToHost(T* data, const size_t pitch) const {
-  CUDA_SAFE_CALL(cudaMemcpy2D((void*)data,
-                              pitch,
-                              (void*)array_ptr_,
-                              (size_t)pitch_,
-                              width_ * sizeof(T),
-                              height_ * depth_,
-                              cudaMemcpyDeviceToHost));
+  ::colmap::internal::CudaSafeCallWithLocation(
+      cudaMemcpy2D((void*)data,
+                   pitch,
+                   (void*)array_ptr_,
+                   (size_t)pitch_,
+                   width_ * sizeof(T),
+                   height_ * depth_,
+                   cudaMemcpyDeviceToHost),
+      __FILE__,
+      __LINE__);
 }
 
 template <typename T>

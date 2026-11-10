@@ -395,7 +395,7 @@ if(CUDA_ENABLED)
 
     COLMAP_ADD_TEST(
         NAME gpu_mat_test
-        SRCS gpu_mat_test.cu
+        SRCS gpu_mat_test.cu gpu_mat_copy_test.cc
         LINK_LIBS colmap_mvs_cuda
     )
     COLMAP_ADD_TEST(
@@ -441,7 +441,7 @@ if(HIP_ENABLED)
 
     COLMAP_ADD_TEST(
         NAME gpu_mat_test
-        SRCS gpu_mat_test.cu
+        SRCS gpu_mat_test.cu gpu_mat_copy_test.cc
         LINK_LIBS colmap_mvs_cuda
     )
     set_source_files_properties(gpu_mat_test.cu PROPERTIES LANGUAGE HIP)

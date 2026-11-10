@@ -56,6 +56,15 @@ void CudaSafeCall(const cudaError_t error,
                   const std::string& file,
                   const int line);
 
+namespace internal {
+// Opt in at internal call sites that must not construct a filename on success.
+inline void CudaSafeCallWithLocation(cudaError_t error,
+                                     const char* file,
+                                     int line) {
+  if (error != cudaSuccess) ::colmap::CudaSafeCall(error, file, line);
+}
+}  // namespace internal
+
 // A refusal identifies the allocation call only; it does not certify cleanup.
 class CudaAllocationRefused : public std::invalid_argument {
  public:
