@@ -36,8 +36,11 @@ void Mat<float>::Write(const std::filesystem::path& path) const {
   THROW_CHECK_FILE_OPEN(file, path);
   SetFullPrecTextStream(file);
   file << width_ << "&" << height_ << "&" << depth_ << "&";
+  THROW_CHECK(file) << path;
   WriteBinaryLittleEndian<float>(&file, {data_.data(), data_.size()});
+  THROW_CHECK(file) << path;
   file.close();
+  THROW_CHECK(file) << path;
 }
 
 }  // namespace mvs
