@@ -650,6 +650,13 @@ endif()
 if(TARGET onnxruntime::onnxruntime)
     list(APPEND COLMAP_COMPILE_DEFINITIONS COLMAP_ONNX_ENABLED)
     message(STATUS "Enabling ONNX support")
+    message(WARNING
+        "ONNX Runtime official binaries enable telemetry by default. "
+        "For builds using 1DS, set ORT_DISABLE_TELEMETRY=1 before starting "
+        "COLMAP or PyCOLMAP to disable it. This variable does not control "
+        "legacy Windows ETW telemetry. For a telemetry-free dependency, "
+        "build ONNX Runtime with --no_telemetry. See "
+        "https://github.com/microsoft/onnxruntime/blob/main/docs/Privacy.md")
     # The prebuilt macOS onnxruntime binaries ship with the CoreML execution
     # provider, which accelerates ONNX inference on the GPU / Apple Neural
     # Engine. Enable it as the GPU backend on Apple platforms (CUDA is

@@ -22,6 +22,25 @@ library, i.e., you can include and link COLMAP against your own C++ source code,
 as described further below. Furthermore, you can use most of COLMAP's
 functionality with :ref:`PyCOLMAP <pycolmap/index>` in Python.
 
+ONNX Runtime telemetry
+----------------------
+
+When ONNX support is enabled, the linked ONNX Runtime dependency may collect
+usage and hardware information and send it to Microsoft. Official ONNX Runtime
+binaries enable telemetry by default; the version number alone does not identify
+the telemetry configuration of a custom build.
+
+For ONNX Runtime builds using 1DS telemetry, set ``ORT_DISABLE_TELEMETRY=1`` in the
+environment **before starting** COLMAP or the Python process using PyCOLMAP.
+Setting it only while configuring or installing COLMAP does not configure later
+processes. The telemetry-disable API suppresses nonessential events but may not
+prevent initialization telemetry. The legacy Windows ETW backend ignores this
+environment variable and records events when an external collector is active.
+To omit telemetry at build time, build ONNX Runtime with ``--no_telemetry`` and
+configure COLMAP with ``FETCH_ONNX=OFF`` to use that dependency. See ONNX Runtime's
+`privacy documentation <https://github.com/microsoft/onnxruntime/blob/main/docs/Privacy.md>`__
+for details.
+
 ------------------
 Pre-built Binaries
 ------------------
