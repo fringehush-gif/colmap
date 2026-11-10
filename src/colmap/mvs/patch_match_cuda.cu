@@ -1407,8 +1407,8 @@ __global__ void SweepFromTopToBottom(
             }
             const int source = cooperative_job.source[result_slot][threadIdx.x];
             if (source < 0) continue;
-            // Reuse identical evaluations, but retain every original sample
-            // add.
+              // Reuse identical evaluations, but retain every original sample
+              // add.
 #ifndef COLMAP_HIP_ENABLED
             if constexpr (kBlockWidth == 8) {
               costs[0] += source < kSampleWindowSize
@@ -1475,52 +1475,31 @@ __global__ void SweepFromTopToBottom(
     }
 
     if constexpr (kCooperative) {
-      // The owner publishes the winner before all groups refresh
-      // independent source-image costs and forward messages.
+      // Publish the winner before independent source-chain updates.
       __syncthreads();
-      if (col < cost_map.GetWidth()) {
+    }
+    if (col < cost_map.GetWidth()) {
+      int winner = min_cost_idx;
+      float winning_normal[3];
+      if constexpr (kCooperative) {
         const int lane = threadIdx.x;
-        const int winner = cooperative_job.best_idx[lane];
-        float winning_normal[3];
+        winner = cooperative_job.best_idx[lane];
         for (int axis = 0; axis < 3; ++axis) {
           winning_normal[axis] = cooperative_job.best_normal[axis][lane];
         }
         pcc_computer.depth = cooperative_job.best_depth[lane];
         pcc_computer.normal = winning_normal;
-        float* source_forward_message = &global_workspace.GetPtr()[col];
-        for (int image_idx = threadIdx.y; image_idx < cost_map.GetDepth();
-             image_idx += blockDim.y) {
-          float cost;
-          if (winner == 0) {
-            cost = cost_map.Get(row, col, image_idx);
-          } else {
-            pcc_computer.src_image_idx = image_idx;
-            cost = pcc_computer.Compute();
-            cost_map.Set(row, col, image_idx, cost);
-          }
-
-          const float alpha = likelihood_computer.ComputeForwardMessage(
-              cost, source_forward_message[image_idx * source_stride]);
-          const float beta = sel_prob_map.Get(row, col, image_idx);
-          const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
-          const float prob = likelihood_computer.ComputeSelProb(
-              alpha, beta, prev_prob, options.prev_sel_prob_weight);
-          source_forward_message[image_idx * source_stride] = alpha;
-          sel_prob_map.Set(row, col, image_idx, prob);
-        }
+      } else {
+        pcc_computer.depth = best_depth;
+        pcc_computer.normal = best_normal;
       }
-      // Filtering consumes all updated source probabilities.
-      // Shared-tile reads also finish here before next-row reuse.
-      __syncthreads();
-    } else if (owner && col < cost_map.GetWidth()) {
-      // Use the new cost to recompute the updated forward message and
-      // the selection probability.
-      pcc_computer.depth = best_depth;
-      pcc_computer.normal = best_normal;
-      for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
-        // Determine the cost for best depth.
+      float* source_forward_message = &global_workspace.GetPtr()[col];
+      const int first_source = kCooperative ? threadIdx.y : 0;
+      const int source_step = kCooperative ? blockDim.y : 1;
+      for (int image_idx = first_source; image_idx < cost_map.GetDepth();
+           image_idx += source_step) {
         float cost;
-        if (min_cost_idx == 0) {
+        if (winner == 0) {
           cost = cost_map.Get(row, col, image_idx);
         } else {
           pcc_computer.src_image_idx = image_idx;
@@ -1529,14 +1508,18 @@ __global__ void SweepFromTopToBottom(
         }
 
         const float alpha = likelihood_computer.ComputeForwardMessage(
-            cost, forward_message[image_idx * source_stride]);
+            cost, source_forward_message[image_idx * source_stride]);
         const float beta = sel_prob_map.Get(row, col, image_idx);
         const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
         const float prob = likelihood_computer.ComputeSelProb(
             alpha, beta, prev_prob, options.prev_sel_prob_weight);
-        forward_message[image_idx * source_stride] = alpha;
+        source_forward_message[image_idx * source_stride] = alpha;
         sel_prob_map.Set(row, col, image_idx, prob);
       }
+    }
+    if constexpr (kCooperative) {
+      // Filtering reads all source probabilities; shared reads finish here.
+      __syncthreads();
     }
 
     if (owner && col < cost_map.GetWidth()) {
