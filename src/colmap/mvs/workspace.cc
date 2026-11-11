@@ -101,6 +101,20 @@ const NormalMap& Workspace::GetNormalMap(const int image_idx) {
   return *THROW_CHECK_NOTNULL(normal_maps_.at(image_idx));
 }
 
+std::shared_ptr<const Bitmap> Workspace::GetBitmapLease(const int image_idx) {
+  return {std::shared_ptr<const Bitmap>{}, &GetBitmap(image_idx)};
+}
+
+std::shared_ptr<const DepthMap> Workspace::GetDepthMapLease(
+    const int image_idx) {
+  return {std::shared_ptr<const DepthMap>{}, &GetDepthMap(image_idx)};
+}
+
+std::shared_ptr<const NormalMap> Workspace::GetNormalMapLease(
+    const int image_idx) {
+  return {std::shared_ptr<const NormalMap>{}, &GetNormalMap(image_idx)};
+}
+
 std::filesystem::path Workspace::GetBitmapPath(const int image_idx) const {
   return model_.images.at(image_idx).GetPath();
 }
@@ -149,6 +163,11 @@ CachedWorkspace::CachedWorkspace(const Options& options)
              [](const int) { return std::make_shared<CachedImage>(); }) {}
 
 const Bitmap& CachedWorkspace::GetBitmap(const int image_idx) {
+  return *GetBitmapLease(image_idx);
+}
+
+std::shared_ptr<const Bitmap> CachedWorkspace::GetBitmapLease(
+    const int image_idx) {
   std::shared_ptr<CachedImage> cached_image;
   {
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
@@ -169,10 +188,15 @@ const Bitmap& CachedWorkspace::GetBitmap(const int image_idx) {
       cache_.UpdateNumBytes(image_idx);
     }
   }
-  return *cached_image->bitmap;
+  return {cached_image, cached_image->bitmap.get()};
 }
 
 const DepthMap& CachedWorkspace::GetDepthMap(const int image_idx) {
+  return *GetDepthMapLease(image_idx);
+}
+
+std::shared_ptr<const DepthMap> CachedWorkspace::GetDepthMapLease(
+    const int image_idx) {
   std::shared_ptr<CachedImage> cached_image;
   {
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
@@ -194,10 +218,15 @@ const DepthMap& CachedWorkspace::GetDepthMap(const int image_idx) {
       cache_.UpdateNumBytes(image_idx);
     }
   }
-  return *cached_image->depth_map;
+  return {cached_image, cached_image->depth_map.get()};
 }
 
 const NormalMap& CachedWorkspace::GetNormalMap(const int image_idx) {
+  return *GetNormalMapLease(image_idx);
+}
+
+std::shared_ptr<const NormalMap> CachedWorkspace::GetNormalMapLease(
+    const int image_idx) {
   std::shared_ptr<CachedImage> cached_image;
   {
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
@@ -219,7 +248,7 @@ const NormalMap& CachedWorkspace::GetNormalMap(const int image_idx) {
       cache_.UpdateNumBytes(image_idx);
     }
   }
-  return *cached_image->normal_map;
+  return {cached_image, cached_image->normal_map.get()};
 }
 
 void ImportPMVSWorkspace(const Workspace& workspace,
