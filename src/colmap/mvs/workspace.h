@@ -48,9 +48,19 @@ class Workspace {
 
   inline const Model& GetModel() const { return model_; }
 
+  // Borrowed references require the caller to prevent eviction, reload and
+  // workspace destruction through the last access. Use leases for reads that
+  // can overlap cache eviction.
   virtual const Bitmap& GetBitmap(int image_idx);
   virtual const DepthMap& GetDepthMap(int image_idx);
   virtual const NormalMap& GetNormalMap(int image_idx);
+
+  // Cached implementations return owners that survive eviction. The default
+  // eager implementation borrows from this workspace, which must outlive the
+  // alias. Load can replace the borrowed component.
+  virtual std::shared_ptr<const Bitmap> GetBitmapLease(int image_idx);
+  virtual std::shared_ptr<const DepthMap> GetDepthMapLease(int image_idx);
+  virtual std::shared_ptr<const NormalMap> GetNormalMapLease(int image_idx);
 
   // Get paths to bitmap, depth map, normal map and consistency graph.
   std::filesystem::path GetBitmapPath(int image_idx) const;
@@ -87,6 +97,10 @@ class CachedWorkspace : public Workspace {
   const Bitmap& GetBitmap(int image_idx) override;
   const DepthMap& GetDepthMap(int image_idx) override;
   const NormalMap& GetNormalMap(int image_idx) override;
+
+  std::shared_ptr<const Bitmap> GetBitmapLease(int image_idx) override;
+  std::shared_ptr<const DepthMap> GetDepthMapLease(int image_idx) override;
+  std::shared_ptr<const NormalMap> GetNormalMapLease(int image_idx) override;
 
  private:
   class CachedImage {
