@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -21,6 +23,16 @@
 namespace colmap {
 namespace mvs {
 namespace {
+
+// Inspect the representation through a reference, independently of
+// floating-point classification assumptions under fast-math.
+bool HasFiniteFloatBits(const float& value) {
+  static_assert(sizeof(float) == sizeof(uint32_t));
+  static_assert(std::numeric_limits<float>::is_iec559);
+  uint32_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return (bits & 0x7f800000U) != 0x7f800000U;
+}
 
 class PackedConsistencyMaskTest : public ::testing::Test {
  protected:
@@ -103,6 +115,30 @@ void CheckDecoded(const GpuMat<uint8_t>& mask,
 }
 
 TEST_F(PackedConsistencyMaskTest, DeviceWriteClearDecodeAndFourRotations) {
+  constexpr std::pair<uint32_t, bool> finite_cases[] = {
+      {0x00000000U, true},
+      {0x80000000U, true},  // Signed zero.
+      {0x00000001U, true},
+      {0x80000001U, true},  // Signed subnormals.
+      {0x007fffffU, true},
+      {0x00800000U, true},  // Normal/subnormal boundary.
+      {0x3f800000U, true},
+      {0xbf800000U, true},  // Signed one.
+      {0x7f7fffffU, true},
+      {0xff7fffffU, true},  // Largest finite values.
+      {0x7f800000U, false},
+      {0xff800000U, false},  // Signed infinity.
+      {0x7fc00000U, false},
+      {0xffc12345U, false},  // Quiet NaNs.
+      {0x7f800001U, false},
+      {0xff800001U, false}  // Signaling NaNs.
+  };
+  for (const auto& [bits, expected] : finite_cases) {
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    EXPECT_EQ(HasFiniteFloatBits(value), expected) << "float bits: " << bits;
+  }
+
   constexpr size_t width = 35, height = 19;
   for (const size_t sources : {size_t{1},
                                size_t{7},
@@ -267,9 +303,8 @@ void CheckProductionResult(const PatchMatch& matcher,
     ASSERT_EQ(map->GetWidth(), width);
     ASSERT_EQ(map->GetHeight(), height);
     ASSERT_EQ(map->GetData().size(), width * height * map->GetDepth());
-    ASSERT_TRUE(std::all_of(map->GetData().begin(),
-                            map->GetData().end(),
-                            [](float value) { return std::isfinite(value); }));
+    ASSERT_TRUE(std::all_of(
+        map->GetData().begin(), map->GetData().end(), HasFiniteFloatBits));
   }
   if (reject_all) {
     for (const auto* map : {static_cast<const Mat<float>*>(&depth),
