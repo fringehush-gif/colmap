@@ -12,6 +12,68 @@
 namespace colmap {
 namespace mvs {
 namespace {
+__global__ void ProbeSamplingSupportKernel(int* errors) {
+  int failures = 0;
+  const int strides[] = {1, 8, 23, 32, 47};
+  for (int test = 0; test < 5; ++test) {
+    const int stride = strides[test];
+    float actual[3 * 47];
+    float expected[3 * 47];
+    for (int i = 0; i < 3 * 47; ++i) actual[i] = expected[i] = -17.0f;
+    actual[0] = actual[stride] = actual[2 * stride] = 0.0f;
+    failures += TransformPDFToCDF(actual, 3, stride);
+    failures += actual[0] != 0.0f || actual[stride] != 0.0f ||
+                actual[2 * stride] != 0.0f;
+    failures += SampleSource(actual, 3, stride, FLT_EPSILON / 2) != -1;
+    actual[stride] = 1.0f;
+    actual[2 * stride] = 3.0f;
+    for (int i = 0; i < 3 * 47; ++i) expected[i] = actual[i];
+    float sum = 0.0f;
+    for (int i = 0; i < 3; ++i) sum += expected[i * stride];
+    const float inverse = 1.0f / sum;
+    float cumulative = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+      const float probability = expected[i * stride] * inverse;
+      cumulative += probability;
+      expected[i * stride] = cumulative;
+    }
+    failures += !TransformPDFToCDF(actual, 3, stride);
+    for (int i = 0; i < 3 * 47; ++i) {
+      failures += __float_as_uint(actual[i]) != __float_as_uint(expected[i]);
+    }
+    failures += SampleSource(actual, 3, stride, FLT_EPSILON / 2) != 1;
+    failures += SampleSource(actual, 3, stride, .5f) != 2;
+    failures += SampleSource(actual, 3, stride, 1.0f) != 2;
+    actual[0] = actual[stride] = actual[2 * stride] = 0.0f;
+    failures += TransformPDFToCDF(actual, 3, stride);
+    const int windows[] = {1, 16};
+    const int sample_counts[] = {1, 17, 19};
+    for (int window_idx = 0; window_idx < 2; ++window_idx) {
+      const int window = windows[window_idx];
+      for (int sample_idx = 0; sample_idx < 3; ++sample_idx) {
+        const int samples = sample_counts[sample_idx];
+        curandState state;
+        curandState reference;
+        curand_init(9182, 0, 0, &state);
+        curand_init(9182, 0, 0, &reference);
+        for (int begin = 0; begin < samples; begin += window) {
+          const int count = min(window, samples - begin);
+          for (int slot = 0; slot < window; ++slot) {
+            if (slot < count) {
+              const float uniform = curand_uniform(&state);
+              failures += SampleSource(actual, 3, stride, uniform) != -1;
+            }
+          }
+        }
+        for (int i = 0; i < samples; ++i) (void)curand_uniform(&reference);
+        for (int i = 0; i < 3; ++i)
+          failures += curand(&state) != curand(&reference);
+      }
+    }
+  }
+  *errors = failures;
+}
+
 __global__ void ProbePropagatedDepthKernel(const float4 inv_K,
                                            const float depth,
                                            const float3 normal,
@@ -87,6 +149,13 @@ __global__ void ProbeSampledSourcesKernel(const GpuMatView<int> draws,
 
 }  // namespace
 namespace internal {
+int ProbeSamplingSupport() {
+  GpuMat<int> errors(1, 1);
+  ProbeSamplingSupportKernel<<<1, 1>>>(errors.GetPtr());
+  CUDA_SYNC_AND_CHECK();
+  return errors.CopyToMat().GetData()[0];
+}
+
 float ProbePropagatedDepth(const std::array<float, 4>& K,
                            const float depth,
                            const std::array<float, 3>& normal,

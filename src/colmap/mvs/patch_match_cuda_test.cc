@@ -3,12 +3,15 @@
 
 #include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/patch_match_sampling.cuh"
 #include "colmap/util/cuda.h"
 
 #include <algorithm>
 #include <array>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -25,6 +28,7 @@ float ProbePropagatedDepth(const std::array<float, 4>& K,
                            float col);
 std::pair<std::vector<int>, std::vector<float>> ProbeSampledSources(
     const std::vector<int>&, const std::vector<float>&, int, bool);
+int ProbeSamplingSupport();
 }  // namespace internal
 namespace {
 constexpr float kDepthMin = 1.0f;
@@ -231,6 +235,66 @@ void ExpectNonempty(const Result& result,
   }
 }
 
+TEST(PatchMatchSampling, EmptySupportAndLowerDrawEndpoint) {
+  for (const int stride : {1, 8, 23, 32, 47}) {
+    SCOPED_TRACE(stride);
+    std::vector<float> values(3 * stride, -17.0f);
+    values[0] = -0.0f;
+    values[stride] = 0.0f;
+    values[2 * stride] = -0.0f;
+    const auto empty = values;
+    EXPECT_FALSE(TransformPDFToCDF(values.data(), 3, stride));
+    EXPECT_EQ(
+        std::memcmp(values.data(), empty.data(), values.size() * sizeof(float)),
+        0);
+    EXPECT_EQ(SampleSource(values.data(), 3, stride, FLT_EPSILON / 2), -1);
+    EXPECT_EQ(SampleSource(values.data(), 3, stride, 1.0f), -1);
+    values[0] = 0.0f;
+    values[stride] = 1.0f;
+    values[2 * stride] = 3.0f;
+    EXPECT_TRUE(TransformPDFToCDF(values.data(), 3, stride));
+    EXPECT_EQ(values[0], 0.0f);
+    EXPECT_EQ(values[stride], .25f);
+    EXPECT_EQ(values[2 * stride], 1.0f);
+    EXPECT_EQ(SampleSource(values.data(), 3, stride, FLT_EPSILON / 2), 1);
+    EXPECT_EQ(SampleSource(values.data(), 3, stride, .5f), 2);
+    EXPECT_EQ(SampleSource(values.data(), 3, stride, 1.0f), 2);
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (i % stride != 0) {
+        EXPECT_EQ(values[i], -17.0f);
+      }
+    }
+  }
+}
+
+TEST(PatchMatchSampling, NonemptyCdfRetainsOrderedArithmetic) {
+  const std::array<std::array<float, 3>, 3> masses{
+      {{{0.0f, 1.0f, 3.0f}},
+       {{5.0f, 2.0f, 0.0f}},
+       {{0x1p20f, 1.0f, 0x1p-20f}}}};
+  for (const int stride : {1, 8, 23, 32, 47}) {
+    for (const auto& mass : masses) {
+      std::vector<float> expected(3 * stride, -17.0f);
+      for (int i = 0; i < 3; ++i) expected[i * stride] = mass[i];
+      auto actual = expected;
+      float total = 0.0f;
+      for (int i = 0; i < 3; ++i) total += expected[i * stride];
+      const float inverse = 1.0f / total;
+      float cumulative = 0.0f;
+      for (int i = 0; i < 3; ++i) {
+        const float probability = expected[i * stride] * inverse;
+        cumulative += probability;
+        expected[i * stride] = cumulative;
+      }
+      ASSERT_TRUE(TransformPDFToCDF(actual.data(), 3, stride));
+      EXPECT_EQ(
+          std::memcmp(
+              actual.data(), expected.data(), actual.size() * sizeof(float)),
+          0);
+    }
+  }
+}
+
 class CudaTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -243,6 +307,56 @@ class CudaTest : public ::testing::Test {
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
   }
 };
+
+TEST_F(CudaTest, SamplingSupportHelpersPreserveNativeDrawCount) {
+  EXPECT_EQ(internal::ProbeSamplingSupport(), 0);
+}
+
+TEST_F(CudaTest, EmptySamplingSupportRetainsScalarAndCooperativeIncumbents) {
+  int configurations = 0;
+  for (const int radius : {2, 5}) {
+    for (const int sources : {2, 33}) {
+      for (const int samples : {1, 17}) {
+        SCOPED_TRACE(::testing::Message() << "radius=" << radius << " sources="
+                                          << sources << " samples=" << samples);
+        auto inputs = MakeInputs(0, sources, 19, 23);
+        for (auto& image : inputs.images) {
+          Bitmap black(image.GetWidth(), image.GetHeight(), false);
+          black.Fill(BitmapColor<uint8_t>(0));
+          image.SetBitmap(std::move(black));
+        }
+        auto options = MakeOptions(true, false, false);
+        options.window_radius = radius;
+        options.num_samples = samples;
+        // Constant patches have cost2; its FP32 likelihood exp(-512)
+        // underflows to zero, giving finite empty sampling support.
+        options.ncc_sigma = 1.0f / 16.0f;
+        const auto result = RunPatchMatch(&inputs, options);
+        ++configurations;
+        ASSERT_EQ(result.depths.GetWidth(), 23);
+        ASSERT_EQ(result.depths.GetHeight(), 19);
+        ASSERT_EQ(result.depths.GetDepth(), 1);
+        ASSERT_EQ(result.depths.GetData().size(), 23 * 19);
+        ASSERT_EQ(result.normals.GetWidth(), 23);
+        ASSERT_EQ(result.normals.GetHeight(), 19);
+        ASSERT_EQ(result.normals.GetDepth(), 3);
+        ASSERT_EQ(result.normals.GetData().size(), 23 * 19 * 3);
+        ASSERT_EQ(result.selection.GetWidth(), 23);
+        ASSERT_EQ(result.selection.GetHeight(), 19);
+        ASSERT_EQ(result.selection.GetDepth(), sources);
+        ASSERT_EQ(result.selection.GetData().size(), 23 * 19 * sources);
+        ExpectExactlyEqual(inputs.depths[0], result.depths);
+        ExpectExactlyEqual(inputs.normals[0], result.normals);
+        EXPECT_TRUE(
+            std::all_of(result.selection.GetData().begin(),
+                        result.selection.GetData().end(),
+                        [](float probability) { return probability == 0.0f; }));
+      }
+    }
+  }
+  EXPECT_EQ(configurations, 8);
+  RecordProperty("empty_support_configurations", configurations);
+}
 
 TEST_F(CudaTest, PropagationPreservesCompletePlaneAcrossSweepRotations) {
   std::array<float, 4> K{800, 640, 750, 480};

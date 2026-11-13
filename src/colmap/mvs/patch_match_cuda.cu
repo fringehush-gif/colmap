@@ -696,23 +696,6 @@ __device__ inline int FindMinCost(const float costs[kNumCosts]) {
   return min_cost_idx;
 }
 
-__device__ inline void TransformPDFToCDF(float* probs,
-                                         const int num_probs,
-                                         const int source_stride) {
-  float prob_sum = 0.0f;
-  for (int i = 0; i < num_probs; ++i) {
-    prob_sum += probs[i * source_stride];
-  }
-  const float inv_prob_sum = 1.0f / prob_sum;
-
-  float cum_prob = 0.0f;
-  for (int i = 0; i < num_probs; ++i) {
-    const float prob = probs[i * source_stride] * inv_prob_sum;
-    cum_prob += prob;
-    probs[i * source_stride] = cum_prob;
-  }
-}
-
 class LikelihoodComputer {
  public:
   __device__ LikelihoodComputer(const float ncc_sigma,
@@ -1139,6 +1122,7 @@ __global__ void SweepFromTopToBottom(
     float costs[kNumCosts] = {0};
     float depths[kNumCosts] = {0};
     const float* normals[kNumCosts] = {nullptr};
+    bool empty_sampling_support = false;
     if (owner && col < cost_map.GetWidth()) {
       pcc_computer.row = row;
       pcc_computer.local_ref_sum = ref_sum_image.Get(row, col);
@@ -1234,7 +1218,8 @@ __global__ void SweepFromTopToBottom(
       __syncthreads();
     }
     if (owner && col < cost_map.GetWidth()) {
-      TransformPDFToCDF(sampling_probs, cost_map.GetDepth(), source_stride);
+      empty_sampling_support = !TransformPDFToCDF(
+          sampling_probs, cost_map.GetDepth(), source_stride);
 
       // Compute matching cost using Monte Carlo sampling of source images.
       // Images with higher selection probability are more likely to be sampled.
@@ -1294,15 +1279,9 @@ __global__ void SweepFromTopToBottom(
           pcc_computer.src_image_idx = -1;
           if (slot < sample_count) {
             // Draw only actual samples, in the original RNG order.
-            const float rand_prob = curand_uniform(&rand_state) - FLT_EPSILON;
-            for (int image_idx = 0; image_idx < cost_map.GetDepth();
-                 ++image_idx) {
-              const float prob = sampling_probs[image_idx * source_stride];
-              if (prob > rand_prob) {
-                pcc_computer.src_image_idx = image_idx;
-                break;
-              }
-            }
+            const float uniform = curand_uniform(&rand_state);
+            pcc_computer.src_image_idx = SampleSource(
+                sampling_probs, cost_map.GetDepth(), source_stride, uniform);
           }
           if constexpr (kCooperative) {
             if constexpr (kSampleWindowSize > 1) {
@@ -1407,8 +1386,8 @@ __global__ void SweepFromTopToBottom(
             }
             const int source = cooperative_job.source[result_slot][threadIdx.x];
             if (source < 0) continue;
-              // Reuse identical evaluations, but retain every original sample
-              // add.
+            // Reuse identical evaluations, but retain every original sample
+            // add.
 #ifndef COLMAP_HIP_ENABLED
             if constexpr (kBlockWidth == 8) {
               costs[0] += source < kSampleWindowSize
@@ -1456,7 +1435,7 @@ __global__ void SweepFromTopToBottom(
     const float* best_normal = nullptr;
     if (owner && col < cost_map.GetWidth()) {
       // Find the parameters of the minimum cost.
-      min_cost_idx = FindMinCost<kNumCosts>(costs);
+      min_cost_idx = empty_sampling_support ? 0 : FindMinCost<kNumCosts>(costs);
       best_depth = depths[min_cost_idx];
       best_normal = normals[min_cost_idx];
 
