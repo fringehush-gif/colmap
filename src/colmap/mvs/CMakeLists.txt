@@ -67,6 +67,11 @@ COLMAP_ADD_TEST(
     LINK_LIBS colmap_mvs
 )
 COLMAP_ADD_TEST(
+    NAME patch_match_options_test
+    SRCS patch_match_options_test.cc
+    LINK_LIBS colmap_mvs
+)
+COLMAP_ADD_TEST(
     NAME poisson_meshing_test
     SRCS poisson_meshing_test.cc
     LINK_LIBS colmap_mvs
@@ -110,6 +115,7 @@ if(CUDA_ENABLED)
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu patch_match_geometry.cuh
+            patch_match_sampling.cuh
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
@@ -275,6 +281,7 @@ if(HIP_ENABLED)
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu patch_match_geometry.cuh
+            patch_match_sampling.cuh
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
