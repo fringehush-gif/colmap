@@ -11,6 +11,7 @@
 #include "colmap/sensor/bitmap.h"
 #include "colmap/sensor/models.h"
 #include "colmap/util/cuda.h"
+#include "colmap/util/misc.h"
 #include "colmap/util/testing.h"
 
 #include <functional>
@@ -21,6 +22,27 @@
 #include <gtest/gtest.h>
 
 namespace colmap {
+
+struct FeatureMatcherControllerTestPeer {
+  struct Worker {
+    std::string gpu_index;
+    const SharedFeatureMatcher* group;
+    bool creator;
+  };
+
+  static std::vector<Worker> Workers(
+      const FeatureMatcherController& controller) {
+    std::vector<Worker> workers;
+    workers.reserve(controller.matchers_.size());
+    for (const auto& worker : controller.matchers_) {
+      workers.push_back({worker->matching_options_.gpu_index,
+                         worker->shared_matcher_.get(),
+                         worker->is_shared_creator_});
+    }
+    return workers;
+  }
+};
+
 namespace {
 
 struct TestData {
@@ -163,6 +185,71 @@ void MatchPairsWithoutVerification(
   ASSERT_TRUE(matcher.Setup());
   matcher.Match(pairs);
   data.database->ClearTwoViewGeometries();
+}
+
+#ifdef COLMAP_GPU_ENABLED
+TEST(FeatureMatcherController, FlexGlueSharesRepeatedDeviceGroups) {
+  const std::vector<std::pair<std::string, std::vector<int>>> cases = {
+      {"0,0", {0, 0}},
+      {"0,1,0", {0, 1, 0}},
+      {"0,1", {0, 1}},
+      {"-1,0", {0, 0}},
+      {"0,-1", {0, 0}}};
+  for (const auto& [gpu_indices, devices] : cases) {
+    for (const int requested_workers : {1, 2}) {
+      SCOPED_TRACE(gpu_indices + ":" + std::to_string(requested_workers));
+      FeatureMatchingOptions options(FeatureMatcherType::FLEXGLUE);
+      options.use_gpu = true;
+      options.gpu_index = gpu_indices;
+      options.num_threads = 4;
+      options.flexglue->image_path = ".";
+      options.flexglue->descriptor_model_path = "unused_descriptor.onnx";
+      options.flexglue->matcher_model_path = "unused_matcher.onnx";
+      options.flexglue->num_workers_per_gpu = requested_workers;
+      TwoViewGeometryOptions geometry_options;
+      // Construction groups workers without opening models or starting GPUs.
+      FeatureMatcherController controller(options, geometry_options, nullptr);
+      const auto workers =
+          FeatureMatcherControllerTestPeer::Workers(controller);
+      const auto requested_devices = CSVToVector<int>(gpu_indices);
+      int workers_per_entry = 1;
+#ifdef COLMAP_CUDA_ENABLED
+      workers_per_entry = requested_workers;
+#endif
+      ASSERT_EQ(workers.size(), devices.size() * workers_per_entry);
+      for (size_t i = 0; i < workers.size(); ++i) {
+        EXPECT_EQ(workers[i].gpu_index,
+                  std::to_string(requested_devices[i / workers_per_entry]));
+        EXPECT_NE(workers[i].group, nullptr);
+        bool first = true;
+        for (size_t j = 0; j < i; ++j) {
+          const bool same_device =
+              devices[i / workers_per_entry] == devices[j / workers_per_entry];
+          EXPECT_EQ(workers[i].group == workers[j].group, same_device);
+          first = first && !same_device;
+        }
+        EXPECT_EQ(workers[i].creator, first);
+      }
+    }
+  }
+}
+
+#endif  // COLMAP_GPU_ENABLED
+
+TEST(FeatureMatcherController, FlexGlueCpuWorkerRemainsUnshared) {
+  FeatureMatchingOptions options(FeatureMatcherType::FLEXGLUE);
+  options.use_gpu = false;
+  options.num_threads = 2;
+  options.gpu_index = "0,0";
+  options.flexglue->image_path = ".";
+  options.flexglue->descriptor_model_path = "unused_descriptor.onnx";
+  options.flexglue->matcher_model_path = "unused_matcher.onnx";
+  TwoViewGeometryOptions geometry_options;
+  FeatureMatcherController controller(options, geometry_options, nullptr);
+  const auto workers = FeatureMatcherControllerTestPeer::Workers(controller);
+  ASSERT_EQ(workers.size(), 1);
+  EXPECT_EQ(workers[0].group, nullptr);
+  EXPECT_FALSE(workers[0].creator);
 }
 
 TEST(FeatureMatcherController, MatchEmptyPairs) {
