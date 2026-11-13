@@ -61,6 +61,7 @@ set(COLMAP_BOOST_HEADER_COMPONENTS
     algorithm
     container_hash
     heap
+    interprocess
     preprocessor
     property_map
     property_tree
