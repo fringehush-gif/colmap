@@ -1147,7 +1147,9 @@ TEST_P(ParameterizedWorkspaceTests, SourceNormalProbeDoesNotCacheOrResize) {
   const auto& reference = workspace->GetNormalMap(0);
   EXPECT_EQ(reference.GetWidth(), 4);
   EXPECT_EQ(reference.GetHeight(), 2);
-  if (cached) EXPECT_LT(reference.Get(0, 0, 0), 0.0f);
+  if (cached) {
+    EXPECT_LT(reference.Get(0, 0, 0), 0.0f);
+  }
 }
 
 TEST_P(ParameterizedWorkspaceTests,

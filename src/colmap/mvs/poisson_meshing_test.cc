@@ -7,34 +7,34 @@
 #include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
 
-#include "thirdparty/PoissonRecon/PreProcessor.h"
+#include <PoissonRecon/PreProcessor.h>
 
 // FEM declarations require the preceding vendor configuration.
-#include "thirdparty/PoissonRecon/FEMTree.h"
-#include "thirdparty/PoissonRecon/Geometry.h"
-#include "thirdparty/PoissonRecon/PoissonRecon.h"
-#include "thirdparty/PoissonRecon/PolygonIndexChain.h"
-#include "thirdparty/PoissonRecon/RegularTree.h"
-#include "thirdparty/PoissonRecon/SurfaceTrimmer.h"
-#include "thirdparty/PoissonRecon/VertexFactory.h"
-#include "thirdparty/PoissonRecon/normal_capture.h"
-#include "thirdparty/PoissonRecon/trim_gpu_adapter.h"
+#include <PoissonRecon/FEMTree.h>
+#include <PoissonRecon/Geometry.h>
+#include <PoissonRecon/PoissonRecon.h>
+#include <PoissonRecon/PolygonIndexChain.h>
+#include <PoissonRecon/RegularTree.h>
+#include <PoissonRecon/SurfaceTrimmer.h>
+#include <PoissonRecon/VertexFactory.h>
+#include <PoissonRecon/normal_capture.h>
+#include <PoissonRecon/trim_gpu_adapter.h>
 
 // NestedVector requires stream declarations supplied by RegularTree.
-#include "thirdparty/PoissonRecon/NestedVector.h"
+#include <PoissonRecon/NestedVector.h>
 
 // Exercise the host-only auxiliary scale diagnostic seam without a GPU.
 #ifndef POISSON_AUX_NATIVE_GPU
 #define POISSON_AUX_NATIVE_GPU
 #define POISSON_AUX_NATIVE_DECL
-#include "thirdparty/PoissonRecon/native_aux.h.inc"
+#include <PoissonRecon/native_aux.h.inc>
 #undef POISSON_AUX_NATIVE_DECL
 #undef POISSON_AUX_NATIVE_GPU
 #endif
 
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
-#include "thirdparty/PoissonRecon/aux_gpu.h"
-#include "thirdparty/PoissonRecon/trim_gpu.h"
+#include <PoissonRecon/aux_gpu.h>
+#include <PoissonRecon/trim_gpu.h>
 #endif
 
 #include <algorithm>
@@ -1233,7 +1233,8 @@ TEST(PoissonMeshing, DynamicPointMoveRetainsOwnershipAndDimensions) {
   ASSERT_EQ(moved.dim(), 3);
   EXPECT_EQ(&moved[0], owned);
   EXPECT_FLOAT_EQ(moved[2], 1.5f);
-  moved = std::move(moved);
+  auto* self = &moved;
+  moved = std::move(*self);
   ASSERT_EQ(moved.dim(), 3);
   EXPECT_EQ(&moved[0], owned);
 

@@ -281,10 +281,11 @@ TEST(Model, ReadCOLMAP) {
   // Check every coordinate and the complete ordered image-index track,
   // rather than only the point count. Track ownership must survive insertion.
   for (const auto& [point_id, expected] : reconstruction.Points3D()) {
-    const auto matches = [&expected](const Model::Point& actual) {
-      return actual.x == static_cast<float>(expected.xyz(0)) &&
-             actual.y == static_cast<float>(expected.xyz(1)) &&
-             actual.z == static_cast<float>(expected.xyz(2));
+    const auto matches = [&expected_point =
+                              expected](const Model::Point& actual) {
+      return actual.x == static_cast<float>(expected_point.xyz(0)) &&
+             actual.y == static_cast<float>(expected_point.xyz(1)) &&
+             actual.z == static_cast<float>(expected_point.xyz(2));
     };
     ASSERT_EQ(std::count_if(model.points.begin(), model.points.end(), matches),
               1)

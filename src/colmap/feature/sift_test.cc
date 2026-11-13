@@ -898,7 +898,9 @@ TEST(SiftCPUPreparedExtraction,
           FeatureDescriptors descriptors;
           ASSERT_TRUE(extractor->Extract(bitmap, &keypoints, &descriptors));
           ASSERT_GT(keypoints.size(), 0);
-          if (max_features == 1) EXPECT_EQ(keypoints.size(), 1);
+          if (max_features == 1) {
+            EXPECT_EQ(keypoints.size(), 1);
+          }
           ValidateKeypoints(keypoints, bitmap);
           ASSERT_EQ(descriptors.data.rows(), keypoints.size());
           ASSERT_EQ(descriptors.data.cols(), 128);

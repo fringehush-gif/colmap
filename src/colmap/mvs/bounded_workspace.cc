@@ -810,7 +810,7 @@ void BoundedWorkspace::DisableCompactDepthBeforeLoading() {
 
 int BoundedWorkspace::ComponentKey(const int image_idx,
                                    const Component component) const {
-  model_.images.at(image_idx);
+  (void)model_.images.at(image_idx);
   const int part = static_cast<int>(component);
   THROW_CHECK_GE(part, 0);
   THROW_CHECK_LT(part, 4);
@@ -1263,7 +1263,7 @@ BoundedWorkspace::ImageLease BoundedWorkspace::AcquireImpl(
     const int image_idx,
     const Component component,
     const std::optional<NormalRegion> region) {
-  model_.images.at(image_idx);
+  (void)model_.images.at(image_idx);
   const auto state = cache_state_;
   size_t required_bytes =
       region ? CheckedRasterBytes(region->width, region->height, 12) : 0;
