@@ -288,10 +288,10 @@ ImmutableMapRegion::ImmutableMapRegion(
   impl_->source = std::move(source);
   impl_->shape = impl_->source->impl_->shape;
   impl_->row_count = impl_->shape.height;
-  const size_t start = impl_->shape.payload_start;
   const size_t mapped_bytes = MappingExtentBytes(impl_->shape);
   impl_->mapped_bytes = MappingPageCharge(mapped_bytes);
 #if defined(__linux__) || defined(_WIN32)
+  const size_t start = impl_->shape.payload_start;
   namespace bip = boost::interprocess;
   THROW_CHECK_LE(
       mapped_bytes,
