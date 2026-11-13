@@ -19,7 +19,8 @@ namespace colmap {
 //
 // @param options              RANSAC options.
 // @param points2D             Corresponding 2D points.
-// @param points3D             Corresponding 3D points. Exact coordinate equality
+// @param points3D             Corresponding 3D points. Exact coordinate
+// equality
 //                             identifies repeated observations of a landmark.
 // @param camera_idxs          Index of the rig camera for each correspondence.
 // @param cams_from_rig        Relative pose from rig to each camera frame.

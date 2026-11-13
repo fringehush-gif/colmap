@@ -230,11 +230,10 @@ void CreateTestData(int num_frames,
   }
 }
 
-void CreateRemappedPartialReconstruction(
-    const Reconstruction& source,
-    const camera_t id_offset,
-    const std::string& omitted_image_name,
-    Reconstruction* destination) {
+void CreateRemappedPartialReconstruction(const Reconstruction& source,
+                                         const camera_t id_offset,
+                                         const std::string& omitted_image_name,
+                                         Reconstruction* destination) {
   for (const auto& [_, camera] : source.Cameras()) {
     Camera remapped_camera = camera;
     remapped_camera.camera_id += id_offset;
@@ -485,10 +484,8 @@ TEST(ApplyRigConfig, ExplicitIntrinsicsWithMatchingCameraIds) {
   auto database = Database::Open(kInMemorySqliteDatabasePath);
   Reconstruction reconstruction;
   CreateTestData(5, 2, database.get(), &reconstruction);
-  const Image* first_image =
-      reconstruction.FindImageWithName("camera0_frame1");
-  const Image* other_image =
-      reconstruction.FindImageWithName("camera1_frame1");
+  const Image* first_image = reconstruction.FindImageWithName("camera0_frame1");
+  const Image* other_image = reconstruction.FindImageWithName("camera1_frame1");
   ASSERT_NE(first_image, nullptr);
   ASSERT_NE(other_image, nullptr);
   const camera_t camera_id = first_image->CameraId();
@@ -524,8 +521,7 @@ TEST(ApplyRigConfig, ExplicitIntrinsicsWithCollisionAndPartialModel) {
   CreateTestData(5, 2, database.get(), &source);
   const Image* first_database_image =
       source.FindImageWithName("camera0_frame1");
-  const Image* second_sensor_image =
-      source.FindImageWithName("camera1_frame1");
+  const Image* second_sensor_image = source.FindImageWithName("camera1_frame1");
   ASSERT_NE(first_database_image, nullptr);
   ASSERT_NE(second_sensor_image, nullptr);
   const camera_t database_camera_id = first_database_image->CameraId();
@@ -560,9 +556,8 @@ TEST(ApplyRigConfig, ExplicitIntrinsicsWithCollisionAndPartialModel) {
   ExpectIntrinsicsEqual(partial.Camera(matched_camera_id), specified);
   ExpectIntrinsicsEqual(database->ReadCamera(second_database_camera_id),
                         second_specified);
-  ExpectIntrinsicsEqual(
-      partial.Camera(second_database_camera_id + kIdOffset),
-      second_specified);
+  ExpectIntrinsicsEqual(partial.Camera(second_database_camera_id + kIdOffset),
+                        second_specified);
   ExpectIntrinsicsEqual(partial.Camera(database_camera_id), unrelated_before);
   EXPECT_EQ(partial.NumImages(), 9);
 }

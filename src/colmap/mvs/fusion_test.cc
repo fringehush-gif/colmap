@@ -2120,7 +2120,9 @@ TEST(StereoFusion, Integration) {
     std::unique_ptr<StereoFusion> nested;
     auto reader = ScopedBitmapReader::Create(
         {image_path},
-        [&](const std::filesystem::path&, bool as_rgb, bool linear,
+        [&](const std::filesystem::path&,
+            bool as_rgb,
+            bool linear,
             Bitmap* target) {
           EXPECT_TRUE(as_rgb);
           EXPECT_FALSE(linear);

@@ -761,8 +761,8 @@ PlyMesh DelaunayMeshing(const DelaunayMeshingOptions& options,
     }
     ++num_integrated_images;
     LOG(INFO) << StringPrintf("Integrated image [%zu/%zu]",
-                             num_integrated_images,
-                             input_data.images.size());
+                              num_integrated_images,
+                              input_data.images.size());
   };
 
   internal::RunDelaunayImageWorkers(

@@ -156,7 +156,8 @@ TEST(CudaDeviceHasComputeCapability, MatchesDeviceProperties) {
 #else
   cudaDeviceProp properties{};
   ASSERT_EQ(cudaGetDeviceProperties(&properties, 0), cudaSuccess);
-  EXPECT_EQ(CudaDeviceHasComputeCapability(0, /*major=*/8), properties.major >= 8);
+  EXPECT_EQ(CudaDeviceHasComputeCapability(0, /*major=*/8),
+            properties.major >= 8);
 #endif
 }
 

@@ -451,8 +451,8 @@ void Reconstruction::AddFrame(class Frame frame) {
     THROW_CHECK_NE(frame_id, kInvalidFrameId);
     // A newly inserted frame cannot already be registered.
     reg_frame_ids_.push_back(frame_id);
-    num_reg_images_ +=
-        std::distance(it->second.ImageIds().begin(), it->second.ImageIds().end());
+    num_reg_images_ += std::distance(it->second.ImageIds().begin(),
+                                     it->second.ImageIds().end());
   }
 }
 

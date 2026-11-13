@@ -29,7 +29,8 @@ void FlushAndCloseBinaryFile(std::ofstream& file,
   file.flush();
   const bool flushed = file.good();
   file.close();
-  THROW_CHECK(flushed && file.good()) << "Failed to write binary file: " << path;
+  THROW_CHECK(flushed && file.good())
+      << "Failed to write binary file: " << path;
 }
 
 // Batch the many small fields in images.bin and points3D.bin without retaining
@@ -43,9 +44,9 @@ class BufferedLittleEndianWriter {
         // A failed write sets badbit. With failbit-only exceptions, a later
         // field's sentry may be the operation that throws. Keep those logical
         // write boundaries for this exception policy.
-        buffer_writes_((stream.exceptions() &
-                        (std::ios::failbit | std::ios::badbit)) !=
-                       std::ios::failbit) {}
+        buffer_writes_(
+            (stream.exceptions() & (std::ios::failbit | std::ios::badbit)) !=
+            std::ios::failbit) {}
 
   template <typename T>
   void Write(const T value) {

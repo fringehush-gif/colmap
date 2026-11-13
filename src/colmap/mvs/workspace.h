@@ -58,8 +58,9 @@ class Workspace {
   // Resolve every name before dispatch; unknown names leave loaded data intact.
   // Discard borrowed views and join readers before calling. Requested inputs
   // are retired before loading; missing or failed inputs remain unavailable.
-  // A successful image publishes a complete triplet. Other images are unchanged.
-  // Cache-backed implementations do nothing here and load data as needed.
+  // A successful image publishes a complete triplet. Other images are
+  // unchanged. Cache-backed implementations do nothing here and load data as
+  // needed.
   virtual void Load(const std::vector<std::string>& image_names);
 
   inline const Options& GetOptions() const { return options_; }

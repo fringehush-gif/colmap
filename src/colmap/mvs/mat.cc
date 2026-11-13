@@ -218,7 +218,8 @@ size_t ImmutableMapRegion::GetMappingReservationBytes(
   THROW_CHECK(Supported());
   std::ifstream input(path, std::ios::binary);
   THROW_CHECK_FILE_OPEN(input, path);
-  return MappingPageCharge(MappingExtentBytes(ReadMappedFloatShape(input, path)));
+  return MappingPageCharge(
+      MappingExtentBytes(ReadMappedFloatShape(input, path)));
 }
 
 size_t ImmutableMapRegion::GetWindowReservationBytes(

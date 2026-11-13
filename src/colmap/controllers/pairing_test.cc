@@ -291,10 +291,11 @@ TEST(VocabTreePairGenerator, DestructionWithFullQueueAndActiveCallback) {
   const bool reached_barrier =
       entered_future.wait_for(std::chrono::seconds(10)) ==
       std::future_status::ready;
-  std::thread destroyer([generator = std::move(generator), &destroying]() mutable {
-    destroying.set_value();
-    generator.reset();
-  });
+  std::thread destroyer(
+      [generator = std::move(generator), &destroying]() mutable {
+        destroying.set_value();
+        generator.reset();
+      });
   destroying_future.wait();
   release.set_value();
   destroyer.join();
@@ -356,8 +357,8 @@ TEST(SequentialPairGenerator, NestedResetFailureRequiresSuccessfulRetry) {
       std::make_pair(images[2].ImageId(), images[0].ImageId());
   auto nested = std::make_unique<FailingResetGenerator>(loop_pair);
   const auto* nested_ptr = nested.get();
-  SequentialPairGeneratorTestPeer::SetLoopDetectionGenerator(
-      generator, std::move(nested));
+  SequentialPairGeneratorTestPeer::SetLoopDetectionGenerator(generator,
+                                                             std::move(nested));
   const auto first_pairs = generator.Next();
   ASSERT_FALSE(first_pairs.empty());
   bool caught_original = false;
@@ -589,7 +590,8 @@ TEST(SequentialPairGenerator, LoopDetectionMinIndexDistance) {
         const size_t image_idx_distance = image_idx1 > image_idx2
                                               ? image_idx1 - image_idx2
                                               : image_idx2 - image_idx1;
-        EXPECT_GE(image_idx_distance, options.loop_detection_min_index_distance);
+        EXPECT_GE(image_idx_distance,
+                  options.loop_detection_min_index_distance);
       }
     }
     EXPECT_TRUE(generator.Next().empty());

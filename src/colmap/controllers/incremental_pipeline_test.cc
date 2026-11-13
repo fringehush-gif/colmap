@@ -56,10 +56,9 @@ Color PointColor(const Point3D& point) {
 
 // Each channel is affine over the raster, so bilinear sampling has a simple
 // independent oracle at the observation coordinate. Values stay in uint8.
-std::optional<Eigen::Vector3d> ExpectedSample(
-    const std::filesystem::path& root,
-    const Image& image,
-    const Point2D& point2D) {
+std::optional<Eigen::Vector3d> ExpectedSample(const std::filesystem::path& root,
+                                              const Image& image,
+                                              const Point2D& point2D) {
   const double x = point2D.xy(0) - 0.5;
   const double y = point2D.xy(1) - 0.5;
   if (!(x >= 0 && x < 127 && y >= 0 && y < 127)) return std::nullopt;
@@ -99,8 +98,9 @@ void CheckNewImageColors(const Reconstruction& reconstruction,
           element.point2D_idx >= image.NumPoints2D()) {
         continue;
       }
-      eligible |= ExpectedSample(root, image, image.Point2D(element.point2D_idx))
-                      .has_value();
+      eligible |=
+          ExpectedSample(root, image, image.Point2D(element.point2D_idx))
+              .has_value();
     }
     if (eligible) {
       EXPECT_NE(PointColor(point), (Color{0, 0, 0}));
@@ -113,7 +113,7 @@ void CheckAssociatedColors(const Reconstruction& reconstruction,
                            const bool require_all_colored) {
   const auto registered_ids = reconstruction.RegImageIds();
   const std::set<image_t> registered(registered_ids.begin(),
-                                    registered_ids.end());
+                                     registered_ids.end());
   std::set<Color> distinct_colors;
   for (const auto& [id, point] : reconstruction.Points3D()) {
     std::set<Color> observation_colors;
@@ -156,8 +156,8 @@ class MapperColorTestInput : public OIIO::ImageInput {
     if (std::filesystem::path(name).extension() != ".colmap_mapper_color") {
       return false;
     }
-    const auto tag = color_image_tags.find(
-        ColorPathKey(std::filesystem::path(name)));
+    const auto tag =
+        color_image_tags.find(ColorPathKey(std::filesystem::path(name)));
     if (tag == color_image_tags.end()) return false;
     image_tag_ = tag->second;
     is_mapping_thread_ = std::this_thread::get_id() == mapping_thread;
@@ -281,7 +281,8 @@ void CheckMapperColorReads(const ColorReadMode mode,
     EXPECT_FALSE(new_images.empty());
     if (mode != ColorReadMode::kFailure) {
       CheckNewImageColors(reconstruction, root, new_images);
-      CheckAssociatedColors(reconstruction, root, /*require_all_colored=*/false);
+      CheckAssociatedColors(
+          reconstruction, root, /*require_all_colored=*/false);
     }
     result->stages.emplace_back(
         std::vector<std::string>(new_images.begin(), new_images.end()),

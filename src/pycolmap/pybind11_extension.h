@@ -26,8 +26,9 @@ namespace pycolmap {
 // existing memory (e.g., Rigid3d.params). This enables zero-copy access
 // to rotation data while providing the full quaternion interface.
 struct Rotation3dWrapper {
-  using Array = pybind11::array_t<
-      double, pybind11::array::c_style | pybind11::array::forcecast>;
+  using Array =
+      pybind11::array_t<double,
+                        pybind11::array::c_style | pybind11::array::forcecast>;
   Array data;
 
   // Default constructor - creates owned identity quaternion
@@ -55,8 +56,7 @@ struct Rotation3dWrapper {
   }
 
   // View constructor - borrows contiguous arrays, copies strided arrays.
-  explicit Rotation3dWrapper(Array arr)
-      : data(std::move(arr)) {}
+  explicit Rotation3dWrapper(Array arr) : data(std::move(arr)) {}
 
   Eigen::Map<Eigen::Quaterniond> map() {
     return Eigen::Map<Eigen::Quaterniond>(data.mutable_data());
@@ -91,8 +91,7 @@ struct type_caster<Eigen::Quaterniond> {
       auto arr = src.cast<pybind11::array_t<double>>();
       if (arr.size() != 4) return false;
       auto contiguous =
-          (arr.flags() & pybind11::array::c_style) ==
-                  pybind11::array::c_style
+          (arr.flags() & pybind11::array::c_style) == pybind11::array::c_style
               ? pybind11::reinterpret_borrow<
                     pycolmap::Rotation3dWrapper::Array>(arr)
               : pycolmap::Rotation3dWrapper::Array::ensure(arr);

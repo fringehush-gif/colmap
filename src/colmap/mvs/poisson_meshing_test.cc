@@ -1011,11 +1011,10 @@ TEST(PoissonMeshing, GpuNormalSlabsRetainValuesAfterCaptureRelease) {
               static_cast<int>((10 + slab_nodes) / slab_nodes));
     ASSERT_EQ(context.values.size(), expected_values.size());
     ASSERT_EQ(context.touched.size(), expected_touched.size());
-    EXPECT_EQ(
-        std::memcmp(context.values.data(),
-                    expected_values.data(),
-                    sizeof(expected_values)),
-        0);
+    EXPECT_EQ(std::memcmp(context.values.data(),
+                          expected_values.data(),
+                          sizeof(expected_values)),
+              0);
     EXPECT_EQ(context.touched, expected_touched);
     std::uint32_t result_bits = 0;
     std::memcpy(&result_bits, &context.values[9], sizeof(result_bits));

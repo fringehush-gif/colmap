@@ -927,8 +927,8 @@ TEST_P(ThreadPoolStopMatrix, JoinsAndConsumesFailures) {
   } catch (const std::future_error& e) {
     EXPECT_EQ(e.code(), std::make_error_code(std::future_errc::broken_promise));
   }
-  const int expected = static_cast<int>(completed_fails) +
-                       static_cast<int>(active_fails);
+  const int expected =
+      static_cast<int>(completed_fails) + static_cast<int>(active_fails);
   if (stop_error) {
     try {
       std::rethrow_exception(stop_error);
@@ -949,13 +949,12 @@ TEST_P(ThreadPoolStopMatrix, JoinsAndConsumesFailures) {
   EXPECT_NO_THROW(pool.Wait());
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    AllOutcomes,
-    ThreadPoolStopMatrix,
-    testing::Values(std::make_pair(false, false),
-                    std::make_pair(true, false),
-                    std::make_pair(false, true),
-                    std::make_pair(true, true)));
+INSTANTIATE_TEST_SUITE_P(AllOutcomes,
+                         ThreadPoolStopMatrix,
+                         testing::Values(std::make_pair(false, false),
+                                         std::make_pair(true, false),
+                                         std::make_pair(false, true),
+                                         std::make_pair(true, true)));
 
 TEST(ThreadPool, FutureAndWaitPropagatesException) {
   ThreadPool pool(1);

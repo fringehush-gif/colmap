@@ -411,7 +411,8 @@ void PatchMatchController::Run() {
       thread_pool_->Wait();
     }
 
-    for (size_t problem_idx = 0; problem_idx < problems_.size(); ++problem_idx) {
+    for (size_t problem_idx = 0; problem_idx < problems_.size();
+         ++problem_idx) {
       thread_pool_->AddTask(
           &PatchMatchController::ProcessProblem, this, options_, problem_idx);
     }

@@ -189,8 +189,8 @@ TEST(EstimateGeneralizedAbsolutePose, TranslationPreservesPointIdentity) {
     for (Eigen::Vector3d& point : problem.points3D) {
       point += world_offset;
     }
-    const FlatHashSet<size_t> unique_ids(
-        problem.point3D_ids.begin(), problem.point3D_ids.end());
+    const FlatHashSet<size_t> unique_ids(problem.point3D_ids.begin(),
+                                         problem.point3D_ids.end());
     RANSACOptions options;
     options.max_error = 2;
     options.random_seed = 0;

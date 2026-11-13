@@ -794,9 +794,8 @@ BoundedWorkspace::BoundedWorkspace(const Options& options,
     mapped_normal_pool_ = std::make_shared<MappedNormalPool>(
         options.mapped_normal_bytes_limit, options.mapped_normal_files_limit);
   }
-  cache_state_ = std::make_shared<CacheState>(static_cast<size_t>(bytes),
-                                              model_.images.size() * 4,
-                                              compact_depth_);
+  cache_state_ = std::make_shared<CacheState>(
+      static_cast<size_t>(bytes), model_.images.size() * 4, compact_depth_);
 }
 
 BoundedWorkspace::~BoundedWorkspace() { ReleaseOriginalDepthNeighborhood(); }

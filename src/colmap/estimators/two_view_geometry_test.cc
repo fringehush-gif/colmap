@@ -16,10 +16,10 @@
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/eigen_alignment.h"
 
+#include <stdexcept>
+
 #include <Eigen/Core>
 #include <gtest/gtest.h>
-
-#include <stdexcept>
 
 namespace colmap {
 namespace {
@@ -1888,8 +1888,8 @@ TEST(EstimateTwoViewGeometry, RejectsOutOfRangeMatchIndices) {
 }
 
 TEST(ExtractMatchedCamRaysWithJac, RejectsOutOfRangeMatchIndices) {
-  const Camera camera = Camera::CreateFromModelId(
-      1, CameraModelId::kPinhole, 100.0, 200, 200);
+  const Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kPinhole, 100.0, 200, 200);
   const std::vector<Eigen::Vector2d> points = {{80.0, 120.0}};
 
   for (const bool skip_invalid : {false, true}) {

@@ -492,7 +492,8 @@ TEST(Bitmap, InterpolationRejectsNonfiniteAndHugeCoordinates) {
 TEST(Bitmap, InterpolationPreservesBorderConventions) {
   const Bitmap bitmap(10, 9, false);
   EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(-0.5, 0.0));
-  EXPECT_TRUE(bitmap.InterpolateNearestNeighbor(std::nextafter(-0.5, 0.0), 0.0));
+  EXPECT_TRUE(
+      bitmap.InterpolateNearestNeighbor(std::nextafter(-0.5, 0.0), 0.0));
   EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(9.5, 0.0));
   EXPECT_TRUE(bitmap.InterpolateNearestNeighbor(std::nextafter(9.5, 0.0), 0.0));
   EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(0.0, 8.5));
@@ -1466,7 +1467,6 @@ TEST(Bitmap, ReadLinearizationAndInverseWriteMatchOIIO) {
 }
 
 TEST(Bitmap, LinearizationRejectsUnspecifiedAndUnknownColorSpaces) {
-
   const auto linear_colorspace = LinearColorSpaceWrittenByOIIO(
       CreateTestDir() / "linear-reference.png", true);
   ASSERT_TRUE(linear_colorspace.has_value());
@@ -1950,8 +1950,7 @@ TEST(BitmapReader, NativeUnicodeRosterAndAdmittedRead) {
   EXPECT_EQ(*size, std::make_pair(2, 1));
   Bitmap managed;
   ASSERT_TRUE(managed.Read(alias));
-  EXPECT_EQ(managed.RowMajorData(),
-            (std::vector<uint8_t>{1, 2, 3, 4, 5, 6}));
+  EXPECT_EQ(managed.RowMajorData(), (std::vector<uint8_t>{1, 2, 3, 4, 5, 6}));
 
   reader->Close();
   reader.reset();
@@ -1977,8 +1976,7 @@ TEST(BitmapReader, UnrelatedActiveScopePreservesUnicodeDiskReads) {
 
   int callback_calls = 0;
   auto reader = ScopedBitmapReader::Create(
-      {managed_path},
-      [&](const std::filesystem::path&, bool, bool, Bitmap*) {
+      {managed_path}, [&](const std::filesystem::path&, bool, bool, Bitmap*) {
         ++callback_calls;
         return false;
       });

@@ -7,8 +7,9 @@ import sys
 import textwrap
 from pathlib import Path
 
-import pycolmap
 import pytest
+
+import pycolmap
 
 pytestmark = pytest.mark.skipif(
     not hasattr(pycolmap, "PoissonMeshingOptions"),

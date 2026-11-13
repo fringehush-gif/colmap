@@ -3,7 +3,6 @@
 #include "colmap/estimators/coordinate_frame.h"
 
 #include "colmap/estimators/coordinate_frame_internal.h"
-
 #include "colmap/geometry/gps.h"
 #include "colmap/geometry/pose.h"
 #include "colmap/image/line.h"

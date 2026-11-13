@@ -343,7 +343,9 @@ def test_reconstruction_delete_all_points2d_and_points3d(
     assert reconstruction_copy.num_points3D() == 0
 
 
-def test_extract_colors_with_python_bitmap_loader_completes(tmp_path: Path) -> None:
+def test_extract_colors_with_python_bitmap_loader_completes(
+    tmp_path: Path,
+) -> None:
     # Run in a child so a worker waiting for the GIL cannot hang pytest.
     script = textwrap.dedent(
         """\
@@ -409,7 +411,10 @@ def test_extract_colors_with_python_bitmap_loader_completes(tmp_path: Path) -> N
             paths, failing_loader, True, True, [(width, height)] * len(paths)
         ) as failed_scope:
             try:
-                reconstruction.extract_colors_for_all_images(root, num_threads=1)
+                reconstruction.extract_colors_for_all_images(
+                    root,
+                    num_threads=1,
+                )
             except RuntimeError as error:
                 assert "expected bitmap loader failure" in str(error)
             else:

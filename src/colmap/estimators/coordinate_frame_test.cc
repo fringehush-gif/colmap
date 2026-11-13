@@ -3,7 +3,6 @@
 #include "colmap/estimators/coordinate_frame.h"
 
 #include "colmap/estimators/coordinate_frame_internal.h"
-
 #include "colmap/geometry/gps.h"
 #include "colmap/math/math.h"
 #include "colmap/math/random.h"
@@ -78,8 +77,8 @@ TEST(VanishingPointEstimator, ParallelSegments) {
     }
     std::vector<Eigen::Vector3d> lines;
     for (const auto& segment : segments) {
-      lines.push_back(segment.start.homogeneous().cross(
-          segment.end.homogeneous()));
+      lines.push_back(
+          segment.start.homogeneous().cross(segment.end.homogeneous()));
     }
     std::vector<Eigen::Vector3d> models;
     VanishingPointEstimator::Estimate(
@@ -301,9 +300,10 @@ TEST(EstimateManhattanWorldFrame, Frontal) {
   const Eigen::Matrix3d identity = Eigen::Matrix3d::Identity();
   EXPECT_THAT(gram, EigenMatrixNear(identity, 1e-6));
   for (int axis = 0; axis < 3; ++axis) {
-    EXPECT_NEAR(std::abs(frame.col(axis).dot(scene.manhattan_from_world.col(axis))),
-                1.0,
-                1e-3);
+    EXPECT_NEAR(
+        std::abs(frame.col(axis).dot(scene.manhattan_from_world.col(axis))),
+        1.0,
+        1e-3);
   }
 }
 

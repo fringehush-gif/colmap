@@ -677,8 +677,11 @@ TEST(TextIO, LocaleIndependentRoundtrip) {
 
 namespace {
 
-// Encode the documented fields independently of production endian/stream helpers.
-void AppendWireUnsigned(uint64_t value, const size_t bytes, std::string* output) {
+// Encode the documented fields independently of production endian/stream
+// helpers.
+void AppendWireUnsigned(uint64_t value,
+                        const size_t bytes,
+                        std::string* output) {
   for (size_t i = 0; i < bytes; ++i) {
     output->push_back(static_cast<char>((value >> (8 * i)) & 0xff));
   }
@@ -698,10 +701,13 @@ std::string ExpectedImageWire(const Reconstruction& reconstruction) {
     const Image& image = reconstruction.Image(id);
     AppendWireUnsigned(id, 4, &output);
     const Rigid3d pose = image.CamFromWorld();
-    for (const double value : {pose.rotation().w(), pose.rotation().x(),
-                              pose.rotation().y(), pose.rotation().z(),
-                              pose.translation().x(), pose.translation().y(),
-                              pose.translation().z()}) {
+    for (const double value : {pose.rotation().w(),
+                               pose.rotation().x(),
+                               pose.rotation().y(),
+                               pose.rotation().z(),
+                               pose.translation().x(),
+                               pose.translation().y(),
+                               pose.translation().z()}) {
       AppendWireDouble(value, &output);
     }
     AppendWireUnsigned(image.CameraId(), 4, &output);
@@ -811,12 +817,20 @@ TEST(ReconstructionBinary, ShortWritePreservesStreamFailureAndPrefix) {
                                      ? ExpectedImageWire(reconstruction)
                                      : ExpectedPointWire(reconstruction);
     const auto write = [&](std::ostream& stream) {
-      if (write_images) WriteImagesBinary(reconstruction, stream);
-      else WritePoints3DBinary(reconstruction, stream);
+      if (write_images)
+        WriteImagesBinary(reconstruction, stream);
+      else
+        WritePoints3DBinary(reconstruction, stream);
     };
-    for (const size_t capacity : {size_t{0}, size_t{1}, size_t{7}, size_t{8},
-                                  size_t{32767}, size_t{32768}, size_t{32769},
-                                  expected.size() - 1, expected.size()}) {
+    for (const size_t capacity : {size_t{0},
+                                  size_t{1},
+                                  size_t{7},
+                                  size_t{8},
+                                  size_t{32767},
+                                  size_t{32768},
+                                  size_t{32769},
+                                  expected.size() - 1,
+                                  expected.size()}) {
       SCOPED_TRACE(write_images);
       SCOPED_TRACE(capacity);
       for (const bool exceptions : {false, true}) {
@@ -848,7 +862,8 @@ class ThrowingWriteBuffer : public LimitedWriteBuffer {
   using LimitedWriteBuffer::LimitedWriteBuffer;
 
  protected:
-  std::streamsize xsputn(const char* data, const std::streamsize size) override {
+  std::streamsize xsputn(const char* data,
+                         const std::streamsize size) override {
     const std::streamsize accepted = LimitedWriteBuffer::xsputn(data, size);
     if (accepted != size) {
       throw WireSinkFailure();
@@ -951,9 +966,9 @@ TEST(ReconstructionBinary, ExceptionMasksAndLogicalFinalField) {
       }
     };
     for (const auto mask : {std::ios::goodbit,
-                           std::ios::failbit,
-                           std::ios::badbit,
-                           std::ios::failbit | std::ios::badbit}) {
+                            std::ios::failbit,
+                            std::ios::badbit,
+                            std::ios::failbit | std::ios::badbit}) {
       SCOPED_TRACE(mask);
       for (const size_t capacity : {size_t{0},
                                     size_t{8},
@@ -1009,7 +1024,8 @@ class RejectLogicalWriteBuffer : public std::streambuf {
   const std::string& Bytes() const { return bytes_; }
 
  protected:
-  std::streamsize xsputn(const char* data, const std::streamsize size) override {
+  std::streamsize xsputn(const char* data,
+                         const std::streamsize size) override {
     if (num_calls_++ == rejected_call_) {
       if (throwing_) {
         throw WireSinkFailure();
@@ -1032,8 +1048,8 @@ class RejectLogicalWriteBuffer : public std::streambuf {
 TEST(ReconstructionBinary, FailbitOnlyRetainsNameTerminatorField) {
   const bool expected_later_throw = LaterWriteThrowsOnBadStream();
   for (const std::string& name : {std::string{},
-                                 std::string("short \xc3\xa5"),
-                                 std::string("raw\0name", 8)}) {
+                                  std::string("short \xc3\xa5"),
+                                  std::string("raw\0name", 8)}) {
     SCOPED_TRACE(name);
     Reconstruction reconstruction = CreateBinaryWireFixture(3);
     const auto& ids = reconstruction.RegImageIds();

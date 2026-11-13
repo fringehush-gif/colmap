@@ -13,6 +13,7 @@
 
 #ifdef __linux__
 #include <csignal>
+
 #include <sys/resource.h>
 #include <unistd.h>
 #endif
@@ -51,7 +52,8 @@ TEST(ConsistencyGraph, WriteReportsIncompleteHeaderAndPayload) {
           file_limit.rlim_cur = limit;
           file_limit.rlim_max = limit;
           if (signal(SIGXFSZ, SIG_IGN) == SIG_ERR ||
-              setrlimit(RLIMIT_FSIZE, &file_limit) != 0) _exit(2);
+              setrlimit(RLIMIT_FSIZE, &file_limit) != 0)
+            _exit(2);
           try {
             const auto graph =
                 limit == 0 ? ConsistencyGraph(2, 1, {})

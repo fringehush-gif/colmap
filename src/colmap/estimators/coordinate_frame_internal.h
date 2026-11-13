@@ -46,8 +46,7 @@ struct VanishingPointEstimator {
 
     // Homogeneous points at infinity are valid. Only invalid or zero
     // homogeneous vectors fail to define a vanishing point.
-    if (!vanishing_point.allFinite() ||
-        (vanishing_point.array() == 0).all()) {
+    if (!vanishing_point.allFinite() || (vanishing_point.array() == 0).all()) {
       std::fill(residuals->begin(),
                 residuals->end(),
                 std::numeric_limits<double>::max());

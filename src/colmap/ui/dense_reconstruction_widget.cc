@@ -420,18 +420,19 @@ void DenseReconstructionWidget::Fusion() {
   auto fuser = std::make_unique<ControllerThread<mvs::StereoFusion>>(
       std::make_shared<mvs::StereoFusion>(
           *options_->stereo_fusion, workspace_path, "COLMAP", "", input_type));
-  fuser->AddCallback(
-      Thread::SUCCEEDED_CALLBACK, [this, fuser = fuser.get(), workspace_path]() {
-        auto fused_points = fuser->GetController()->GetFusedPoints();
-        auto fused_points_visibility =
-            fuser->GetController()->GetFusedPointsVisibility();
-        const auto output_path = workspace_path / kFusedFileName;
-        mvs::WriteFusedPointCloud(
-            output_path, fused_points, fused_points_visibility);
-        main_window_->model_viewer_widget_->point_cloud =
-            std::move(fused_points);
-        write_fused_points_action_->trigger();
-      });
+  fuser->AddCallback(Thread::SUCCEEDED_CALLBACK,
+                     [this, fuser = fuser.get(), workspace_path]() {
+                       auto fused_points =
+                           fuser->GetController()->GetFusedPoints();
+                       auto fused_points_visibility =
+                           fuser->GetController()->GetFusedPointsVisibility();
+                       const auto output_path = workspace_path / kFusedFileName;
+                       mvs::WriteFusedPointCloud(
+                           output_path, fused_points, fused_points_visibility);
+                       main_window_->model_viewer_widget_->point_cloud =
+                           std::move(fused_points);
+                       write_fused_points_action_->trigger();
+                     });
   thread_control_widget_->StartThread("Fusion...", true, std::move(fuser));
 #endif
 }
@@ -461,10 +462,10 @@ void DenseReconstructionWidget::PoissonMeshing() {
   if (ExistsFile(workspace_path / kFusedFileName)) {
     thread_control_widget_->StartFunction(
         "Poisson Meshing...", [this, workspace_path]() {
-          THROW_CHECK(mvs::PoissonMeshing(
-              *options_->poisson_meshing,
-              workspace_path / kFusedFileName,
-              workspace_path / kPoissonMeshedFileName));
+          THROW_CHECK(
+              mvs::PoissonMeshing(*options_->poisson_meshing,
+                                  workspace_path / kFusedFileName,
+                                  workspace_path / kPoissonMeshedFileName));
           LoadAndDisplayMesh(workspace_path / kPoissonMeshedFileName);
         });
   }

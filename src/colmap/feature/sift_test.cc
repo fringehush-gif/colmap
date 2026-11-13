@@ -72,9 +72,8 @@ TEST(SiftCPUExponentialTable, RetainsEachConstructionRoundingMode) {
     tables.push_back(table);
     // Later constructions must not rewrite any earlier filter's table.
     for (size_t i = 0; i < filters.size(); ++i) {
-      EXPECT_TRUE(std::equal(tables[i].begin(),
-                            tables[i].end(),
-                            filters[i]->expn_tab));
+      EXPECT_TRUE(
+          std::equal(tables[i].begin(), tables[i].end(), filters[i]->expn_tab));
     }
   }
   ASSERT_FALSE(filters.empty());
@@ -127,11 +126,11 @@ TEST(SiftCPUExponentialTable, AllConsumersSurviveConcurrentConstruction) {
   };
   const Outputs expected = calculate();
   ASSERT_GT(expected.num_angles, 0);
-  ASSERT_GT(*std::max_element(expected.descriptor.begin(),
-                             expected.descriptor.end()),
-            0);
+  ASSERT_GT(
+      *std::max_element(expected.descriptor.begin(), expected.descriptor.end()),
+      0);
   ASSERT_GT(*std::max_element(expected.raw_descriptor.begin(),
-                             expected.raw_descriptor.end()),
+                              expected.raw_descriptor.end()),
             0);
   // Under ThreadSanitizer this also catches identical-value shared writes:
   // output parity alone cannot establish freedom from the original data race.

@@ -419,24 +419,18 @@ TEST(EstimateTwoViewRotationCovariance, RejectsStaleMatchIndices) {
   TwoViewGeometry geometry = data.geometry;
   geometry.inlier_matches.front().point2D_idx1 =
       static_cast<point2D_t>(data.points1.size());
-  EXPECT_THROW(EstimateTwoViewRotationCovariance(
-                   data.camera1,
-                   data.points1,
-                   data.camera2,
-                   data.points2,
-                   geometry),
-               std::invalid_argument);
+  EXPECT_THROW(
+      EstimateTwoViewRotationCovariance(
+          data.camera1, data.points1, data.camera2, data.points2, geometry),
+      std::invalid_argument);
 
   geometry = data.geometry;
   geometry.inlier_matches.front().point2D_idx2 =
       static_cast<point2D_t>(data.points2.size());
-  EXPECT_THROW(EstimateTwoViewRotationCovariance(
-                   data.camera1,
-                   data.points1,
-                   data.camera2,
-                   data.points2,
-                   geometry),
-               std::invalid_argument);
+  EXPECT_THROW(
+      EstimateTwoViewRotationCovariance(
+          data.camera1, data.points1, data.camera2, data.points2, geometry),
+      std::invalid_argument);
 }
 
 TEST(EstimateTwoViewRotationCovariance, MissingPoseOrTooFewInliers) {

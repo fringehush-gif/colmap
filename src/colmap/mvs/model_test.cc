@@ -70,7 +70,8 @@ std::vector<std::map<int, float>> LegacyTriangulationAngles(
 }
 
 std::vector<std::vector<int>> ReferenceOverlappingImages(
-    const Model& model, const size_t num_images,
+    const Model& model,
+    const size_t num_images,
     const double min_triangulation_angle) {
   std::vector<std::vector<int>> overlapping_images(model.images.size());
 
@@ -123,7 +124,6 @@ std::vector<std::vector<int>> ReferenceOverlappingImages(
   return overlapping_images;
 }
 
-
 Model MakeOverlapModel() {
   Model model;
   const float K[9] = {100, 0, 50, 0, 100, 50, 0, 0, 1};
@@ -142,10 +142,14 @@ Model MakeOverlapModel() {
 
 void ExpectReferenceOverlap(const Model& model) {
   for (const size_t limit : {size_t(0), size_t(1), size_t(3), size_t(100)}) {
-    for (const double threshold :
-         {0.0, -0.0, std::numeric_limits<double>::denorm_min(),
-          -std::numeric_limits<double>::denorm_min(), 0.01, -1.0, 180.0,
-          std::numeric_limits<double>::quiet_NaN()}) {
+    for (const double threshold : {0.0,
+                                   -0.0,
+                                   std::numeric_limits<double>::denorm_min(),
+                                   -std::numeric_limits<double>::denorm_min(),
+                                   0.01,
+                                   -1.0,
+                                   180.0,
+                                   std::numeric_limits<double>::quiet_NaN()}) {
       EXPECT_EQ(model.GetMaxOverlappingImages(limit, threshold),
                 ReferenceOverlappingImages(model, limit, threshold))
           << "limit=" << limit << " threshold=" << threshold;
@@ -163,7 +167,8 @@ TEST(Model, OverlapThresholdRetainsOrderedNeighbors) {
   ExpectReferenceOverlap(model);
   model.points.push_back({std::numeric_limits<float>::max(),
                           -std::numeric_limits<float>::max(),
-                          std::numeric_limits<float>::denorm_min(), {0, 1, 4}});
+                          std::numeric_limits<float>::denorm_min(),
+                          {0, 1, 4}});
   ExpectReferenceOverlap(model);
 }
 

@@ -10,11 +10,10 @@
 #include "colmap/util/testing.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <utility>
-
-#include <cmath>
 
 #include <gtest/gtest.h>
 

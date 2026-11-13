@@ -124,7 +124,9 @@ def test_bitmap_from_array_memoryview_rejects_unsafe_dtype(dtype) -> None:
 def test_bitmap_from_array_sequence() -> None:
     source = [[0, 17, 255], [71, 131, 3]]
     bitmap = pycolmap.Bitmap.from_array(source)
-    np.testing.assert_array_equal(bitmap.to_array(), np.array(source, dtype=np.uint8))
+    np.testing.assert_array_equal(
+        bitmap.to_array(), np.array(source, dtype=np.uint8)
+    )
 
 
 @pytest.mark.parametrize("dtype", [np.int16, np.float32, object])
@@ -471,7 +473,9 @@ def test_bitmap_scope_close_releases_loader_but_preserves_stats(
     class Loader:
         def __init__(self) -> None:
             shape = (2, 3) if gray_only else (2, 3, 3)
-            self.pixels = np.arange(np.prod(shape), dtype=np.uint8).reshape(shape)
+            self.pixels = np.arange(np.prod(shape), dtype=np.uint8).reshape(
+                shape
+            )
 
         def __call__(self, requested: Path) -> np.ndarray:
             assert requested == path
@@ -481,7 +485,9 @@ def test_bitmap_scope_close_releases_loader_but_preserves_stats(
     expected = loader.pixels.copy()
     loader_ref = weakref.ref(loader)
     factory = (
-        pycolmap.BitmapReadScope.gray_only if gray_only else pycolmap.BitmapReadScope
+        pycolmap.BitmapReadScope.gray_only
+        if gray_only
+        else pycolmap.BitmapReadScope
     )
     scope = factory([path], loader, True, True, [(3, 2)])
     identity = scope.identity_token
@@ -507,7 +513,9 @@ def test_bitmap_scope_constructor_failure_releases_loader(
     path = tmp_path / "duplicate-scope.png"
     pixels = np.zeros((2, 3) if gray_only else (2, 3, 3), dtype=np.uint8)
     factory = (
-        pycolmap.BitmapReadScope.gray_only if gray_only else pycolmap.BitmapReadScope
+        pycolmap.BitmapReadScope.gray_only
+        if gray_only
+        else pycolmap.BitmapReadScope
     )
     owner = factory([path], lambda requested: pixels, True, True, [(3, 2)])
 
@@ -526,7 +534,9 @@ def test_bitmap_scope_constructor_failure_releases_loader(
         assert owner.stats()["bitmapReads"] == 1
     finally:
         owner.close()
-    with factory([path], lambda requested: pixels, True, True, [(3, 2)]) as replacement:
+    with factory(
+        [path], lambda requested: pixels, True, True, [(3, 2)]
+    ) as replacement:
         bitmap = pycolmap.Bitmap.read(path, as_rgb=not gray_only)
         assert bitmap is not None
         np.testing.assert_array_equal(bitmap.to_array(), pixels)
@@ -544,12 +554,16 @@ def test_bitmap_scope_loader_failure_preserves_stats_and_releases_on_close(
 
     loader_ref = weakref.ref(loader)
     factory = (
-        pycolmap.BitmapReadScope.gray_only if gray_only else pycolmap.BitmapReadScope
+        pycolmap.BitmapReadScope.gray_only
+        if gray_only
+        else pycolmap.BitmapReadScope
     )
     scope = factory([path], loader, True, True, [(3, 2)])
     del loader
     try:
-        with pytest.raises(RuntimeError, match="deliberate scope loader failure"):
+        with pytest.raises(
+            RuntimeError, match="deliberate scope loader failure"
+        ):
             pycolmap.Bitmap.read(path, as_rgb=not gray_only)
         assert loader_ref() is not None
         assert scope.stats()["bitmapReads"] == 0

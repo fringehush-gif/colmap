@@ -427,7 +427,8 @@ TEST(Camera, RayApisRejectNonfiniteAndDegenerateBearings) {
     EXPECT_FALSE(perspective.CamRayFromImgWithJac(pixel).has_value());
   }
   const Camera unknown;
-  EXPECT_THROW(unknown.CamRayFromImg(Eigen::Vector2d::Zero()), std::domain_error);
+  EXPECT_THROW(unknown.CamRayFromImg(Eigen::Vector2d::Zero()),
+               std::domain_error);
   EXPECT_THROW(unknown.CamRayFromImgWithJac(Eigen::Vector2d::Zero()),
                std::domain_error);
 }

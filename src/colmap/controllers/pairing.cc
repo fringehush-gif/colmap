@@ -359,7 +359,8 @@ std::vector<std::pair<image_t, image_t>> VocabTreePairGenerator::Next() {
     try {
       StopQueries();
     } catch (const std::exception& error) {
-      LOG(WARNING) << "Vocabulary query errors during cleanup: " << error.what();
+      LOG(WARNING) << "Vocabulary query errors during cleanup: "
+                   << error.what();
     } catch (...) {
       LOG(WARNING) << "Unknown vocabulary query error during cleanup";
     }
@@ -410,11 +411,12 @@ void VocabTreePairGenerator::Query(const image_t image_id) {
     Retrieval retrieval;
     retrieval.image_id = image_id;
 
-    // Each query must push exactly one result, because the consuming Next() pops
-    // exactly one result per query. If a query fails (e.g., due to corrupt
+    // Each query must push exactly one result, because the consuming Next()
+    // pops exactly one result per query. If a query fails (e.g., due to corrupt
     // features or an out-of-memory error during spatial verification), we still
     // push an empty result and skip retrieval for this image. Otherwise, the
-    // consumer would block indefinitely waiting for a result that never arrives.
+    // consumer would block indefinitely waiting for a result that never
+    // arrives.
     try {
       auto keypoints = *cache_->GetKeypoints(image_id);
       auto descriptors = *cache_->GetDescriptors(image_id);
@@ -426,7 +428,8 @@ void VocabTreePairGenerator::Query(const image_t image_id) {
 
       auto query_options = query_options_;
       if (image_pair_filter_) {
-        query_options.image_id_filter = [this, image_id](const int candidate_id) {
+        query_options.image_id_filter = [this,
+                                         image_id](const int candidate_id) {
           return image_pair_filter_(image_id, candidate_id);
         };
       }
@@ -513,10 +516,10 @@ void SequentialPairGenerator::Reset() {
 }
 
 bool SequentialPairGenerator::HasFinished() const {
-  return reset_failed_ ||
-         (image_idx_ >= image_ids_.size() &&
-          (vocab_tree_pair_generator_ ? vocab_tree_pair_generator_->HasFinished()
-                                      : true));
+  return reset_failed_ || (image_idx_ >= image_ids_.size() &&
+                           (vocab_tree_pair_generator_
+                                ? vocab_tree_pair_generator_->HasFinished()
+                                : true));
 }
 
 void SequentialPairGenerator::MaybeExpandRigImages(image_t image_id1,

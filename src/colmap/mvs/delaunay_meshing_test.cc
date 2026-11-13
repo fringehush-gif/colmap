@@ -287,8 +287,8 @@ class DelaunayMeshingTest : public ::testing::TestWithParam<int> {};
 
 // Include more workers than images to cover the bounded worker count.
 INSTANTIATE_TEST_SUITE_P(NumThreads,
-                        DelaunayMeshingTest,
-                        ::testing::Values(1, 2, 8));
+                         DelaunayMeshingTest,
+                         ::testing::Values(1, 2, 8));
 
 TEST_P(DelaunayMeshingTest, SparseIntegration) {
   const auto test_dir = CreateTestDir();

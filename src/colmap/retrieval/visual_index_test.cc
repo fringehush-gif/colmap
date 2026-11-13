@@ -332,8 +332,8 @@ TEST(VisualIndex, MultiwordMatchesRetainMaximumScore) {
 TEST(InvertedFile, ReadinessRequiresEmbeddingAndSortedEntries) {
   for (const bool trained : {false, true}) {
     for (const bool sorted : {false, true}) {
-      SCOPED_TRACE(::testing::Message() << "trained=" << trained
-                                      << " sorted=" << sorted);
+      SCOPED_TRACE(::testing::Message()
+                   << "trained=" << trained << " sorted=" << sorted);
       InvertedFile<16> file;
       EXPECT_FALSE(file.IsUsable());
       if (trained) {

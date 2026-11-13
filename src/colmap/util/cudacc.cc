@@ -134,9 +134,9 @@ void CudaCleanupScope::Check() const {
   if (operation_ != nullptr) {
     const std::runtime_error error(
         StringPrintf("CUDA %s cleanup %s failed (code %d)",
-                      driver_ ? "driver" : "runtime",
-                      operation_,
-                      code_));
+                     driver_ ? "driver" : "runtime",
+                     operation_,
+                     code_));
     if (std::current_exception()) {
       std::throw_with_nested(error);
     }

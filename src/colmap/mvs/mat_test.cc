@@ -448,7 +448,8 @@ TEST_F(MatFileTest, MappedNormalRegionKeepsPlanarBitsAtOddEdge) {
   ImmutableMapRegion source(shared_source);
   EXPECT_EQ(source.GetMappingBytes(), mapped_bytes);
   EXPECT_EQ(shared_source->GetMappingReservationBytes(), mapped_bytes);
-  EXPECT_EQ(ImmutableMapRegion::GetMappingReservationBytes(path_), mapped_bytes);
+  EXPECT_EQ(ImmutableMapRegion::GetMappingReservationBytes(path_),
+            mapped_bytes);
   EXPECT_GT(std::filesystem::file_size(path_), mapped_bytes);
   for (size_t row = 0; row < 2; ++row) {
     for (size_t col = 0; col < 3; ++col) {

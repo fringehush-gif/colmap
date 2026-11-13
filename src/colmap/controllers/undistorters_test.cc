@@ -78,9 +78,8 @@ TEST(COLMAPUndistorter, PropagatesCopyFailure) {
   const auto input = root / "input";
   const auto output = root / "output";
   CreateDirIfNotExists(input);
-  Reconstruction reconstruction =
-      CreateSyntheticReconstructionWithBitmaps(
-          input, 2, 16, 16, ".png", {16, 8, 8, 0.05});
+  Reconstruction reconstruction = CreateSyntheticReconstructionWithBitmaps(
+      input, 2, 16, 16, ".png", {16, 8, 8, 0.05});
   for (const auto& [id, image] : reconstruction.Images()) {
     Bitmap bitmap;
     ASSERT_TRUE(bitmap.Read(input / image.Name()));
@@ -144,9 +143,8 @@ TEST(StandaloneImageUndistorter, PropagatesCopyFailure) {
   const auto input = root / "input";
   const auto output = root / "output";
   CreateDirIfNotExists(input);
-  Reconstruction reconstruction =
-      CreateSyntheticReconstructionWithBitmaps(
-          input, 2, 16, 16, ".png", {16, 8, 8, 0.05});
+  Reconstruction reconstruction = CreateSyntheticReconstructionWithBitmaps(
+      input, 2, 16, 16, ".png", {16, 8, 8, 0.05});
   for (const auto& [id, image] : reconstruction.Images()) {
     Bitmap bitmap;
     ASSERT_TRUE(bitmap.Read(input / image.Name()));

@@ -49,8 +49,8 @@
 #endif
 
 #ifdef __linux__
-#include <cstdio>
 #include <csignal>
+#include <cstdio>
 
 #include <sys/resource.h>
 #include <unistd.h>
@@ -429,7 +429,8 @@ class PatchMatchControllerTestAccess {
   using Hooks = PatchMatchController::SparseTestHooks;
   using Prepared = PatchMatchController::PreparedProblem;
   using ConfigProblem = std::pair<std::string, std::vector<std::string>>;
-  static std::vector<ConfigProblem> ReadConfig(PatchMatchController& controller) {
+  static std::vector<ConfigProblem> ReadConfig(
+      PatchMatchController& controller) {
     controller.ReadWorkspace();
     controller.ReadProblems();
     const auto& model = controller.workspace_->GetModel();
@@ -635,7 +636,8 @@ TEST(PatchMatchController, SubmissionFailureDrainsBorrowingWorkers) {
   auto caller = std::async(std::launch::async, [&]() {
     auto controller = std::make_shared<PatchMatchController>(
         PatchMatchOptions{}, "", "COLMAP", "");
-    auto& pool = PatchMatchControllerTestAccess::InitializeScheduler(*controller);
+    auto& pool =
+        PatchMatchControllerTestAccess::InitializeScheduler(*controller);
     std::weak_ptr<PatchMatchController> borrowed = controller;
     try {
       // Exercise the real controller's borrowed state and the shared owning
@@ -677,8 +679,7 @@ TEST(PatchMatchController, SubmissionFailureDrainsBorrowingWorkers) {
     return false;
   });
 
-  const auto fault_status =
-      failed_submission.wait_for(std::chrono::seconds(5));
+  const auto fault_status = failed_submission.wait_for(std::chrono::seconds(5));
   EXPECT_EQ(fault_status, std::future_status::ready);
   if (fault_status == std::future_status::ready) {
     EXPECT_EQ(caller.wait_for(std::chrono::milliseconds(20)),
@@ -939,7 +940,7 @@ struct Result {
   NormalMap normals;
   Mat<float> selection;
   // Query graph through its public API, preserving each pixel and ordered IDs.
-  std::vector<std::vector<int> > consistent_images;
+  std::vector<std::vector<int>> consistent_images;
 };
 
 Result RunPatchMatch(Inputs* inputs, const PatchMatchOptions& options) {
@@ -1238,7 +1239,7 @@ TEST_F(CudaTest, IntegerStatisticsArrayPreservesChannelBits) {
 // Parameter order: geometric consistency, filtering.
 class PatchMatchCudaTest
     : public CudaTest,
-      public ::testing::WithParamInterface<std::tuple<bool, bool> > {};
+      public ::testing::WithParamInterface<std::tuple<bool, bool>> {};
 
 class SourceUploadTest : public CudaTest,
                          public ::testing::WithParamInterface<bool> {};
@@ -1367,7 +1368,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
   options.num_samples = defaults.num_samples;
   options.num_iterations = defaults.num_iterations;
   options.sigma_spatial = options.window_radius;
-  std::vector<std::unique_ptr<Inputs> > inputs;
+  std::vector<std::unique_ptr<Inputs>> inputs;
   std::vector<PatchMatch::Problem> problems;
   inputs.reserve(count);
   problems.reserve(count);
@@ -1380,7 +1381,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
     problems.push_back(make_problem(*inputs.back()));
   }
   const auto construct = [&]() {
-    std::vector<std::unique_ptr<PatchMatchCuda> > owners;
+    std::vector<std::unique_ptr<PatchMatchCuda>> owners;
     owners.reserve(problems.size());
     for (const auto& problem : problems)
       owners.push_back(std::make_unique<PatchMatchCuda>(options, problem));
@@ -1416,7 +1417,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
     }
   }
   using Snapshot =
-      std::tuple<DepthMap, NormalMap, Mat<float>, std::vector<int> >;
+      std::tuple<DepthMap, NormalMap, Mat<float>, std::vector<int>>;
   std::vector<Snapshot> expected;
   expected.reserve(incumbent.size());
   for (const auto& owner : incumbent) expected.push_back(read(*owner));
@@ -1500,7 +1501,7 @@ TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {
       options.num_iterations = defaults.num_iterations;
       options.sigma_spatial = options.window_radius;
       std::vector<PatchMatch::Problem> problems(3);
-      std::vector<std::unique_ptr<PatchMatchCuda> > control, candidate;
+      std::vector<std::unique_ptr<PatchMatchCuda>> control, candidate;
       for (size_t i = 0; i < problems.size(); ++i) {
         auto& problem = problems[i];
         problem.ref_image_idx = 0;
@@ -1565,8 +1566,8 @@ TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {
 
 TEST_F(CudaTest, SparseSourceCapabilityAndUnavailableContract) {
   Inputs input = MakeInputs(0, 9, 257, 513);
-  std::vector<std::shared_ptr<const Bitmap> > bitmap_leases;
-  std::vector<std::shared_ptr<const DepthMap> > depth_leases;
+  std::vector<std::shared_ptr<const Bitmap>> bitmap_leases;
+  std::vector<std::shared_ptr<const DepthMap>> depth_leases;
   for (const auto& image : input.images)
     bitmap_leases.push_back(std::make_shared<Bitmap>(image.GetBitmap()));
   for (const auto& depth : input.depths)
@@ -1613,7 +1614,7 @@ TEST_F(CudaTest, InvalidBitmapLeasesUseBothIndependentDenseUploadPaths) {
     for (int invalid = 0; invalid < 3; ++invalid) {
       SCOPED_TRACE(::testing::Message()
                    << "direct " << direct << " invalid " << invalid);
-      std::vector<std::shared_ptr<const Bitmap> > leases(input.images.size());
+      std::vector<std::shared_ptr<const Bitmap>> leases(input.images.size());
       const int source = 7;
       if (invalid == 0) {
         auto owner = std::make_shared<Bitmap>(input.images[source].GetBitmap());
@@ -1645,15 +1646,15 @@ TEST_F(CudaTest, InvalidBitmapLeasesUseBothIndependentDenseUploadPaths) {
 
 TEST_F(CudaTest, SparseSourceProvenanceRejectsUnknownOrChangedOwners) {
   Inputs input = MakeInputs(0, 9, 257, 513);
-  std::vector<std::shared_ptr<const Bitmap> > bitmaps;
-  std::vector<std::shared_ptr<const DepthMap> > depths;
+  std::vector<std::shared_ptr<const Bitmap>> bitmaps;
+  std::vector<std::shared_ptr<const DepthMap>> depths;
   for (const auto& image : input.images)
     bitmaps.push_back(std::make_shared<Bitmap>(image.GetBitmap()));
   for (const auto& depth : input.depths)
     depths.push_back(std::make_shared<DepthMap>(depth));
-  std::vector<std::vector<std::shared_ptr<const Bitmap> > > bitmap_leases(
+  std::vector<std::vector<std::shared_ptr<const Bitmap>>> bitmap_leases(
       3, bitmaps);
-  std::vector<std::vector<std::shared_ptr<const DepthMap> > > depth_leases(
+  std::vector<std::vector<std::shared_ptr<const DepthMap>>> depth_leases(
       3, depths);
   std::vector<PatchMatch::Problem> problems(3);
   std::vector<const PatchMatch::Problem*> pointers;
@@ -1701,8 +1702,8 @@ TEST_F(CudaTest, SparseSourceCleanRefusalsReleasePartialSetup) {
                  << "runtime/device";
   }
   Inputs input = MakeInputs(0, 9, 257, 513);
-  std::vector<std::shared_ptr<const Bitmap> > bitmaps;
-  std::vector<std::shared_ptr<const DepthMap> > depths;
+  std::vector<std::shared_ptr<const Bitmap>> bitmaps;
+  std::vector<std::shared_ptr<const DepthMap>> depths;
   for (const auto& image : input.images)
     bitmaps.push_back(std::make_shared<Bitmap>(image.GetBitmap()));
   for (const auto& depth : input.depths)
@@ -1876,7 +1877,7 @@ class ControllerWorkspaceFixture {
   }
   const std::vector<std::string>& ImageNames() const { return names; }
   static auto Outputs(const std::filesystem::path& root) {
-    std::map<std::filesystem::path, std::vector<char> > maps;
+    std::map<std::filesystem::path, std::vector<char>> maps;
     for (const auto* family : {"depth_maps", "normal_maps"}) {
       for (const auto& file :
            std::filesystem::directory_iterator(root / "stereo" / family)) {
@@ -1915,9 +1916,10 @@ TEST(PatchMatchController, RejectsDuplicateConfiguredReferences) {
     const auto root = fixture.Workspace();
     {
       std::ofstream config(root / "stereo/patch-match.cfg");
-      config << names[0] << "\n" << names[1] << "\n"
-             << names[0] << "\n" << names[different_sources ? 2 : 1]
-             << "\n";
+      config << names[0] << "\n"
+             << names[1] << "\n"
+             << names[0] << "\n"
+             << names[different_sources ? 2 : 1] << "\n";
     }
     PatchMatchController controller(
         ControllerWorkspaceFixture::Options(), root, "COLMAP", "");
@@ -1938,8 +1940,10 @@ TEST(PatchMatchController, PreservesUniqueReferenceAndSourceOrder) {
   const auto root = fixture.Workspace();
   {
     std::ofstream config(root / "stereo/patch-match.cfg");
-    config << names[2] << "\n" << names[4] << "," << names[0] << "\n"
-           << names[0] << "\n" << names[3] << "," << names[2] << "\n";
+    config << names[2] << "\n"
+           << names[4] << "," << names[0] << "\n"
+           << names[0] << "\n"
+           << names[3] << "," << names[2] << "\n";
   }
   PatchMatchController controller(
       ControllerWorkspaceFixture::Options(), root, "COLMAP", "");
@@ -1996,8 +2000,10 @@ std::filesystem::path MakePublicationGpuWorkspace() {
         const double value = 128.0 + 42.0 * std::sin(8.0 * x + 3.0 * y) +
                              35.0 * std::cos(5.0 * x - 11.0 * y) +
                              24.0 * std::sin(17.0 * x + 13.0 * y);
-        bitmap.SetPixel(col, row, BitmapColor<uint8_t>(static_cast<uint8_t>(
-                                      std::clamp(std::round(value), 0.0, 255.0))));
+        bitmap.SetPixel(col,
+                        row,
+                        BitmapColor<uint8_t>(static_cast<uint8_t>(
+                            std::clamp(std::round(value), 0.0, 255.0))));
       }
     }
     bitmap.Write(root / "images" / image.Name());
@@ -2018,8 +2024,8 @@ void ExpectPublicationGpuFiles(const std::filesystem::path& root,
   constexpr size_t width = 96, height = 64;
   for (const auto* family : {"depth_maps", "normal_maps"}) {
     size_t count = 0;
-    for (const auto& f : std::filesystem::directory_iterator(
-             root / "stereo" / family)) {
+    for (const auto& f :
+         std::filesystem::directory_iterator(root / "stereo" / family)) {
       if (f.path().filename().string().find(".geometric.bin") ==
           std::string::npos) {
         continue;
@@ -2036,8 +2042,8 @@ void ExpectPublicationGpuFiles(const std::filesystem::path& root,
     ++graphs;
     ConsistencyGraph graph;
     ASSERT_NO_THROW(graph.Read(f.path()));
-    const auto header = std::to_string(width) + "&" +
-                        std::to_string(height) + "&1&";
+    const auto header =
+        std::to_string(width) + "&" + std::to_string(height) + "&1&";
     if (std::filesystem::file_size(f.path()) > header.size()) ++nonempty;
   }
   EXPECT_EQ(graphs, expected);
@@ -2208,8 +2214,10 @@ TEST(PatchMatchController, PublicationRejectsDanglingGraphBeforeRetry) {
   ControllerWorkspaceFixture fixture(8, 8);
   auto options = PublicationOptions(false);
   PatchMatchController controller(options, fixture.Workspace(), "COLMAP", "");
-  const auto a = PatchMatchControllerTestAccess::Prepare(controller, options, 0);
-  const auto b = PatchMatchControllerTestAccess::Prepare(controller, options, 1);
+  const auto a =
+      PatchMatchControllerTestAccess::Prepare(controller, options, 0);
+  const auto b =
+      PatchMatchControllerTestAccess::Prepare(controller, options, 1);
   ASSERT_TRUE(a);
   ASSERT_TRUE(b);
   DepthMap(8, 8, 1, 10).Write(a->depth_path);
@@ -2218,12 +2226,12 @@ TEST(PatchMatchController, PublicationRejectsDanglingGraphBeforeRetry) {
   ASSERT_FALSE(std::filesystem::exists(b->consistency_path));
   std::filesystem::create_symlink(b->consistency_path, a->consistency_path);
   bool called = false;
-  EXPECT_THROW(PatchMatchControllerTestAccess::Publish(
-                   *a,
-                   [&](const auto& normal) {
-                     called = true;
-                     WritePublicationFiles(*a, normal);
-                   }),
+  EXPECT_THROW(PatchMatchControllerTestAccess::Publish(*a,
+                                                       [&](const auto& normal) {
+                                                         called = true;
+                                                         WritePublicationFiles(
+                                                             *a, normal);
+                                                       }),
                std::exception);
   EXPECT_FALSE(called);
   EXPECT_FALSE(ExistsFile(a->normal_path));
@@ -2263,8 +2271,9 @@ TEST(PatchMatchController, PublicationPreservesDepthAndGraphSymlinkTargets) {
       EXPECT_TRUE(ExistsFile(prepared->normal_path));
       EXPECT_TRUE(std::filesystem::is_symlink(link));
       EXPECT_EQ(std::filesystem::file_size(target), 6);
-      EXPECT_EQ(bool(PatchMatchControllerTestAccess::Prepare(controller, options)),
-                was_ready);
+      EXPECT_EQ(
+          bool(PatchMatchControllerTestAccess::Prepare(controller, options)),
+          was_ready);
     }
   }
 }
@@ -2321,7 +2330,8 @@ TEST(PatchMatchController, PublicationPartialWritesRemainEligibleForRetry) {
             _exit(7);
           }
           if (ExistsFile(prepared->normal_path)) {
-            std::fputs("Publication exposed completion after failure\n", stderr);
+            std::fputs("Publication exposed completion after failure\n",
+                       stderr);
             _exit(8);
           }
           _exit(0);
@@ -2331,7 +2341,6 @@ TEST(PatchMatchController, PublicationPartialWritesRemainEligibleForRetry) {
   }
 }
 #endif
-
 
 TEST(PatchMatchController, PreparePreservesConfiguredSourceOrder) {
   for (const int missing_source : {-1, 4}) {
@@ -2361,7 +2370,7 @@ TEST(PatchMatchController, PreparePreservesConfiguredSourceOrder) {
 #ifdef COLMAP_TEST_CUDA_ALLOCATION_WRAPPING
 std::pair<size_t, size_t> FindControllerFixtureShape(bool batch,
                                                      bool checkpoint) {
-  for (const auto& shape : std::vector<std::pair<size_t, size_t> >{
+  for (const auto& shape : std::vector<std::pair<size_t, size_t>>{
            {513, 257}, {1025, 513}, {1536, 1024}}) {
     if (!CanPairPatchMatchViews(shape.first,
                                 shape.second,
@@ -2370,7 +2379,7 @@ std::pair<size_t, size_t> FindControllerFixtureShape(bool batch,
                                 false,
                                 checkpoint))
       continue;
-    const std::vector<std::pair<size_t, size_t> > shapes(5, shape);
+    const std::vector<std::pair<size_t, size_t>> shapes(5, shape);
     if (!batch || (CanBatchPatchMatchViews(shapes, false, checkpoint) &&
                    CanBatchPatchMatchViews(shapes, true, checkpoint))) {
       return shape;
@@ -2870,9 +2879,9 @@ TEST_F(CudaTest, ControllerReadmitsInitialLaterAndGeometryAttachmentRefusals) {
   size_t width = sparse_supported ? 0 : 513;
   size_t height = sparse_supported ? 0 : 257;
   if (sparse_supported) {
-    for (const auto& shape : std::vector<std::pair<size_t, size_t> >{
+    for (const auto& shape : std::vector<std::pair<size_t, size_t>>{
              {513, 257}, {1025, 513}, {1536, 1024}}) {
-      const std::vector<std::pair<size_t, size_t> > shapes(5, shape);
+      const std::vector<std::pair<size_t, size_t>> shapes(5, shape);
       if (CanBatchPatchMatchViews(shapes, false, true) &&
           CanBatchPatchMatchViews(shapes, true, true)) {
         width = shape.first;
@@ -2982,8 +2991,8 @@ TEST_F(CudaTest, SparseSourceCleanupFailureNeverPermitsReadmission) {
   EXPECT_EXIT(
       ([] {
         Inputs input = MakeInputs(0, 9, 257, 513);
-        std::vector<std::shared_ptr<const Bitmap> > bitmaps;
-        std::vector<std::shared_ptr<const DepthMap> > depths;
+        std::vector<std::shared_ptr<const Bitmap>> bitmaps;
+        std::vector<std::shared_ptr<const DepthMap>> depths;
         for (const auto& image : input.images)
           bitmaps.push_back(std::make_shared<Bitmap>(image.GetBitmap()));
         for (const auto& depth : input.depths)
@@ -3025,8 +3034,8 @@ TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
   // One workspace identity; five references reuse differently ordered subsets.
   // Varying source dimensions exercise the original zero-padded layer extent.
   Inputs input = MakeInputs(0, 9, 257, 513);
-  std::vector<std::shared_ptr<const Bitmap> > bitmap_leases;
-  std::vector<std::shared_ptr<const DepthMap> > depth_leases;
+  std::vector<std::shared_ptr<const Bitmap>> bitmap_leases;
+  std::vector<std::shared_ptr<const DepthMap>> depth_leases;
   for (const auto& image : input.images)
     bitmap_leases.push_back(std::make_shared<Bitmap>(image.GetBitmap()));
   for (const auto& depth : input.depths)
@@ -3041,8 +3050,8 @@ TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
       options.num_iterations = defaults.num_iterations;
       options.sigma_spatial = options.window_radius;
       // Native PrepareProblem owns different vectors for each reference.
-      std::vector<std::vector<Image> > images(5, input.images);
-      std::vector<std::vector<DepthMap> > depths(5, input.depths);
+      std::vector<std::vector<Image>> images(5, input.images);
+      std::vector<std::vector<DepthMap>> depths(5, input.depths);
       std::vector<PatchMatch::Problem> problems(5);
       std::vector<const PatchMatch::Problem*> pointers;
       for (int ref = 0; ref < 5; ++ref) {
@@ -3074,7 +3083,7 @@ TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
                     {&invalid, &problems[1], &problems[2]}, geometry),
                 0);
       using Snapshot =
-          std::tuple<DepthMap, NormalMap, Mat<float>, std::vector<int> >;
+          std::tuple<DepthMap, NormalMap, Mat<float>, std::vector<int>>;
       const auto read = [](const PatchMatchCuda& owner) {
         return Snapshot(owner.GetDepthMap(),
                         owner.GetNormalMap(),
@@ -3113,7 +3122,7 @@ TEST_F(CudaTest, SparseSourceAliasesPreserveOrderedPaddedOutputs) {
       std::swap(problems[0].src_image_idxs[0], problems[0].src_image_idxs[1]);
       EXPECT_FALSE(shared->Matches(problems[0], geometry));
       std::swap(problems[0].src_image_idxs[0], problems[0].src_image_idxs[1]);
-      std::vector<std::unique_ptr<PatchMatchCuda> > owners;
+      std::vector<std::unique_ptr<PatchMatchCuda>> owners;
       owners.push_back(std::make_unique<PatchMatchCuda>(options, problems[0]));
       owners[0]->UseSparseSources(shared);
       for (size_t i = 1; i < problems.size(); ++i)
@@ -3158,18 +3167,18 @@ TEST_F(CudaTest, ImmutableSourceDepthLeasesPreserveThreeViewGeoOutput) {
   options.num_samples = 15;
   options.num_iterations = 5;
   constexpr int kReferences = 3;
-  std::vector<std::shared_ptr<const DepthMap> > canonical;
-  std::vector<std::shared_ptr<const Bitmap> > bitmap_leases;
+  std::vector<std::shared_ptr<const DepthMap>> canonical;
+  std::vector<std::shared_ptr<const Bitmap>> bitmap_leases;
   for (const auto& image : input.images)
     bitmap_leases.push_back(std::make_shared<Bitmap>(image.GetBitmap()));
   for (const auto& depth : input.depths)
     canonical.push_back(std::make_shared<DepthMap>(depth));
-  std::vector<std::vector<DepthMap> > old_depths(kReferences, input.depths);
-  std::vector<std::vector<DepthMap> > owned_depths(
+  std::vector<std::vector<DepthMap>> old_depths(kReferences, input.depths);
+  std::vector<std::vector<DepthMap>> owned_depths(
       kReferences, std::vector<DepthMap>(input.depths.size()));
-  std::vector<std::vector<std::shared_ptr<const DepthMap> > > leases(
+  std::vector<std::vector<std::shared_ptr<const DepthMap>>> leases(
       kReferences,
-      std::vector<std::shared_ptr<const DepthMap> >(input.depths.size()));
+      std::vector<std::shared_ptr<const DepthMap>>(input.depths.size()));
   std::vector<PatchMatch::Problem> old_problems(kReferences),
       new_problems(kReferences);
   std::vector<const PatchMatch::Problem*> new_pointers;
@@ -3195,7 +3204,7 @@ TEST_F(CudaTest, ImmutableSourceDepthLeasesPreserveThreeViewGeoOutput) {
   }
 
   using Snapshot =
-      std::tuple<DepthMap, NormalMap, Mat<float>, std::vector<int> >;
+      std::tuple<DepthMap, NormalMap, Mat<float>, std::vector<int>>;
   const auto read = [](const PatchMatchCuda& owner) {
     return Snapshot(owner.GetDepthMap(),
                     owner.GetNormalMap(),
@@ -3228,7 +3237,7 @@ TEST_F(CudaTest, ImmutableSourceDepthLeasesPreserveThreeViewGeoOutput) {
   ASSERT_GT(PatchMatchSparseSources::Budget(new_pointers, true), 0);
   auto shared = PatchMatchSparseSources::Create(new_pointers, true);
   ASSERT_TRUE(shared);
-  std::vector<std::unique_ptr<PatchMatchCuda> > owners;
+  std::vector<std::unique_ptr<PatchMatchCuda>> owners;
   owners.push_back(std::make_unique<PatchMatchCuda>(options, new_problems[0]));
   owners[0]->UseSparseSources(shared);
   for (int ref = 1; ref < kReferences; ++ref)
@@ -3267,7 +3276,7 @@ TEST_F(CudaTest, BatchAdmissionCanBeatIneligiblePairs) {
   // incumbent schedules singletons but the five-view aggregate saves waves.
   bool found = false;
   for (size_t width = 64; width <= 65536; width += 64) {
-    const std::vector<std::pair<size_t, size_t> > shapes(5, {width, 3});
+    const std::vector<std::pair<size_t, size_t>> shapes(5, {width, 3});
     if (!CanPairPatchMatchViews(width, 3, width, 3, false) &&
         CanBatchPatchMatchViews(shapes, false)) {
       found = true;
@@ -3281,7 +3290,7 @@ TEST_F(CudaTest, BatchAdmissionCanBeatIneligiblePairs) {
 TEST_F(CudaTest, BatchAdmissionRejectsUnsupportedGroupSizes) {
   EXPECT_FALSE(CanBatchPatchMatchViews({{47, 149}, {39, 153}}, false));
   EXPECT_FALSE(CanBatchPatchMatchViews(
-      std::vector<std::pair<size_t, size_t> >(6, {47, 149}), false));
+      std::vector<std::pair<size_t, size_t>>(6, {47, 149}), false));
   EXPECT_FALSE(
       CanBatchPatchMatchViews({{47, 149}, {0, 153}, {47, 149}}, false));
 }
