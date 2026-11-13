@@ -78,6 +78,7 @@ class PatchMatchCuda {
             bool kCheckpointHmm,
             int kCostBits = 0>
   void RunWithWindowSizeAndStep();
+  void CheckUsable() const;
   void RunImpl();
 
   GpuMatView<float> GeometryView(const GpuMat<float>& owner) const;
@@ -94,7 +95,7 @@ class PatchMatchCuda {
   cudaTextureObject_t ReferenceStatisticsTexture() const;
   void InitSourceImages();
   void InitTransforms();
-  void InitWorkspaceMemory();
+  void InitWorkspaceMemory(bool primary_geometry_scratch);
   void RotateStateMaps(size_t width, size_t height);
   size_t CostMapWidth() const;
   size_t CostMapHeight() const;
@@ -105,13 +106,19 @@ class PatchMatchCuda {
   void CheckCostMapDomain() const;
 #ifndef COLMAP_HIP_ENABLED
   void InitAlternateOrientationMemory(const PatchMatchCuda* geometry_donor);
-  void EnsureGeometryRotationMemory();
+  void PoisonGeometryState() noexcept;
+  void EnsureGeometryRotationMemory(bool allow_checkpoint = true);
+  bool CanRotateGeometryThroughCheckpoint() const;
+  bool CheckpointGeometryFits() const;
+  size_t GeometryScratchBytes() const;
   static size_t GeometryBytes(const GpuMat<float>& depth,
                               const GpuMat<float>& normal);
   static size_t GeometryBytes(const GpuMat<float>& depth,
                               const OctNormalMap& normal);
   void BindReusableRefImageTexture();
-  void RotateWithBufferReuse(bool pack_geometry);
+  void RotateWithBufferReuse(
+      bool pack_geometry,
+      PatchMatchHmmCheckpoint* checkpoint_scratch = nullptr);
 #endif
 
   // Rotate reference image by 90 degrees in counter-clockwise direction.

@@ -2142,7 +2142,16 @@ PatchMatchCuda::PatchMatchCuda(
 #endif
     InitSourceImages();
   InitTransforms();
-  InitWorkspaceMemory();
+  bool primary_geometry_scratch = true;
+#ifndef COLMAP_HIP_ENABLED
+  // Hint only: never retain a donor pointer beyond construction.
+  if (geometry_donor && geometry_donor->CheckpointGeometryFits() &&
+      geometry_donor->ref_width_ == ref_width_ &&
+      geometry_donor->ref_height_ == ref_height_ &&
+      geometry_donor->options_.gpu_index == options_.gpu_index)
+    primary_geometry_scratch = false;
+#endif
+  InitWorkspaceMemory(primary_geometry_scratch);
 #ifndef COLMAP_HIP_ENABLED
   if (options_.rotation_buffer_reuse) {
     InitAlternateOrientationMemory(geometry_donor);
@@ -2176,7 +2185,12 @@ void PatchMatchCuda::UseSparseSources(
 }
 #endif
 
+void PatchMatchCuda::CheckUsable() const {
+  THROW_CHECK_GE(rotation_in_half_pi_, 0)
+      << "Interrupted in-place geometry rotation; reconstruct the owner";
+}
 void PatchMatchCuda::Run() {
+  CheckUsable();
   results_valid_ = false;
   consistency_mask_valid_ = false;
   try {
@@ -2377,6 +2391,35 @@ size_t PatchMatchCuda::GeometryBytes(const GpuMat<float>& depth,
   return bytes + normal.GetCapacityBytes();
 }
 
+void PatchMatchCuda::PoisonGeometryState() noexcept {
+  // Negative orientation is a persistent host refusal, not a recoverable frame.
+  rotation_in_half_pi_ = -1;
+  results_valid_ = false;
+  consistency_mask_valid_ = false;
+}
+
+bool PatchMatchCuda::CanRotateGeometryThroughCheckpoint() const {
+  if (rotation_in_half_pi_ < 0 || !options_.rotation_buffer_reuse ||
+      !options_.checkpoint_hmm || !options_.normal_oct40 || !hmm_checkpoint_ ||
+      !oct_normal_map_ || !depth_map_ || !ref_width_ || !ref_height_ ||
+      !oct_normal_map_->CanStore(ref_width_, ref_height_) ||
+      !oct_normal_map_->CanStore(ref_height_, ref_width_))
+    return false;
+  const size_t plane = ref_width_ * ref_height_ * sizeof(float);
+  return depth_map_->GetHeight() && depth_map_->GetDepth() == 1 &&
+         depth_map_->GetPitch() >= plane / depth_map_->GetHeight() +
+                                       (plane % depth_map_->GetHeight() != 0);
+}
+size_t PatchMatchCuda::GeometryScratchBytes() const {
+  THROW_CHECK(CanRotateGeometryThroughCheckpoint());
+  return 4 * std::max(((ref_width_ + 127) / 128 * 128) * ref_height_,
+                      ((ref_height_ + 127) / 128 * 128) * ref_width_);
+}
+bool PatchMatchCuda::CheckpointGeometryFits() const {
+  return CanRotateGeometryThroughCheckpoint() &&
+         hmm_checkpoint_->GetCapacityBytes() >= GeometryScratchBytes();
+}
+
 bool PatchMatchCuda::CanShareGeometryRotation() const {
   if (!options_.rotation_buffer_reuse || rotation_in_half_pi_ != 0 ||
       ref_height_ == 0 || ref_width_ == 0 ||
@@ -2396,13 +2439,21 @@ bool PatchMatchCuda::CanShareGeometryRotation() const {
                : fits(fp32, 3);
   };
   return fits(depth_map_, 1) && normal_fits(oct_normal_map_, normal_map_) &&
-         ((geometry_alternate_bound_ && !alternate_depth_map_ &&
+         (CanRotateGeometryThroughCheckpoint() ||
+          (geometry_alternate_bound_ && !alternate_depth_map_ &&
            !alternate_normal_map_ && !alternate_oct_normal_map_) ||
           (fits(alternate_depth_map_, 1) &&
            normal_fits(alternate_oct_normal_map_, alternate_normal_map_)));
 }
 
-void PatchMatchCuda::EnsureGeometryRotationMemory() {
+void PatchMatchCuda::EnsureGeometryRotationMemory(bool allow_checkpoint) {
+  if (allow_checkpoint && CheckpointGeometryFits() && !alternate_depth_map_ &&
+      !alternate_normal_map_ && !alternate_oct_normal_map_) {
+    geometry_alternate_bound_ = 0;
+    geometry_peak_floor_ = std::max(
+        geometry_peak_floor_, GeometryBytes(*depth_map_, *oct_normal_map_));
+    return;
+  }
   const size_t next = (rotation_in_half_pi_ + 1) % 4;
   const size_t width = next % 2 ? ref_height_ : ref_width_;
   const size_t height = next % 2 ? ref_width_ : ref_height_;
@@ -2432,6 +2483,7 @@ void PatchMatchCuda::EnsureGeometryRotationMemory() {
 #endif
 
 DepthMap PatchMatchCuda::GetDepthMap() const {
+  CheckUsable();
   THROW_CHECK(!options_.normal_oct40 || results_valid_)
       << "Oct40 results require a successful completed run";
   return DepthMap(
@@ -2439,6 +2491,7 @@ DepthMap PatchMatchCuda::GetDepthMap() const {
 }
 
 NormalMap PatchMatchCuda::GetNormalMap() const {
+  CheckUsable();
   THROW_CHECK(!options_.normal_oct40 || results_valid_)
       << "Oct40 results require a successful completed run";
 #ifndef COLMAP_HIP_ENABLED
@@ -2448,6 +2501,7 @@ NormalMap PatchMatchCuda::GetNormalMap() const {
 }
 
 Mat<float> PatchMatchCuda::GetSelProbMap() const {
+  CheckUsable();
   THROW_CHECK(!options_.normal_oct40 || results_valid_)
       << "Oct40 results require a successful completed run";
   return prev_sel_prob_unorm16_map_ ? prev_sel_prob_unorm16_map_->CopyToMat()
@@ -2455,6 +2509,7 @@ Mat<float> PatchMatchCuda::GetSelProbMap() const {
 }
 
 std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
+  CheckUsable();
   if (!consistency_mask_valid_) return {};
   const Mat<uint8_t> mask = consistency_mask_->CopyToMat();
   std::vector<int> consistent_image_idxs;
@@ -3203,6 +3258,9 @@ bool CanBatchPatchMatchViews(
 // admission; the controller admits larger groups separately.
 void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
                         const std::vector<cudaStream_t>& streams) {
+  // Reject every poisoned owner before invalidating any healthy result.
+  for (PatchMatchCuda* p : views)
+    if (p != nullptr) p->CheckUsable();
   for (PatchMatchCuda* p : views) {
     if (p == nullptr) continue;
     p->results_valid_ = false;
@@ -3253,7 +3311,34 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
   }
   VLOG(2) << "PatchMatch batch checkpoint_hmm: "
           << first.options_.checkpoint_hmm << ", references: " << views.size();
-  bool shared_geometry = first.CanShareGeometryRotation();
+  bool checkpoint_geometry = first.CheckpointGeometryFits();
+  for (PatchMatchCuda* p : views)
+    checkpoint_geometry = checkpoint_geometry &&
+                          p->CanRotateGeometryThroughCheckpoint() &&
+                          p->ref_width_ == first.ref_width_ &&
+                          p->ref_height_ == first.ref_height_;
+  if (checkpoint_geometry) {
+    // No beta survives a sweep. Join constructors/previous work before
+    // replacing unused checkpoint owners. Only the first owner keeps the
+    // geometry floor.
+    CUDA_SYNC_AND_CHECK();
+    {
+      CudaCleanupScope retired_bank;
+      for (PatchMatchCuda* p : views) {
+        p->alternate_depth_map_.reset();
+        p->alternate_normal_map_.reset();
+        p->alternate_oct_normal_map_.reset();
+        p->geometry_alternate_bound_ = 0;
+        // Retain an already-observed historical construction peak floor.
+      }
+      retired_bank.Check();
+    }
+    // No checkpoint replacement/allocation at this transition. Scoped
+    // constructor hints keep prepared children compact. Unhinted owners retain
+    // their admitted capacity rather than creating an old-plus-new peak.
+  }
+  bool shared_geometry =
+      !checkpoint_geometry && first.CanShareGeometryRotation();
   for (PatchMatchCuda* p : views)
     shared_geometry = shared_geometry && p->CanShareGeometryRotation() &&
                       p->ref_width_ == first.ref_width_ &&
@@ -3265,7 +3350,7 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     geometry_normal = std::move(first.alternate_normal_map_);
     geometry_oct_normal = std::move(first.alternate_oct_normal_map_);
     if (!geometry_depth) {
-      first.EnsureGeometryRotationMemory();
+      first.EnsureGeometryRotationMemory(false);
       geometry_depth = std::move(first.alternate_depth_map_);
       geometry_normal = std::move(first.alternate_normal_map_);
       geometry_oct_normal = std::move(first.alternate_oct_normal_map_);
@@ -3277,9 +3362,21 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
       p->alternate_normal_map_.reset();
       p->alternate_oct_normal_map_.reset();
     }
-  } else {
+  } else if (!checkpoint_geometry) {
     for (PatchMatchCuda* p : views)
       if (p->options_.rotation_buffer_reuse) p->EnsureGeometryRotationMemory();
+  }
+  if (checkpoint_geometry) {
+    size_t checkpoints = 0;
+    for (PatchMatchCuda* p : views) {
+      THROW_CHECK(!p->alternate_depth_map_ && !p->alternate_normal_map_ &&
+                  !p->alternate_oct_normal_map_);
+      checkpoints += p->hmm_checkpoint_->GetCapacityBytes();
+    }
+    VLOG(2) << "B11_BANK references=" << views.size()
+            << " checkpoint-bytes=" << checkpoints
+            << " donor-bytes=" << first.hmm_checkpoint_->GetCapacityBytes()
+            << " alternate-owners=0\n";
   }
   const bool is_pair = views.size() == 2;
   if (is_pair) {
@@ -3589,22 +3686,37 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
       }
       for (PatchMatchCuda* p : views)
         if (p->cost_bits_) p->CheckCostMapDomain();
-      for (PatchMatchCuda* p : views) {
-        if (shared_geometry) {
-          p->alternate_depth_map_ = std::move(geometry_depth);
-          p->alternate_normal_map_ = std::move(geometry_normal);
-          p->alternate_oct_normal_map_ = std::move(geometry_oct_normal);
+      try {
+        for (PatchMatchCuda* p : views) {
+          if (shared_geometry) {
+            p->alternate_depth_map_ = std::move(geometry_depth);
+            p->alternate_normal_map_ = std::move(geometry_normal);
+            p->alternate_oct_normal_map_ = std::move(geometry_oct_normal);
+          }
+          if (checkpoint_geometry)
+            p->RotateWithBufferReuse(true, first.hmm_checkpoint_.get());
+          else
+            p->Rotate(shared_geometry);
+          if (shared_geometry) {
+            geometry_depth = std::move(p->alternate_depth_map_);
+            geometry_normal = std::move(p->alternate_normal_map_);
+            geometry_oct_normal = std::move(p->alternate_oct_normal_map_);
+          }
         }
-        p->Rotate(shared_geometry);
-        if (shared_geometry) {
-          geometry_depth = std::move(p->alternate_depth_map_);
-          geometry_normal = std::move(p->alternate_normal_map_);
-          geometry_oct_normal = std::move(p->alternate_oct_normal_map_);
-        }
-      }
-      for (PatchMatchCuda* p : views) rotate_last_mask(*p, last);
+        for (PatchMatchCuda* p : views) rotate_last_mask(*p, last);
 
-      CUDA_SYNC_AND_CHECK();
+        CUDA_SYNC_AND_CHECK();
+      } catch (...) {
+        // A batch transition is one execution unit. Even an owner whose copy
+        // completed cannot be rerun as a partially completed batch trajectory.
+        bool destructive_failure = checkpoint_geometry;
+        for (PatchMatchCuda* p : views)
+          destructive_failure =
+              destructive_failure || p->rotation_in_half_pi_ < 0;
+        if (destructive_failure)
+          for (PatchMatchCuda* p : views) p->PoisonGeometryState();
+        throw;
+      }
     }
   }
   if (shared_geometry) {
@@ -4020,7 +4132,7 @@ void PatchMatchCuda::InitTransforms() {
   }
 }
 
-void PatchMatchCuda::InitWorkspaceMemory() {
+void PatchMatchCuda::InitWorkspaceMemory(bool primary_geometry_scratch) {
   // Validate helper arithmetic and the original PRNG's int dimensions.
   THROW_CHECK_GT(ref_width_, 0);
   THROW_CHECK_GT(ref_height_, 0);
@@ -4098,8 +4210,11 @@ void PatchMatchCuda::InitWorkspaceMemory() {
     // U16 probability rotation bounds the scratch for every packed cost
     // format. Keep the float floor if either rotating owner is FP32.
     const size_t rotation_element_bytes =
-        options_.probability_unorm16 && cost_bits_ != 0 ? sizeof(uint16_t)
-                                                        : sizeof(float);
+        (options_.probability_unorm16 && cost_bits_ != 0 &&
+         !(primary_geometry_scratch && options_.normal_oct40 &&
+           options_.rotation_buffer_reuse))
+            ? sizeof(uint16_t)
+            : sizeof(float);
     hmm_checkpoint_ = std::make_unique<PatchMatchHmmCheckpoint>(
         ref_width_,
         ref_height_,
@@ -4166,7 +4281,11 @@ void PatchMatchCuda::InitAlternateOrientationMemory(
       geometry_donor->options_.normal_oct40 == options_.normal_oct40 &&
       geometry_donor->ref_width_ == ref_width_ &&
       geometry_donor->ref_height_ == ref_height_;
-  if (defer_geometry) {
+  if (defer_geometry && CanRotateGeometryThroughCheckpoint() &&
+      geometry_donor->CheckpointGeometryFits()) {
+    geometry_alternate_bound_ = 0;
+    geometry_peak_floor_ = active_geometry;
+  } else if (defer_geometry) {
     geometry_alternate_bound_ = geometry_donor->geometry_alternate_bound_;
     THROW_CHECK_LE(geometry_alternate_bound_,
                    std::numeric_limits<size_t>::max() - active_geometry);
@@ -4295,7 +4414,9 @@ void PatchMatchCuda::Rotate(bool pack_geometry) {
 #endif
 #ifndef COLMAP_HIP_ENABLED
   if (options_.rotation_buffer_reuse) {
-    RotateWithBufferReuse(pack_geometry);
+    RotateWithBufferReuse(
+        pack_geometry,
+        CheckpointGeometryFits() ? hmm_checkpoint_.get() : nullptr);
     return;
   }
 #endif
@@ -4367,69 +4488,110 @@ void PatchMatchCuda::Rotate(bool pack_geometry) {
 }
 
 #ifndef COLMAP_HIP_ENABLED
-void PatchMatchCuda::RotateWithBufferReuse(bool pack_geometry) {
+void PatchMatchCuda::RotateWithBufferReuse(
+    bool pack_geometry, PatchMatchHmmCheckpoint* checkpoint_scratch) {
   const auto old_depth = GeometryView(*depth_map_);
   const auto old_normal =
       normal_map_ ? GeometryView(*normal_map_) : GpuMatView<float>{};
-  dense_geometry_ = dense_geometry_ || pack_geometry;
-  rotation_in_half_pi_ = (rotation_in_half_pi_ + 1) % 4;
-  const size_t width = rotation_in_half_pi_ % 2 == 0 ? ref_width_ : ref_height_;
-  const size_t height =
-      rotation_in_half_pi_ % 2 == 0 ? ref_height_ : ref_width_;
-  if (dense_geometry_) {
-    const auto rotate = [this](const auto input, auto& output) {
-      const auto target = GeometryView(*output);
-      for (size_t slice = 0; slice < input.depth; ++slice)
-        CudaRotate(reinterpret_cast<float*>(reinterpret_cast<char*>(input.ptr) +
-                                            slice * input.pitch * input.height),
-                   target.ptr + slice * target.width * target.height,
-                   input.width,
-                   input.height,
-                   input.pitch,
-                   target.pitch);
+  if (checkpoint_scratch) {
+    THROW_CHECK(CanRotateGeometryThroughCheckpoint());
+    oct_normal_map_->CheckPlaneScratch(checkpoint_scratch->GetPtr(),
+                                       checkpoint_scratch->GetCapacityBytes());
+    const auto scratch =
+        reinterpret_cast<uintptr_t>(checkpoint_scratch->GetPtr());
+    const auto begin = reinterpret_cast<uintptr_t>(depth_map_->GetPtr());
+    const size_t bytes = depth_map_->GetPitch() * depth_map_->GetHeight();
+    THROW_CHECK_EQ(scratch % alignof(float), 0);
+    THROW_CHECK(scratch >= begin ? scratch - begin >= bytes
+                                 : begin - scratch >=
+                                       checkpoint_scratch->GetCapacityBytes());
+  }
+  try {
+    dense_geometry_ = dense_geometry_ || pack_geometry || checkpoint_scratch;
+    rotation_in_half_pi_ = (rotation_in_half_pi_ + 1) % 4;
+    const size_t width =
+        rotation_in_half_pi_ % 2 == 0 ? ref_width_ : ref_height_;
+    const size_t height =
+        rotation_in_half_pi_ % 2 == 0 ? ref_height_ : ref_width_;
+    if (checkpoint_scratch) {
+      const size_t scratch_pitch = 4 * ((width + 127) / 128 * 128);
+      CudaRotate(old_depth.ptr,
+                 checkpoint_scratch->GetPtr(),
+                 old_depth.width,
+                 old_depth.height,
+                 old_depth.pitch,
+                 scratch_pitch);
       CUDA_SYNC_AND_CHECK();
-    };
-    rotate(old_depth, alternate_depth_map_);
-    depth_map_.swap(alternate_depth_map_);
-    if (!oct_normal_map_) {
-      RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
-          old_normal);
-      rotate(old_normal, alternate_normal_map_);
-      normal_map_.swap(alternate_normal_map_);
+      CUDA_SAFE_CALL(cudaMemcpy2D(depth_map_->GetPtr(),
+                                  4 * width,
+                                  checkpoint_scratch->GetPtr(),
+                                  scratch_pitch,
+                                  4 * width,
+                                  height,
+                                  cudaMemcpyDeviceToDevice));
+      oct_normal_map_->RotateWithPlaneScratch(
+          checkpoint_scratch->GetPtr(), checkpoint_scratch->GetCapacityBytes());
+    } else {
+      if (dense_geometry_) {
+        const auto rotate = [this](const auto input, auto& output) {
+          const auto target = GeometryView(*output);
+          for (size_t slice = 0; slice < input.depth; ++slice)
+            CudaRotate(
+                reinterpret_cast<float*>(reinterpret_cast<char*>(input.ptr) +
+                                         slice * input.pitch * input.height),
+                target.ptr + slice * target.width * target.height,
+                input.width,
+                input.height,
+                input.pitch,
+                target.pitch);
+          CUDA_SYNC_AND_CHECK();
+        };
+        rotate(old_depth, alternate_depth_map_);
+        depth_map_.swap(alternate_depth_map_);
+        if (!oct_normal_map_) {
+          RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
+              old_normal);
+          rotate(old_normal, alternate_normal_map_);
+          normal_map_.swap(alternate_normal_map_);
+        }
+      } else {
+        THROW_CHECK_EQ(alternate_depth_map_->GetWidth(), width);
+        THROW_CHECK_EQ(alternate_depth_map_->GetHeight(), height);
+        depth_map_->Rotate(alternate_depth_map_.get());
+        depth_map_.swap(alternate_depth_map_);
+        if (!oct_normal_map_) {
+          RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
+              old_normal);
+          normal_map_->Rotate(alternate_normal_map_.get());
+          normal_map_.swap(alternate_normal_map_);
+        }
+      }
+      if (oct_normal_map_) {
+        oct_normal_map_->RotateTo(*alternate_oct_normal_map_);
+        oct_normal_map_.swap(alternate_oct_normal_map_);
+      }
     }
-  } else {
-    THROW_CHECK_EQ(alternate_depth_map_->GetWidth(), width);
-    THROW_CHECK_EQ(alternate_depth_map_->GetHeight(), height);
-    depth_map_->Rotate(alternate_depth_map_.get());
-    depth_map_.swap(alternate_depth_map_);
-    if (!oct_normal_map_) {
-      RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
-          old_normal);
-      normal_map_->Rotate(alternate_normal_map_.get());
-      normal_map_.swap(alternate_normal_map_);
+    ref_image_->Rotate(alternate_ref_image_.get());
+    if (ref_sum_image_) {
+      ref_sum_image_->Rotate(alternate_ref_sum_image_.get());
+      ref_squared_sum_image_->Rotate(alternate_ref_squared_sum_image_.get());
+      ref_sum_image_.swap(alternate_ref_sum_image_);
+      ref_squared_sum_image_.swap(alternate_ref_squared_sum_image_);
     }
-  }
-  if (oct_normal_map_) {
-    oct_normal_map_->RotateTo(*alternate_oct_normal_map_);
-    oct_normal_map_.swap(alternate_oct_normal_map_);
-  }
-  ref_image_->Rotate(alternate_ref_image_.get());
-  if (ref_sum_image_) {
-    ref_sum_image_->Rotate(alternate_ref_sum_image_.get());
-    ref_squared_sum_image_->Rotate(alternate_ref_squared_sum_image_.get());
-    ref_sum_image_.swap(alternate_ref_sum_image_);
-    ref_squared_sum_image_.swap(alternate_ref_squared_sum_image_);
-  }
-  ref_image_.swap(alternate_ref_image_);
-  ref_image_texture_.swap(alternate_ref_image_texture_);
-  std::swap(ref_image_array_, alternate_ref_image_array_);
-  BindRefImageTexture();
+    ref_image_.swap(alternate_ref_image_);
+    ref_image_texture_.swap(alternate_ref_image_texture_);
+    std::swap(ref_image_array_, alternate_ref_image_array_);
+    BindRefImageTexture();
 
-  RotateStateMaps(width, height);
-  if (options_.filter) {
-    consistency_mask_.swap(alternate_consistency_mask_);
+    RotateStateMaps(width, height);
+    if (options_.filter) {
+      consistency_mask_.swap(alternate_consistency_mask_);
+    }
+    ComputeCudaConfig();
+  } catch (...) {
+    if (checkpoint_scratch) PoisonGeometryState();
+    throw;
   }
-  ComputeCudaConfig();
 }
 #endif
 

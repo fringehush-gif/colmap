@@ -8,6 +8,8 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -147,6 +149,58 @@ bool SameCode(Encoded a, Encoded b) {
   return a.direction.x == b.direction.x && a.direction.y == b.direction.y &&
          a.magnitude == b.magnitude;
 }
+
+std::vector<Encoded> CopyNormalCodes(const OctNormalView& view) {
+  const size_t count = view.width * view.height;
+  std::vector<oct_revisit::Code> direction(count);
+  std::vector<uint8_t> magnitude(count);
+  CUDA_SAFE_CALL(cudaMemcpy2D(direction.data(),
+                              view.width * sizeof(oct_revisit::Code),
+                              view.direction,
+                              view.pixel_pitch * sizeof(oct_revisit::Code),
+                              view.width * sizeof(oct_revisit::Code),
+                              view.height,
+                              cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaMemcpy2D(magnitude.data(),
+                              view.width,
+                              view.magnitude,
+                              view.pixel_pitch,
+                              view.width,
+                              view.height,
+                              cudaMemcpyDeviceToHost));
+  std::vector<Encoded> codes(count);
+  for (size_t i = 0; i < count; ++i) codes[i] = {direction[i], magnitude[i]};
+  return codes;
+}
+
+std::vector<uint32_t> CopyNormalWords(const OctNormalMap& owner) {
+  const auto decoded = owner.CopyToMat();
+  std::vector<uint32_t> words(decoded.GetData().size());
+  static_assert(sizeof(float) == sizeof(uint32_t));
+  std::memcpy(words.data(), decoded.GetPtr(), words.size() * sizeof(uint32_t));
+  return words;
+}
+
+std::vector<float> ScratchNormals(size_t count) {
+  std::vector<float> xyz(3 * count);
+  for (size_t i = 0; i < count; ++i) {
+    const double z = -0.9 + 1.8 * (i + 0.5) / count;
+    const double angle = 2.39996322972865332 * i;
+    const double scale = i % 19 == 0 ? 0.0 : 1.0 + (int(i % 7) - 3) * 0x1p-20;
+    const double radius = scale * std::sqrt(1 - z * z);
+    xyz[i] = float(radius * std::cos(angle));
+    xyz[count + i] = float(radius * std::sin(angle));
+    xyz[2 * count + i] = float(scale * z);
+  }
+  return xyz;
+}
+
+size_t NormalPlaneScratchBytes(size_t width, size_t height) {
+  return sizeof(oct_revisit::Code) *
+         std::max((width + 127) / 128 * 128 * height,
+                  (height + 127) / 128 * 128 * width);
+}
+
 class OctNormalCodec : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -529,6 +583,98 @@ TEST_F(OctNormalCodec, FourFrameOwnerRotationAndWinnerCodeCarry) {
   CUDA_SAFE_CALL(cudaFree(changed));
   CUDA_SAFE_CALL(cudaFree(values));
   CUDA_SAFE_CALL(cudaFree(codes));
+}
+TEST_F(OctNormalCodec, PlaneScratchRotationMatchesOutOfPlace) {
+  for (const auto shape :
+       {std::pair<size_t, size_t>{1, 1}, {43, 55}, {129, 17}, {17, 129}}) {
+    const auto [width, height] = shape;
+    SCOPED_TRACE(::testing::Message() << width << "x" << height);
+    const auto xyz = ScratchNormals(width * height);
+    OctNormalMap candidate(width, height, true);
+    OctNormalMap first(width, height, true), second(height, width, true);
+    candidate.CopyFromCPU(xyz.data(), width * sizeof(float));
+    first.CopyFromCPU(xyz.data(), width * sizeof(float));
+    const size_t capacity = NormalPlaneScratchBytes(width, height);
+    constexpr size_t guard = 128;
+    GpuMat<uint8_t> scratch(capacity + 2 * guard, 1);
+    CUDA_SAFE_CALL(cudaMemset(scratch.GetPtr(), 0xa5, capacity + 2 * guard));
+    const auto* magnitude = candidate.View().magnitude;
+    auto* input = &first;
+    auto* output = &second;
+    for (unsigned turn = 1; turn <= 4; ++turn) {
+      SCOPED_TRACE(turn);
+      candidate.RotateWithPlaneScratch(scratch.GetPtr() + guard, capacity);
+      input->RotateTo(*output);
+      EXPECT_EQ(candidate.GetWidth(), output->GetWidth());
+      EXPECT_EQ(candidate.GetHeight(), output->GetHeight());
+      EXPECT_EQ(candidate.GetFrame(), turn % 4);
+      EXPECT_EQ(candidate.View().magnitude, magnitude);
+      const auto actual = CopyNormalCodes(candidate.View());
+      const auto expected = CopyNormalCodes(output->View());
+      ASSERT_EQ(actual.size(), expected.size());
+      EXPECT_TRUE(
+          std::equal(actual.begin(), actual.end(), expected.begin(), SameCode));
+      EXPECT_EQ(CopyNormalWords(candidate), CopyNormalWords(*output));
+      for (const size_t offset : {size_t{0}, guard + capacity}) {
+        std::vector<uint8_t> bytes(guard);
+        CUDA_SAFE_CALL(cudaMemcpy(bytes.data(),
+                                  scratch.GetPtr() + offset,
+                                  bytes.size(),
+                                  cudaMemcpyDeviceToHost));
+        EXPECT_EQ(bytes, std::vector<uint8_t>(guard, 0xa5));
+      }
+      std::swap(input, output);
+    }
+  }
+}
+
+TEST_F(OctNormalCodec, PlaneScratchRefusesBeforeMutation) {
+  constexpr size_t width = 129, height = 17;
+  OctNormalMap owner(width, height, true);
+  const size_t payload_bytes = owner.GetCapacityBytes() - sizeof(unsigned);
+  CUDA_SAFE_CALL(cudaMemset(owner.View().direction, 0xa5, payload_bytes));
+  const auto xyz = ScratchNormals(width * height);
+  owner.CopyFromCPU(xyz.data(), width * sizeof(float));
+  const size_t capacity = NormalPlaneScratchBytes(width, height);
+  GpuMat<uint8_t> scratch(capacity, 1);
+  CUDA_SAFE_CALL(cudaMemset(scratch.GetPtr(), 0xa5, capacity));
+  const auto before = CopyNormalWords(owner);
+  std::vector<uint8_t> payload(payload_bytes);
+  CUDA_SAFE_CALL(cudaMemcpy(payload.data(),
+                            owner.View().direction,
+                            payload_bytes,
+                            cudaMemcpyDeviceToHost));
+  const auto refuse = [&](void* pointer, size_t bytes, const char* reason) {
+    SCOPED_TRACE(reason);
+    try {
+      owner.RotateWithPlaneScratch(pointer, bytes);
+      ADD_FAILURE() << "Invalid scratch was accepted";
+    } catch (const std::invalid_argument& error) {
+      EXPECT_NE(std::string(error.what()).find(reason), std::string::npos);
+    }
+    EXPECT_EQ(owner.GetWidth(), width);
+    EXPECT_EQ(owner.GetHeight(), height);
+    EXPECT_EQ(owner.GetPixelPitch(), (width + 127) / 128 * 128);
+    EXPECT_EQ(owner.GetFrame(), 0u);
+    EXPECT_EQ(CopyNormalWords(owner), before);
+    std::vector<uint8_t> after(payload_bytes), scratch_after(capacity);
+    CUDA_SAFE_CALL(cudaMemcpy(after.data(),
+                              owner.View().direction,
+                              payload_bytes,
+                              cudaMemcpyDeviceToHost));
+    EXPECT_EQ(after, payload);
+    CUDA_SAFE_CALL(cudaMemcpy(scratch_after.data(),
+                              scratch.GetPtr(),
+                              capacity,
+                              cudaMemcpyDeviceToHost));
+    EXPECT_EQ(scratch_after, std::vector<uint8_t>(capacity, 0xa5));
+    EXPECT_NO_THROW(owner.CheckDomain());
+  };
+  const size_t required =
+      sizeof(oct_revisit::Code) * ((height + 127) / 128 * 128) * width;
+  refuse(scratch.GetPtr(), required - 1, "scratch_bytes >= required");
+  refuse(owner.View().direction, capacity, "disjoint");
+  refuse(owner.View().magnitude, capacity, "disjoint");
 }
 }  // namespace
 }  // namespace colmap::mvs

@@ -806,8 +806,11 @@ void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
     finish_first_native();
     return;
   }
-  auto second_cuda =
-      std::make_unique<PatchMatchCuda>(second.options, second.problem);
+  auto second_cuda = std::make_unique<PatchMatchCuda>(
+      second.options,
+      second.problem,
+      std::shared_ptr<const PatchMatchSparseSources>{},
+      first_cuda->CanShareGeometryRotation() ? first_cuda.get() : nullptr);
   CUDA_SYNC_AND_CHECK();
   size_t free_after_second = 0, total_after_second = 0;
   CUDA_SAFE_CALL(cudaMemGetInfo(&free_after_second, &total_after_second));
@@ -912,8 +915,12 @@ void PatchMatchController::ProcessProblemBatch(
               owned_peak <=
                   std::numeric_limits<size_t>::max() - kExternalMargin &&
               free_bytes >= owned_peak + kExternalMargin) {
-            owners[i + 1] =
-                CreateCudaOwner(input[i + 1]->options, input[i + 1]->problem);
+            owners[i + 1] = CreateCudaOwner(
+                input[i + 1]->options,
+                input[i + 1]->problem,
+                {},
+                owners[i]->CanShareGeometryRotation() ? owners[i].get()
+                                                      : nullptr);
             CUDA_SYNC_AND_CHECK();
           }
           if (owners[i + 1]) {

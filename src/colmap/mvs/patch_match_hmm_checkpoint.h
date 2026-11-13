@@ -19,17 +19,8 @@ class PatchMatchHmmCheckpoint {
                           size_t sources,
                           size_t rotation_element_bytes = sizeof(float))
       : original_width_(width), original_height_(height), sources_(sources) {
-    THROW_CHECK_GT(width, 0);
-    THROW_CHECK_GT(height, 0);
-    THROW_CHECK_LE(width, std::numeric_limits<int>::max());
-    THROW_CHECK_LE(height, std::numeric_limits<int>::max());
-    THROW_CHECK(rotation_element_bytes == sizeof(uint16_t) ||
-                rotation_element_bytes == sizeof(float));
     capacity_ =
-        std::max({WorkspaceBytes(width, height, sources),
-                  WorkspaceBytes(height, width, sources),
-                  Multiply(Pitch(width, rotation_element_bytes), height),
-                  Multiply(Pitch(height, rotation_element_bytes), width)});
+        RequiredCapacity(width, height, sources, rotation_element_bytes);
     CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_));
   }
   ~PatchMatchHmmCheckpoint() {
@@ -39,6 +30,22 @@ class PatchMatchHmmCheckpoint {
   }
   PatchMatchHmmCheckpoint(const PatchMatchHmmCheckpoint&) = delete;
   PatchMatchHmmCheckpoint& operator=(const PatchMatchHmmCheckpoint&) = delete;
+
+  static size_t RequiredCapacity(size_t width,
+                                 size_t height,
+                                 size_t sources,
+                                 size_t rotation_element_bytes) {
+    THROW_CHECK_GT(width, 0);
+    THROW_CHECK_GT(height, 0);
+    THROW_CHECK_LE(width, std::numeric_limits<int>::max());
+    THROW_CHECK_LE(height, std::numeric_limits<int>::max());
+    THROW_CHECK(rotation_element_bytes == sizeof(uint16_t) ||
+                rotation_element_bytes == sizeof(float));
+    return std::max({WorkspaceBytes(width, height, sources),
+                     WorkspaceBytes(height, width, sources),
+                     Multiply(Pitch(width, rotation_element_bytes), height),
+                     Multiply(Pitch(height, rotation_element_bytes), width)});
+  }
 
   float* GetPtr() const { return ptr_; }
   size_t GetCapacityBytes() const { return capacity_; }

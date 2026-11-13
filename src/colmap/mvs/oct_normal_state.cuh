@@ -281,6 +281,8 @@ class OctNormalMap {
   }
 
   void CheckDomain() const {
+    THROW_CHECK_LT(frame_, 4u)
+        << "Interrupted in-place normal rotation; reconstruct the owner";
     unsigned int failure = 0;
     CUDA_SAFE_CALL(
         cudaMemcpy(&failure, error_, sizeof(failure), cudaMemcpyDeviceToHost));
@@ -289,6 +291,8 @@ class OctNormalMap {
 
 #if defined(__CUDACC__)
   OctNormalView View() const {
+    THROW_CHECK_LT(frame_, 4u)
+        << "Interrupted in-place normal rotation; reconstruct the owner";
     return {static_cast<oct_revisit::Code*>(data_),
             static_cast<uint8_t*>(data_) + 4 * plane_pixels_,
             pixel_pitch_,
@@ -354,6 +358,78 @@ class OctNormalMap {
     CheckDomain();
     return result;
   }
+  // Private B11 primitive pilot. Caller owns a joined, disjoint dead span.
+  void CheckPlaneScratch(void* scratch, size_t scratch_bytes) const {
+    CheckDomain();
+    THROW_CHECK(scratch != nullptr);
+    THROW_CHECK(CanStore(height_, width_));
+    const size_t next_pitch = (height_ + 127) / 128 * 128;
+    const size_t required = 4 * next_pitch * width_;
+    THROW_CHECK_GE(scratch_bytes, required);
+    const auto pointer = reinterpret_cast<uintptr_t>(scratch);
+    THROW_CHECK_LE(scratch_bytes,
+                   std::numeric_limits<uintptr_t>::max() - pointer);
+    THROW_CHECK_EQ(pointer % alignof(oct_revisit::Code), 0);
+    const auto disjoint = [pointer, scratch_bytes](const void* data,
+                                                   size_t bytes) {
+      const auto begin = reinterpret_cast<uintptr_t>(data);
+      return pointer >= begin ? pointer - begin >= bytes
+                              : begin - pointer >= scratch_bytes;
+    };
+    THROW_CHECK(disjoint(data_, payload_bytes_));
+    THROW_CHECK(disjoint(error_, sizeof(unsigned int)));
+    int device = 0;
+    cudaDeviceProp properties;
+    CUDA_SAFE_CALL(cudaGetDevice(&device));
+    CUDA_SAFE_CALL(cudaGetDeviceProperties(&properties, device));
+    THROW_CHECK_LE((height_ + 31) / 32,
+                   static_cast<size_t>(properties.maxGridSize[1]));
+    THROW_CHECK_LE((width_ + 31) / 32,
+                   static_cast<size_t>(properties.maxGridSize[0]));
+  }
+  void RotateWithPlaneScratch(void* scratch, size_t scratch_bytes) {
+    CheckPlaneScratch(scratch, scratch_bytes);
+    const size_t next_pitch = (height_ + 127) / 128 * 128;
+    try {
+      CudaRotate(static_cast<const oct_revisit::Code*>(data_),
+                 static_cast<oct_revisit::Code*>(scratch),
+                 static_cast<int>(width_),
+                 static_cast<int>(height_),
+                 static_cast<int>(4 * pixel_pitch_),
+                 static_cast<int>(4 * next_pitch));
+      CUDA_SYNC_AND_CHECK();
+      CUDA_SAFE_CALL(cudaMemcpy2D(data_,
+                                  4 * next_pitch,
+                                  scratch,
+                                  4 * next_pitch,
+                                  4 * height_,
+                                  width_,
+                                  cudaMemcpyDeviceToDevice));
+      CudaRotate(static_cast<const uint8_t*>(data_) + 4 * plane_pixels_,
+                 static_cast<uint8_t*>(scratch),
+                 static_cast<int>(width_),
+                 static_cast<int>(height_),
+                 static_cast<int>(pixel_pitch_),
+                 static_cast<int>(next_pitch));
+      CUDA_SYNC_AND_CHECK();
+      CUDA_SAFE_CALL(
+          cudaMemcpy2D(static_cast<uint8_t*>(data_) + 4 * plane_pixels_,
+                       next_pitch,
+                       scratch,
+                       next_pitch,
+                       height_,
+                       width_,
+                       cudaMemcpyDeviceToDevice));
+      CUDA_SYNC_AND_CHECK();
+      std::swap(width_, height_);
+      pixel_pitch_ = next_pitch;
+      frame_ = (frame_ + 1) & 3u;
+    } catch (...) {
+      frame_ = 4u;
+      throw;
+    }
+  }
+
   void RotateTo(OctNormalMap& output) const {
     THROW_CHECK_NE(this, &output);
     CheckDomain();
