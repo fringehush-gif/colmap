@@ -7,6 +7,7 @@
 #include "colmap/math/math.h"
 #include "colmap/mvs/gpu_mat.h"
 #include "colmap/mvs/gpu_mat_prng.h"
+#include "colmap/mvs/patch_match_sampling.cuh"
 #include "colmap/mvs/patch_match_state_map.h"
 
 #include <array>
@@ -35,6 +36,44 @@ class CudaTest : public ::testing::Test {
 };
 
 }  // namespace
+
+namespace {
+__global__ void CheckSourceSampling(int* errors) {
+  int failures = 0;
+  for (int i = 0; i < 3; ++i) {
+    const int stride = i == 0 ? 1 : (i == 1 ? 8 : 32);
+    float probs[96] = {};
+    failures += TransformPDFToCDF(probs, 3, stride);
+    failures += SampleSource(probs, 3, stride, FLT_EPSILON / 2) != -1;
+    failures += SampleSource(probs, 3, stride, 1.0f) != -1;
+    probs[stride] = 1.0f;
+    probs[2 * stride] = 3.0f;
+    failures += !TransformPDFToCDF(probs, 3, stride);
+    failures +=
+        probs[0] != 0.0f || probs[stride] != 0.25f || probs[2 * stride] != 1.0f;
+    failures += SampleSource(probs, 3, stride, FLT_EPSILON / 2) != 1;
+    failures += SampleSource(probs, 3, stride, 0.5f) != 2;
+    failures += SampleSource(probs, 3, stride, 1.0f) != 2;
+  }
+  float invalid[2] = {-1.0f, 1.0f};
+  failures += !TransformPDFToCDF(invalid, 2, 1);
+  failures += SampleSource(invalid, 2, 1, 0.5f) != -1;
+  invalid[0] = __int_as_float(0x7fc00000);
+  invalid[1] = 0.0f;
+  failures += !TransformPDFToCDF(invalid, 2, 1);
+  failures += SampleSource(invalid, 2, 1, 0.5f) != -1;
+  *errors = failures;
+}
+}  // namespace
+
+TEST_F(CudaTest, DeviceSupportAndLowerEndpoint) {
+  GpuMat<int> errors(1, 1);
+  CheckSourceSampling<<<1, 1>>>(errors.GetPtr());
+  CUDA_SYNC_AND_CHECK();
+  int actual = -1;
+  errors.CopyToHost(&actual, sizeof(actual));
+  EXPECT_EQ(actual, 0);
+}
 
 TEST_F(CudaTest, FillWithVector) {
   GpuMat<float> array(100, 100, 2);

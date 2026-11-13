@@ -6,12 +6,20 @@
 #include "colmap/mvs/patch_match_hmm_checkpoint.h"
 #include "colmap/mvs/patch_match_io.h"
 #include "colmap/mvs/patch_match_rng_perimeter.h"
+#include "colmap/mvs/patch_match_sampling.cuh"
 #include "colmap/mvs/patch_match_source_array.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/cudacc.h"
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
+
+#include <array>
+#include <cfloat>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -20,18 +28,14 @@
 #include "colmap/mvs/patch_match_cuda.h"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iterator>
-#include <limits>
 #include <map>
 #include <memory>
 #include <new>
@@ -39,7 +43,6 @@
 #include <string>
 #include <tuple>
 #include <utility>
-#include <vector>
 
 #include <cuda.h>
 #include <cuda_runtime_api.h>
@@ -313,6 +316,114 @@ std::pair<std::vector<int>, std::vector<float>> ProbeSampledSources(
     bool cooperative);
 }  // namespace internal
 #endif
+TEST(PatchMatchCuda, SourceSamplingPreservesSupportAndStrides) {
+  for (const int stride : {1, 8, 32}) {
+    std::vector<float> probs(3 * stride, -7.0f);
+    probs[0] = probs[stride] = probs[2 * stride] = 0.0f;
+    EXPECT_FALSE(TransformPDFToCDF(probs.data(), 3, stride));
+    for (const float draw : {std::numeric_limits<float>::denorm_min(),
+                             FLT_EPSILON / 2,
+                             FLT_EPSILON,
+                             0.5f,
+                             1.0f}) {
+      EXPECT_EQ(SampleSource(probs.data(), 3, stride, draw), -1);
+    }
+    probs[stride] = 1.0f;
+    probs[2 * stride] = 3.0f;
+    EXPECT_TRUE(TransformPDFToCDF(probs.data(), 3, stride));
+    EXPECT_EQ(probs[0], 0.0f);
+    EXPECT_EQ(probs[stride], 0.25f);
+    EXPECT_EQ(probs[2 * stride], 1.0f);
+    EXPECT_EQ(SampleSource(probs.data(), 3, stride, FLT_EPSILON / 2), 1);
+    EXPECT_EQ(SampleSource(probs.data(), 3, stride, 0.5f), 2);
+    EXPECT_EQ(SampleSource(probs.data(), 3, stride, 1.0f), 2);
+    for (size_t i = 0; i < probs.size(); ++i) {
+      if (i % stride != 0) EXPECT_EQ(probs[i], -7.0f);
+    }
+  }
+  // Invalid distributions keep the old normalization/selection policy; they
+  // must not masquerade as validated all-zero support.
+  for (const auto pdf : {std::array<float, 2>{-1.0f, 1.0f},
+                         {std::numeric_limits<float>::quiet_NaN(), 0.0f},
+                         {std::numeric_limits<float>::infinity(), 0.0f}}) {
+    auto cdf = pdf;
+    EXPECT_TRUE(TransformPDFToCDF(cdf.data(), 2, 1));
+    EXPECT_EQ(SampleSource(cdf.data(), 2, 1, 0.5f), -1);
+  }
+}
+
+TEST(PatchMatchCuda, SourceSamplingDirectedBoundaries) {
+  EXPECT_FALSE(TransformPDFToCDF(nullptr, 0, 32));
+  EXPECT_EQ(SampleSource(nullptr, 0, 32, 1.0f), -1);
+  for (const int stride : {1, 8, 32}) {
+    std::vector<float> probs(5 * stride, -7.0f);
+    for (int i = 0; i < 5; ++i) probs[i * stride] = i % 2 ? -0.0f : 0.0f;
+    const auto zeros = probs;
+    EXPECT_FALSE(TransformPDFToCDF(probs.data(), 5, stride));
+    EXPECT_EQ(
+        std::memcmp(probs.data(), zeros.data(), probs.size() * sizeof(float)),
+        0);
+    probs[stride] = 1.0f;
+    probs[3 * stride] = 3.0f;
+    ASSERT_TRUE(TransformPDFToCDF(probs.data(), 5, stride));
+    EXPECT_EQ(probs[0], 0.0f);
+    EXPECT_EQ(probs[stride], 0.25f);
+    EXPECT_EQ(probs[2 * stride], 0.25f);
+    EXPECT_EQ(probs[3 * stride], 1.0f);
+    EXPECT_EQ(probs[4 * stride], 1.0f);
+    for (float u : {std::numeric_limits<float>::denorm_min(),
+                    FLT_EPSILON / 2,
+                    std::nextafter(FLT_EPSILON, 0.0f),
+                    FLT_EPSILON,
+                    std::nextafter(FLT_EPSILON, 1.0f)}) {
+      EXPECT_EQ(SampleSource(probs.data(), 5, stride, u), 1);
+    }
+    EXPECT_EQ(SampleSource(probs.data(), 5, stride, .25f + FLT_EPSILON), 3);
+    EXPECT_EQ(SampleSource(probs.data(), 5, stride, 1.0f), 3);
+    for (int j = 0; j < 257; ++j) {
+      const float u = float(j + 1) / 257.0f;
+      const float old_threshold = u - FLT_EPSILON;
+      int old_source = -1;
+      for (int i = 0; i < 5; ++i) {
+        if (probs[i * stride] > old_threshold) {
+          old_source = i;
+          break;
+        }
+      }
+      EXPECT_EQ(SampleSource(probs.data(), 5, stride, u), old_source);
+    }
+    for (size_t i = 0; i < probs.size(); ++i) {
+      if (i % stride != 0) EXPECT_EQ(probs[i], -7.0f);
+    }
+  }
+  // Retain legacy classification and selection; these are not valid CDFs.
+  float mixed[] = {-1.0f, 1.0f};
+  ASSERT_TRUE(TransformPDFToCDF(mixed, 2, 1));
+  EXPECT_TRUE(std::isinf(mixed[0]));
+  EXPECT_TRUE(std::signbit(mixed[0]));
+  EXPECT_TRUE(std::isnan(mixed[1]));
+  EXPECT_EQ(SampleSource(mixed, 2, 1, .5f), -1);
+  float reversed[] = {1.0f, -1.0f};
+  ASSERT_TRUE(TransformPDFToCDF(reversed, 2, 1));
+  EXPECT_TRUE(std::isinf(reversed[0]));
+  EXPECT_FALSE(std::signbit(reversed[0]));
+  EXPECT_TRUE(std::isnan(reversed[1]));
+  EXPECT_EQ(SampleSource(reversed, 2, 1, .5f), 0);
+  for (float first : {std::numeric_limits<float>::quiet_NaN(),
+                      std::numeric_limits<float>::infinity()}) {
+    float invalid[] = {first, 0.0f};
+    ASSERT_TRUE(TransformPDFToCDF(invalid, 2, 1));
+    EXPECT_TRUE(std::isnan(invalid[0]));
+    EXPECT_TRUE(std::isnan(invalid[1]));
+    EXPECT_EQ(SampleSource(invalid, 2, 1, .5f), -1);
+  }
+  float negative[] = {-1.0f, -3.0f};
+  ASSERT_TRUE(TransformPDFToCDF(negative, 2, 1));
+  EXPECT_EQ(negative[0], .25f);
+  EXPECT_EQ(negative[1], 1.0f);
+  EXPECT_EQ(SampleSource(negative, 2, 1, .5f), 1);
+}
+
 class PatchMatchControllerTestAccess {
  public:
   using Hooks = PatchMatchController::SparseTestHooks;
@@ -935,6 +1046,45 @@ class CudaTest : public ::testing::Test {
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
   }
 };
+
+TEST_F(CudaTest, EmptySamplingSupportRetainsInitializedParameters) {
+  Inputs inputs = MakeInputs(0);
+  for (auto& image : inputs.images) {
+    Bitmap bitmap(image.GetWidth(), image.GetHeight(), false);
+    // Match the zero texture border so edge windows also have zero variance.
+    bitmap.Fill(BitmapColor<uint8_t>(0));
+    image.SetBitmap(std::move(bitmap));
+  }
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  problem.src_image_idxs = {1, 2};
+  problem.images = &inputs.images;
+  problem.depth_maps = &inputs.depths;
+  problem.normal_maps = &inputs.normals;
+  for (const int radius : {2, 5}) {
+    for (const bool checkpoint : {false, true}) {
+      for (const bool reuse : {false, true}) {
+        SCOPED_TRACE(::testing::Message()
+                     << radius << " / checkpoint " << checkpoint << " / reuse "
+                     << reuse);
+        auto options = MakeOptions(false, false, reuse);
+        options.window_radius = radius;
+        options.checkpoint_hmm = checkpoint;
+        options.ncc_sigma = 1.0 / 16;
+        options.num_iterations = 1;
+        // Constant patches produce max NCC cost; its likelihood exp(-512)
+        // underflows to zero. No source can supply a candidate score.
+        PatchMatchCuda owner(options, problem);
+        const auto depth = owner.GetDepthMap();
+        const auto normal = owner.GetNormalMap();
+        ASSERT_GT(depth.GetData().front(), 0.0f);
+        owner.Run();
+        ExpectExactlyEqual(depth, owner.GetDepthMap());
+        ExpectExactlyEqual(normal, owner.GetNormalMap());
+      }
+    }
+  }
+}
 
 TEST_F(CudaTest, PropagationPreservesCompletePlaneAcrossSweepRotations) {
   std::array<float, 4> K{800, 640, 750, 480};
