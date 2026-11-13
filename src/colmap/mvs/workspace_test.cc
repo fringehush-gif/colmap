@@ -1812,7 +1812,7 @@ TEST(BoundedWorkspaceResident, CompactRgbAdmissionAndExactSamples) {
   ASSERT_TRUE(descriptor.HasBitmap(0));
   const int image = descriptor.GetModel().GetImageIdx(name);
 
-  for (const auto grid :
+  for (const auto& grid :
        {std::pair{10, 5}, {7, 3}, {1, 1}, {10, 1}, {1, 5}, {9, 4}}) {
     Mat<float> depth(grid.first, grid.second, 1);
     depth.Fill(2.0f);

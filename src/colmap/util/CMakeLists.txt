@@ -135,6 +135,10 @@ if(TESTS_ENABLED)
         PRIVATE_LINK_LIBS
             colmap_math
     )
+    if(COVERAGE_ENABLED)
+        # Sibling-directory tests also consume these instrumented libraries.
+        target_link_options(colmap_gtest_main INTERFACE -coverage)
+    endif()
     if(NOT BUILD_SHARED_LIBS)
         # With static builds, colmap_gtest_main provides gmock/gtest symbols
         # to test executables.  Use GTest::gmock (not GTest::gmock_main) to

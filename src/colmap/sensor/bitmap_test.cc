@@ -635,7 +635,7 @@ TEST(Bitmap, RescaleOnlyOneAxisChanges) {
   for (const bool as_rgb : {false, true}) {
     for (const auto filter :
          {Bitmap::RescaleFilter::kBilinear, Bitmap::RescaleFilter::kBox}) {
-      for (const auto dimensions : {std::pair{9, 5}, std::pair{7, 3}}) {
+      for (const auto& dimensions : {std::pair{9, 5}, std::pair{7, 3}}) {
         Bitmap bitmap(7, 5, as_rgb);
         auto& pixels = bitmap.RowMajorData();
         for (size_t idx = 0; idx < pixels.size(); ++idx) {

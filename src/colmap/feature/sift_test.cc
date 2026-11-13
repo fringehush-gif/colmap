@@ -250,7 +250,8 @@ TEST(SiftCPUConvolution, MatchesScalarReferenceAcrossLayouts) {
 }
 
 TEST(SiftCPUGradientStorage, RejectsSingletonAxisOctaves) {
-  for (const auto shape : {std::pair{1, 1}, std::pair{8, 1}, std::pair{1, 8}}) {
+  for (const auto& shape :
+       {std::pair{1, 1}, std::pair{8, 1}, std::pair{1, 8}}) {
     for (const int levels : {1, 3}) {
       SCOPED_TRACE(::testing::Message() << shape.first << "x" << shape.second
                                         << " levels=" << levels);
