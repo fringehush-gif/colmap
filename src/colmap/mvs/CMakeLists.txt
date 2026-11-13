@@ -137,6 +137,7 @@ if(CUDA_ENABLED)
             oct_precise.cuh
             patch_match_hmm_checkpoint.h
             patch_match_rng_perimeter.h
+            patch_match_sampling.cuh
             packed_consistency_mask.h
         PUBLIC_LINK_LIBS
             colmap_mvs
@@ -415,6 +416,7 @@ if(HIP_ENABLED)
             unorm16.h
             patch_match_hmm_checkpoint.h
             patch_match_rng_perimeter.h
+            patch_match_sampling.cuh
             packed_consistency_mask.h
         PUBLIC_LINK_LIBS
             colmap_mvs

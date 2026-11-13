@@ -9,7 +9,10 @@
 #include "colmap/mvs/gpu_mat_prng.h"
 #include "colmap/mvs/packed_ncc_cost_map.h"
 #include "colmap/mvs/patch_match_hmm_checkpoint.h"
+#include "colmap/mvs/patch_match_probability_unorm16.h"
+#include "colmap/mvs/patch_match_sampling.cuh"
 #include "colmap/mvs/patch_match_state_map.h"
+#include "colmap/util/cuda.h"
 
 #include <algorithm>
 #include <array>
@@ -24,6 +27,47 @@
 
 namespace colmap {
 namespace mvs {
+
+namespace {
+__global__ void CheckSourceSampling(int* errors) {
+  int failures = 0;
+  for (int i = 0; i < 3; ++i) {
+    const int stride = i == 0 ? 1 : (i == 1 ? 8 : 32);
+    float probs[96] = {};
+    failures += TransformPDFToCDF(probs, 3, stride);
+    failures += SampleSource(probs, 3, stride, FLT_EPSILON / 2) != -1;
+    failures += SampleSource(probs, 3, stride, 1.0f) != -1;
+    probs[stride] = 1.0f;
+    probs[2 * stride] = 3.0f;
+    failures += !TransformPDFToCDF(probs, 3, stride);
+    failures +=
+        probs[0] != 0.0f || probs[stride] != 0.25f || probs[2 * stride] != 1.0f;
+    failures += SampleSource(probs, 3, stride, FLT_EPSILON / 2) != 1;
+    failures += SampleSource(probs, 3, stride, 0.5f) != 2;
+    failures += SampleSource(probs, 3, stride, 1.0f) != 2;
+  }
+  float invalid[2] = {-1.0f, 1.0f};
+  failures += !TransformPDFToCDF(invalid, 2, 1);
+  failures += SampleSource(invalid, 2, 1, 0.5f) != -1;
+  invalid[0] = __int_as_float(0x7fc00000);
+  invalid[1] = 0.0f;
+  failures += !TransformPDFToCDF(invalid, 2, 1);
+  failures += SampleSource(invalid, 2, 1, 0.5f) != -1;
+  *errors = failures;
+}
+}  // namespace
+
+TEST(PatchMatchSampling, DeviceSupportAndLowerEndpoint) {
+  if (GetNumCudaDevices() == 0) {
+    GTEST_SKIP() << "No CUDA or HIP device available";
+  }
+  GpuMat<int> errors(1, 1);
+  CheckSourceSampling<<<1, 1>>>(errors.GetPtr());
+  CUDA_SYNC_AND_CHECK();
+  int actual = -1;
+  errors.CopyToHost(&actual, sizeof(actual));
+  EXPECT_EQ(actual, 0);
+}
 
 TEST(GpuMat, FillWithVector) {
   GpuMat<float> array(100, 100, 2);
@@ -422,9 +466,48 @@ TEST(PackedNccCostMap, RejectsEachInvalidDomain) {
   }
 }
 
+TEST(PatchMatchProbabilityUnorm16, RotatesWithCompactHmmScratch) {
+  constexpr size_t width = 385, height = 513, sources = 3;
+  PatchMatchProbabilityUnorm16 map(width, height, sources);
+  map.FillWithScalar(0.5f);
+  std::vector<uint16_t> codes(width * height * sources);
+  for (size_t i = 0; i < codes.size(); ++i)
+    codes[i] = static_cast<uint16_t>(i % 65536);
+  const auto view = map.View();
+  CUDA_SAFE_CALL(cudaMemcpy2D(view.ptr,
+                              view.pitch,
+                              codes.data(),
+                              width * sizeof(uint16_t),
+                              width * sizeof(uint16_t),
+                              height * sources,
+                              cudaMemcpyHostToDevice));
+  std::vector<float> expected = map.CopyToMat().GetData();
+  PatchMatchHmmCheckpoint compact(width, height, sources, sizeof(uint16_t));
+  PatchMatchHmmCheckpoint full(width, height, sources);
+  ASSERT_LT(compact.GetCapacityBytes(), full.GetCapacityBytes());
+  size_t w = width, h = height;
+  for (int turn = 0; turn < 4; ++turn) {
+    std::vector<float> rotated(expected.size());
+    for (size_t source = 0; source < sources; ++source)
+      for (size_t row = 0; row < h; ++row)
+        for (size_t col = 0; col < w; ++col)
+          rotated[(source * w + (w - 1 - col)) * h + row] =
+              expected[(source * h + row) * w + col];
+    map.RotateWithPlaneScratch(compact.GetPtr(), compact.GetCapacityBytes());
+    std::swap(w, h);
+    expected.swap(rotated);
+    EXPECT_EQ(map.GetWidth(), w);
+    EXPECT_EQ(map.GetHeight(), h);
+    ASSERT_EQ(map.CopyToMat().GetData(), expected);
+  }
+}
+
 TEST(PackedNccCostMap, RotatesOddPlanesWithBoundedScratch) {
-  for (const auto [width, height] :
-       {std::pair<size_t, size_t>{7, 5}, {257, 3}, {3, 257}}) {
+  for (const auto [width, height] : {std::pair<size_t, size_t>{7, 5},
+                                     {257, 3},
+                                     {3, 257},
+                                     {385, 513},
+                                     {513, 385}}) {
     for (const size_t kSources : {size_t{1}, size_t{2}, size_t{3}}) {
       PackedNccCostMap map(width, height, kSources);
       const size_t capacity = map.GetCapacityBytes();
@@ -439,8 +522,13 @@ TEST(PackedNccCostMap, RotatesOddPlanesWithBoundedScratch) {
                                   width * sizeof(uint16_t),
                                   height * kSources,
                                   cudaMemcpyHostToDevice));
-      PatchMatchHmmCheckpoint scratch(width, height, kSources);
+      PatchMatchHmmCheckpoint scratch(
+          width, height, kSources, sizeof(uint16_t));
       const size_t scratch_bytes = scratch.GetCapacityBytes();
+      if ((width == 385 && height == 513) || (width == 513 && height == 385)) {
+        PatchMatchHmmCheckpoint full(width, height, kSources);
+        EXPECT_LT(scratch_bytes, full.GetCapacityBytes());
+      }
       const size_t next_plane =
           ((height * sizeof(uint16_t) + 511) / 512 * 512) * width;
       EXPECT_ANY_THROW(
@@ -600,8 +688,12 @@ TEST(Fixed24NccCostMap, RejectsEachInvalidDomain) {
 }
 
 TEST(Fixed24NccCostMap, RotatesOddPlanesWithBoundedScratch) {
-  for (const auto [width, height] :
-       {std::pair<size_t, size_t>{1, 1}, {7, 5}, {257, 3}, {513, 257}}) {
+  for (const auto [width, height] : {std::pair<size_t, size_t>{1, 1},
+                                     {7, 5},
+                                     {257, 3},
+                                     {513, 257},
+                                     {385, 513},
+                                     {513, 385}}) {
     for (const size_t kSources : {size_t{1}, size_t{2}, size_t{3}}) {
       Fixed24NccCostMap map(width, height, kSources);
       const size_t capacity = map.GetCapacityBytes();
@@ -633,8 +725,13 @@ TEST(Fixed24NccCostMap, RotatesOddPlanesWithBoundedScratch) {
       PatchMatchStateMap original_float(width, height, kSources);
       EXPECT_EQ((capacity - sizeof(uint32_t)) * 4,
                 original_float.GetCapacityBytes() * 3);
-      PatchMatchHmmCheckpoint scratch(width, height, kSources);
+      PatchMatchHmmCheckpoint scratch(
+          width, height, kSources, sizeof(uint16_t));
       const size_t scratch_bytes = scratch.GetCapacityBytes();
+      if ((width == 385 && height == 513) || (width == 513 && height == 385)) {
+        PatchMatchHmmCheckpoint full(width, height, kSources);
+        EXPECT_LT(scratch_bytes, full.GetCapacityBytes());
+      }
       const size_t next_plane = 2 * ((height + 127) / 128 * 128) * width;
       EXPECT_ANY_THROW(
           map.RotateWithPlaneScratch(scratch.GetPtr(), next_plane - 1));
@@ -816,7 +913,11 @@ TEST(NccFixed20, ColumnOwnershipAndRotation) {
     unsigned* expected_device = expected_owner.GetPtr();
     Check(cudaMemset(bad, 0, 4));
     // Qualify the real retained scratch provider, including thin dimensions.
-    colmap::mvs::PatchMatchHmmCheckpoint hmm(w, h, s);
+    colmap::mvs::PatchMatchHmmCheckpoint hmm(w, h, s, sizeof(uint16_t));
+    if ((w == 385 && h == 513) || (w == 513 && h == 385)) {
+      colmap::mvs::PatchMatchHmmCheckpoint full(w, h, s);
+      EXPECT_LT(hmm.GetCapacityBytes(), full.GetCapacityBytes());
+    }
     void* scratch = hmm.GetPtr();
     const size_t scratch_bytes = hmm.GetCapacityBytes();
     Need(scratch_bytes >= 2 * cap / s, "actual HMM scratch reserve");

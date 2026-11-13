@@ -13,6 +13,7 @@
 #include "colmap/mvs/packed_ncc_cost_map.h"
 #include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/mvs/patch_match_rng_perimeter.h"
+#include "colmap/mvs/patch_match_sampling.cuh"
 #include "colmap/mvs/patch_match_source_array.h"
 #ifndef COLMAP_HIP_ENABLED
 #include "colmap/mvs/oct_normal_state.cuh"
@@ -752,23 +753,6 @@ __device__ inline int FindMinCost(const float costs[kNumCosts]) {
   return min_cost_idx;
 }
 
-__device__ inline void TransformPDFToCDF(float* probs,
-                                         const int num_probs,
-                                         const int source_stride) {
-  float prob_sum = 0.0f;
-  for (int i = 0; i < num_probs; ++i) {
-    prob_sum += probs[i * source_stride];
-  }
-  const float inv_prob_sum = 1.0f / prob_sum;
-
-  float cum_prob = 0.0f;
-  for (int i = 0; i < num_probs; ++i) {
-    const float prob = probs[i * source_stride] * inv_prob_sum;
-    cum_prob += prob;
-    probs[i * source_stride] = cum_prob;
-  }
-}
-
 class LikelihoodComputer {
  public:
   __device__ LikelihoodComputer(const float ncc_sigma,
@@ -1393,6 +1377,7 @@ __global__ void SweepFromTopToBottom(
     float costs[kNumCosts] = {0};
     float depths[kNumCosts] = {0};
     const float* normals[kNumCosts] = {nullptr};
+    bool empty_sampling_support = false;
     if (owner && col < cost_map.GetWidth()) {
       pcc_computer.row = row;
       if constexpr (kWindowSize == 11 && kWindowStep == 1) {
@@ -1525,11 +1510,13 @@ __global__ void SweepFromTopToBottom(
     }
     if (owner && col < cost_map.GetWidth()) {
       if (use_shared_sampling) {
-        TransformPDFToCDF(&shared_sampling_probs[0][threadIdx.x],
-                          cost_map.GetDepth(),
-                          kBlockWidth);
+        empty_sampling_support =
+            !TransformPDFToCDF(&shared_sampling_probs[0][threadIdx.x],
+                               cost_map.GetDepth(),
+                               kBlockWidth);
       } else {
-        TransformPDFToCDF(sampling_probs, cost_map.GetDepth(), source_stride);
+        empty_sampling_support = !TransformPDFToCDF(
+            sampling_probs, cost_map.GetDepth(), source_stride);
       }
 
       // Compute matching cost using Monte Carlo sampling of source images.
@@ -1590,18 +1577,12 @@ __global__ void SweepFromTopToBottom(
           pcc_computer.src_image_idx = -1;
           if (slot < sample_count) {
             // Draw only actual samples, in the original RNG order.
-            const float rand_prob = curand_uniform(&rand_state) - FLT_EPSILON;
-            for (int image_idx = 0; image_idx < cost_map.GetDepth();
-                 ++image_idx) {
-              const float prob =
-                  use_shared_sampling
-                      ? shared_sampling_probs[image_idx][threadIdx.x]
-                      : sampling_probs[image_idx * source_stride];
-              if (prob > rand_prob) {
-                pcc_computer.src_image_idx = image_idx;
-                break;
-              }
-            }
+            pcc_computer.src_image_idx = SampleSource(
+                use_shared_sampling ? &shared_sampling_probs[0][threadIdx.x]
+                                    : sampling_probs,
+                cost_map.GetDepth(),
+                use_shared_sampling ? kBlockWidth : source_stride,
+                curand_uniform(&rand_state));
           }
           if constexpr (kCooperative) {
             if constexpr (kSampleWindowSize > 1) {
@@ -1792,7 +1773,9 @@ __global__ void SweepFromTopToBottom(
     const float* best_normal = nullptr;
     if (owner && col < cost_map.GetWidth()) {
       // Find the parameters of the minimum cost.
-      min_cost_idx = FindMinCost<kNumCosts>(costs);
+      // All-zero sampling support supplies no evidence for a new hypothesis.
+      // Preserve the existing policy for other degenerate distributions.
+      min_cost_idx = empty_sampling_support ? 0 : FindMinCost<kNumCosts>(costs);
       best_depth = depths[min_cost_idx];
       best_normal = normals[min_cost_idx];
 
@@ -4112,8 +4095,16 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   // However, it is useful to keep the probabilities for the entire image
   // in memory, so that it can be exported.
   if (options_.checkpoint_hmm) {
+    // U16 probability rotation bounds the scratch for every packed cost
+    // format. Keep the float floor if either rotating owner is FP32.
+    const size_t rotation_element_bytes =
+        options_.probability_unorm16 && cost_bits_ != 0 ? sizeof(uint16_t)
+                                                        : sizeof(float);
     hmm_checkpoint_ = std::make_unique<PatchMatchHmmCheckpoint>(
-        ref_width_, ref_height_, problem_.src_image_idxs.size());
+        ref_width_,
+        ref_height_,
+        problem_.src_image_idxs.size(),
+        rotation_element_bytes);
   } else {
     sel_prob_map_ = std::make_unique<PatchMatchStateMap>(
         ref_width_, ref_height_, problem_.src_image_idxs.size());

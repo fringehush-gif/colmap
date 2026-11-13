@@ -71,9 +71,7 @@ struct OctNormalView {
     direction[index] = code.direction;
     magnitude[index] = code.magnitude;
   }
-  __device__ void DecodeCode(oct_magnitude::Encoded code, float* normal) const {
-    float3 value;
-    if (!oct_magnitude::Decode(code, value)) Signal(1u << 9);
+  __device__ void ApplyFrame(float3 value, float* normal) const {
     // Decode canonically first. Reordering decoder operations by rotating
     // oct coordinates would change the associated FP32 normal/cached cost.
     switch (frame & 3u) {
@@ -95,6 +93,11 @@ struct OctNormalView {
         break;
     }
     normal[2] = value.z;
+  }
+  __device__ void DecodeCode(oct_magnitude::Encoded code, float* normal) const {
+    float3 value;
+    if (!oct_magnitude::Decode(code, value)) Signal(1u << 9);
+    ApplyFrame(value, normal);
   }
   __device__ void GetSlice(size_t row, size_t col, float* normal) const {
     DecodeCode(ReadCode(row, col), normal);
@@ -127,13 +130,15 @@ struct OctNormalView {
     oct_magnitude::Encoded code;
     // This owner admits a two-step final norm
     // error. Keep the reusable codec's stricter default policy unchanged.
-    const auto status = oct_magnitude::Encode<2>(canonical, code, 0x1p-23f);
+    float3 prepared;
+    const auto status =
+        oct_magnitude::Encode<2>(canonical, code, 0x1p-23f, &prepared);
     if (status != oct_magnitude::Status::kOk &&
         status != oct_magnitude::Status::kZero)
       Signal(1u << static_cast<unsigned int>(status));
     // Failures leave canonical zero and set the sticky refusal. The host must
     // CheckDomain before consuming results; there is no silent FP32 fallback.
-    DecodeCode(code, normal);
+    ApplyFrame(prepared, normal);
     return code;
   }
   // Initialization only. A selected hypothesis must instead retain and store
@@ -393,7 +398,11 @@ class OctNormalMap {
 
  private:
   struct TransferDeleter {
-    void operator()(float* pointer) const noexcept { (void)cudaFree(pointer); }
+    void operator()(float* pointer) const noexcept {
+      const auto status = cudaFree(pointer);
+      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                             static_cast<int>(status));
+    }
   };
   using TransferBuffer = std::unique_ptr<float, TransferDeleter>;
   static TransferBuffer AllocateTransfer(size_t bytes) {

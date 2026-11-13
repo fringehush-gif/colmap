@@ -96,12 +96,13 @@ __device__ inline bool Decode(Encoded code, float3& out) {
 // Limit is caller policy, never silently widened on refusal. This is a
 // per-vector approximation; callers must not silently normalize on failure.
 template <int Radius = 2>
-__device__ inline Status Encode(
-    float3 source,
-    Encoded& out,
-    float norm_error_limit = kDefaultNormErrorLimit) {
+__device__ inline Status Encode(float3 source,
+                                Encoded& out,
+                                float norm_error_limit = kDefaultNormErrorLimit,
+                                float3* prepared = nullptr) {
   static_assert(Radius >= 0 && Radius <= 2, "bounded candidate search only");
   out = Invalid();
+  if (prepared) *prepared = make_float3(0, 0, 0);
   if (!isfinite(source.x) || !isfinite(source.y) || !isfinite(source.z))
     return Status::kNonfinite;
   if (IsZero(source)) return Status::kZero;
@@ -139,6 +140,7 @@ __device__ inline Status Encode(
       __fadd_rn(best_error, 2.0f * kEstimatorBudget) > norm_error_limit)
     return Status::kNoCertifiedCandidate;
   out = {direction, static_cast<uint8_t>(best_q + 127)};
+  if (prepared) *prepared = Correct(base, best_q);
   return Status::kOk;
 }
 

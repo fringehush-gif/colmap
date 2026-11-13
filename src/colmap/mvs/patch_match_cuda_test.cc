@@ -6,6 +6,7 @@
 #include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/patch_match_hmm_checkpoint.h"
 #include "colmap/mvs/patch_match_rng_perimeter.h"
+#include "colmap/mvs/patch_match_sampling.cuh"
 #include "colmap/mvs/patch_match_source_array.h"
 #include "colmap/util/cudacc.h"
 
@@ -133,10 +134,49 @@ TEST(PatchMatchCuda, CheckpointHmmRejectsInvalidAllocationShapes) {
   EXPECT_ANY_THROW(PatchMatchHmmCheckpoint::StripeRows(0));
   EXPECT_ANY_THROW(PatchMatchHmmCheckpoint(0, 1, 1));
   EXPECT_ANY_THROW(PatchMatchHmmCheckpoint(1, 0, 1));
+  for (const size_t element_bytes : {0, 1, 8}) {
+    EXPECT_ANY_THROW(PatchMatchHmmCheckpoint(1, 1, 1, element_bytes));
+  }
   EXPECT_ANY_THROW(PatchMatchHmmCheckpoint(
       std::size_t(std::numeric_limits<int>::max()) + 1, 1, 1));
   EXPECT_ANY_THROW(PatchMatchHmmCheckpoint(
       128, 128, std::numeric_limits<std::size_t>::max()));
+}
+
+TEST(PatchMatchCuda, SourceSamplingPreservesSupportAndStrides) {
+  for (const int stride : {1, 8, 32}) {
+    std::vector<float> probs(3 * stride, -7.0f);
+    probs[0] = probs[stride] = probs[2 * stride] = 0.0f;
+    EXPECT_FALSE(TransformPDFToCDF(probs.data(), 3, stride));
+    for (const float draw : {std::numeric_limits<float>::denorm_min(),
+                             FLT_EPSILON / 2,
+                             FLT_EPSILON,
+                             0.5f,
+                             1.0f}) {
+      EXPECT_EQ(SampleSource(probs.data(), 3, stride, draw), -1);
+    }
+    probs[stride] = 1.0f;
+    probs[2 * stride] = 3.0f;
+    EXPECT_TRUE(TransformPDFToCDF(probs.data(), 3, stride));
+    EXPECT_EQ(probs[0], 0.0f);
+    EXPECT_EQ(probs[stride], 0.25f);
+    EXPECT_EQ(probs[2 * stride], 1.0f);
+    EXPECT_EQ(SampleSource(probs.data(), 3, stride, FLT_EPSILON / 2), 1);
+    EXPECT_EQ(SampleSource(probs.data(), 3, stride, 0.5f), 2);
+    EXPECT_EQ(SampleSource(probs.data(), 3, stride, 1.0f), 2);
+    for (size_t i = 0; i < probs.size(); ++i) {
+      if (i % stride != 0) EXPECT_EQ(probs[i], -7.0f);
+    }
+  }
+  // Invalid distributions keep the old normalization/selection policy; they
+  // must not masquerade as validated all-zero support.
+  for (const auto pdf : {std::array<float, 2>{-1.0f, 1.0f},
+                         {std::numeric_limits<float>::quiet_NaN(), 0.0f},
+                         {std::numeric_limits<float>::infinity(), 0.0f}}) {
+    auto cdf = pdf;
+    EXPECT_TRUE(TransformPDFToCDF(cdf.data(), 2, 1));
+    EXPECT_EQ(SampleSource(cdf.data(), 2, 1, 0.5f), -1);
+  }
 }
 
 TEST(PatchMatchCuda, RngPerimeterLayoutPreservesRotatedRowZero) {
@@ -425,6 +465,81 @@ class CudaTest : public ::testing::Test {
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
   }
 };
+
+TEST_F(CudaTest, CompactCheckpointCapacityCoversBothOrientations) {
+  const auto pitch = [](size_t width, size_t bytes) {
+    return (width * bytes + 511) / 512 * 512;
+  };
+  for (const auto& [width, height, sources] :
+       {std::tuple<size_t, size_t, size_t>{1, 129, 1},
+        {129, 1, 1},
+        {47, 35, 20},
+        {1536, 1536, 20},
+        {3072, 3072, 20}}) {
+    SCOPED_TRACE(std::to_string(width) + "x" + std::to_string(height));
+    PatchMatchHmmCheckpoint full(width, height, sources);
+    PatchMatchHmmCheckpoint compact(width, height, sources, sizeof(uint16_t));
+    size_t expected = 0;
+    for (const auto& [w, h] : {std::pair{width, height}, {height, width}}) {
+      const size_t rows = PatchMatchHmmCheckpoint::StripeRows(h);
+      const size_t checkpoints = (h - 1) / rows + 1;
+      expected = std::max(
+          expected, pitch(w, sizeof(float)) * (rows + checkpoints) * sources);
+      expected = std::max(expected, pitch(w, sizeof(uint16_t)) * h);
+      const auto stripe = compact.Stripe(w, h);
+      const auto end = reinterpret_cast<const char*>(stripe.GetPtr()) +
+                       stripe.GetPitch() * stripe.GetHeight() * sources;
+      EXPECT_LE(end,
+                reinterpret_cast<const char*>(compact.GetPtr()) +
+                    compact.GetCapacityBytes());
+    }
+    EXPECT_EQ(compact.GetCapacityBytes(), expected);
+    EXPECT_LE(compact.GetCapacityBytes(), full.GetCapacityBytes());
+    if (width == 3072) {
+      EXPECT_EQ(full.GetCapacityBytes() - compact.GetCapacityBytes(),
+                size_t{10469376});
+    }
+  }
+}
+
+TEST_F(CudaTest, EmptySamplingSupportRetainsInitializedParameters) {
+  Inputs inputs = MakeInputs(0);
+  for (auto& image : inputs.images) {
+    Bitmap bitmap(image.GetWidth(), image.GetHeight(), false);
+    // Match the zero texture border so edge windows also have zero variance.
+    bitmap.Fill(BitmapColor<uint8_t>(0));
+    image.SetBitmap(std::move(bitmap));
+  }
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  problem.src_image_idxs = {1, 2};
+  problem.images = &inputs.images;
+  problem.depth_maps = &inputs.depths;
+  problem.normal_maps = &inputs.normals;
+  for (const int radius : {2, 5}) {
+    for (const bool checkpoint : {false, true}) {
+      for (const bool reuse : {false, true}) {
+        SCOPED_TRACE(::testing::Message()
+                     << radius << " / checkpoint " << checkpoint << " / reuse "
+                     << reuse);
+        auto options = MakeOptions(false, false, reuse);
+        options.window_radius = radius;
+        options.checkpoint_hmm = checkpoint;
+        options.ncc_sigma = 1.0 / 16;
+        options.num_iterations = 1;
+        // Constant patches produce max NCC cost; its likelihood exp(-512)
+        // underflows to zero. No source can supply a candidate score.
+        PatchMatchCuda owner(options, problem);
+        const auto depth = owner.GetDepthMap();
+        const auto normal = owner.GetNormalMap();
+        ASSERT_GT(depth.GetData().front(), 0.0f);
+        owner.Run();
+        ExpectExactlyEqual(depth, owner.GetDepthMap());
+        ExpectExactlyEqual(normal, owner.GetNormalMap());
+      }
+    }
+  }
+}
 
 TEST_F(CudaTest, NondefaultFilteredPhotoPreservesRotatedStatistics) {
   Inputs inputs = MakeInputs(0, 4, 77, 95);
@@ -941,6 +1056,28 @@ TEST_F(CudaTest, EveryPersistentOwnerReportsCleanupFailure) {
     ExpectOwnerReportsCleanup<Fixed20NccCostMap>("NCC20", ordinal, 7, 5, 2);
     ExpectOwnerReportsCleanup<Fixed24NccCostMap>("NCC24", ordinal, 7, 5, 2);
     ExpectOwnerReportsCleanup<OctNormalMap>("Oct40", ordinal, 7, 5);
+  }
+}
+
+TEST_F(CudaTest, OctNormalTransfersReportTemporaryCleanupFailure) {
+  const size_t width = 7, height = 5;
+  std::vector<float> normals(width * height * 3, 0.0f);
+  std::fill(normals.begin() + 2 * width * height, normals.end(), -1.0f);
+  OctNormalMap owner(width, height);
+  for (const bool upload : {true, false}) {
+    SCOPED_TRACE(upload);
+    CudaCleanupScope cleanup;
+    injected_free_errors = 0;
+    scoped_frees_until_refusal = 1;
+    if (upload) {
+      owner.CopyFromCPU(normals.data(), width * sizeof(float));
+    } else {
+      const auto result = owner.CopyToMat();
+      EXPECT_EQ(result.GetData(), normals);
+    }
+    EXPECT_EQ(scoped_frees_until_refusal, 0);
+    EXPECT_EQ(injected_free_errors, 1);
+    EXPECT_THROW(cleanup.Check(), std::runtime_error);
   }
 }
 
@@ -2090,6 +2227,8 @@ TEST_F(CudaTest, NccCostUnorm16UsesActualOwnerBytes) {
   const size_t height = inputs.images[0].GetHeight();
   PatchMatchStateMap float_cost(width, height, 4);
   PackedNccCostMap packed_cost(width, height, 4);
+  PatchMatchHmmCheckpoint full_hmm(width, height, 4);
+  PatchMatchHmmCheckpoint compact_hmm(width, height, 4, sizeof(uint16_t));
   ASSERT_GT(float_cost.GetCapacityBytes(), packed_cost.GetCapacityBytes());
   for (const bool probability_unorm16 : {false, true}) {
     auto options = MakeOptions(false, false, false);
@@ -2102,7 +2241,10 @@ TEST_F(CudaTest, NccCostUnorm16UsesActualOwnerBytes) {
     options.ncc_cost_unorm16 = true;
     PatchMatchCuda packed(options, problem);
     EXPECT_EQ(fp32.PairPeakBytes() - packed.PairPeakBytes(),
-              float_cost.GetCapacityBytes() - packed_cost.GetCapacityBytes());
+              float_cost.GetCapacityBytes() - packed_cost.GetCapacityBytes() +
+                  (probability_unorm16 ? full_hmm.GetCapacityBytes() -
+                                             compact_hmm.GetCapacityBytes()
+                                       : 0));
   }
 }
 
@@ -2202,6 +2344,8 @@ TEST_F(CudaTest, NccFixed24UsesActualOwnerBytes) {
   const size_t height = inputs.images[0].GetHeight();
   PatchMatchStateMap float_cost(width, height, 4);
   Fixed24NccCostMap packed_cost(width, height, 4);
+  PatchMatchHmmCheckpoint full_hmm(width, height, 4);
+  PatchMatchHmmCheckpoint compact_hmm(width, height, 4, sizeof(uint16_t));
   ASSERT_GT(float_cost.GetCapacityBytes(), packed_cost.GetCapacityBytes());
   for (const bool probability_unorm16 : {false, true}) {
     auto options = MakeOptions(false, false, false);
@@ -2214,7 +2358,10 @@ TEST_F(CudaTest, NccFixed24UsesActualOwnerBytes) {
     options.ncc_cost_fixed24 = true;
     PatchMatchCuda packed(options, problem);
     EXPECT_EQ(fp32.PairPeakBytes() - packed.PairPeakBytes(),
-              float_cost.GetCapacityBytes() - packed_cost.GetCapacityBytes());
+              float_cost.GetCapacityBytes() - packed_cost.GetCapacityBytes() +
+                  (probability_unorm16 ? full_hmm.GetCapacityBytes() -
+                                             compact_hmm.GetCapacityBytes()
+                                       : 0));
   }
 }
 
@@ -2296,6 +2443,8 @@ TEST_F(CudaTest, NccFixed20UsesActualOwnerBytes) {
   const size_t height = inputs.images[0].GetHeight();
   PatchMatchStateMap float_cost(width, height, 4);
   Fixed20NccCostMap packed_cost(width, height, 4);
+  PatchMatchHmmCheckpoint full_hmm(width, height, 4);
+  PatchMatchHmmCheckpoint compact_hmm(width, height, 4, sizeof(uint16_t));
   ASSERT_GT(float_cost.GetCapacityBytes(), packed_cost.GetCapacityBytes());
   for (const bool probability_unorm16 : {false, true}) {
     auto options = MakeOptions(false, false, false);
@@ -2308,7 +2457,10 @@ TEST_F(CudaTest, NccFixed20UsesActualOwnerBytes) {
     options.ncc_cost_fixed20 = true;
     PatchMatchCuda packed(options, problem);
     EXPECT_EQ(fp32.PairPeakBytes() - packed.PairPeakBytes(),
-              float_cost.GetCapacityBytes() - packed_cost.GetCapacityBytes());
+              float_cost.GetCapacityBytes() - packed_cost.GetCapacityBytes() +
+                  (probability_unorm16 ? full_hmm.GetCapacityBytes() -
+                                             compact_hmm.GetCapacityBytes()
+                                       : 0));
   }
 }
 

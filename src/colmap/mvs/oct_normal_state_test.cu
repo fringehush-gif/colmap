@@ -29,6 +29,74 @@ __global__ void Observe(const float3* input, Observation* output, size_t n) {
   result.decoded_ok = oct_magnitude::Decode(result.code, result.decoded);
   output[i] = result;
 }
+struct PreparedObservation {
+  Status status;
+  Status reference_status;
+  Encoded code;
+  Encoded reference_code;
+  unsigned prepared_bits[3];
+  unsigned decoded_bits[3];
+  unsigned owner_bits[3];
+  unsigned owner_decoded_bits[3];
+  Encoded owner_code;
+  Encoded owner_reference_code;
+  unsigned error;
+  unsigned expected_error;
+};
+__device__ void SaveBits(float3 value, unsigned* bits) {
+  bits[0] = __float_as_uint(value.x);
+  bits[1] = __float_as_uint(value.y);
+  bits[2] = __float_as_uint(value.z);
+}
+__global__ void ObservePrepared(const float3* input,
+                                PreparedObservation* output,
+                                unsigned* errors,
+                                size_t n) {
+  const size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n * 4) return;
+  const unsigned frame = i % 4;
+  const float3 value = input[i / 4];
+  PreparedObservation result{};
+  float3 prepared, decoded;
+  const float limit = i / 4 == n - 1 ? 0.0f : 0x1p-23f;
+  result.status =
+      oct_magnitude::Encode<2>(value, result.code, limit, &prepared);
+  result.reference_status =
+      oct_magnitude::Encode<2>(value, result.reference_code, limit);
+  oct_magnitude::Decode(result.reference_code, decoded);
+  SaveBits(prepared, result.prepared_bits);
+  SaveBits(decoded, result.decoded_bits);
+
+  OctNormalView view{nullptr, nullptr, 0, 0, 0, &errors[i], frame};
+  float normal[3] = {value.x, value.y, value.z};
+  result.owner_code = view.Canonicalize(normal);
+  SaveBits(make_float3(normal[0], normal[1], normal[2]), result.owner_bits);
+  float3 canonical;
+  switch (frame) {
+    case 0:
+      canonical = value;
+      break;
+    case 1:
+      canonical = make_float3(-value.y, value.x, value.z);
+      break;
+    case 2:
+      canonical = make_float3(-value.x, -value.y, value.z);
+      break;
+    default:
+      canonical = make_float3(value.y, -value.x, value.z);
+      break;
+  }
+  const Status status = oct_magnitude::Encode<2>(
+      canonical, result.owner_reference_code, 0x1p-23f);
+  view.DecodeCode(result.owner_reference_code, normal);
+  SaveBits(make_float3(normal[0], normal[1], normal[2]),
+           result.owner_decoded_bits);
+  result.error = errors[i];
+  result.expected_error = status == Status::kOk || status == Status::kZero
+                              ? 0u
+                              : 1u << static_cast<unsigned>(status);
+  output[i] = result;
+}
 __global__ void DecodeMalformed(bool* ok, float3* values) {
   Encoded c = oct_magnitude::Invalid();
   c.magnitude = 127;
@@ -135,6 +203,64 @@ TEST_F(OctNormalCodec, IndependentDoubleAngularAndNormOracle) {
                                     ax * bx + ay * by + az * bz);
     EXPECT_LE(angle, 0.00015);  // 16+16 oct direction bound, radians
     EXPECT_LE(std::abs(an - bn), std::ldexp(1.0, -23));
+  }
+}
+
+TEST_F(OctNormalCodec, PreparedNormalMatchesSelectedCodeInAllFrames) {
+  std::vector<float3> input;
+  for (int i = 0; i < 4096; ++i) {
+    const double z = 1.0 - 2.0 * (i + 0.5) / 4096.0;
+    const double phi = i * 2.39996322972865332;
+    const double r = std::sqrt(1.0 - z * z);
+    input.push_back(make_float3(
+        float(r * std::cos(phi)), float(r * std::sin(phi)), float(z)));
+  }
+  input.push_back(make_float3(0, 0, 0));
+  input.push_back(make_float3(2, 0, 0));
+  input.push_back(make_float3(std::numeric_limits<float>::infinity(), 0, 0));
+  input.push_back(make_float3(std::numeric_limits<float>::quiet_NaN(), 0, 0));
+  input.push_back(make_float3(1, 0, 0));  // Invalid certificate limit.
+  const size_t count = input.size() * 4;
+  float3* device_input = nullptr;
+  PreparedObservation* device_output = nullptr;
+  unsigned* errors = nullptr;
+  CUDA_SAFE_CALL(cudaMalloc(&device_input, input.size() * sizeof(float3)));
+  CUDA_SAFE_CALL(
+      cudaMalloc(&device_output, count * sizeof(PreparedObservation)));
+  CUDA_SAFE_CALL(cudaMalloc(&errors, count * sizeof(unsigned)));
+  CUDA_SAFE_CALL(cudaMemset(errors, 0, count * sizeof(unsigned)));
+  CUDA_SAFE_CALL(cudaMemcpy(device_input,
+                            input.data(),
+                            input.size() * sizeof(float3),
+                            cudaMemcpyHostToDevice));
+  ObservePrepared<<<(count + 127) / 128, 128>>>(
+      device_input, device_output, errors, input.size());
+  CUDA_SYNC_AND_CHECK();
+  std::vector<PreparedObservation> output(count);
+  CUDA_SAFE_CALL(cudaMemcpy(output.data(),
+                            device_output,
+                            count * sizeof(PreparedObservation),
+                            cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaFree(errors));
+  CUDA_SAFE_CALL(cudaFree(device_output));
+  CUDA_SAFE_CALL(cudaFree(device_input));
+  EXPECT_EQ(output[0].status, Status::kOk);
+  EXPECT_EQ(output[4096 * 4].status, Status::kZero);
+  EXPECT_EQ(output[4097 * 4].status, Status::kOutOfEnvelope);
+  EXPECT_EQ(output[4098 * 4].status, Status::kNonfinite);
+  EXPECT_EQ(output[(input.size() - 1) * 4].status,
+            Status::kNoCertifiedCandidate);
+  for (size_t i = 0; i < count; ++i) {
+    SCOPED_TRACE(i);
+    const auto& got = output[i];
+    EXPECT_EQ(got.status, got.reference_status);
+    EXPECT_TRUE(SameCode(got.code, got.reference_code));
+    EXPECT_TRUE(SameCode(got.owner_code, got.owner_reference_code));
+    EXPECT_EQ(got.error, got.expected_error);
+    for (int axis = 0; axis < 3; ++axis) {
+      EXPECT_EQ(got.prepared_bits[axis], got.decoded_bits[axis]);
+      EXPECT_EQ(got.owner_bits[axis], got.owner_decoded_bits[axis]);
+    }
   }
 }
 
