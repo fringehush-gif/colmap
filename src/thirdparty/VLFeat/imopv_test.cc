@@ -3,6 +3,7 @@
 #include "thirdparty/VLFeat/imopv.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <type_traits>
 #include <utility>
@@ -39,11 +40,13 @@ void Convolve(T* dst, size_t dst_stride, const T* src, int width, int height,
 template <typename T>
 void ReferenceConvolve(T* dst, int dst_stride, const T* src, int width,
                        int height, int src_stride, const T* filter, int begin,
-                       int end, int step, unsigned int flags) {
+                       int end, int step, unsigned int flags,
+                       bool reverse_taps = false) {
   for (int x = 0; x < width; ++x) {
     for (int y = 0, output_y = 0; y < height; y += step, ++output_y) {
       T sum = 0;
-      for (int tap = end; tap >= begin; --tap) {
+      for (int i = 0; i <= end - begin; ++i) {
+        const int tap = reverse_taps ? begin + i : end - i;
         const int row = y - tap;
         const bool outside = row < 0 || row >= height;
         const T value = outside && (flags & VL_PAD_MASK) == VL_PAD_BY_ZERO
@@ -148,12 +151,22 @@ void CheckRounding() {
       constexpr int height = 33;
       std::vector<T> input(width * height);
       for (size_t i = 0; i < input.size(); ++i) {
-        input[i] = T(i % 17) / T(7) + (i % 3 == 0 ? T(1e6) : T(-1e6));
+        // Power-of-two inputs make each product exact, isolating sum order
+        // from multiply-add contraction without changing the filter.
+        input[i] = std::ldexp((i % 3 == 0) ? T(1) : T(-1),
+                              6 * static_cast<int>(i % 7) - 18);
       }
       const T filter[] = {T(0.1), T(-0.7), T(1.3), T(0.9), T(-0.1)};
       std::vector<T> actual(input.size()), expected(input.size());
+      std::vector<T> reverse_expected(input.size());
       ReferenceConvolve(expected.data(), width, input.data(), width, height,
                         width, filter, -2, 2, 1, VL_PAD_BY_CONTINUITY);
+      ReferenceConvolve(reverse_expected.data(), width, input.data(), width,
+                        height, width, filter, -2, 2, 1,
+                        VL_PAD_BY_CONTINUITY, true);
+      ASSERT_NE(std::memcmp(expected.data(), reverse_expected.data(),
+                            expected.size() * sizeof(T)), 0)
+          << "element bytes=" << sizeof(T) << " simd=" << simd << " width=" << width;
       Convolve(actual.data(), width, input.data(), width, height, width,
                filter, -2, 2, 1, VL_PAD_BY_CONTINUITY);
       EXPECT_EQ(std::memcmp(actual.data(), expected.data(),
