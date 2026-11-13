@@ -394,11 +394,21 @@ FeatureMatcherController::FeatureMatcherController(
     }
 #endif
     matchers_.reserve(gpu_indices.size() * num_workers_per_gpu);
+    FlatHashMap<int, std::shared_ptr<SharedFeatureMatcher>> shared_matchers;
     for (const auto& gpu_index : gpu_indices) {
       worker_matching_options.gpu_index = std::to_string(gpu_index);
       std::shared_ptr<SharedFeatureMatcher> shared_matcher;
-      if (num_workers_per_gpu > 1) {
-        shared_matcher = std::make_shared<SharedFeatureMatcher>();
+      bool is_shared_creator = true;
+      if (matching_options_.type == FeatureMatcherType::FLEXGLUE) {
+        // ONNX maps negative indices to device 0. Share models, cached
+        // features and the inference limit without dropping any workers.
+        const int device = std::max(0, gpu_index);
+        auto [it, inserted] = shared_matchers.try_emplace(device);
+        if (inserted) {
+          it->second = std::make_shared<SharedFeatureMatcher>();
+        }
+        shared_matcher = it->second;
+        is_shared_creator = inserted;
       }
       for (int w = 0; w < num_workers_per_gpu; ++w) {
         matchers_.emplace_back(std::make_unique<FeatureMatcherWorker>(
@@ -408,7 +418,7 @@ FeatureMatcherController::FeatureMatcherController(
             &matcher_queue_,
             matcher_output_queue,
             shared_matcher,
-            /*is_shared_creator=*/w == 0));
+            /*is_shared_creator=*/is_shared_creator && w == 0));
       }
     }
   } else {
