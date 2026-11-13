@@ -3,6 +3,7 @@
 #include "colmap/scene/visibility_pyramid.h"
 
 #include <algorithm>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -76,6 +77,38 @@ TEST(VisibilityPyramid, ClampOutsideImage) {
     pyramid.ResetPoint(point.x(), point.y());
     EXPECT_EQ(pyramid.Score(), score);
     pyramid.ResetPoint(x, y);
+    EXPECT_EQ(pyramid.Score(), 0);
+  }
+}
+
+TEST(VisibilityPyramid, IgnoreNonfiniteCoordinates) {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  const std::vector<Eigen::Vector2d> invalid = {
+      {nan, 200}, {inf, 200}, {-inf, 200}, {320, nan}, {320, inf}, {320, -inf}};
+  for (const auto& point : invalid) {
+    VisibilityPyramid pyramid(6, 640, 480);
+    pyramid.SetPoint(point.x(), point.y());
+    EXPECT_EQ(pyramid.Score(), 0);
+    pyramid.SetPoint(point.x(), point.y());
+    EXPECT_EQ(pyramid.Score(), 0);
+    pyramid.ResetPoint(point.x(), point.y());
+    EXPECT_EQ(pyramid.Score(), 0);
+    pyramid.ResetPoint(point.x(), point.y());
+    EXPECT_EQ(pyramid.Score(), 0);
+
+    pyramid.SetPoint(320, 200);
+    const size_t finite_score = pyramid.Score();
+    ASSERT_GT(finite_score, 0);
+    pyramid.SetPoint(point.x(), point.y());
+    EXPECT_EQ(pyramid.Score(), finite_score);
+    pyramid.SetPoint(point.x(), point.y());
+    EXPECT_EQ(pyramid.Score(), finite_score);
+    pyramid.ResetPoint(point.x(), point.y());
+    EXPECT_EQ(pyramid.Score(), finite_score);
+    pyramid.ResetPoint(point.x(), point.y());
+    EXPECT_EQ(pyramid.Score(), finite_score);
+    pyramid.ResetPoint(320, 200);
     EXPECT_EQ(pyramid.Score(), 0);
   }
 }

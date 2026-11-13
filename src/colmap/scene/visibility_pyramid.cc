@@ -5,6 +5,7 @@
 #include "colmap/util/logging.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace colmap {
 
@@ -28,7 +29,9 @@ void VisibilityPyramid::SetPoint(const double x, const double y) {
 
   size_t cx = 0;
   size_t cy = 0;
-  CellForPoint(x, y, &cx, &cy);
+  if (!CellForPoint(x, y, &cx, &cy)) {
+    return;
+  }
 
   for (int i = static_cast<int>(pyramid_.size() - 1); i >= 0; --i) {
     auto& level = pyramid_[i];
@@ -50,7 +53,9 @@ void VisibilityPyramid::ResetPoint(const double x, const double y) {
 
   size_t cx = 0;
   size_t cy = 0;
-  CellForPoint(x, y, &cx, &cy);
+  if (!CellForPoint(x, y, &cx, &cy)) {
+    return;
+  }
 
   for (int i = static_cast<int>(pyramid_.size() - 1); i >= 0; --i) {
     auto& level = pyramid_[i];
@@ -67,15 +72,19 @@ void VisibilityPyramid::ResetPoint(const double x, const double y) {
   THROW_CHECK_LE(score_, max_score_);
 }
 
-void VisibilityPyramid::CellForPoint(const double x,
+bool VisibilityPyramid::CellForPoint(const double x,
                                      const double y,
                                      size_t* cx,
                                      size_t* cy) const {
   THROW_CHECK_GT(width_, 0);
   THROW_CHECK_GT(height_, 0);
+  if (!std::isfinite(x) || !std::isfinite(y)) {
+    return false;
+  }
   const int max_dim = 1 << pyramid_.size();
   *cx = std::clamp<double>(max_dim * x / width_, 0, max_dim - 1);
   *cy = std::clamp<double>(max_dim * y / height_, 0, max_dim - 1);
+  return true;
 }
 
 }  // namespace colmap
