@@ -30,7 +30,8 @@ struct FeatureMatcherControllerTestPeer {
     bool creator;
   };
 
-  static std::vector<Worker> Workers(const FeatureMatcherController& controller) {
+  static std::vector<Worker> Workers(
+      const FeatureMatcherController& controller) {
     std::vector<Worker> workers;
     workers.reserve(controller.matchers_.size());
     for (const auto& worker : controller.matchers_) {
@@ -208,7 +209,8 @@ TEST(FeatureMatcherController, FlexGlueSharesRepeatedDeviceGroups) {
       TwoViewGeometryOptions geometry_options;
       // Construction groups workers without opening models or starting GPUs.
       FeatureMatcherController controller(options, geometry_options, nullptr);
-      const auto workers = FeatureMatcherControllerTestPeer::Workers(controller);
+      const auto workers =
+          FeatureMatcherControllerTestPeer::Workers(controller);
       const auto requested_devices = CSVToVector<int>(gpu_indices);
       int workers_per_entry = 1;
 #ifdef COLMAP_CUDA_ENABLED
@@ -221,8 +223,8 @@ TEST(FeatureMatcherController, FlexGlueSharesRepeatedDeviceGroups) {
         EXPECT_NE(workers[i].group, nullptr);
         bool first = true;
         for (size_t j = 0; j < i; ++j) {
-          const bool same_device = devices[i / workers_per_entry] ==
-                                   devices[j / workers_per_entry];
+          const bool same_device =
+              devices[i / workers_per_entry] == devices[j / workers_per_entry];
           EXPECT_EQ(workers[i].group == workers[j].group, same_device);
           first = first && !same_device;
         }
