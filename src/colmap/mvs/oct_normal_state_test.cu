@@ -5,10 +5,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <gtest/gtest.h>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <vector>
+
+#include <gtest/gtest.h>
 
 namespace colmap::mvs {
 namespace {
@@ -323,6 +325,105 @@ TEST_F(OctNormalCodec, RefusalAndSentinels) {
     CUDA_SYNC_AND_CHECK();
     EXPECT_ANY_THROW(map.CheckDomain());
     EXPECT_ANY_THROW(map.CopyToMat());
+  }
+}
+
+__global__ void EncodeTransferReference(OctNormalView view,
+                                        const float3* input,
+                                        Encoded* codes,
+                                        float3* values,
+                                        size_t count) {
+  const size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= count) return;
+  float normal[3] = {input[i].x, input[i].y, input[i].z};
+  codes[i] = view.Canonicalize(normal);
+  values[i] = make_float3(normal[0], normal[1], normal[2]);
+}
+
+TEST_F(OctNormalCodec, PaddedChunkedTransferMatchesDirectOwner) {
+  constexpr size_t width = 1025, height = 343, pitch = width + 7;
+  constexpr size_t count = width * height;
+  const size_t rows = OctNormalMap::TransferRows(width, height);
+  ASSERT_LT(rows, height);
+  ASSERT_NE(height % rows, 0);
+  std::vector<float> padded(3 * pitch * height, -17.0f);
+  std::vector<float3> input(count);
+  const float3 directions[] = {make_float3(1, 0, 0),
+                               make_float3(0, -1, 0),
+                               make_float3(0, 0, 1),
+                               make_float3(-1, 0, 0),
+                               make_float3(0.6f, 0.8f, 0)};
+  for (size_t i = 0; i < count; ++i) {
+    const float3 n = directions[(i + i / width) % 5];
+    input[i] = n;
+    const size_t row = i / width, col = i % width;
+    padded[row * pitch + col] = n.x;
+    padded[(height + row) * pitch + col] = n.y;
+    padded[(2 * height + row) * pitch + col] = n.z;
+  }
+  OctNormalMap map(width, height);
+  map.CopyFromCPU(padded.data(), pitch * sizeof(float));
+  float3 *device_input = nullptr, *device_values = nullptr;
+  Encoded* device_codes = nullptr;
+  unsigned* changed = nullptr;
+  CUDA_SAFE_CALL(cudaMalloc(&device_input, count * sizeof(float3)));
+  CUDA_SAFE_CALL(cudaMalloc(&device_values, count * sizeof(float3)));
+  CUDA_SAFE_CALL(cudaMalloc(&device_codes, count * sizeof(Encoded)));
+  CUDA_SAFE_CALL(cudaMalloc(&changed, sizeof(unsigned)));
+  CUDA_SAFE_CALL(cudaMemset(changed, 0, sizeof(unsigned)));
+  CUDA_SAFE_CALL(cudaMemcpy(device_input,
+                            input.data(),
+                            count * sizeof(float3),
+                            cudaMemcpyHostToDevice));
+  const unsigned blocks = static_cast<unsigned>((count + 127) / 128);
+  EncodeTransferReference<<<blocks, 128>>>(
+      map.View(), device_input, device_codes, device_values, count);
+  CUDA_SYNC_AND_CHECK();
+  std::vector<Encoded> expected_codes(count), actual_codes(count);
+  std::vector<float3> expected(count), actual(count);
+  CUDA_SAFE_CALL(cudaMemcpy(expected_codes.data(),
+                            device_codes,
+                            count * sizeof(Encoded),
+                            cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaMemcpy(expected.data(),
+                            device_values,
+                            count * sizeof(float3),
+                            cudaMemcpyDeviceToHost));
+  ReadAndCarry<<<blocks, 128>>>(
+      map.View(), device_codes, device_values, changed);
+  CUDA_SYNC_AND_CHECK();
+  CUDA_SAFE_CALL(cudaMemcpy(actual_codes.data(),
+                            device_codes,
+                            count * sizeof(Encoded),
+                            cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaMemcpy(actual.data(),
+                            device_values,
+                            count * sizeof(float3),
+                            cudaMemcpyDeviceToHost));
+  unsigned changed_count = 0;
+  CUDA_SAFE_CALL(cudaMemcpy(
+      &changed_count, changed, sizeof(changed_count), cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaFree(changed));
+  CUDA_SAFE_CALL(cudaFree(device_codes));
+  CUDA_SAFE_CALL(cudaFree(device_values));
+  CUDA_SAFE_CALL(cudaFree(device_input));
+  map.CheckDomain();
+  EXPECT_EQ(changed_count, 0u);
+  const auto transferred = map.CopyToMat();
+  const auto same_bits = [](float a, float b) {
+    return std::memcmp(&a, &b, sizeof(float)) == 0;
+  };
+  for (size_t i = 0; i < count; ++i) {
+    if (!SameCode(actual_codes[i], expected_codes[i]) ||
+        !same_bits(actual[i].x, expected[i].x) ||
+        !same_bits(actual[i].y, expected[i].y) ||
+        !same_bits(actual[i].z, expected[i].z) ||
+        !same_bits(transferred.GetPtr()[i], expected[i].x) ||
+        !same_bits(transferred.GetPtr()[count + i], expected[i].y) ||
+        !same_bits(transferred.GetPtr()[2 * count + i], expected[i].z)) {
+      ADD_FAILURE() << "Transfer differs from direct owner at pixel " << i;
+      break;
+    }
   }
 }
 

@@ -311,17 +311,15 @@ class OctNormalMap {
       const size_t rows = std::min(capacity_rows, height_ - offset);
       const GpuMatView<float> tile{
           temporary.get(), width_ * sizeof(float), width_, rows, 3};
-      for (size_t axis = 0; axis < 3; ++axis) {
-        const auto* source = reinterpret_cast<const char*>(data) +
-                             (axis * height_ + offset) * byte_pitch;
-        CUDA_SAFE_CALL(cudaMemcpy2D(temporary.get() + axis * rows * width_,
-                                    tile.pitch,
-                                    source,
-                                    byte_pitch,
-                                    tile.pitch,
-                                    rows,
-                                    cudaMemcpyHostToDevice));
-      }
+      cudaMemcpy3DParms copy = {};
+      copy.srcPtr = make_cudaPitchedPtr(
+          const_cast<float*>(data), byte_pitch, tile.pitch, height_);
+      copy.srcPos = make_cudaPos(0, offset, 0);
+      copy.dstPtr =
+          make_cudaPitchedPtr(temporary.get(), tile.pitch, tile.pitch, rows);
+      copy.extent = make_cudaExtent(tile.pitch, rows, 3);
+      copy.kind = cudaMemcpyHostToDevice;
+      CUDA_SAFE_CALL(cudaMemcpy3D(&copy));
       internal::OctNormalUpload<<<TransferBlocks(rows), 128>>>(
           tile, View(), offset);
       CUDA_SYNC_AND_CHECK();
@@ -343,16 +341,15 @@ class OctNormalMap {
       internal::OctNormalDownload<<<TransferBlocks(rows), 128>>>(
           View(), tile, offset);
       CUDA_SYNC_AND_CHECK();
-      for (size_t axis = 0; axis < 3; ++axis) {
-        float* target = result.GetPtr() + (axis * height_ + offset) * width_;
-        CUDA_SAFE_CALL(cudaMemcpy2D(target,
-                                    tile.pitch,
-                                    temporary.get() + axis * rows * width_,
-                                    tile.pitch,
-                                    tile.pitch,
-                                    rows,
-                                    cudaMemcpyDeviceToHost));
-      }
+      cudaMemcpy3DParms copy = {};
+      copy.srcPtr =
+          make_cudaPitchedPtr(temporary.get(), tile.pitch, tile.pitch, rows);
+      copy.dstPtr =
+          make_cudaPitchedPtr(result.GetPtr(), tile.pitch, tile.pitch, height_);
+      copy.dstPos = make_cudaPos(0, offset, 0);
+      copy.extent = make_cudaExtent(tile.pitch, rows, 3);
+      copy.kind = cudaMemcpyDeviceToHost;
+      CUDA_SAFE_CALL(cudaMemcpy3D(&copy));
     }
     CheckDomain();
     return result;
