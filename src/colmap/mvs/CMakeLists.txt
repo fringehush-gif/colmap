@@ -257,6 +257,10 @@ if(CUDA_ENABLED)
         )
     endif()
 
+    if(TESTS_ENABLED)
+        target_compile_definitions(colmap_mvs_cuda PRIVATE COLMAP_PATCH_MATCH_TESTING)
+    endif()
+
     COLMAP_ADD_TEST(
         NAME patch_match_cuda_test
         SRCS patch_match_cuda_test.cc patch_match_cuda_test.cu

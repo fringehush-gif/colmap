@@ -2263,5 +2263,57 @@ void PatchMatchCuda::Rotate() {
   ComputeCudaConfig();
 }
 
+#ifdef COLMAP_PATCH_MATCH_TESTING
+// Private bridge for the direct ownership regression. It seeds the existing
+// PRNG state and computes the same initial cost used by Run, before any sweep.
+namespace internal {
+namespace {
+__global__ void SeedOwnershipTest(GpuMatView<curandState> states,
+                                  const unsigned long long seed) {
+  const int col = blockIdx.x * blockDim.x + threadIdx.x;
+  const int row = blockIdx.y * blockDim.y + threadIdx.y;
+  if (col < states.GetWidth() && row < states.GetHeight()) {
+    curand_init(
+        seed, row * states.GetWidth() + col, 0, &states.GetRef(row, col));
+  }
+}
+}  // namespace
+
+struct PatchMatchCudaTestAccess {
+  static Mat<float> InitialCost(PatchMatchCuda& pm,
+                                const unsigned long long seed) {
+    const dim3 block(32, 16);
+    const dim3 grid((pm.ref_width_ + block.x - 1) / block.x,
+                    (pm.ref_height_ + block.y - 1) / block.y);
+    SeedOwnershipTest<<<grid, block>>>(pm.rand_state_map_->View(), seed);
+    pm.ComputeCudaConfig();
+    dim3 cost_grid = pm.sweep_grid_size_;
+    cost_grid.y = (pm.cost_map_->GetHeight() + kInitialCostStripeRows - 1) /
+                  kInitialCostStripeRows;
+    ComputeInitialCost<11, 1><<<cost_grid, pm.sweep_block_size_>>>(
+        MakeRefCamera(pm.ref_K_host_[0], pm.ref_inv_K_host_[0]),
+        pm.cost_map_->View(),
+        pm.depth_map_->View(),
+        pm.normal_map_->View(),
+        pm.ref_image_texture_->GetObj(),
+        pm.ref_image_->sum_image->View(),
+        pm.ref_image_->squared_sum_image->View(),
+        pm.src_images_texture_->GetObj(),
+        pm.poses_texture_[0]->GetObj(),
+        pm.options_.sigma_spatial,
+        pm.options_.sigma_color);
+    CUDA_SYNC_AND_CHECK();
+    return pm.cost_map_->CopyToMat();
+  }
+
+};
+
+Mat<float> ProbeOwnershipInitialCost(PatchMatchCuda& pm,
+                                     const unsigned long long seed) {
+  return PatchMatchCudaTestAccess::InitialCost(pm, seed);
+}
+}  // namespace internal
+#endif  // COLMAP_PATCH_MATCH_TESTING
+
 }  // namespace mvs
 }  // namespace colmap

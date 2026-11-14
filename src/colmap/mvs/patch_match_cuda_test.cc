@@ -27,6 +27,7 @@ float ProbePropagatedDepth(const std::array<float, 4>& K,
 std::pair<std::vector<int>, std::vector<float>> ProbeSampledSources(
     const std::vector<int>&, const std::vector<float>&, int, bool);
 int ProbeSamplingSupport();
+Mat<float> ProbeOwnershipInitialCost(PatchMatchCuda&, unsigned long long);
 }  // namespace internal
 namespace {
 constexpr float kDepthMin = 1.0f;
@@ -245,6 +246,57 @@ class CudaTest : public ::testing::Test {
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
   }
 };
+
+TEST_F(CudaTest, DirectInstancesOwnReferenceCalibration) {
+  auto a = MakeInputs(0);
+  auto b = MakeInputs(1);
+  ASSERT_NE(a.images[0].GetK()[0], b.images[0].GetK()[0]);
+  ASSERT_NE(a.images[0].GetK()[4], b.images[0].GetK()[4]);
+  auto options = MakeOptions(true, false, false);
+  options.window_radius = 5;
+  options.window_step = 1;
+  options.sigma_spatial = 5.0;
+  options.num_samples = 17;
+  auto make_problem = [](Inputs& inputs) {
+    PatchMatch::Problem problem;
+    problem.ref_image_idx = 0;
+    problem.src_image_idxs = {1, 2};
+    problem.images = &inputs.images;
+    problem.depth_maps = &inputs.depths;
+    problem.normal_maps = &inputs.normals;
+    return problem;
+  };
+  const auto problem_a = make_problem(a);
+  const auto problem_b = make_problem(b);
+  constexpr unsigned long long kSeed = 12345;
+
+  PatchMatchCuda isolated(options, problem_a);
+  const Mat<float> isolated_cost =
+      internal::ProbeOwnershipInitialCost(isolated, kSeed);
+  isolated.Run();
+  const auto isolated_depth = isolated.GetDepthMap();
+  const auto isolated_normal = isolated.GetNormalMap();
+  const auto isolated_selection = isolated.GetSelProbMap();
+
+  PatchMatchCuda interleaved(options, problem_a);
+  PatchMatchCuda other(options, problem_b);
+  const Mat<float> interleaved_cost =
+      internal::ProbeOwnershipInitialCost(interleaved, kSeed);
+  interleaved.Run();
+  ASSERT_GT(isolated_cost.GetData().size(), 0);
+  EXPECT_TRUE(std::any_of(
+      isolated_cost.GetData().begin(),
+      isolated_cost.GetData().end(),
+      [](float cost) { return std::isfinite(cost) && cost < 1.9f; }));
+  ExpectExactlyEqual(isolated_cost, interleaved_cost);
+  ExpectExactlyEqual(isolated_depth, interleaved.GetDepthMap());
+  ExpectExactlyEqual(isolated_normal, interleaved.GetNormalMap());
+  ExpectExactlyEqual(isolated_selection, interleaved.GetSelProbMap());
+  EXPECT_TRUE(std::any_of(
+      isolated_depth.GetData().begin(),
+      isolated_depth.GetData().end(),
+      [](float depth) { return std::isfinite(depth) && depth > 0; }));
+}
 
 TEST_F(CudaTest, SamplingSupportHelpersPreserveNativeDrawCount) {
   EXPECT_EQ(internal::ProbeSamplingSupport(), 0);
