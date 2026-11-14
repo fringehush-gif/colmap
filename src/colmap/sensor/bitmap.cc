@@ -40,7 +40,7 @@ constexpr uint64_t kMaxPixels = 64ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kMaxAxisEntries = 8ULL * 1024ULL * 1024ULL;
 struct Axis {
   int taps = 0;
-  std::vector<int> origin;
+  std::vector<int> index;
   std::vector<float> weight;
 };
 
@@ -61,7 +61,7 @@ bool MakeAxis(int source, int target, Axis* axis) {
     return false;
   Axis a;
   a.taps = 2 * radius + 1;
-  a.origin.resize(target);
+  a.index.resize(static_cast<size_t>(target) * a.taps);
   a.weight.resize(static_cast<size_t>(target) * a.taps);
   for (int dst = 0; dst < target; ++dst) {
     const float sample = (static_cast<float>(dst) + 0.5f) *
@@ -81,9 +81,10 @@ bool MakeAxis(int source, int target, Axis* axis) {
         last > std::numeric_limits<int>::max())
       return false;
     const float fraction = sample - static_cast<float>(center);
-    a.origin[dst] = center - radius;
     float sum = 0.0f;
     for (int tap = 0; tap < a.taps; ++tap) {
+      a.index[static_cast<size_t>(dst) * a.taps + tap] =
+          std::max(0, std::min(source - 1, center - radius + tap));
       const float offset =
           ratio * (static_cast<float>(tap - radius) - (fraction - 0.5f));
       const float scaled = offset * (2.0f / width);
@@ -97,7 +98,7 @@ bool MakeAxis(int source, int target, Axis* axis) {
     }
   }
   axis->taps = a.taps;
-  axis->origin.swap(a.origin);
+  axis->index.swap(a.index);
   axis->weight.swap(a.weight);
   return true;
 }
@@ -172,17 +173,19 @@ bool ResizeGrayTriangle(const uint8_t* src,
           for (int x = region.xbegin; x < region.xend; ++x) {
             const float* xw =
                 ax.weight.data() + static_cast<size_t>(x) * ax.taps;
+            const int* xi = ax.index.data() + static_cast<size_t>(x) * ax.taps;
             const float* yw =
                 ay.weight.data() + static_cast<size_t>(y) * ay.taps;
+            const int* yi = ay.index.data() + static_cast<size_t>(y) * ay.taps;
             float sum = 0.0f;
             for (int j = 0; j < ay.taps; ++j) {
               const float vy = yw[j];
               if (vy == 0.0f) continue;
-              const int sy = std::max(0, std::min(sh - 1, ay.origin[y] + j));
+              const int sy = yi[j];
               for (int i = 0; i < ax.taps; ++i) {
                 const float w = vy * xw[i];
                 if (w == 0.0f) continue;
-                const int sx = std::max(0, std::min(sw - 1, ax.origin[x] + i));
+                const int sx = xi[i];
                 sum += w * (static_cast<float>(
                                 src[static_cast<size_t>(sy) * sw + sx]) *
                             (1.0f / 255.0f));
