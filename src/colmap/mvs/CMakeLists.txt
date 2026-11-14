@@ -72,6 +72,10 @@ COLMAP_ADD_TEST(
     LINK_LIBS colmap_mvs
 )
 COLMAP_ADD_TEST(
+    NAME patch_match_sampling_test
+    SRCS patch_match_sampling_test.cc
+)
+COLMAP_ADD_TEST(
     NAME poisson_meshing_test
     SRCS poisson_meshing_test.cc
     LINK_LIBS colmap_mvs
