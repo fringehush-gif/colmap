@@ -3,6 +3,7 @@
 
 #include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/patch_match_cuda_test.h"
 #include "colmap/util/cuda.h"
 
 #include <algorithm>
@@ -296,6 +297,144 @@ TEST_F(CudaTest, DirectInstancesOwnReferenceCalibration) {
       isolated_depth.GetData().begin(),
       isolated_depth.GetData().end(),
       [](float depth) { return std::isfinite(depth) && depth > 0; }));
+}
+
+TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
+  constexpr int kWidth = 35;
+  constexpr int kHeight = 65;
+  constexpr int kSamples = 17;
+  constexpr unsigned long long kSeed = 9182;
+  static_assert(kWidth % 8 != 0 && kWidth % 32 != 0);
+
+  for (const int sources : {32, 33}) {
+    SCOPED_TRACE(sources);
+    auto inputs = MakeInputs(0, 2, kHeight, kWidth);
+    // Repeating a real overlapping source makes the high IDs eligible for
+    // sampling rather than placing later cameras outside the reference view.
+    const Image source_image = inputs.images[2];
+    const DepthMap source_depth = inputs.depths[2];
+    const NormalMap source_normal = inputs.normals[2];
+    inputs.images[1] = source_image;
+    inputs.depths[1] = source_depth;
+    inputs.normals[1] = source_normal;
+    while (inputs.images.size() < static_cast<size_t>(sources + 1)) {
+      inputs.images.push_back(source_image);
+      inputs.depths.push_back(source_depth);
+      inputs.normals.push_back(source_normal);
+    }
+    // Alternating non-ground-truth depths provide a useful propagation and
+    // perturbation challenge; the source geometry remains valid.
+    for (int row = 0; row < kHeight; ++row) {
+      for (int col = 0; col < kWidth; ++col) {
+        inputs.depths[0].Set(row, col, row % 2 == 0 ? 3.2f : 5.2f);
+      }
+    }
+    PatchMatch::Problem problem;
+    problem.ref_image_idx = 0;
+    for (int i = 1; i <= sources; ++i) problem.src_image_idxs.push_back(i);
+    problem.images = &inputs.images;
+    problem.depth_maps = &inputs.depths;
+    problem.normal_maps = &inputs.normals;
+    auto options = MakeOptions(true, false, false);
+    options.window_radius = 5;
+    options.window_step = 1;
+    options.sigma_spatial = 5.0;
+    options.num_samples = kSamples;
+
+    PatchMatchCuda scalar(options, problem);
+    PatchMatchCuda cooperative(options, problem);
+    const auto a = internal::ProbeSweep(scalar, false, kSeed);
+    const auto b = internal::ProbeSweep(cooperative, true, kSeed);
+    ASSERT_EQ(a.draws.GetWidth(), kWidth);
+    ASSERT_EQ(a.draws.GetHeight(), kHeight);
+    ASSERT_EQ(a.draws.GetDepth(), kSamples);
+    ASSERT_EQ(a.draws.GetData(), b.draws.GetData());
+    ASSERT_EQ(a.winners.GetData(), b.winners.GetData());
+    ASSERT_EQ(a.support.GetData(), b.support.GetData());
+    ExpectExactlyEqual(a.initial_cost, b.initial_cost);
+    ExpectExactlyEqual(a.hypotheses, b.hypotheses);
+    ExpectExactlyEqual(a.hypothesis_costs, b.hypothesis_costs);
+    ExpectExactlyEqual(a.forward, b.forward);
+    ExpectExactlyEqual(a.cost, b.cost);
+    ExpectExactlyEqual(a.depth, b.depth);
+    ExpectExactlyEqual(a.normal, b.normal);
+    ExpectExactlyEqual(a.selection, b.selection);
+    ASSERT_EQ(a.continuation.GetWidth(), kWidth);
+    ASSERT_EQ(a.continuation.GetDepth(), 3);
+    ASSERT_EQ(a.continuation.GetData(), b.continuation.GetData());
+    EXPECT_TRUE(std::any_of(a.continuation.GetData().begin(),
+                            a.continuation.GetData().end(),
+                            [](uint32_t draw) { return draw != 0; }));
+
+    int supported_pixels = 0;
+    int supported_rows = 0;
+    int duplicate_pixels = 0;
+    int high31 = 0;
+    int high32 = 0;
+    int strict_new_winners = 0;
+    for (int row = 0; row < kHeight; ++row) {
+      bool row_supported = false;
+      for (int col = 0; col < kWidth; ++col) {
+        const int supported = a.support.Get(row, col);
+        ASSERT_TRUE(supported == 0 || supported == 1);
+        supported_pixels += supported;
+        row_supported = row_supported || supported;
+        std::vector<bool> seen(sources, false);
+        bool duplicate = false;
+        for (int sample = 0; sample < kSamples; ++sample) {
+          const int source = a.draws.Get(row, col, sample);
+          ASSERT_GE(source, -1);
+          ASSERT_LT(source, sources);
+          if (source >= 0) {
+            ASSERT_EQ(supported, 1);
+            if (sample < 16) {
+              duplicate = duplicate || seen[source];
+              seen[source] = true;
+            }
+            high31 += source == 31;
+            high32 += source == 32;
+          }
+        }
+        duplicate_pixels += duplicate;
+        const int winner = a.winners.Get(row, col);
+        ASSERT_GE(winner, 0);
+        ASSERT_LT(winner, 5);
+        bool different = false;
+        for (int component = 0; component < 4; ++component) {
+          const float chosen =
+              a.hypotheses.Get(row, col, winner * 4 + component);
+          const float incumbent = a.hypotheses.Get(row, col, component);
+          different = different || chosen != incumbent;
+          const float published = component == 0
+                                      ? a.depth.Get(row, col)
+                                      : a.normal.Get(row, col, component - 1);
+          ASSERT_EQ(std::memcmp(&chosen, &published, sizeof(float)), 0);
+        }
+        if (supported && winner > 0 && different &&
+            a.hypothesis_costs.Get(row, col, winner) <
+                a.hypothesis_costs.Get(row, col, 0)) {
+          ++strict_new_winners;
+        }
+      }
+      supported_rows += row_supported;
+    }
+    EXPECT_GT(supported_pixels, 0);
+    EXPECT_GT(supported_rows, 1);
+    EXPECT_GT(duplicate_pixels, 0);
+    EXPECT_GT(high31, 0);
+    if (sources == 33) {
+      EXPECT_GT(high32, 0);
+    }
+    EXPECT_GT(strict_new_winners, 0);
+    RecordProperty("sources_" + std::to_string(sources) + "_supported_pixels",
+                   supported_pixels);
+    RecordProperty("sources_" + std::to_string(sources) + "_duplicate_pixels",
+                   duplicate_pixels);
+    RecordProperty("sources_" + std::to_string(sources) + "_draws_31", high31);
+    RecordProperty("sources_" + std::to_string(sources) + "_draws_32", high32);
+    RecordProperty("sources_" + std::to_string(sources) + "_strict_winners",
+                   strict_new_winners);
+  }
 }
 
 TEST_F(CudaTest, SamplingSupportHelpersPreserveNativeDrawCount) {

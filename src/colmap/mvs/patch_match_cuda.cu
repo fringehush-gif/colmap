@@ -12,6 +12,9 @@
 #include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/mvs/patch_match_geometry.cuh"
 #include "colmap/mvs/patch_match_sampling.cuh"
+#ifdef COLMAP_PATCH_MATCH_TESTING
+#include "colmap/mvs/patch_match_cuda_test.h"
+#endif
 #include "colmap/util/cuda.h"
 #include "colmap/util/cudacc.h"
 #include "colmap/util/logging.h"
@@ -965,13 +968,34 @@ struct CooperativeNccJob<true, kBlockWidth, kSampleWindowSize> {
   int best_idx[kBlockWidth];
 };
 
+#ifdef COLMAP_PATCH_MATCH_TESTING
+// Views are passed only in test builds; kTrace=false eliminates all writes.
+struct SweepTrace {
+  GpuMatView<int> draws;
+  GpuMatView<int> winners;
+  GpuMatView<int> support;
+  GpuMatView<float> hypotheses;
+  GpuMatView<float> costs;
+  GpuMatView<float> forward;
+};
+#define SWEEP_TRACE_ARGUMENT \
+  , SweepTrace {}
+#else
+#define SWEEP_TRACE_ARGUMENT
+#endif
+
 template <int kWindowSize,
           int kWindowStep,
           bool kGeomConsistencyTerm = false,
           bool kFilterPhotoConsistency = false,
           bool kFilterGeomConsistency = false,
           bool kCooperative = false,
-          int kBlockWidth = THREADS_PER_BLOCK>
+          int kBlockWidth = THREADS_PER_BLOCK
+#ifdef COLMAP_PATCH_MATCH_TESTING
+          ,
+          bool kTrace = false
+#endif
+          >
 __global__ void SweepFromTopToBottom(
     const RefCamera camera,
     GpuMatView<float> global_workspace,
@@ -988,7 +1012,12 @@ __global__ void SweepFromTopToBottom(
     const cudaTextureObject_t src_images_texture,
     const cudaTextureObject_t src_depth_maps_texture,
     const cudaTextureObject_t poses_texture,
-    const SweepOptions options) {
+    const SweepOptions options
+#ifdef COLMAP_PATCH_MATCH_TESTING
+    ,
+    SweepTrace trace
+#endif
+) {
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
   const bool owner = !kCooperative || threadIdx.y == 0;
   constexpr int kSampleBatchSize =
@@ -1010,6 +1039,7 @@ __global__ void SweepFromTopToBottom(
                                          options.min_triangulation_angle,
                                          options.incident_angle_sigma);
 
+  // The two logical M*S regions are packed; allocation pitch is not stride.
   const int source_stride = global_workspace.GetWidth();
   float* forward_message = nullptr;
   float* sampling_probs = nullptr;
@@ -1282,6 +1312,12 @@ __global__ void SweepFromTopToBottom(
             const float uniform = curand_uniform(&rand_state);
             pcc_computer.src_image_idx = SampleSource(
                 sampling_probs, cost_map.GetDepth(), source_stride, uniform);
+#ifdef COLMAP_PATCH_MATCH_TESTING
+            if constexpr (kTrace) {
+              trace.draws.Set(
+                  row, col, sample + slot, pcc_computer.src_image_idx);
+            }
+#endif
           }
           if constexpr (kCooperative) {
             if constexpr (kSampleWindowSize > 1) {
@@ -1436,6 +1472,19 @@ __global__ void SweepFromTopToBottom(
     if (owner && col < cost_map.GetWidth()) {
       // Find the parameters of the minimum cost.
       min_cost_idx = empty_sampling_support ? 0 : FindMinCost<kNumCosts>(costs);
+#ifdef COLMAP_PATCH_MATCH_TESTING
+      if constexpr (kTrace) {
+        trace.winners.Set(row, col, min_cost_idx);
+        trace.support.Set(row, col, !empty_sampling_support);
+        for (int i = 0; i < kNumCosts; ++i) {
+          trace.costs.Set(row, col, i, costs[i]);
+          trace.hypotheses.Set(row, col, 4 * i, depths[i]);
+          for (int axis = 0; axis < 3; ++axis) {
+            trace.hypotheses.Set(row, col, 4 * i + axis + 1, normals[i][axis]);
+          }
+        }
+      }
+#endif
       best_depth = depths[min_cost_idx];
       best_normal = normals[min_cost_idx];
 
@@ -1494,6 +1543,11 @@ __global__ void SweepFromTopToBottom(
             alpha, beta, prev_prob, options.prev_sel_prob_weight);
         source_forward_message[image_idx * source_stride] = alpha;
         sel_prob_map.Set(row, col, image_idx, prob);
+#ifdef COLMAP_PATCH_MATCH_TESTING
+        if constexpr (kTrace) {
+          trace.forward.Set(row, col, image_idx, alpha);
+        }
+#endif
       }
     }
     if constexpr (kCooperative) {
@@ -1801,7 +1855,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
               ? 0                                               \
               : src_depth_maps_texture_->GetObj(),              \
           poses_texture_[rotation_in_half_pi_]->GetObj(),       \
-          sweep_options);
+          sweep_options SWEEP_TRACE_ARGUMENT);
 
       if (last_sweep) {
         if (options_.filter) {
@@ -1872,6 +1926,8 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
   total_timer.Print("Total");
 }
+
+#undef SWEEP_TRACE_ARGUMENT
 
 void PatchMatchCuda::ComputeCudaConfig() {
   sweep_block_size_.x = THREADS_PER_BLOCK;
@@ -2171,6 +2227,8 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   cost_map_ = std::make_unique<GpuMat<float>>(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
 
+  // Two packed M*S regions fit in the pitched allocation; M is the logical
+  // source stride, independent of the allocated pitch.
   const int ref_max_dim = std::max(ref_width_, ref_height_);
   global_workspace_ = std::make_unique<GpuMat<float>>(
       ref_max_dim, problem_.src_image_idxs.size(), 2);
@@ -2277,6 +2335,14 @@ __global__ void SeedOwnershipTest(GpuMatView<curandState> states,
         seed, row * states.GetWidth() + col, 0, &states.GetRef(row, col));
   }
 }
+__global__ void SweepContinuation(GpuMatView<curandState> states,
+                                  GpuMatView<uint32_t> draws) {
+  const int col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (col < states.GetWidth()) {
+    curandState state = states.Get(0, col);
+    for (int i = 0; i < 3; ++i) draws.Set(0, col, i, curand(&state));
+  }
+}
 }  // namespace
 
 struct PatchMatchCudaTestAccess {
@@ -2306,7 +2372,95 @@ struct PatchMatchCudaTestAccess {
     return pm.cost_map_->CopyToMat();
   }
 
+  static SweepTraceResult Sweep(PatchMatchCuda& pm,
+                                const bool cooperative,
+                                const unsigned long long seed) {
+    const Mat<float> initial_cost = InitialCost(pm, seed);
+    const size_t width = pm.cost_map_->GetWidth();
+    const size_t height = pm.cost_map_->GetHeight();
+    const size_t sources = pm.cost_map_->GetDepth();
+    GpuMat<int> draws(width, height, pm.options_.num_samples);
+    GpuMat<int> winners(width, height);
+    GpuMat<int> support(width, height);
+    GpuMat<float> hypotheses(width, height, 20);
+    GpuMat<float> costs(width, height, 5);
+    GpuMat<float> forward(width, height, sources);
+    GpuMat<uint32_t> continuation(width, 1, 3);
+    const SweepTrace trace{draws.View(),
+                           winners.View(),
+                           support.View(),
+                           hypotheses.View(),
+                           costs.View(),
+                           forward.View()};
+    SweepOptions options;
+    options.depth_min = pm.options_.depth_min;
+    options.depth_max = pm.options_.depth_max;
+    options.sigma_spatial = pm.options_.sigma_spatial;
+    options.sigma_color = pm.options_.sigma_color;
+    options.num_samples = pm.options_.num_samples;
+    options.ncc_sigma = pm.options_.ncc_sigma;
+    options.min_triangulation_angle =
+        DEG2RAD(pm.options_.min_triangulation_angle);
+    options.incident_angle_sigma = pm.options_.incident_angle_sigma;
+    options.geom_consistency_regularizer =
+        pm.options_.geom_consistency_regularizer;
+    options.geom_consistency_max_cost = pm.options_.geom_consistency_max_cost;
+    const RefCamera camera =
+        MakeRefCamera(pm.ref_K_host_[0], pm.ref_inv_K_host_[0]);
+
+    // The only difference between these launches is the actual specialization
+    // and its block geometry. InitialCost seeded each instance identically.
+#define LAUNCH_TEST_SWEEP(COOPERATIVE, WIDTH)                               \
+  SweepFromTopToBottom<11, 1, true, false, false, COOPERATIVE, WIDTH, true> \
+      <<<dim3((width + WIDTH - 1) / WIDTH),                                 \
+         dim3(WIDTH, COOPERATIVE ? 16 : 1)>>>(                              \
+          camera,                                                           \
+          pm.global_workspace_->View(),                                     \
+          pm.rand_state_map_->View(),                                       \
+          pm.cost_map_->View(),                                             \
+          pm.depth_map_->View(),                                            \
+          pm.normal_map_->View(),                                           \
+          pm.consistency_mask_->View(),                                     \
+          pm.sel_prob_map_->View(),                                         \
+          pm.prev_sel_prob_map_->View(),                                    \
+          pm.ref_image_texture_->GetObj(),                                  \
+          pm.ref_image_->sum_image->View(),                                 \
+          pm.ref_image_->squared_sum_image->View(),                         \
+          pm.src_images_texture_->GetObj(),                                 \
+          pm.src_depth_maps_texture_->GetObj(),                             \
+          pm.poses_texture_[0]->GetObj(),                                   \
+          options,                                                          \
+          trace)
+    if (cooperative) {
+      LAUNCH_TEST_SWEEP(true, 8);
+    } else {
+      LAUNCH_TEST_SWEEP(false, THREADS_PER_BLOCK);
+    }
+#undef LAUNCH_TEST_SWEEP
+    CUDA_SYNC_AND_CHECK();
+    SweepContinuation<<<(width + 31) / 32, 32>>>(pm.rand_state_map_->View(),
+                                                 continuation.View());
+    CUDA_SYNC_AND_CHECK();
+    return {draws.CopyToMat(),
+            winners.CopyToMat(),
+            support.CopyToMat(),
+            hypotheses.CopyToMat(),
+            costs.CopyToMat(),
+            forward.CopyToMat(),
+            initial_cost,
+            pm.cost_map_->CopyToMat(),
+            pm.depth_map_->CopyToMat(),
+            pm.normal_map_->CopyToMat(),
+            pm.sel_prob_map_->CopyToMat(),
+            continuation.CopyToMat()};
+  }
 };
+
+SweepTraceResult ProbeSweep(PatchMatchCuda& pm,
+                            const bool cooperative,
+                            const unsigned long long seed) {
+  return PatchMatchCudaTestAccess::Sweep(pm, cooperative, seed);
+}
 
 Mat<float> ProbeOwnershipInitialCost(PatchMatchCuda& pm,
                                      const unsigned long long seed) {
