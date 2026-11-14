@@ -2186,9 +2186,17 @@ void PatchMatchCuda::UseSparseSources(
 #endif
 
 void PatchMatchCuda::CheckUsable() const {
-  THROW_CHECK_GE(rotation_in_half_pi_, 0)
+  THROW_CHECK_EQ(rotation_in_half_pi_, 0)
       << "Interrupted in-place geometry rotation; reconstruct the owner";
 }
+
+void PatchMatchCuda::PoisonGeometryState() noexcept {
+  // Negative orientation is a persistent host refusal, not a recoverable frame.
+  rotation_in_half_pi_ = -1;
+  results_valid_ = false;
+  consistency_mask_valid_ = false;
+}
+
 void PatchMatchCuda::Run() {
   CheckUsable();
   results_valid_ = false;
@@ -2200,6 +2208,7 @@ void PatchMatchCuda::Run() {
     CheckNormalDomain();
     results_valid_ = true;
   } catch (...) {
+    if (rotation_in_half_pi_ != 0) PoisonGeometryState();
     consistency_mask_valid_ = false;
     throw;
   }
@@ -2389,13 +2398,6 @@ size_t PatchMatchCuda::GeometryBytes(const GpuMat<float>& depth,
   const size_t bytes = depth.GetPitch() * depth.GetHeight();
   THROW_CHECK_LE(normal.GetCapacityBytes(), maximum - bytes);
   return bytes + normal.GetCapacityBytes();
-}
-
-void PatchMatchCuda::PoisonGeometryState() noexcept {
-  // Negative orientation is a persistent host refusal, not a recoverable frame.
-  rotation_in_half_pi_ = -1;
-  results_valid_ = false;
-  consistency_mask_valid_ = false;
 }
 
 bool PatchMatchCuda::CanRotateGeometryThroughCheckpoint() const {
@@ -3686,6 +3688,8 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
       }
       for (PatchMatchCuda* p : views)
         if (p->cost_bits_) p->CheckCostMapDomain();
+      // Successful earlier phases rotate every view once in the same order.
+      const int original_rotation = first.rotation_in_half_pi_;
       try {
         for (PatchMatchCuda* p : views) {
           if (shared_geometry) {
@@ -3711,8 +3715,9 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
         // completed cannot be rerun as a partially completed batch trajectory.
         bool destructive_failure = checkpoint_geometry;
         for (PatchMatchCuda* p : views)
-          destructive_failure =
-              destructive_failure || p->rotation_in_half_pi_ < 0;
+          destructive_failure = destructive_failure ||
+                                p->rotation_in_half_pi_ < 0 ||
+                                p->rotation_in_half_pi_ != original_rotation;
         if (destructive_failure)
           for (PatchMatchCuda* p : views) p->PoisonGeometryState();
         throw;
@@ -4421,70 +4426,75 @@ void PatchMatchCuda::Rotate(bool pack_geometry) {
   }
 #endif
 
-  rotation_in_half_pi_ = (rotation_in_half_pi_ + 1) % 4;
+  try {
+    rotation_in_half_pi_ = (rotation_in_half_pi_ + 1) % 4;
 
-  size_t width;
-  size_t height;
-  if (rotation_in_half_pi_ % 2 == 0) {
-    width = ref_width_;
-    height = ref_height_;
-  } else {
-    width = ref_height_;
-    height = ref_width_;
-  }
+    size_t width;
+    size_t height;
+    if (rotation_in_half_pi_ % 2 == 0) {
+      width = ref_width_;
+      height = ref_height_;
+    } else {
+      width = ref_height_;
+      height = ref_width_;
+    }
 
-  // RNG state remains in original perimeter coordinates; the sweep maps
-  // its row-zero columns through rotation_in_half_pi_.
+    // RNG state remains in original perimeter coordinates; the sweep maps
+    // its row-zero columns through rotation_in_half_pi_.
 
-  // Rotate depth map.
-  {
-    std::unique_ptr<GpuMat<float>> rotated_depth_map(
-        new GpuMat<float>(width, height));
-    depth_map_->Rotate(rotated_depth_map.get());
-    depth_map_.swap(rotated_depth_map);
-  }
+    // Rotate depth map.
+    {
+      std::unique_ptr<GpuMat<float>> rotated_depth_map(
+          new GpuMat<float>(width, height));
+      depth_map_->Rotate(rotated_depth_map.get());
+      depth_map_.swap(rotated_depth_map);
+    }
 
-  // Rotate normal map.
+    // Rotate normal map.
 #ifndef COLMAP_HIP_ENABLED
-  if (oct_normal_map_) {
-    auto rotated = std::make_unique<OctNormalMap>(width, height);
-    oct_normal_map_->RotateTo(*rotated);
-    oct_normal_map_.swap(rotated);
-  } else
+    if (oct_normal_map_) {
+      auto rotated = std::make_unique<OctNormalMap>(width, height);
+      oct_normal_map_->RotateTo(*rotated);
+      oct_normal_map_.swap(rotated);
+    } else
 #endif
-  {
-    RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
-        normal_map_->View());
-    std::unique_ptr<GpuMat<float>> rotated_normal_map(
-        new GpuMat<float>(width, height, 3));
-    normal_map_->Rotate(rotated_normal_map.get());
-    normal_map_.swap(rotated_normal_map);
-  }
-
-  // Rotate reference image.
-  {
-    std::unique_ptr<GpuMat<uint8_t>> rotated_ref_image(
-        new GpuMat<uint8_t>(width, height));
-    std::unique_ptr<GpuMat<float>> rotated_sum, rotated_squared_sum;
-    if (ref_sum_image_) {
-      rotated_sum = std::make_unique<GpuMat<float>>(width, height);
-      rotated_squared_sum = std::make_unique<GpuMat<float>>(width, height);
+    {
+      RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
+          normal_map_->View());
+      std::unique_ptr<GpuMat<float>> rotated_normal_map(
+          new GpuMat<float>(width, height, 3));
+      normal_map_->Rotate(rotated_normal_map.get());
+      normal_map_.swap(rotated_normal_map);
     }
-    ref_image_->Rotate(rotated_ref_image.get());
-    if (ref_sum_image_) {
-      ref_sum_image_->Rotate(rotated_sum.get());
-      ref_squared_sum_image_->Rotate(rotated_squared_sum.get());
-      ref_sum_image_.swap(rotated_sum);
-      ref_squared_sum_image_.swap(rotated_squared_sum);
+
+    // Rotate reference image.
+    {
+      std::unique_ptr<GpuMat<uint8_t>> rotated_ref_image(
+          new GpuMat<uint8_t>(width, height));
+      std::unique_ptr<GpuMat<float>> rotated_sum, rotated_squared_sum;
+      if (ref_sum_image_) {
+        rotated_sum = std::make_unique<GpuMat<float>>(width, height);
+        rotated_squared_sum = std::make_unique<GpuMat<float>>(width, height);
+      }
+      ref_image_->Rotate(rotated_ref_image.get());
+      if (ref_sum_image_) {
+        ref_sum_image_->Rotate(rotated_sum.get());
+        ref_squared_sum_image_->Rotate(rotated_squared_sum.get());
+        ref_sum_image_.swap(rotated_sum);
+        ref_squared_sum_image_.swap(rotated_squared_sum);
+      }
+      ref_image_.swap(rotated_ref_image);
+      BindRefImageTexture();
     }
-    ref_image_.swap(rotated_ref_image);
-    BindRefImageTexture();
+
+    RotateStateMaps(width, height);
+
+    // Recompute Cuda configuration for rotated reference image.
+    ComputeCudaConfig();
+  } catch (...) {
+    PoisonGeometryState();
+    throw;
   }
-
-  RotateStateMaps(width, height);
-
-  // Recompute Cuda configuration for rotated reference image.
-  ComputeCudaConfig();
 }
 
 #ifndef COLMAP_HIP_ENABLED
@@ -4589,7 +4599,7 @@ void PatchMatchCuda::RotateWithBufferReuse(
     }
     ComputeCudaConfig();
   } catch (...) {
-    if (checkpoint_scratch) PoisonGeometryState();
+    PoisonGeometryState();
     throw;
   }
 }

@@ -17,6 +17,29 @@ void PatchMatchCudaTestPeer::PoisonProbability(PatchMatchCuda& owner) {
   CUDA_SYNC_AND_CHECK();
 }
 
+PatchMatchTestGeometry PatchMatchCudaTestPeer::Geometry(
+    const PatchMatchCuda& owner) {
+  return {{owner.depth_map_->GetWidth(), owner.depth_map_->GetHeight()},
+          {owner.oct_normal_map_ ? owner.oct_normal_map_->GetWidth()
+                                 : owner.normal_map_->GetWidth(),
+           owner.oct_normal_map_ ? owner.oct_normal_map_->GetHeight()
+                                 : owner.normal_map_->GetHeight()},
+          {owner.CostMapWidth(), owner.CostMapHeight()},
+          {owner.ref_image_->GetWidth(), owner.ref_image_->GetHeight()},
+          {owner.prev_sel_prob_map_->GetWidth(),
+           owner.prev_sel_prob_map_->GetHeight()},
+          owner.oct_normal_map_ ? owner.oct_normal_map_->GetFrame() : 0u,
+          owner.rotation_in_half_pi_};
+}
+
+void PatchMatchCudaTestPeer::RotateThree(PatchMatchCuda& owner) {
+  for (int i = 0; i < 3; ++i) owner.Rotate();
+}
+
+void PatchMatchCudaTestPeer::CheckUsable(const PatchMatchCuda& owner) {
+  owner.CheckUsable();
+}
+
 void PatchMatchCudaTestPeer::PoisonOctNormal(PatchMatchCuda& owner) {
   THROW_CHECK(owner.oct_normal_map_);
   const unsigned int failure = 1u << 9;
