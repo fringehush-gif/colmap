@@ -301,6 +301,34 @@ TEST(MemoryConstrainedLRUCache, UpdateNumBytes) {
   EXPECT_EQ(cache.NumBytes(), 2);
 }
 
+TEST(MemoryConstrainedLRUCache, UpdateNumBytesOnlyForPinnedEntry) {
+  MemoryConstrainedLRUCache<int, SizedElem> cache(
+      10, [](int) { return std::make_shared<SizedElem>(0); });
+  const auto old = cache.Get(1);
+  old->num_bytes = 4;
+  ASSERT_TRUE(cache.UpdateNumBytes(1, old));
+  EXPECT_EQ(cache.NumBytes(), 4);
+
+  // Evict and reinsert the same key while the old value is still pinned.
+  ASSERT_TRUE(cache.Evict(1));
+  const auto replacement = cache.Get(1);
+  ASSERT_NE(old, replacement);
+  replacement->num_bytes = 3;
+  ASSERT_TRUE(cache.UpdateNumBytes(1, replacement));
+  const auto other = cache.Get(2);
+  other->num_bytes = 2;
+  ASSERT_TRUE(cache.UpdateNumBytes(2, other));
+  old->num_bytes = 100;
+  EXPECT_FALSE(cache.UpdateNumBytes(1, old));
+  EXPECT_FALSE(cache.UpdateNumBytes(99, old));
+  EXPECT_EQ(cache.NumBytes(), 5);
+  // A rejected update must not make the replacement recent.
+  cache.Pop();
+  EXPECT_FALSE(cache.Exists(1));
+  EXPECT_TRUE(cache.Exists(2));
+  EXPECT_EQ(cache.NumBytes(), 2);
+}
+
 TEST(ThreadSafeLRUCache, Empty) {
   ThreadSafeLRUCache<int, int> cache(
       5, [](const int key) { return std::make_shared<int>(key); });

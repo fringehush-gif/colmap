@@ -48,9 +48,17 @@ class Workspace {
 
   inline const Model& GetModel() const { return model_; }
 
+  // Borrowed references are only safe while the cache entry cannot be evicted.
+  // Use Copy* for concurrent consumers.
   virtual const Bitmap& GetBitmap(int image_idx);
   virtual const DepthMap& GetDepthMap(int image_idx);
   virtual const NormalMap& GetNormalMap(int image_idx);
+
+  // The base copies stable preloaded data; evicting implementations must pin
+  // their entry for the duration of the copy.
+  virtual Bitmap CopyBitmap(int image_idx);
+  virtual DepthMap CopyDepthMap(int image_idx);
+  virtual NormalMap CopyNormalMap(int image_idx);
 
   // Get paths to bitmap, depth map, normal map and consistency graph.
   std::filesystem::path GetBitmapPath(int image_idx) const;
@@ -88,6 +96,10 @@ class CachedWorkspace : public Workspace {
   const DepthMap& GetDepthMap(int image_idx) override;
   const NormalMap& GetNormalMap(int image_idx) override;
 
+  Bitmap CopyBitmap(int image_idx) override;
+  DepthMap CopyDepthMap(int image_idx) override;
+  NormalMap CopyNormalMap(int image_idx) override;
+
  private:
   class CachedImage {
    public:
@@ -104,6 +116,12 @@ class CachedWorkspace : public Workspace {
    private:
     NON_COPYABLE(CachedImage)
   };
+
+  std::shared_ptr<CachedImage> PinImage(int image_idx);
+  // The caller owns the entry mutex; only short accounting holds cache_mutex_.
+  void LoadBitmap(int image_idx, const std::shared_ptr<CachedImage>& image);
+  void LoadDepthMap(int image_idx, const std::shared_ptr<CachedImage>& image);
+  void LoadNormalMap(int image_idx, const std::shared_ptr<CachedImage>& image);
 
   std::mutex cache_mutex_;
   MemoryConstrainedLRUCache<int, CachedImage> cache_;

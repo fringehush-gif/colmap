@@ -17,6 +17,7 @@ COLMAP_ADD_LIBRARY(
         poisson_meshing.h poisson_meshing.cc
         normal_map.h normal_map.cc
         patch_match_options.h patch_match_options.cc
+        patch_match_input.h patch_match_input.cc
         texture_mapping.h texture_mapping.cc
         workspace.h workspace.cc
     PUBLIC_LINK_LIBS
@@ -29,6 +30,9 @@ COLMAP_ADD_LIBRARY(
         colmap_poisson_recon
         Eigen3::Eigen
 )
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_mvs PRIVATE COLMAP_MVS_INPUT_TESTING)
+endif()
 if(CGAL_ENABLED)
     target_link_libraries(colmap_mvs PRIVATE CGAL)
 endif()
@@ -66,6 +70,14 @@ COLMAP_ADD_TEST(
     SRCS mesh_simplification_test.cc
     LINK_LIBS colmap_mvs
 )
+COLMAP_ADD_TEST(
+    NAME patch_match_input_test
+    SRCS patch_match_input_test.cc
+    LINK_LIBS colmap_mvs
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_mvs_patch_match_input_test PRIVATE COLMAP_MVS_INPUT_TESTING)
+endif()
 COLMAP_ADD_TEST(
     NAME patch_match_options_test
     SRCS patch_match_options_test.cc
@@ -110,6 +122,9 @@ COLMAP_ADD_TEST(
     SRCS workspace_test.cc
     LINK_LIBS colmap_mvs
 )
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_mvs_workspace_test PRIVATE COLMAP_MVS_INPUT_TESTING)
+endif()
 
 if(CUDA_ENABLED)
     COLMAP_ADD_LIBRARY(

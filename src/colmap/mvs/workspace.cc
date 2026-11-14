@@ -2,6 +2,10 @@
 
 #include "colmap/mvs/workspace.h"
 
+#ifdef COLMAP_MVS_INPUT_TESTING
+#include "colmap/mvs/patch_match_input.h"
+#endif
+
 #include "colmap/util/file.h"
 #include "colmap/util/threading.h"
 
@@ -101,6 +105,18 @@ const NormalMap& Workspace::GetNormalMap(const int image_idx) {
   return *THROW_CHECK_NOTNULL(normal_maps_.at(image_idx));
 }
 
+Bitmap Workspace::CopyBitmap(const int image_idx) {
+  return GetBitmap(image_idx);
+}
+
+DepthMap Workspace::CopyDepthMap(const int image_idx) {
+  return GetDepthMap(image_idx);
+}
+
+NormalMap Workspace::CopyNormalMap(const int image_idx) {
+  return GetNormalMap(image_idx);
+}
+
 std::filesystem::path Workspace::GetBitmapPath(const int image_idx) const {
   return model_.images.at(image_idx).GetPath();
 }
@@ -148,13 +164,14 @@ CachedWorkspace::CachedWorkspace(const Options& options)
       cache_((size_t)(1024.0 * 1024.0 * 1024.0 * options.cache_size),
              [](const int) { return std::make_shared<CachedImage>(); }) {}
 
-const Bitmap& CachedWorkspace::GetBitmap(const int image_idx) {
-  std::shared_ptr<CachedImage> cached_image;
-  {
-    std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-    cached_image = cache_.Get(image_idx);
-  }
-  std::lock_guard<std::mutex> lock(cached_image->mutex);
+std::shared_ptr<CachedWorkspace::CachedImage> CachedWorkspace::PinImage(
+    const int image_idx) {
+  std::lock_guard<std::mutex> cache_lock(cache_mutex_);
+  return cache_.Get(image_idx);
+}
+
+void CachedWorkspace::LoadBitmap(
+    const int image_idx, const std::shared_ptr<CachedImage>& cached_image) {
   if (!cached_image->bitmap) {
     cached_image->bitmap = std::make_unique<Bitmap>();
     cached_image->bitmap->Read(GetBitmapPath(image_idx), options_.image_as_rgb);
@@ -164,21 +181,12 @@ const Bitmap& CachedWorkspace::GetBitmap(const int image_idx) {
     }
     cached_image->num_bytes += cached_image->bitmap->NumBytes();
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-    // Handle the case where another thread has already evicted the image.
-    if (cache_.Exists(image_idx)) {
-      cache_.UpdateNumBytes(image_idx);
-    }
+    cache_.UpdateNumBytes(image_idx, cached_image);
   }
-  return *cached_image->bitmap;
 }
 
-const DepthMap& CachedWorkspace::GetDepthMap(const int image_idx) {
-  std::shared_ptr<CachedImage> cached_image;
-  {
-    std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-    cached_image = cache_.Get(image_idx);
-  }
-  std::lock_guard<std::mutex> lock(cached_image->mutex);
+void CachedWorkspace::LoadDepthMap(
+    const int image_idx, const std::shared_ptr<CachedImage>& cached_image) {
   if (!cached_image->depth_map) {
     cached_image->depth_map = std::make_unique<DepthMap>();
     cached_image->depth_map->Read(GetDepthMapPath(image_idx));
@@ -189,21 +197,12 @@ const DepthMap& CachedWorkspace::GetDepthMap(const int image_idx) {
     }
     cached_image->num_bytes += cached_image->depth_map->GetNumBytes();
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-    // Handle the case where another thread has already evicted the image.
-    if (cache_.Exists(image_idx)) {
-      cache_.UpdateNumBytes(image_idx);
-    }
+    cache_.UpdateNumBytes(image_idx, cached_image);
   }
-  return *cached_image->depth_map;
 }
 
-const NormalMap& CachedWorkspace::GetNormalMap(const int image_idx) {
-  std::shared_ptr<CachedImage> cached_image;
-  {
-    std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-    cached_image = cache_.Get(image_idx);
-  }
-  std::lock_guard<std::mutex> lock(cached_image->mutex);
+void CachedWorkspace::LoadNormalMap(
+    const int image_idx, const std::shared_ptr<CachedImage>& cached_image) {
   if (!cached_image->normal_map) {
     cached_image->normal_map = std::make_unique<NormalMap>();
     cached_image->normal_map->Read(GetNormalMapPath(image_idx));
@@ -214,12 +213,62 @@ const NormalMap& CachedWorkspace::GetNormalMap(const int image_idx) {
     }
     cached_image->num_bytes += cached_image->normal_map->GetNumBytes();
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-    // Handle the case where another thread has already evicted the image.
-    if (cache_.Exists(image_idx)) {
-      cache_.UpdateNumBytes(image_idx);
-    }
+    cache_.UpdateNumBytes(image_idx, cached_image);
   }
-  return *cached_image->normal_map;
+}
+
+const Bitmap& CachedWorkspace::GetBitmap(const int image_idx) {
+  const auto image = PinImage(image_idx);
+  std::lock_guard<std::mutex> lock(image->mutex);
+  LoadBitmap(image_idx, image);
+  return *image->bitmap;
+}
+
+Bitmap CachedWorkspace::CopyBitmap(const int image_idx) {
+  const auto image = PinImage(image_idx);
+  std::lock_guard<std::mutex> lock(image->mutex);
+  LoadBitmap(image_idx, image);
+#ifdef COLMAP_MVS_INPUT_TESTING
+  internal::NotifyInputCopyForTesting(image_idx,
+                                      internal::InputPayload::Bitmap);
+#endif
+  return *image->bitmap;
+}
+
+const DepthMap& CachedWorkspace::GetDepthMap(const int image_idx) {
+  const auto image = PinImage(image_idx);
+  std::lock_guard<std::mutex> lock(image->mutex);
+  LoadDepthMap(image_idx, image);
+  return *image->depth_map;
+}
+
+DepthMap CachedWorkspace::CopyDepthMap(const int image_idx) {
+  const auto image = PinImage(image_idx);
+  std::lock_guard<std::mutex> lock(image->mutex);
+  LoadDepthMap(image_idx, image);
+#ifdef COLMAP_MVS_INPUT_TESTING
+  internal::NotifyInputCopyForTesting(image_idx,
+                                      internal::InputPayload::DepthMap);
+#endif
+  return *image->depth_map;
+}
+
+const NormalMap& CachedWorkspace::GetNormalMap(const int image_idx) {
+  const auto image = PinImage(image_idx);
+  std::lock_guard<std::mutex> lock(image->mutex);
+  LoadNormalMap(image_idx, image);
+  return *image->normal_map;
+}
+
+NormalMap CachedWorkspace::CopyNormalMap(const int image_idx) {
+  const auto image = PinImage(image_idx);
+  std::lock_guard<std::mutex> lock(image->mutex);
+  LoadNormalMap(image_idx, image);
+#ifdef COLMAP_MVS_INPUT_TESTING
+  internal::NotifyInputCopyForTesting(image_idx,
+                                      internal::InputPayload::NormalMap);
+#endif
+  return *image->normal_map;
 }
 
 void ImportPMVSWorkspace(const Workspace& workspace,
