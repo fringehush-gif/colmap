@@ -178,6 +178,94 @@ TEST(PatchMatchController, PreservesUniqueReferenceAndSourceOrder) {
   EXPECT_EQ(PatchMatchControllerTestAccess::ReadConfig(c), expected);
 }
 
+void WritePublicationTestBytes(const std::filesystem::path& path,
+                               const std::string& bytes) {
+  std::ofstream file(path, std::ios::binary);
+  file.exceptions(std::ios::failbit | std::ios::badbit);
+  file << bytes;
+  file.close();
+}
+
+std::string ReadPublicationTestBytes(const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  file.exceptions(std::ios::failbit | std::ios::badbit);
+  return {std::istreambuf_iterator<char>(file),
+          std::istreambuf_iterator<char>()};
+}
+
+TEST(PatchMatchController, FinalNormalRenameFailureCanRetry) {
+  const auto root = CreateTestDir();
+  const auto depth = root / "depth.bin";
+  const auto normal = root / "normal.bin";
+  const auto graph = root / "graph.bin";
+  WritePublicationTestBytes(depth, "old depth");
+  WritePublicationTestBytes(normal, "old normal");
+  std::filesystem::path stage;
+  bool obstruct = true;
+  int writes = 0;
+  const auto write_output = [&](const auto& path) {
+    ++writes;
+    stage = path.parent_path();
+    WritePublicationTestBytes(depth, "new depth");
+    WritePublicationTestBytes(path, "new normal");
+    if (obstruct) {
+      // Deliberately obstruct the destination after the initial inspection.
+      std::filesystem::create_directory(normal);
+      WritePublicationTestBytes(normal / "keep", "obstruction");
+    }
+  };
+  try {
+    PatchMatchControllerTestAccess::Publish(depth, normal, graph, write_output);
+    FAIL() << "Expected final normal rename failure";
+  } catch (const std::filesystem::filesystem_error& error) {
+    EXPECT_EQ(error.path1(), stage / "normal.bin");
+    EXPECT_EQ(error.path2(), normal);
+  }
+  EXPECT_EQ(writes, 1);
+  EXPECT_EQ(ReadPublicationTestBytes(depth), "new depth");
+  ASSERT_TRUE(std::filesystem::is_directory(normal));
+  EXPECT_FALSE(ExistsFile(normal));
+  EXPECT_EQ(ReadPublicationTestBytes(normal / "keep"), "obstruction");
+  EXPECT_FALSE(std::filesystem::exists(stage));
+
+  std::filesystem::remove_all(normal);
+  obstruct = false;
+  ASSERT_NO_THROW(PatchMatchControllerTestAccess::Publish(
+      depth, normal, graph, write_output));
+  EXPECT_EQ(writes, 2);
+  EXPECT_EQ(ReadPublicationTestBytes(depth), "new depth");
+  EXPECT_TRUE(ExistsFile(normal));
+  EXPECT_EQ(ReadPublicationTestBytes(normal), "new normal");
+  EXPECT_FALSE(std::filesystem::exists(stage));
+}
+
+TEST(PatchMatchController, StageCleanupFailureKeepsCommittedNormal) {
+  const auto root = CreateTestDir();
+  const auto depth = root / "depth.bin";
+  const auto normal = root / "normal.bin";
+  const auto graph = root / "graph.bin";
+  WritePublicationTestBytes(depth, "old depth");
+  WritePublicationTestBytes(normal, "old normal");
+  std::filesystem::path stage;
+  int writes = 0;
+  ASSERT_NO_THROW(PatchMatchControllerTestAccess::Publish(
+      depth, normal, graph, [&](const auto& path) {
+        ++writes;
+        stage = path.parent_path();
+        WritePublicationTestBytes(depth, "new depth");
+        WritePublicationTestBytes(path, "new normal");
+        // A nonempty stage refuses removal even for an administrator.
+        WritePublicationTestBytes(stage / "debris", "harmless debris");
+      }));
+  EXPECT_EQ(writes, 1);
+  EXPECT_EQ(ReadPublicationTestBytes(depth), "new depth");
+  ASSERT_TRUE(ExistsFile(normal));
+  EXPECT_EQ(ReadPublicationTestBytes(normal), "new normal");
+  ASSERT_TRUE(std::filesystem::is_directory(stage));
+  EXPECT_EQ(ReadPublicationTestBytes(stage / "debris"), "harmless debris");
+  EXPECT_FALSE(std::filesystem::exists(stage / "normal.bin"));
+}
+
 TEST(PatchMatchController, CleanupPreservesOriginalError) {
   const auto root = CreateTestDir();
   const auto normal = root / "normal.bin";
