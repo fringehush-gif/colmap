@@ -21,7 +21,7 @@ COLMAP_SAMPLING_HD inline bool TransformPDFToCDF(float* probs,
   bool all_zero = true;
   for (int i = 0; i < num_probs; ++i) {
     prob_sum += probs[i * source_stride];
-    all_zero = all_zero && probs[i * source_stride] == 0.0f;
+    all_zero &= probs[i * source_stride] == 0.0f;
   }
   if (all_zero) return false;
   const float inv_prob_sum = 1.0f / prob_sum;
