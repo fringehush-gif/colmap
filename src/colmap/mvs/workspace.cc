@@ -117,6 +117,10 @@ NormalMap Workspace::CopyNormalMap(const int image_idx) {
   return GetNormalMap(image_idx);
 }
 
+void Workspace::EnsureNormalLoaded(const int image_idx) {
+  (void)GetNormalMap(image_idx);
+}
+
 std::filesystem::path Workspace::GetBitmapPath(const int image_idx) const {
   return model_.images.at(image_idx).GetPath();
 }
@@ -269,6 +273,16 @@ NormalMap CachedWorkspace::CopyNormalMap(const int image_idx) {
                                       internal::InputPayload::NormalMap);
 #endif
   return *image->normal_map;
+}
+
+void CachedWorkspace::EnsureNormalLoaded(const int image_idx) {
+  const auto image = PinImage(image_idx);
+  std::lock_guard<std::mutex> lock(image->mutex);
+  LoadNormalMap(image_idx, image);
+#ifdef COLMAP_MVS_INPUT_TESTING
+  internal::NotifyInputCopyForTesting(image_idx,
+                                      internal::InputPayload::NormalMap);
+#endif
 }
 
 void ImportPMVSWorkspace(const Workspace& workspace,

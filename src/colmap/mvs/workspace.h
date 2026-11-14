@@ -59,6 +59,7 @@ class Workspace {
   virtual Bitmap CopyBitmap(int image_idx);
   virtual DepthMap CopyDepthMap(int image_idx);
   virtual NormalMap CopyNormalMap(int image_idx);
+  virtual void EnsureNormalLoaded(int image_idx);
 
   // Get paths to bitmap, depth map, normal map and consistency graph.
   std::filesystem::path GetBitmapPath(int image_idx) const;
@@ -99,6 +100,7 @@ class CachedWorkspace : public Workspace {
   Bitmap CopyBitmap(int image_idx) override;
   DepthMap CopyDepthMap(int image_idx) override;
   NormalMap CopyNormalMap(int image_idx) override;
+  void EnsureNormalLoaded(int image_idx) override;
 
  private:
   class CachedImage {

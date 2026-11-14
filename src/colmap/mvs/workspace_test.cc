@@ -96,6 +96,7 @@ TEST_P(ParameterizedWorkspaceTests, GetData) {
             workspace->GetDepthMap(0).GetData());
   EXPECT_EQ(workspace->CopyNormalMap(0).GetData(),
             workspace->GetNormalMap(0).GetData());
+  EXPECT_NO_THROW(workspace->EnsureNormalLoaded(0));
 }
 
 TEST_P(ParameterizedWorkspaceTests, MaxImageSize) {

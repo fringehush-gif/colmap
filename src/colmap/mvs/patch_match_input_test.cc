@@ -225,10 +225,11 @@ TEST_F(InputTest, FailedReadAndPartialSubmissionDrainBeforeUnwind) {
   }
 }
 
-TEST_F(InputTest, AllNormalPayloadsAndSourceNormalsAcquired) {
+TEST_F(InputTest, ReferenceNormalOnlyButAllSourceNormalsAcquired) {
   CachedWorkspace workspace(options);
   ThreadPool pool(2);
   std::vector<int> indexes;
+  indexes.reserve(names.size());
   for (const auto& name : names)
     indexes.push_back(workspace.GetModel().GetImageIdx(name));
   const int ref = indexes[0];
@@ -258,9 +259,9 @@ TEST_F(InputTest, AllNormalPayloadsAndSourceNormalsAcquired) {
               expected_bitmap.RowMajorData());
     EXPECT_EQ(depths[idx].GetData(), expected_depth.GetData());
     EXPECT_EQ(normal_acquisitions[idx], 1);
-    NormalMap expected_for_image;
-    expected_for_image.Read(workspace.GetNormalMapPath(idx));
-    EXPECT_EQ(normals[idx].GetData(), expected_for_image.GetData());
+    if (idx != ref) {
+      EXPECT_TRUE(normals[idx].GetData().empty());
+    }
   }
   NormalMap expected_normal;
   expected_normal.Read(workspace.GetNormalMapPath(ref));

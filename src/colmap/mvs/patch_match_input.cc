@@ -40,7 +40,6 @@ void StagePatchMatchInputs(Workspace& workspace,
                            std::vector<Image>& images,
                            std::vector<DepthMap>& depth_maps,
                            std::vector<NormalMap>& normal_maps) {
-  (void)ref_image_idx;
   // Allocate before submission so vector growth cannot lose an accepted task.
   std::vector<std::shared_future<void>> futures;
   futures.reserve(image_idxs.size());
@@ -51,7 +50,12 @@ void StagePatchMatchInputs(Workspace& workspace,
         images.at(image_idx).SetBitmap(workspace.CopyBitmap(image_idx));
         if (geom_consistency) {
           depth_maps.at(image_idx) = workspace.CopyDepthMap(image_idx);
-          normal_maps.at(image_idx) = workspace.CopyNormalMap(image_idx);
+          if (image_idx == ref_image_idx) {
+            normal_maps.at(image_idx) = workspace.CopyNormalMap(image_idx);
+          } else {
+            // Source normals remain an input dependency and are still loaded.
+            workspace.EnsureNormalLoaded(image_idx);
+          }
         }
       }));
 #ifdef COLMAP_MVS_INPUT_TESTING
