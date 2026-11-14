@@ -2410,8 +2410,8 @@ struct PatchMatchCudaTestAccess {
     // and its block geometry. InitialCost seeded each instance identically.
 #define LAUNCH_TEST_SWEEP(COOPERATIVE, WIDTH)                               \
   SweepFromTopToBottom<11, 1, true, false, false, COOPERATIVE, WIDTH, true> \
-      <<<dim3((width + WIDTH - 1) / WIDTH),                                 \
-         dim3(WIDTH, COOPERATIVE ? 16 : 1)>>>(                              \
+      <<<dim3((width + (WIDTH) - 1) / (WIDTH)),                             \
+         dim3(WIDTH, (COOPERATIVE) ? 16 : 1)>>>(                            \
           camera,                                                           \
           pm.global_workspace_->View(),                                     \
           pm.rand_state_map_->View(),                                       \

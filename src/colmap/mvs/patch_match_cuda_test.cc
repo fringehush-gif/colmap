@@ -317,7 +317,7 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
     inputs.images[1] = source_image;
     inputs.depths[1] = source_depth;
     inputs.normals[1] = source_normal;
-    while (inputs.images.size() < static_cast<size_t>(sources + 1)) {
+    while (inputs.images.size() < static_cast<size_t>(sources) + 1) {
       inputs.images.push_back(source_image);
       inputs.depths.push_back(source_depth);
       inputs.normals.push_back(source_normal);
@@ -408,6 +408,7 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
           const float published = component == 0
                                       ? a.depth.Get(row, col)
                                       : a.normal.Get(row, col, component - 1);
+          // Preserve the selected tuple's exact bits, including signed zero.
           ASSERT_EQ(std::memcmp(&chosen, &published, sizeof(float)), 0);
         }
         if (supported && winner > 0 && different &&
