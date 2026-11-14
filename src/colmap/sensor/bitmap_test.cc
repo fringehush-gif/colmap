@@ -558,18 +558,23 @@ TEST(Bitmap, RescaleGrayTriangleMatchesOIIO) {
                            std::array{7, 5, 1, 1},
                            std::array{65, 33, 65, 17},
                            std::array{65, 33, 33, 33},
+                           std::array{1, 17, 1, 9},
+                           std::array{17, 1, 9, 1},
+                           std::array{63, 47, 62, 46},
                            std::array{257, 255, 13, 11}}) {
-    for (const int pattern : {0, 127, 255, -1, -2}) {
+    for (const int pattern : {0, 127, 255, -1, -2, -3, -4}) {
       SCOPED_TRACE(pattern);
       SCOPED_TRACE(shape[0]);
       Bitmap bitmap(shape[0], shape[1], false);
       auto& pixels = bitmap.RowMajorData();
+      size_t impulse = pixels.size() / 2;
+      if (pattern == -3) impulse = 0;
+      if (pattern == -4) impulse = pixels.size() - 1;
       for (size_t i = 0; i < pixels.size(); ++i) {
-        pixels[i] =
-            pattern >= 0 ? static_cast<uint8_t>(pattern)
-            : pattern == -1
-                ? static_cast<uint8_t>(i * 37 + 11)
-                : static_cast<uint8_t>(i == pixels.size() / 2 ? 255 : 0);
+        pixels[i] = pattern >= 0 ? static_cast<uint8_t>(pattern)
+                    : pattern == -1
+                        ? static_cast<uint8_t>(i * 37 + 11)
+                        : static_cast<uint8_t>(i == impulse ? 255 : 0);
       }
       const auto input = pixels;
       std::vector<uint8_t> expected(static_cast<size_t>(shape[2]) * shape[3]);
