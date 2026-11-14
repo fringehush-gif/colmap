@@ -1801,13 +1801,11 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 #else
   constexpr bool kCooperative = kWindowSize == 11 && kWindowStep == 1;
 #endif
+  // Only radius 5 / step 1 uses cooperative sweeping (and never on HIP).
   // Initial-cost and element-wise kernels retain their existing launch shape.
-  // More column tiles can occupy the GPU; wider windows retain the full halo.
-  constexpr int kSweepBlockWidth = !kCooperative || kWindowSize / 2 > 16
-                                       ? THREADS_PER_BLOCK
-                                       : (kWindowSize / 2 <= 8 ? 8 : 16);
+  constexpr int kSweepBlockWidth = kCooperative ? 8 : THREADS_PER_BLOCK;
   constexpr int kSampleBatchSize =
-      kCooperative && kSweepBlockWidth == 8 ? kCooperativeSampleBatchSize : 1;
+      kCooperative ? kCooperativeSampleBatchSize : 1;
   const dim3 sweep_kernel_block_size(
       kSweepBlockWidth, kCooperative ? 4 * kSampleBatchSize : 1, 1);
 
