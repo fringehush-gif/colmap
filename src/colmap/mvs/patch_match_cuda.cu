@@ -1197,7 +1197,7 @@ struct SweepOptions {
   float filter_geom_consistency_max_cost = 1.0f;
 };
 
-// Bounded look-ahead state. All views use a tightly packed, instance-local
+// Bounded look-ahead state. All views use one instance-local
 // allocation; first_row/num_rows describe the active band in global coordinates.
 struct LookAheadViews {
   GpuMatView<float> random_parameters;
@@ -1227,27 +1227,30 @@ class LookAheadWorkspace {
 
   int Rows() const { return plan_.rows; }
 
-  LookAheadViews Views(const int first_row, const int num_rows) const {
-    const size_t width = plan_.width;
-    const size_t rows = plan_.rows;
+  LookAheadViews Views(const unsigned int rotation,
+                       const int first_row,
+                       const int num_rows) const {
+    const auto& layout = plan_.layouts[rotation & 1];
+    const size_t width = layout.width;
+    const size_t rows = layout.plane_rows;
     const size_t sources = plan_.sources;
     const size_t pitch = width * sizeof(float);
     const GpuMatView<float> geometric_costs =
-        plan_.geometry ? GpuMatView<float>{data_ + plan_.geometry_offset,
+        plan_.geometry ? GpuMatView<float>{data_ + layout.geometry_offset,
                                            pitch,
                                            width,
                                            rows,
                                            2 * sources}
                        : GpuMatView<float>{};
     return {{data_, pitch, width, rows, 4},
-            {data_ + plan_.uniforms_offset,
+            {data_ + layout.uniforms_offset,
              pitch,
              width,
              rows,
              static_cast<size_t>(plan_.samples)},
-            {data_ + plan_.costs_offset, pitch, width, rows, 3 * sources},
+            {data_ + layout.costs_offset, pitch, width, rows, 3 * sources},
             geometric_costs,
-            {data_ + plan_.previous_offset, pitch, width, 1, 4},
+            {data_ + layout.previous_offset, pitch, width, 1, 4},
             first_row,
             num_rows};
   }
@@ -1259,6 +1262,7 @@ class LookAheadWorkspace {
 
 std::unique_ptr<LookAheadWorkspace> MakeLookAheadWorkspace(
     const size_t width,
+    const size_t height,
     const size_t sources,
     const int samples,
     const bool geom_consistency_term) {
@@ -1266,7 +1270,7 @@ std::unique_ptr<LookAheadWorkspace> MakeLookAheadWorkspace(
   return nullptr;
 #else
   const auto plan = internal::PatchMatchLookAheadPlan::Make(
-      width, sources, samples, geom_consistency_term);
+      width, height, sources, samples, geom_consistency_term);
   if (plan.rows == 0) return nullptr;
   // Allocation errors follow CUDA_SAFE_CALL; do not fall back after mutation.
   return std::make_unique<LookAheadWorkspace>(plan);
@@ -2579,7 +2583,8 @@ void LaunchSweep(LookAheadWorkspace* workspace,
         const int num_rows =
             std::min(workspace->Rows(),
                      static_cast<int>(cost_map.GetHeight()) - first_row);
-        const LookAheadViews band = workspace->Views(first_row, num_rows);
+        const LookAheadViews band =
+            workspace->Views(rand_state_rotation, first_row, num_rows);
         GenerateBandHypotheses<<<(cost_map.GetWidth() + 31) / 32, 32>>>(
             camera,
             depth_map,
@@ -2753,7 +2758,8 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 #ifndef COLMAP_HIP_ENABLED
   if constexpr (kWindowSize == 11 && kWindowStep == 1) {
     look_ahead_workspace = MakeLookAheadWorkspace(
-        std::max(ref_width_, ref_height_),
+        ref_width_,
+        ref_height_,
         problem_.src_image_idxs.size(),
         options_.num_samples,
         options_.geom_consistency);
@@ -2901,6 +2907,10 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 #undef CALL_SWEEP_FUNC
 
       CUDA_SYNC_AND_CHECK();
+      if (last_sweep) {
+        // No later kernel uses the band storage; release it before rotation.
+        look_ahead_workspace.reset();
+      }
 
       Rotate();
 
@@ -3553,13 +3563,14 @@ struct PatchMatchCudaTestAccess {
     const size_t sources = pm.cost_map_->GetDepth();
     THROW_CHECK_GE(pm.depth_map_->GetHeight(), first_row + rows);
     auto workspace = MakeLookAheadWorkspace(
-        std::max(pm.ref_width_, pm.ref_height_),
+        pm.ref_width_,
+        pm.ref_height_,
         sources,
         std::max(pm.options_.num_samples, static_cast<int>(sources)),
         true);
     THROW_CHECK_NOTNULL(workspace.get());
     THROW_CHECK_GE(workspace->Rows(), rows);
-    LookAheadViews band = workspace->Views(first_row, rows);
+    LookAheadViews band = workspace->Views(0, first_row, rows);
     const auto current_depth = pm.depth_map_->CopyToMat();
     const auto current_normal = pm.normal_map_->CopyToMat();
     Mat<float> random(width, rows, 4);
@@ -3765,7 +3776,8 @@ struct PatchMatchCudaTestAccess {
     std::unique_ptr<LookAheadWorkspace> look_ahead_workspace;
     if (cooperative) {
       look_ahead_workspace = MakeLookAheadWorkspace(
-          std::max(pm.cost_map_->GetWidth(), pm.cost_map_->GetHeight()),
+          pm.ref_width_,
+          pm.ref_height_,
           pm.cost_map_->GetDepth(),
           pm.options_.num_samples,
           true);  // The existing private probe instantiates the GEO term.

@@ -27,8 +27,10 @@ struct AllocationState {
   colmap::FlatHashSet<void*> live_pitched;
   colmap::FlatHashSet<void*> live_linear;
   size_t successful_linear_allocations = 0;
+  std::vector<size_t> successful_linear_bytes;
   size_t tracked_linear_frees = 0;
   size_t successful_allocations = 0;
+  std::vector<size_t> live_linear_at_matching_pitched_allocations;
   size_t tracked_frees = 0;
   size_t scalar_width = 0;
   size_t scalar_height = 0;
@@ -72,6 +74,7 @@ extern "C" cudaError_t __wrap_cudaMalloc(void** pointer, size_t bytes) {
   const auto status = __real_cudaMalloc(pointer, bytes);
   if (allocations.tracking && status == cudaSuccess && *pointer != nullptr) {
     ++allocations.successful_linear_allocations;
+    allocations.successful_linear_bytes.push_back(bytes);
     if (!allocations.live_linear.insert(*pointer).second) {
       allocations.duplicate_owner = true;
     }
@@ -95,6 +98,11 @@ extern "C" cudaError_t __wrap_cudaMallocPitch(void** pointer,
   const auto status = __real_cudaMallocPitch(pointer, pitch, width, height);
   if (allocations.tracking && status == cudaSuccess && *pointer != nullptr) {
     ++allocations.successful_allocations;
+    if (width == allocations.scalar_width &&
+        height == allocations.scalar_height) {
+      allocations.live_linear_at_matching_pitched_allocations.push_back(
+          allocations.live_linear.size());
+    }
     if (!allocations.live_pitched.insert(*pointer).second) {
       allocations.duplicate_owner = true;
     }
@@ -440,6 +448,76 @@ TEST_F(PatchMatchRotationLifetimeTest, CostDestinationAllocationRefusal) {
       << "Allocation refusal requires CUDA, a static production owner, "
          "and a supported non-Windows/non-Apple wrap linker; "
          "HIP allocation refusal is not implemented";
+#endif
+}
+
+TEST_F(PatchMatchRotationLifetimeTest,
+       ThinImagesAllocateOnlyTheirLargestLiveBand) {
+#if defined(COLMAP_MVS_CUDA_ALLOCATION_WRAP)
+  struct Case {
+    int width;
+    int height;
+    bool geometry;
+    size_t expected_bytes;
+  };
+  for (const Case& c :
+       {Case{3072, 1, false, 1683456}, Case{1, 3072, true, 2469888}}) {
+    SCOPED_TRACE(::testing::Message()
+                 << c.width << "x" << c.height << ", geometry=" << c.geometry);
+    // The fixture observes the actual production allocation and four rotations.
+    // A one-pixel dimension cannot supply the usual textured-patch oracle;
+    // nonvacuous numerical coverage lives in the existing 35x259 trace test.
+    auto inputs = MakeInputs(2, c.width, c.height);
+    const Image source_image = inputs.images[2];
+    const DepthMap source_depth = inputs.depths[2];
+    const NormalMap source_normal = inputs.normals[2];
+    while (inputs.images.size() < 33) {
+      inputs.images.push_back(source_image);
+      inputs.depths.push_back(source_depth);
+      inputs.normals.push_back(source_normal);
+    }
+    auto options = MakeOptions(c.geometry, false, 33);
+    options.num_iterations = 1;
+    const auto problem = MakeProblem(&inputs);
+    AllocationScope scope;
+    PatchMatchCuda owner(options, problem);
+    ASSERT_GT(allocations.successful_allocations, 0u)
+        << "The initialized production owner must reach the allocation wrapper";
+    const size_t linear_before = allocations.successful_linear_bytes.size();
+    const auto live_linear_before = allocations.live_linear;
+    // Original-shape scalar depth allocations begin rotations 2 and 4. The
+    // normal planes have height*3, selection/cost have height*32, and immutable
+    // reference statistics do not allocate rotated scalar planes.
+    allocations.scalar_width = static_cast<size_t>(c.width) * sizeof(float);
+    allocations.scalar_height = c.height;
+    owner.Run();
+    ASSERT_EQ(allocations.successful_linear_bytes.size(), linear_before + 1);
+    EXPECT_EQ(allocations.successful_linear_bytes.back(), c.expected_bytes);
+    EXPECT_EQ(allocations.live_linear, live_linear_before);
+    ASSERT_EQ(allocations.live_linear_at_matching_pitched_allocations.size(),
+              2);
+    EXPECT_EQ(allocations.live_linear_at_matching_pitched_allocations.front(),
+              live_linear_before.size() + 1);
+    EXPECT_EQ(allocations.live_linear_at_matching_pitched_allocations.back(),
+              live_linear_before.size());
+
+    // Four rotations restore the original dimensions and leave normal getters
+    // usable. This test makes no NCC-quality or probability-range assertion.
+    const auto depth = owner.GetDepthMap();
+    const auto normal = owner.GetNormalMap();
+    const auto selection = owner.GetSelProbMap();
+    EXPECT_EQ(depth.GetWidth(), static_cast<size_t>(c.width));
+    EXPECT_EQ(depth.GetHeight(), static_cast<size_t>(c.height));
+    EXPECT_EQ(normal.GetWidth(), depth.GetWidth());
+    EXPECT_EQ(normal.GetHeight(), depth.GetHeight());
+    EXPECT_EQ(normal.GetDepth(), 3u);
+    EXPECT_EQ(selection.GetWidth(), depth.GetWidth());
+    EXPECT_EQ(selection.GetHeight(), depth.GetHeight());
+    EXPECT_EQ(selection.GetDepth(), 32u);
+  }
+#else
+  GTEST_SKIP() << "Allocation-size observation requires CUDA and a supported "
+                  "static-owner allocation-wrap linker";
 #endif
 }
 
