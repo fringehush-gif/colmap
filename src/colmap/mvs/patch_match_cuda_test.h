@@ -4,6 +4,7 @@
 #include "colmap/mvs/mat.h"
 
 #include <cstdint>
+#include <vector>
 
 namespace colmap {
 namespace mvs {
@@ -24,11 +25,18 @@ struct SweepTraceResult {
   Mat<float> normal;
   Mat<float> selection;
   Mat<uint32_t> continuation;
+  // Raw draws from a state copy before this sweep, for shared-corner checks.
+  Mat<uint32_t> continuation_before;
 };
 
 SweepTraceResult ProbeSweep(PatchMatchCuda& patch_match,
                             bool cooperative,
                             unsigned long long seed);
+
+// Four real sweeps and rotations, with one seed operation at sequence start.
+// Uses the existing GEO trace contract and requires filtering to be disabled.
+std::vector<SweepTraceResult> ProbeSweepSequence(
+    PatchMatchCuda& patch_match, bool cooperative, unsigned long long seed);
 
 }  // namespace internal
 }  // namespace mvs

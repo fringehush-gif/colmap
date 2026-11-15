@@ -385,6 +385,101 @@ TEST_F(CudaTest, DirectInstancesOwnReferenceCalibration) {
       [](float depth) { return std::isfinite(depth) && depth > 0; }));
 }
 
+// Compose real band execution, perimeter histories and Rotate. The independent
+// perimeter test compares integer ownership/seed evolution against a dense map;
+// this test additionally requires the production scalar/band traces to agree.
+TEST_F(CudaTest, BandAndScalarKeepPerimeterHistoriesAcrossFourRotations) {
+  constexpr int kWidth = 35, kHeight = 257, kSources = 17, kSamples = 17;
+  constexpr unsigned long long kSeed = 9182;
+  auto inputs = MakeInputs(0, 2, kHeight, kWidth);
+  const Image source_image = inputs.images[2];
+  const DepthMap source_depth = inputs.depths[2];
+  const NormalMap source_normal = inputs.normals[2];
+  inputs.images[1] = source_image;
+  inputs.depths[1] = source_depth;
+  inputs.normals[1] = source_normal;
+  while (inputs.images.size() < kSources + 1) {
+    inputs.images.push_back(source_image);
+    inputs.depths.push_back(source_depth);
+    inputs.normals.push_back(source_normal);
+  }
+  MakeSourceTexturesDistinct(&inputs);
+  AddDistinctSourceDepthErrors(&inputs);
+  for (int row = 0; row < kHeight; ++row) {
+    for (int col = 0; col < kWidth; ++col) {
+      inputs.depths[0].Set(row, col, row % 2 == 0 ? 3.2f : 5.2f);
+    }
+  }
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  for (int i = 1; i <= kSources; ++i) problem.src_image_idxs.push_back(i);
+  problem.images = &inputs.images;
+  problem.depth_maps = &inputs.depths;
+  problem.normal_maps = &inputs.normals;
+  auto options = MakeOptions(true, false, false);
+  options.window_radius = 5;
+  options.num_samples = kSamples;
+  options.sigma_spatial = 5.0;
+  options.num_iterations = 1;
+
+  PatchMatchCuda scalar(options, problem);
+  PatchMatchCuda band(options, problem);
+  const auto expected = internal::ProbeSweepSequence(scalar, false, kSeed);
+  const auto actual = internal::ProbeSweepSequence(band, true, kSeed);
+  ASSERT_EQ(expected.size(), 4);
+  ASSERT_EQ(actual.size(), expected.size());
+  for (int step = 0; step < 4; ++step) {
+    SCOPED_TRACE(::testing::Message() << "orientation=" << step);
+    const auto& a = expected[step];
+    const auto& b = actual[step];
+    const int width = step % 2 == 0 ? kWidth : kHeight;
+    const int height = step % 2 == 0 ? kHeight : kWidth;
+    ASSERT_EQ(a.draws.GetWidth(), width);
+    ASSERT_EQ(a.draws.GetHeight(), height);
+    ASSERT_EQ(a.draws.GetData(), b.draws.GetData());
+    ASSERT_EQ(a.winners.GetData(), b.winners.GetData());
+    ASSERT_EQ(a.support.GetData(), b.support.GetData());
+    ExpectExactlyEqual(a.initial_cost, b.initial_cost);
+    ExpectExactlyEqual(a.hypotheses, b.hypotheses);
+    ExpectExactlyEqual(a.hypothesis_costs, b.hypothesis_costs);
+    ExpectExactlyEqual(a.forward, b.forward);
+    ExpectExactlyEqual(a.cost, b.cost);
+    ExpectExactlyEqual(a.depth, b.depth);
+    ExpectExactlyEqual(a.normal, b.normal);
+    ExpectExactlyEqual(a.selection, b.selection);
+    ASSERT_EQ(a.continuation.GetData(), b.continuation.GetData());
+    ASSERT_EQ(a.continuation_before.GetData(), b.continuation_before.GetData());
+    EXPECT_NE(a.continuation.GetData(), a.continuation_before.GetData());
+    EXPECT_TRUE(std::any_of(a.support.GetData().begin(),
+                            a.support.GetData().end(),
+                            [](int supported) { return supported != 0; }));
+    EXPECT_TRUE(std::any_of(a.draws.GetData().begin(),
+                            a.draws.GetData().end(),
+                            [](int source) { return source == kSources - 1; }));
+    if (step > 0) {
+      const auto& previous = actual[step - 1].continuation;
+      // CCW rotation maps the prior top-right corner to the new top-left.
+      // No new draws, reseed or state copy may intervene between the sweeps.
+      for (int draw = 0; draw < 3; ++draw) {
+        EXPECT_EQ(previous.Get(0, previous.GetWidth() - 1, draw),
+                  b.continuation_before.Get(0, 0, draw));
+      }
+    }
+    if (height > 128) {
+      for (int boundary : {128, 256}) {
+        int supported = 0;
+        for (int col = 0; col < width; ++col) {
+          supported += a.support.Get(boundary, col);
+        }
+        EXPECT_GT(supported, 0) << "band boundary " << boundary;
+      }
+    }
+  }
+  ExpectExactlyEqual(scalar.GetDepthMap(), band.GetDepthMap());
+  ExpectExactlyEqual(scalar.GetNormalMap(), band.GetNormalMap());
+  ExpectExactlyEqual(scalar.GetSelProbMap(), band.GetSelProbMap());
+}
+
 TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
   constexpr int kWidth = 35;
   constexpr unsigned long long kSeed = 9182;
