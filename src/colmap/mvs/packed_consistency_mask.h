@@ -25,6 +25,14 @@ __host__ __device__ inline constexpr uint8_t PackedConsistencyMaskBit(
 struct PackedConsistencyMaskView {
   GpuMatView<uint8_t> bytes;
 
+  // Rejecting the whole pixel clears each packed byte once. The same single
+  // owner that sets source bits must perform this operation.
+  __device__ void Clear(const size_t row, const size_t col) {
+    for (size_t plane = 0; plane < bytes.GetDepth(); ++plane) {
+      bytes.Set(row, col, plane, uint8_t{0});
+    }
+  }
+
   __device__ void Set(const size_t row,
                       const size_t col,
                       const size_t source,

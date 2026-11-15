@@ -65,6 +65,24 @@ __global__ void ClearOne(PackedConsistencyMaskView mask, size_t sources) {
   mask.Set(row, col, (row * 7 + col * 11) % sources, 0);
 }
 
+template <bool kReference>
+__global__ void ClearSelectedPixels(PackedConsistencyMaskView mask,
+                                    size_t sources) {
+  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  if (col >= mask.bytes.width || row >= mask.bytes.height ||
+      (row + col) % 3 != 1) {
+    return;
+  }
+  if constexpr (kReference) {
+    for (size_t source = 0; source < sources; ++source) {
+      mask.Set(row, col, source, 0);
+    }
+  } else {
+    mask.Clear(row, col);
+  }
+}
+
 // Reference is a dense boolean matrix per pixel, not a byte-packed formula.
 std::vector<uint8_t> RotateReference(const std::vector<uint8_t>& dense,
                                      size_t width,
@@ -180,6 +198,69 @@ TEST_F(PackedConsistencyMaskTest, DeviceWriteClearDecodeAndFourRotations) {
       std::swap(current, next);
       CheckDecoded(*current, dense, sources);
     }
+  }
+}
+
+TEST_F(PackedConsistencyMaskTest,
+       ClearPixelMatchesPerSourceClearWithNeighbors) {
+  constexpr size_t width = 35, height = 19;
+  const dim3 block(16, 8);
+  const dim3 grid((width + block.x - 1) / block.x,
+                  (height + block.y - 1) / block.y);
+  for (const size_t sources : {size_t{1},
+                               size_t{7},
+                               size_t{8},
+                               size_t{9},
+                               size_t{17},
+                               size_t{31},
+                               size_t{32},
+                               size_t{33}}) {
+    SCOPED_TRACE(::testing::Message() << "sources=" << sources);
+    const size_t planes = PackedConsistencyMaskDepth(sources);
+    std::vector<uint8_t> packed(width * height * planes, 0);
+    std::vector<uint8_t> dense(width * height * sources, 0);
+    for (size_t row = 0; row < height; ++row) {
+      for (size_t col = 0; col < width; ++col) {
+        for (size_t source = 0; source < sources; ++source) {
+          const bool set = (row * 11 + col * 7 + source * 13) % 5 != 0;
+          dense[(row * width + col) * sources + source] = set;
+          if (set) {
+            packed[(source / 8) * width * height + row * width + col] |=
+                uint8_t{1} << (source % 8);
+          }
+        }
+      }
+    }
+    // Only valid source bits are populated. The unused tail bits retain their
+    // zero initialization, matching the production mask.
+    GpuMat<uint8_t> candidate(width, height, planes);
+    GpuMat<uint8_t> reference(width, height, planes);
+    candidate.CopyToDevice(packed.data(), width);
+    reference.CopyToDevice(packed.data(), width);
+    ClearSelectedPixels<false>
+        <<<grid, block>>>(PackedConsistencyMaskView{candidate.View()}, sources);
+    ClearSelectedPixels<true>
+        <<<grid, block>>>(PackedConsistencyMaskView{reference.View()}, sources);
+    CUDA_SYNC_AND_CHECK();
+    EXPECT_EQ(candidate.CopyToMat().GetData(), reference.CopyToMat().GetData());
+    size_t cleared_positive_bits = 0;
+    size_t retained_positive_bits = 0;
+    for (size_t row = 0; row < height; ++row) {
+      for (size_t col = 0; col < width; ++col) {
+        for (size_t source = 0; source < sources; ++source) {
+          uint8_t& bit = dense[(row * width + col) * sources + source];
+          if ((row + col) % 3 == 1) {
+            cleared_positive_bits += bit;
+            bit = 0;
+          } else {
+            retained_positive_bits += bit;
+          }
+        }
+      }
+    }
+    EXPECT_GT(cleared_positive_bits, 0);
+    EXPECT_GT(retained_positive_bits, 0);
+    CheckDecoded(candidate, dense, sources);
   }
 }
 

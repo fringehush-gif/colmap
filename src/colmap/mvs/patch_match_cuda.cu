@@ -2465,10 +2465,7 @@ __global__ void SweepFromTopToBottom(
           normal_map.Set(row, col, 0, 0.0f);
           normal_map.Set(row, col, 1, 0.0f);
           normal_map.Set(row, col, 2, 0.0f);
-          for (int image_idx = 0; image_idx < cost_map.GetDepth();
-               ++image_idx) {
-            consistency_mask.Set(row, col, image_idx, 0);
-          }
+          consistency_mask.Clear(row, col);
         }
       }
 
