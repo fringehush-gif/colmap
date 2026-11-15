@@ -947,26 +947,456 @@ struct SweepOptions {
   float filter_geom_consistency_max_cost = 1.0f;
 };
 
+// Bounded look-ahead state. All views use a tightly packed, instance-local
+// allocation; first_row/num_rows describe the active band in global coordinates.
+struct LookAheadViews {
+  GpuMatView<float> random_parameters;
+  // Producer writes raw uniforms. Sweep keeps its first sixteen selected IDs
+  // in shared storage, then replaces each consumed tail uniform with an ID
+  // (-1..31), exactly representable as float.
+  GpuMatView<float> uniforms;
+  GpuMatView<float> costs;
+  GpuMatView<float> geometric_costs;
+  GpuMatView<float> previous_parameters;
+  int first_row = 0;
+  int num_rows = 0;
+};
+
+class LookAheadWorkspace {
+ public:
+  static constexpr size_t kMaxBytes = 64 * 1024 * 1024;
+  static constexpr int kMaxRows = 128;
+
+  static int PlanRows(const size_t width,
+                      const size_t sources,
+                      const int samples,
+                      const bool geom_consistency_term) {
+    // This limits speculative work and memory, not a measured speed crossover.
+    if (width == 0 || sources == 0 || samples <= 0 || sources > 32 ||
+        sources > static_cast<size_t>(samples)) {
+      return 0;
+    }
+    constexpr size_t kFloatCapacity = kMaxBytes / sizeof(float);
+    if (width > kFloatCapacity / 4) return 0;
+    const size_t remaining = kFloatCapacity - 4 * width;
+    const size_t planes = (geom_consistency_term ? 5 : 3) * sources +
+                          static_cast<size_t>(samples) + 4;
+    // Divide before multiplying, so every subsequent allocation fits the cap.
+    const size_t rows = remaining / width / planes;
+    return static_cast<int>(std::min<size_t>(kMaxRows, rows));
+  }
+
+  LookAheadWorkspace(const size_t width,
+                     const size_t sources,
+                     const int samples,
+                     const bool geom_consistency_term,
+                     const int rows)
+      : width_(width),
+        sources_(sources),
+        samples_(samples),
+        geom_consistency_term_(geom_consistency_term),
+        rows_(rows) {
+    CHECK_GT(rows_, 0);
+    CHECK_LE(rows_,
+             PlanRows(width_, sources_, samples_, geom_consistency_term_));
+    const size_t planes = (geom_consistency_term_ ? 5 : 3) * sources_ +
+                          static_cast<size_t>(samples_) + 4;
+    const size_t num_floats = width_ * (4 + rows_ * planes);
+    CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&data_),
+                              num_floats * sizeof(float)));
+  }
+
+  ~LookAheadWorkspace() { (void)cudaFree(data_); }
+  LookAheadWorkspace(const LookAheadWorkspace&) = delete;
+  LookAheadWorkspace& operator=(const LookAheadWorkspace&) = delete;
+
+  int Rows() const { return rows_; }
+
+  LookAheadViews Views(const int first_row, const int num_rows) const {
+    const size_t band_pixels = width_ * rows_;
+    float* random = data_;
+    float* uniforms = random + 4 * band_pixels;
+    float* costs = uniforms + samples_ * band_pixels;
+    float* geometry = costs + 3 * sources_ * band_pixels;
+    float* previous =
+        geometry + (geom_consistency_term_ ? 2 * sources_ * band_pixels : 0);
+    const size_t pitch = width_ * sizeof(float);
+    const GpuMatView<float> geometric_costs =
+        geom_consistency_term_
+            ? GpuMatView<float>{geometry,
+                                pitch,
+                                width_,
+                                static_cast<size_t>(rows_),
+                                2 * sources_}
+            : GpuMatView<float>{};
+    return {{random, pitch, width_, static_cast<size_t>(rows_), 4},
+            {uniforms, pitch, width_, static_cast<size_t>(rows_),
+             static_cast<size_t>(samples_)},
+            {costs, pitch, width_, static_cast<size_t>(rows_), 3 * sources_},
+            geometric_costs,
+            {previous, pitch, width_, 1, 4},
+            first_row,
+            num_rows};
+  }
+
+ private:
+  float* data_ = nullptr;
+  const size_t width_;
+  const size_t sources_;
+  const int samples_;
+  const bool geom_consistency_term_;
+  const int rows_;
+};
+
+std::unique_ptr<LookAheadWorkspace> MakeLookAheadWorkspace(
+    const size_t width,
+    const size_t sources,
+    const int samples,
+    const bool geom_consistency_term) {
+#ifdef COLMAP_HIP_ENABLED
+  return nullptr;
+#else
+  const int rows =
+      LookAheadWorkspace::PlanRows(width, sources, samples, geom_consistency_term);
+  if (rows == 0) return nullptr;
+  // Allocation errors follow CUDA_SAFE_CALL; do not fall back after mutation.
+  return std::make_unique<LookAheadWorkspace>(
+      width, sources, samples, geom_consistency_term, rows);
+#endif
+}
+
+__device__ inline void InitializeSourceMessages(
+    LikelihoodComputer& likelihood_computer,
+    const GpuMatView<float> cost_map,
+    GpuMatView<float> sel_prob_map,
+    float* forward_message,
+    const int source_stride,
+    const int col,
+    const int image_idx) {
+  float beta = 0.5f;
+  for (int row = cost_map.GetHeight() - 1; row >= 0; --row) {
+    const float cost = cost_map.Get(row, col, image_idx);
+    beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
+    sel_prob_map.Set(row, col, image_idx, beta);
+  }
+  forward_message[image_idx * source_stride] = 0.5f;
+}
+
+__global__ void InitializeSweepMessages(
+    GpuMatView<float> global_workspace,
+    const GpuMatView<float> cost_map,
+    GpuMatView<float> sel_prob_map,
+    const SweepOptions options) {
+  const int col = blockIdx.x * blockDim.x + threadIdx.x;
+  const int source = blockIdx.y * blockDim.y + threadIdx.y;
+  if (col >= cost_map.GetWidth() || source >= cost_map.GetDepth()) return;
+  LikelihoodComputer likelihood_computer(options.ncc_sigma,
+                                         options.min_triangulation_angle,
+                                         options.incident_angle_sigma);
+  InitializeSourceMessages(likelihood_computer,
+                           cost_map,
+                           sel_prob_map,
+                           global_workspace.GetPtr() + col,
+                           global_workspace.GetWidth(),
+                           col,
+                           source);
+}
+
+__global__ void GenerateBandHypotheses(
+    const RefCamera camera,
+    const GpuMatView<float> depth_map,
+    const GpuMatView<float> normal_map,
+    GpuMatView<curandState> rand_state_map,
+    const SweepOptions options,
+    LookAheadViews band) {
+  const int col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (col >= depth_map.GetWidth()) return;
+  curandState rand_state = rand_state_map.Get(0, col);
+  for (int local_row = 0; local_row < band.num_rows; ++local_row) {
+    const int row = band.first_row + local_row;
+    const float depth = depth_map.Get(row, col);
+    float normal[3];
+    normal_map.GetSlice(row, col, normal);
+    const float random_depth =
+        PerturbDepth(options.perturbation, depth, &rand_state);
+    float random_normal[3];
+    PerturbNormal(camera,
+                  row,
+                  col,
+                  options.perturbation * M_PI,
+                  normal,
+                  &rand_state,
+                  random_normal);
+    band.random_parameters.Set(local_row, col, 0, random_depth);
+    for (int axis = 0; axis < 3; ++axis) {
+      band.random_parameters.Set(local_row, col, axis + 1, random_normal[axis]);
+    }
+    // These are raw draws, not sources: CDF selection still belongs to Sweep.
+    for (int sample = 0; sample < options.num_samples; ++sample) {
+      band.uniforms.Set(local_row, col, sample, curand_uniform(&rand_state));
+    }
+  }
+  rand_state_map.Set(0, col, rand_state);
+}
+
+constexpr int kLookAheadStripeRows = 8;
+
+template <bool kGeomConsistencyTerm>
+__global__ void PrecomputeBandCosts(
+    const RefCamera camera,
+    const GpuMatView<float> depth_map,
+    const GpuMatView<float> normal_map,
+    const cudaTextureObject_t ref_image_texture,
+    const GpuMatView<float> ref_sum_image,
+    const GpuMatView<float> ref_squared_sum_image,
+    const cudaTextureObject_t src_images_texture,
+    const cudaTextureObject_t src_depth_maps_texture,
+    const cudaTextureObject_t poses_texture,
+    const SweepOptions options,
+    LookAheadViews band) {
+  const int col = blockIdx.x * 8 + threadIdx.x;
+  const int hypothesis = threadIdx.y % 3;
+  const int first_source = threadIdx.y / 3;
+  const int num_sources = band.costs.GetDepth() / 3;
+  const int first_local_row = blockIdx.y * kLookAheadStripeRows;
+  const int last_local_row =
+      min(first_local_row + kLookAheadStripeRows, band.num_rows);
+  using CostComputer = PhotoConsistencyCostComputer<11, 1, 8>;
+  CostComputer computer(camera,
+                        ref_image_texture,
+                        src_images_texture,
+                        poses_texture,
+                        options.sigma_spatial,
+                        options.sigma_color);
+  computer.col = col;
+  __shared__ float reference[CostComputer::LocalRefImageType::kDataSize];
+  __shared__ float weights[CostComputer::kWeightCacheSize];
+  __shared__ bool same_depth[8];
+  __shared__ bool same_normal[8];
+  computer.local_ref_image.data = reference;
+  computer.local_weights = weights;
+  for (int local_row = first_local_row; local_row < last_local_row; ++local_row) {
+    const int row = band.first_row + local_row;
+    __syncthreads();
+    if (threadIdx.y == 0) {
+      computer.ReadRef(row, local_row == first_local_row);
+      same_depth[threadIdx.x] = false;
+      same_normal[threadIdx.x] = false;
+#ifndef COLMAP_HIP_ENABLED
+      if (col < depth_map.GetWidth()) {
+        // Compare once per column and publish through the existing tile
+        // barrier. Bit equality preserves signed zero and NaN distinctions.
+        same_depth[threadIdx.x] =
+            __float_as_uint(depth_map.Get(row, col)) ==
+            __float_as_uint(band.random_parameters.Get(local_row, col, 0));
+        float current_normal[3];
+        normal_map.GetSlice(row, col, current_normal);
+        bool equal_normal = true;
+        for (int axis = 0; axis < 3; ++axis) {
+          equal_normal =
+              equal_normal &&
+              __float_as_uint(current_normal[axis]) == __float_as_uint(
+                  band.random_parameters.Get(local_row, col, axis + 1));
+        }
+        same_normal[threadIdx.x] = equal_normal;
+      }
+#endif
+    }
+    __syncthreads();
+    computer.ReadWeights(threadIdx.y, 12);
+    __syncthreads();
+    if (col >= depth_map.GetWidth()) continue;
+    // h0 writes each aliased destination. Its skipped worker writes nothing,
+    // so no extra synchronization or producer-to-producer read is needed.
+    if ((hypothesis == 1 && same_depth[threadIdx.x]) ||
+        (hypothesis == 2 && same_normal[threadIdx.x])) {
+      continue;
+    }
+
+    float normal[3];
+    if (hypothesis == 2) {
+      normal_map.GetSlice(row, col, normal);
+    } else {
+      for (int axis = 0; axis < 3; ++axis) {
+        normal[axis] = band.random_parameters.Get(local_row, col, axis + 1);
+      }
+    }
+    computer.row = row;
+    computer.normal = normal;
+    computer.depth = hypothesis == 1
+                         ? depth_map.Get(row, col)
+                         : band.random_parameters.Get(local_row, col, 0);
+    computer.local_ref_sum = ref_sum_image.Get(row, col);
+    computer.local_ref_squared_sum = ref_squared_sum_image.Get(row, col);
+    for (int source = first_source; source < num_sources; source += 4) {
+      computer.src_image_idx = source;
+      const float cost = computer.Compute();
+      band.costs.Set(
+          local_row, col, hypothesis * num_sources + source, cost);
+      if (hypothesis == 0) {
+        if (same_depth[threadIdx.x]) {
+          band.costs.Set(local_row, col, num_sources + source, cost);
+        }
+        if (same_normal[threadIdx.x]) {
+          band.costs.Set(local_row, col, 2 * num_sources + source, cost);
+        }
+      }
+      if constexpr (kGeomConsistencyTerm) {
+        if (hypothesis < 2) {
+          // Geometry depends on depth, not normal. h0 has random depth and
+          // h1 current depth; h2 repeats random depth and needs no extra job.
+          const int depth_kind = hypothesis == 0 ? 1 : 0;
+          const float geometric_cost =
+              ComputeGeomConsistencyCost(camera,
+                                         poses_texture,
+                                         src_depth_maps_texture,
+                                         row,
+                                         col,
+                                         computer.depth,
+                                         source,
+                                         options.geom_consistency_max_cost);
+          band.geometric_costs.Set(
+              local_row, col, depth_kind * num_sources + source, geometric_cost);
+          if (hypothesis == 0 && same_depth[threadIdx.x]) {
+            band.geometric_costs.Set(local_row, col, source, geometric_cost);
+          }
+        }
+      }
+    }
+  }
+}
+
 constexpr int kCooperativeSampleBatchSize = 4;
 constexpr int kCooperativeSampleWindowSize = 16;
 
 template <bool kCooperative,
           int kBlockWidth = THREADS_PER_BLOCK,
-          int kSampleWindowSize = 1>
+          int kSampleWindowSize = 1,
+          int kLookAheadCapacity = 0,
+          bool kGeomConsistencyTerm = false>
 struct CooperativeNccJob {};
 
-template <int kBlockWidth, int kSampleWindowSize>
-struct CooperativeNccJob<true, kBlockWidth, kSampleWindowSize> {
-  float depths[4][kBlockWidth];
-  float normals[4][3][kBlockWidth];
-  float results[kSampleWindowSize][4][kBlockWidth];
+template <int kBlockWidth,
+          int kSampleWindowSize,
+          int kLookAheadCapacity,
+          bool kGeomConsistencyTerm>
+struct CooperativeNccJob<true,
+                         kBlockWidth,
+                         kSampleWindowSize,
+                         kLookAheadCapacity,
+                         kGeomConsistencyTerm> {
+  static constexpr int kNumSlots =
+      kLookAheadCapacity ? kLookAheadCapacity : kSampleWindowSize;
+  static constexpr int kNumParameters = kLookAheadCapacity ? 1 : 4;
+  static constexpr int kNumGeometryKinds = kGeomConsistencyTerm ? 3 : 1;
+  // One padded rank shifts each band hypothesis plane by eight banks. This
+  // avoids identical plane offsets when the first warp folds four hypotheses.
+  static constexpr int kResultStride = kNumSlots + (kLookAheadCapacity ? 1 : 0);
+  float depths[kNumParameters][kBlockWidth];
+  float normals[kNumParameters][3][kBlockWidth];
+  float results[4 * kResultStride][kBlockWidth];
+  float geometric_costs[kNumGeometryKinds * kResultStride][kBlockWidth];
   float ref_sum[kBlockWidth];
   float ref_squared_sum[kBlockWidth];
-  int source[kSampleWindowSize][kBlockWidth];
+  int source[kNumSlots][kBlockWidth];
   float best_depth[kBlockWidth];
   float best_normal[3][kBlockWidth];
   int best_idx[kBlockWidth];
+
+  // Legacy slots contain four hypothesis lanes. Band workers each evaluate one
+  // source, so transpose that layout to keep their stores in distinct banks.
+  __device__ float& Result(const int slot,
+                          const int hypothesis,
+                          const int column) {
+    return results[kLookAheadCapacity ? hypothesis * kResultStride + slot
+                                     : slot * 4 + hypothesis][column];
+  }
+
+  __device__ float& GeometricCost(const int slot,
+                                 const int kind,
+                                 const int column) {
+    return geometric_costs[kLookAheadCapacity ? kind * kResultStride + slot
+                                            : slot * kNumGeometryKinds + kind]
+                          [column];
+  }
 };
+
+#ifndef COLMAP_HIP_ENABLED
+// This helper is called after cache publication. The first warp executes every
+// shuffle, including lanes for columns past valid_width; other warps return.
+// All accumulation stays serial within each hypothesis, never a tree reduction.
+template <int kCapacity, bool kGeomConsistencyTerm>
+__device__ void FoldLookAheadSamples(
+    const GpuMatView<float> sampled_sources,
+    const int local_row,
+    const int col,
+    const int valid_width,
+    const int num_samples,
+    const float regularizer,
+    const uint32_t source_mask,
+    const int (&first_sources)[kCooperativeSampleWindowSize][8],
+    const float (&incumbent_cost)[kCapacity][8],
+    CooperativeNccJob<true,
+                      8,
+                      kCooperativeSampleWindowSize,
+                      kCapacity,
+                      kGeomConsistencyTerm>& cache,
+    float (&costs)[5]) {
+  const bool owner = threadIdx.y == 0;
+  // x spans eight columns; y=0..3 is exactly the first warp. Each lane
+  // folds one hypothesis in the original sample order, and y=0 also folds
+  // hypothesis4. Shuffles deliver sums without another block barrier.
+  if (threadIdx.y < 4) {
+    constexpr uint32_t kFirstWarpMask = 0xffffffffu;
+    const int hypothesis = threadIdx.y;
+    float hypothesis_cost = 0.0f;
+    float fourth_cost = 0.0f;
+    const auto accumulate_cost = [&](const int index,
+                                      const int source,
+                                      const int slot,
+                                      float& sum) {
+      sum += index == 0 ? incumbent_cost[source][threadIdx.x]
+                        : cache.Result(slot, index - 1, threadIdx.x);
+      if constexpr (kGeomConsistencyTerm) {
+        const int kind = index == 3 ? 0 : (index == 4 ? 2 : index);
+        sum += regularizer * cache.GeometricCost(slot, kind, threadIdx.x);
+      }
+    };
+    for (int sample = 0; sample < num_samples; ++sample) {
+      int source = -1;
+      int slot = -1;
+      if (owner && col < valid_width) {
+        source = sample < kCooperativeSampleWindowSize
+                     ? first_sources[sample][threadIdx.x]
+                     : static_cast<int>(
+                           sampled_sources.Get(local_row, col, sample));
+        if (source >= 0) {
+          slot = __popc(source_mask & ((uint32_t{1} << source) - 1));
+        }
+      }
+      // Invalid columns still execute every shuffle with the full mask.
+      source = __shfl_sync(kFirstWarpMask, source, threadIdx.x);
+      slot = __shfl_sync(kFirstWarpMask, slot, threadIdx.x);
+      if (source < 0) continue;
+      accumulate_cost(hypothesis, source, slot, hypothesis_cost);
+      if (owner) accumulate_cost(4, source, slot, fourth_cost);
+    }
+    const float first_cost =
+        __shfl_sync(kFirstWarpMask, hypothesis_cost, threadIdx.x + 8);
+    const float second_cost =
+        __shfl_sync(kFirstWarpMask, hypothesis_cost, threadIdx.x + 16);
+    const float third_cost =
+        __shfl_sync(kFirstWarpMask, hypothesis_cost, threadIdx.x + 24);
+    if (owner && col < valid_width) {
+      costs[0] = hypothesis_cost;
+      costs[1] = first_cost;
+      costs[2] = second_cost;
+      costs[3] = third_cost;
+      costs[4] = fourth_cost;
+    }
+  }
+}
+#endif
 
 #ifdef COLMAP_PATCH_MATCH_TESTING
 // Views are passed only in test builds; kTrace=false eliminates all writes.
@@ -990,7 +1420,8 @@ template <int kWindowSize,
           bool kFilterPhotoConsistency = false,
           bool kFilterGeomConsistency = false,
           bool kCooperative = false,
-          int kBlockWidth = THREADS_PER_BLOCK
+          int kBlockWidth = THREADS_PER_BLOCK,
+          int kLookAheadCapacity = 0
 #ifdef COLMAP_PATCH_MATCH_TESTING
           ,
           bool kTrace = false
@@ -1012,28 +1443,34 @@ __global__ void SweepFromTopToBottom(
     const cudaTextureObject_t src_images_texture,
     const cudaTextureObject_t src_depth_maps_texture,
     const cudaTextureObject_t poses_texture,
-    const SweepOptions options
+    const SweepOptions options,
+    LookAheadViews look_ahead
 #ifdef COLMAP_PATCH_MATCH_TESTING
     ,
     SweepTrace trace
 #endif
 ) {
+  constexpr bool kLookAhead = kLookAheadCapacity != 0;
+  static_assert(kLookAheadCapacity == 0 || kLookAheadCapacity == 16 ||
+                kLookAheadCapacity == 32);
+  static_assert(!kLookAhead || (kCooperative && kBlockWidth == 8));
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
   const bool owner = !kCooperative || threadIdx.y == 0;
   constexpr int kSampleBatchSize =
       kCooperative && kBlockWidth == 8 ? kCooperativeSampleBatchSize : 1;
   constexpr int kSampleWindowSize =
       kCooperative && kBlockWidth == 8 ? kCooperativeSampleWindowSize : 1;
-  __shared__ CooperativeNccJob<kCooperative, kBlockWidth, kSampleWindowSize>
-      cooperative_job;
+  constexpr int kCachedSources =
+      kLookAhead ? kLookAheadCapacity : kSampleWindowSize;
+  __shared__ CooperativeNccJob<kCooperative,
+                              kBlockWidth,
+                              kSampleWindowSize,
+                              kLookAheadCapacity,
+                              kGeomConsistencyTerm> cooperative_job;
+  // Legacy sample aliases become the first sixteen selected IDs in band mode.
+  // Only longer rows need the existing global uniform slots as tail-ID storage.
   __shared__ int cooperative_sample_alias[kSampleWindowSize][kBlockWidth];
-  __shared__ float
-      cooperative_geometric_costs[kSampleWindowSize]
-                                 [kCooperative && kGeomConsistencyTerm ? 3 : 1]
-                                 [kBlockWidth];
-
-  // Probability for boundary pixels.
-  constexpr float kUniformProb = 0.5f;
+  __shared__ uint32_t row_source_mask[kLookAhead ? kBlockWidth : 1];
 
   LikelihoodComputer likelihood_computer(options.ncc_sigma,
                                          options.min_triangulation_angle,
@@ -1056,22 +1493,18 @@ __global__ void SweepFromTopToBottom(
   // updated forward messages are computed further below.
   //////////////////////////////////////////////////////////////////////////////
 
-  if (col < cost_map.GetWidth()) {
+  if (!kLookAhead && col < cost_map.GetWidth()) {
     const int first_source = kCooperative ? threadIdx.y : 0;
     const int source_step = kCooperative ? blockDim.y : 1;
     for (int image_idx = first_source; image_idx < cost_map.GetDepth();
          image_idx += source_step) {
-      // Source chains are independent; preserve each ordered row recurrence.
-      // Compute backward message.
-      float beta = kUniformProb;
-      for (int row = cost_map.GetHeight() - 1; row >= 0; --row) {
-        const float cost = cost_map.Get(row, col, image_idx);
-        beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
-        sel_prob_map.Set(row, col, image_idx, beta);
-      }
-
-      // Initialize forward message.
-      forward_message[image_idx * source_stride] = kUniformProb;
+      InitializeSourceMessages(likelihood_computer,
+                               cost_map,
+                               sel_prob_map,
+                               forward_message,
+                               source_stride,
+                               col,
+                               image_idx);
     }
   }
 
@@ -1110,21 +1543,30 @@ __global__ void SweepFromTopToBottom(
   // Cuda PRNG state for random sampling.
 #ifndef COLMAP_HIP_ENABLED
   __shared__ float
-      source_current_cost[kCooperative && kBlockWidth == 8 ? kSampleWindowSize
+      source_current_cost[kCooperative && kBlockWidth == 8 ? kCachedSources
                                                            : 1]
                          [kCooperative && kBlockWidth == 8 ? kBlockWidth : 1];
 #endif
   curandState rand_state;
 
   if (owner && col < cost_map.GetWidth()) {
-    // Read random state for current column.
-    rand_state = rand_state_map.Get(0, col);
-    // Parameters for first row in column.
-    prev_param_state.depth = depth_map.Get(0, col);
-    normal_map.GetSlice(0, col, prev_param_state.normal);
+    if constexpr (!kLookAhead) rand_state = rand_state_map.Get(0, col);
+    if (kLookAhead && look_ahead.first_row > 0) {
+      prev_param_state.depth = look_ahead.previous_parameters.Get(0, col, 0);
+      for (int axis = 0; axis < 3; ++axis) {
+        prev_param_state.normal[axis] =
+            look_ahead.previous_parameters.Get(0, col, axis + 1);
+      }
+    } else {
+      prev_param_state.depth = depth_map.Get(0, col);
+      normal_map.GetSlice(0, col, prev_param_state.normal);
+    }
   }
 
-  for (int row = 0; row < cost_map.GetHeight(); ++row) {
+  const int first_row = kLookAhead ? look_ahead.first_row : 0;
+  const int last_row = kLookAhead ? first_row + look_ahead.num_rows
+                                 : static_cast<int>(cost_map.GetHeight());
+  for (int row = first_row; row < last_row; ++row) {
     if constexpr (!kCooperative) {
       // The scalar refresh has no end-of-row barrier before tile reuse.
       __syncthreads();
@@ -1134,7 +1576,7 @@ __global__ void SweepFromTopToBottom(
     if constexpr (kCooperative) {
       // The owner loads the reference tile; groups fill independent weight
       // rows. The first barrier publishes the tile, the second its weights.
-      if (owner) pcc_computer.ReadRef(row);
+      if (owner) pcc_computer.ReadRef(row, kLookAhead && row == first_row);
       __syncthreads();
       if constexpr (kBlockWidth == 8 &&
                     PhotoConsistencyCostComputerType::kCacheWeights) {
@@ -1152,6 +1594,13 @@ __global__ void SweepFromTopToBottom(
     float costs[kNumCosts] = {0};
     float depths[kNumCosts] = {0};
     const float* normals[kNumCosts] = {nullptr};
+    // Source-chain ownership is y, y+16, independently of compact NCC ranks.
+    // Keep both pairs for capacity32: an incumbent winner needs these exact
+    // unweighted values again, but any changed winner must recompute them.
+    float incumbent_alpha0;
+    float incumbent_prob0;
+    float incumbent_alpha1;
+    float incumbent_prob1;
     bool empty_sampling_support = false;
     if (owner && col < cost_map.GetWidth()) {
       pcc_computer.row = row;
@@ -1173,16 +1622,24 @@ __global__ void SweepFromTopToBottom(
       curr_param_state.depth = depth_map.Get(row, col);
       normal_map.GetSlice(row, col, curr_param_state.normal);
 
-      // Generate random parameters.
-      rand_param_state.depth = PerturbDepth(
-          options.perturbation, curr_param_state.depth, &rand_state);
-      PerturbNormal(camera,
-                    row,
-                    col,
-                    options.perturbation * M_PI,
-                    curr_param_state.normal,
-                    &rand_state,
-                    rand_param_state.normal);
+      if constexpr (kLookAhead) {
+        rand_param_state.depth =
+            look_ahead.random_parameters.Get(row - first_row, col, 0);
+        for (int axis = 0; axis < 3; ++axis) {
+          rand_param_state.normal[axis] = look_ahead.random_parameters.Get(
+              row - first_row, col, axis + 1);
+        }
+      } else {
+        rand_param_state.depth = PerturbDepth(
+            options.perturbation, curr_param_state.depth, &rand_state);
+        PerturbNormal(camera,
+                      row,
+                      col,
+                      options.perturbation * M_PI,
+                      curr_param_state.normal,
+                      &rand_state,
+                      rand_param_state.normal);
+      }
     }
 
     // Compute independent source probabilities before the ordered CDF update.
@@ -1203,7 +1660,7 @@ __global__ void SweepFromTopToBottom(
         const float cost = cost_map.Get(row, col, image_idx);
 #ifndef COLMAP_HIP_ENABLED
         if constexpr (kCooperative && kBlockWidth == 8) {
-          if (image_idx < kSampleWindowSize)
+          if (image_idx < kCachedSources)
             source_current_cost[image_idx][threadIdx.x] = cost;
         }
 #endif
@@ -1213,6 +1670,20 @@ __global__ void SweepFromTopToBottom(
         const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
         const float sel_prob = likelihood_computer.ComputeSelProb(
             alpha, beta, prev_prob, options.prev_sel_prob_weight);
+        if constexpr (kLookAhead) {
+          if constexpr (kLookAheadCapacity == 32) {
+            if (image_idx >= 16) {
+              incumbent_alpha1 = alpha;
+              incumbent_prob1 = sel_prob;
+            } else {
+              incumbent_alpha0 = alpha;
+              incumbent_prob0 = sel_prob;
+            }
+          } else {
+            incumbent_alpha0 = alpha;
+            incumbent_prob0 = sel_prob;
+          }
+        }
 
         float cos_triangulation_angle;
         float cos_incident_angle;
@@ -1273,7 +1744,8 @@ __global__ void SweepFromTopToBottom(
         cooperative_job.ref_sum[lane] = pcc_computer.local_ref_sum;
         cooperative_job.ref_squared_sum[lane] =
             pcc_computer.local_ref_squared_sum;
-        for (int hypothesis = 0; hypothesis < 4; ++hypothesis) {
+        for (int hypothesis = 0; hypothesis < (kLookAhead ? 1 : 4);
+             ++hypothesis) {
           cooperative_job.depths[hypothesis][lane] = depths[hypothesis + 1];
           for (int axis = 0; axis < 3; ++axis) {
             cooperative_job.normals[hypothesis][axis][lane] =
@@ -1293,174 +1765,268 @@ __global__ void SweepFromTopToBottom(
       }
     }
 
-    for (int sample = 0; sample < options.num_samples;
-         sample += options.num_samples - sample < kSampleWindowSize
-                       ? options.num_samples - sample
-                       : kSampleWindowSize) {
-      const int sample_count = options.num_samples - sample < kSampleWindowSize
-                                   ? options.num_samples - sample
-                                   : kSampleWindowSize;
-      float geometric_costs[3] = {0};
-      if (owner && col < cost_map.GetWidth()) {
-        int num_unique_sources = 0;
+    if constexpr (kLookAhead) {
+      // The row's CDF is immutable during evaluation. Consume each raw draw
+      // once, retain its first sixteen source IDs in shared storage and any
+      // tail IDs in consumed float slots, and compact the row only once. A NaN
+      // CDF can select no source while its original support status stays true;
+      // do not derive support from this mask.
+      if (owner) {
         uint32_t sampled_sources = 0;
-        const bool use_source_mask = cost_map.GetDepth() <= 32;
-        for (int slot = 0; slot < kSampleWindowSize; ++slot) {
-          pcc_computer.src_image_idx = -1;
-          if (slot < sample_count) {
-            // Draw only actual samples, in the original RNG order.
-            const float uniform = curand_uniform(&rand_state);
-            pcc_computer.src_image_idx = SampleSource(
+        if (col < cost_map.GetWidth()) {
+          for (int sample = 0; sample < options.num_samples; ++sample) {
+            const float uniform =
+                look_ahead.uniforms.Get(row - first_row, col, sample);
+            const int source = SampleSource(
                 sampling_probs, cost_map.GetDepth(), source_stride, uniform);
-#ifdef COLMAP_PATCH_MATCH_TESTING
-            if constexpr (kTrace) {
-              trace.draws.Set(
-                  row, col, sample + slot, pcc_computer.src_image_idx);
-            }
-#endif
-          }
-          if constexpr (kCooperative) {
-            if constexpr (kSampleWindowSize > 1) {
-              cooperative_sample_alias[slot][threadIdx.x] =
-                  internal::AppendSampledSource(pcc_computer.src_image_idx,
-                                                use_source_mask,
-                                                sampled_sources,
-                                                num_unique_sources,
-                                                cooperative_job.source,
-                                                threadIdx.x);
+            if (sample < kSampleWindowSize) {
+              cooperative_sample_alias[sample][threadIdx.x] = source;
             } else {
-              cooperative_job.source[slot][threadIdx.x] =
-                  pcc_computer.src_image_idx;
+              look_ahead.uniforms.Set(row - first_row, col, sample,
+                                       static_cast<float>(source));
             }
-          } else if (pcc_computer.src_image_idx >= 0) {
-            if constexpr (kGeomConsistencyTerm) {
-              for (int i = 0; i < 3; ++i) {
-                geometric_costs[i] = ComputeGeomConsistencyCost(
-                    camera,
-                    poses_texture,
-                    src_depth_maps_texture,
-                    row,
-                    col,
-                    depths[i],
-                    pcc_computer.src_image_idx,
-                    options.geom_consistency_max_cost);
-              }
-            }
-            costs[0] += cost_map.Get(row, col, pcc_computer.src_image_idx);
-            if constexpr (kGeomConsistencyTerm) {
-              costs[0] +=
-                  options.geom_consistency_regularizer * geometric_costs[0];
-            }
+#ifdef COLMAP_PATCH_MATCH_TESTING
+            if constexpr (kTrace) trace.draws.Set(row, col, sample, source);
+#endif
+            if (source >= 0) sampled_sources |= uint32_t{1} << source;
           }
         }
-        if constexpr (kCooperative && kSampleWindowSize > 1) {
-          internal::PackSampledSources<kSampleWindowSize>(
-              use_source_mask,
-              sampled_sources,
-              num_unique_sources,
-              sample_count,
-              cooperative_job.source,
-              cooperative_sample_alias,
-              threadIdx.x);
+        row_source_mask[threadIdx.x] = sampled_sources;
+        uint32_t remaining_sources = sampled_sources;
+        int slot = 0;
+        while (remaining_sources != 0) {
+          cooperative_job.source[slot++][threadIdx.x] =
+              __ffs(remaining_sources) - 1;
+          remaining_sources &= remaining_sources - 1;
         }
       }
-
-      if constexpr (kCooperative) {
-        if (owner && col >= cost_map.GetWidth()) {
-          for (int slot = 0; slot < kSampleWindowSize; ++slot) {
-            cooperative_job.source[slot][threadIdx.x] = -1;
-            if constexpr (kSampleWindowSize > 1) {
-              cooperative_sample_alias[slot][threadIdx.x] = -1;
-            }
-          }
+      __syncthreads();
+      if (col < cost_map.GetWidth()) {
+        const int num_sources =
+            __popc(row_source_mask[threadIdx.x]);
+        float propagated_normal[3];
+        for (int axis = 0; axis < 3; ++axis) {
+          propagated_normal[axis] =
+              cooperative_job.normals[0][axis][threadIdx.x];
         }
-        // Invalid columns and padded final-window samples reach both barriers.
-        __syncthreads();
-        const int hypothesis = threadIdx.y % 4;
-        // Worker waves evaluate dense unique jobs into disjoint result slots.
-        const int worker_limit = kSampleWindowSize == 1 ? 1 : sample_count;
-        for (int slot = threadIdx.y / 4; slot < worker_limit;
-             slot += kSampleBatchSize) {
+        pcc_computer.depth = cooperative_job.depths[0][threadIdx.x];
+        pcc_computer.normal = propagated_normal;
+        // Keep expensive work dense by compact rank, even when selected source
+        // IDs are sparse. Cache values remain live through winner/filter reuse.
+        for (int slot = threadIdx.y; slot < num_sources; slot += blockDim.y) {
           const int source = cooperative_job.source[slot][threadIdx.x];
-          if (col < cost_map.GetWidth() && source >= 0) {
-            if constexpr (kGeomConsistencyTerm) {
-              if (hypothesis < 3) {
-                const int depth_hypothesis =
-                    hypothesis == 0 ? 2 : hypothesis - 1;
-                cooperative_geometric_costs[slot][hypothesis][threadIdx.x] =
-                    ComputeGeomConsistencyCost(
-                        camera,
-                        poses_texture,
-                        src_depth_maps_texture,
-                        row,
-                        col,
-                        cooperative_job.depths[depth_hypothesis][threadIdx.x],
-                        source,
-                        options.geom_consistency_max_cost);
-              }
-            }
-            float hypothesis_normal[3];
-            for (int axis = 0; axis < 3; ++axis) {
-              hypothesis_normal[axis] =
-                  cooperative_job.normals[hypothesis][axis][threadIdx.x];
-            }
-            pcc_computer.src_image_idx = source;
-            pcc_computer.depth =
-                cooperative_job.depths[hypothesis][threadIdx.x];
-            pcc_computer.normal = hypothesis_normal;
-            cooperative_job.results[slot][hypothesis][threadIdx.x] =
-                pcc_computer.Compute();
+          pcc_computer.src_image_idx = source;
+          cooperative_job.Result(slot, 0, threadIdx.x) = pcc_computer.Compute();
+          for (int hypothesis = 1; hypothesis < 4; ++hypothesis) {
+            cooperative_job.Result(slot, hypothesis, threadIdx.x) =
+                look_ahead.costs.Get(row - first_row,
+                                     col,
+                                     (hypothesis - 1) * cost_map.GetDepth() +
+                                         source);
+          }
+          if constexpr (kGeomConsistencyTerm) {
+            cooperative_job.GeometricCost(slot, 0, threadIdx.x) =
+                look_ahead.geometric_costs.Get(row - first_row, col, source);
+            cooperative_job.GeometricCost(slot, 1, threadIdx.x) =
+                ComputeGeomConsistencyCost(camera,
+                                           poses_texture,
+                                           src_depth_maps_texture,
+                                           row,
+                                           col,
+                                           pcc_computer.depth,
+                                           source,
+                                           options.geom_consistency_max_cost);
+            cooperative_job.GeometricCost(slot, 2, threadIdx.x) =
+                look_ahead.geometric_costs.Get(
+                    row - first_row, col, cost_map.GetDepth() + source);
           }
         }
-        __syncthreads();
-        if (owner && col < cost_map.GetWidth()) {
-          for (int slot = 0; slot < sample_count; ++slot) {
-            int result_slot = slot;
-            if constexpr (kSampleWindowSize > 1) {
-              result_slot = cooperative_sample_alias[slot][threadIdx.x];
-              if (result_slot < 0) continue;
-            }
-            const int source = cooperative_job.source[result_slot][threadIdx.x];
-            if (source < 0) continue;
-            // Reuse identical evaluations, but retain every original sample
-            // add.
+      }
+      // Every actual source is now cached. Invalid columns participate too.
+      __syncthreads();
 #ifndef COLMAP_HIP_ENABLED
-            if constexpr (kBlockWidth == 8) {
-              costs[0] += source < kSampleWindowSize
-                              ? source_current_cost[source][threadIdx.x]
-                              : cost_map.Get(row, col, source);
-            } else
+      FoldLookAheadSamples<kLookAheadCapacity, kGeomConsistencyTerm>(
+          look_ahead.uniforms,
+          row - first_row,
+          col,
+          cost_map.GetWidth(),
+          options.num_samples,
+          options.geom_consistency_regularizer,
+          row_source_mask[threadIdx.x],
+          cooperative_sample_alias,
+          source_current_cost,
+          cooperative_job,
+          costs);
 #endif
-            {
-              costs[0] += cost_map.Get(row, col, source);
-            }
-            if constexpr (kGeomConsistencyTerm) {
-              for (int i = 0; i < 3; ++i) {
-                geometric_costs[i] =
-                    cooperative_geometric_costs[result_slot][i][threadIdx.x];
+    } else {
+      for (int sample = 0; sample < options.num_samples;
+           sample += options.num_samples - sample < kSampleWindowSize
+                         ? options.num_samples - sample
+                         : kSampleWindowSize) {
+        const int sample_count = options.num_samples - sample < kSampleWindowSize
+                                     ? options.num_samples - sample
+                                     : kSampleWindowSize;
+        float geometric_costs[3] = {0};
+        if (owner && col < cost_map.GetWidth()) {
+          int num_unique_sources = 0;
+          uint32_t sampled_sources = 0;
+          const bool use_source_mask = cost_map.GetDepth() <= 32;
+          for (int slot = 0; slot < kSampleWindowSize; ++slot) {
+            pcc_computer.src_image_idx = -1;
+            if (slot < sample_count) {
+              // Draw only actual samples, in the original RNG order.
+              const float uniform = curand_uniform(&rand_state);
+              pcc_computer.src_image_idx = SampleSource(
+                  sampling_probs, cost_map.GetDepth(), source_stride, uniform);
+#ifdef COLMAP_PATCH_MATCH_TESTING
+              if constexpr (kTrace) {
+                trace.draws.Set(
+                    row, col, sample + slot, pcc_computer.src_image_idx);
               }
-              costs[0] +=
-                  options.geom_consistency_regularizer * geometric_costs[0];
+#endif
             }
-            for (int i = 1; i < kNumCosts; ++i) {
-              costs[i] +=
-                  cooperative_job.results[result_slot][i - 1][threadIdx.x];
-              if (kGeomConsistencyTerm) {
-                costs[i] += options.geom_consistency_regularizer *
-                            geometric_costs[i == 3 ? 0 : (i == 4 ? 2 : i)];
+            if constexpr (kCooperative) {
+              if constexpr (kSampleWindowSize > 1) {
+                cooperative_sample_alias[slot][threadIdx.x] =
+                    internal::AppendSampledSource(pcc_computer.src_image_idx,
+                                                  use_source_mask,
+                                                  sampled_sources,
+                                                  num_unique_sources,
+                                                  cooperative_job.source,
+                                                  threadIdx.x);
+              } else {
+                cooperative_job.source[slot][threadIdx.x] =
+                    pcc_computer.src_image_idx;
+              }
+            } else if (pcc_computer.src_image_idx >= 0) {
+              if constexpr (kGeomConsistencyTerm) {
+                for (int i = 0; i < 3; ++i) {
+                  geometric_costs[i] = ComputeGeomConsistencyCost(
+                      camera,
+                      poses_texture,
+                      src_depth_maps_texture,
+                      row,
+                      col,
+                      depths[i],
+                      pcc_computer.src_image_idx,
+                      options.geom_consistency_max_cost);
+                }
+              }
+              costs[0] += cost_map.Get(row, col, pcc_computer.src_image_idx);
+              if constexpr (kGeomConsistencyTerm) {
+                costs[0] +=
+                    options.geom_consistency_regularizer * geometric_costs[0];
               }
             }
           }
+          if constexpr (kCooperative && kSampleWindowSize > 1) {
+            internal::PackSampledSources<kSampleWindowSize>(
+                use_source_mask,
+                sampled_sources,
+                num_unique_sources,
+                sample_count,
+                cooperative_job.source,
+                cooperative_sample_alias,
+                threadIdx.x);
+          }
         }
-      } else {
-        if (pcc_computer.src_image_idx == -1) continue;
-        for (int i = 1; i < kNumCosts; ++i) {
-          pcc_computer.depth = depths[i];
-          pcc_computer.normal = normals[i];
-          costs[i] += pcc_computer.Compute();
-          if (kGeomConsistencyTerm) {
-            costs[i] += options.geom_consistency_regularizer *
-                        geometric_costs[i == 3 ? 0 : (i == 4 ? 2 : i)];
+
+        if constexpr (kCooperative) {
+          if (owner && col >= cost_map.GetWidth()) {
+            for (int slot = 0; slot < kSampleWindowSize; ++slot) {
+              cooperative_job.source[slot][threadIdx.x] = -1;
+              if constexpr (kSampleWindowSize > 1) {
+                cooperative_sample_alias[slot][threadIdx.x] = -1;
+              }
+            }
+          }
+          // Invalid columns and padded final-window samples reach both barriers.
+          __syncthreads();
+          const int hypothesis = threadIdx.y % 4;
+          const int worker_limit = kSampleWindowSize == 1 ? 1 : sample_count;
+          for (int slot = threadIdx.y / 4; slot < worker_limit;
+               slot += kSampleBatchSize) {
+            const int source = cooperative_job.source[slot][threadIdx.x];
+            if (col < cost_map.GetWidth() && source >= 0) {
+              if constexpr (kGeomConsistencyTerm) {
+                if (hypothesis < 3) {
+                  const int depth_hypothesis =
+                      hypothesis == 0 ? 2 : hypothesis - 1;
+                  cooperative_job.GeometricCost(slot, hypothesis, threadIdx.x) =
+                      ComputeGeomConsistencyCost(
+                          camera,
+                          poses_texture,
+                          src_depth_maps_texture,
+                          row,
+                          col,
+                          cooperative_job.depths[depth_hypothesis][threadIdx.x],
+                          source,
+                          options.geom_consistency_max_cost);
+                }
+              }
+              float hypothesis_normal[3];
+              for (int axis = 0; axis < 3; ++axis) {
+                hypothesis_normal[axis] =
+                    cooperative_job.normals[hypothesis][axis][threadIdx.x];
+              }
+              pcc_computer.src_image_idx = source;
+              pcc_computer.depth =
+                  cooperative_job.depths[hypothesis][threadIdx.x];
+              pcc_computer.normal = hypothesis_normal;
+              cooperative_job.Result(slot, hypothesis, threadIdx.x) =
+                  pcc_computer.Compute();
+            }
+          }
+          __syncthreads();
+          if (owner && col < cost_map.GetWidth()) {
+            for (int slot = 0; slot < sample_count; ++slot) {
+              int result_slot = slot;
+              if constexpr (kSampleWindowSize > 1) {
+                result_slot = cooperative_sample_alias[slot][threadIdx.x];
+                if (result_slot < 0) continue;
+              }
+              const int source = cooperative_job.source[result_slot][threadIdx.x];
+              if (source < 0) continue;
+              // Reuse identical evaluations, but retain every original sample
+              // add.
+#ifndef COLMAP_HIP_ENABLED
+              if constexpr (kBlockWidth == 8) {
+                costs[0] += source < kSampleWindowSize
+                                ? source_current_cost[source][threadIdx.x]
+                                : cost_map.Get(row, col, source);
+              } else
+#endif
+              {
+                costs[0] += cost_map.Get(row, col, source);
+              }
+              if constexpr (kGeomConsistencyTerm) {
+                for (int i = 0; i < 3; ++i) {
+                  geometric_costs[i] =
+                      cooperative_job.GeometricCost(result_slot, i, threadIdx.x);
+                }
+                costs[0] +=
+                    options.geom_consistency_regularizer * geometric_costs[0];
+              }
+              for (int i = 1; i < kNumCosts; ++i) {
+                costs[i] +=
+                    cooperative_job.Result(result_slot, i - 1, threadIdx.x);
+                if (kGeomConsistencyTerm) {
+                  costs[i] += options.geom_consistency_regularizer *
+                              geometric_costs[i == 3 ? 0 : (i == 4 ? 2 : i)];
+                }
+              }
+            }
+          }
+        } else {
+          if (pcc_computer.src_image_idx == -1) continue;
+          for (int i = 1; i < kNumCosts; ++i) {
+            pcc_computer.depth = depths[i];
+            pcc_computer.normal = normals[i];
+            costs[i] += pcc_computer.Compute();
+            if (kGeomConsistencyTerm) {
+              costs[i] += options.geom_consistency_regularizer *
+                          geometric_costs[i == 3 ? 0 : (i == 4 ? 2 : i)];
+            }
           }
         }
       }
@@ -1530,17 +2096,52 @@ __global__ void SweepFromTopToBottom(
         if (winner == 0) {
           cost = cost_map.Get(row, col, image_idx);
         } else {
-          pcc_computer.src_image_idx = image_idx;
-          cost = pcc_computer.Compute();
+          bool cached = false;
+          if constexpr (kLookAhead) {
+            if (winner >= 2) {
+              cost = look_ahead.costs.Get(row - first_row,
+                                          col,
+                                          (winner - 2) * cost_map.GetDepth() +
+                                              image_idx);
+              cached = true;
+            } else if (winner == 1) {
+              // Every selected source remains live through refresh, not just
+              // those in the last sixteen draws. Rank needs no list search.
+              const uint32_t mask =
+                  row_source_mask[threadIdx.x];
+              const uint32_t bit = uint32_t{1} << image_idx;
+              if ((mask & bit) != 0) {
+                const int slot = __popc(mask & (bit - 1));
+                cost = cooperative_job.Result(slot, 0, threadIdx.x);
+                cached = true;
+              }
+            }
+          }
+          if (!cached) {
+            pcc_computer.src_image_idx = image_idx;
+            cost = pcc_computer.Compute();
+          }
           cost_map.Set(row, col, image_idx, cost);
         }
 
-        const float alpha = likelihood_computer.ComputeForwardMessage(
-            cost, source_forward_message[image_idx * source_stride]);
-        const float beta = sel_prob_map.Get(row, col, image_idx);
-        const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
-        const float prob = likelihood_computer.ComputeSelProb(
-            alpha, beta, prev_prob, options.prev_sel_prob_weight);
+        float alpha;
+        float prob;
+        if (kLookAhead && winner == 0) {
+          if constexpr (kLookAheadCapacity == 32) {
+            alpha = image_idx < 16 ? incumbent_alpha0 : incumbent_alpha1;
+            prob = image_idx < 16 ? incumbent_prob0 : incumbent_prob1;
+          } else {
+            alpha = incumbent_alpha0;
+            prob = incumbent_prob0;
+          }
+        } else {
+          alpha = likelihood_computer.ComputeForwardMessage(
+              cost, source_forward_message[image_idx * source_stride]);
+          const float beta = sel_prob_map.Get(row, col, image_idx);
+          const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
+          prob = likelihood_computer.ComputeSelProb(
+              alpha, beta, prev_prob, options.prev_sel_prob_weight);
+        }
         source_forward_message[image_idx * source_stride] = alpha;
         sel_prob_map.Set(row, col, image_idx, prob);
 #ifdef COLMAP_PATCH_MATCH_TESTING
@@ -1551,7 +2152,9 @@ __global__ void SweepFromTopToBottom(
       }
     }
     if constexpr (kCooperative) {
-      // Filtering reads all source probabilities; shared reads finish here.
+      // Filtering reads the updated source probabilities. Band geometry stays
+      // immutable through filtering; the next row's tile barrier joins every
+      // owner before any row-cache field is overwritten.
       __syncthreads();
     }
 
@@ -1566,6 +2169,36 @@ __global__ void SweepFromTopToBottom(
             likelihood_computer.ComputeNCCProb(1.0f - options.filter_min_ncc);
         const float cos_min_triangulation_angle =
             cos(options.filter_min_triangulation_angle);
+
+        // Reuse only a fresh evaluation of this exact winning depth. The term
+        // and filter both call ComputeGeomConsistencyCost with max_cost above;
+        // filter-only specializations have no table and keep the live call.
+        const auto winning_geometric_cost = [&](const int image_idx) {
+          if constexpr (kLookAhead && kGeomConsistencyTerm) {
+            if (min_cost_idx == 0 || min_cost_idx == 3) {
+              return look_ahead.geometric_costs.Get(
+                  row - first_row, col, image_idx);
+            }
+            if (min_cost_idx == 2 || min_cost_idx == 4) {
+              return look_ahead.geometric_costs.Get(
+                  row - first_row, col, cost_map.GetDepth() + image_idx);
+            }
+            const uint32_t mask = row_source_mask[threadIdx.x];
+            const uint32_t bit = uint32_t{1} << image_idx;
+            if ((mask & bit) != 0) {
+              return cooperative_job.GeometricCost(
+                  __popc(mask & (bit - 1)), 1, threadIdx.x);
+            }
+          }
+          return ComputeGeomConsistencyCost(camera,
+                                            poses_texture,
+                                            src_depth_maps_texture,
+                                            row,
+                                            col,
+                                            best_depth,
+                                            image_idx,
+                                            options.geom_consistency_max_cost);
+        };
 
         for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
           float cos_triangulation_angle;
@@ -1587,28 +2220,14 @@ __global__ void SweepFromTopToBottom(
               num_consistent += 1;
             }
           } else if (!kFilterPhotoConsistency) {
-            if (ComputeGeomConsistencyCost(camera,
-                                           poses_texture,
-                                           src_depth_maps_texture,
-                                           row,
-                                           col,
-                                           best_depth,
-                                           image_idx,
-                                           options.geom_consistency_max_cost) <=
+            if (winning_geometric_cost(image_idx) <=
                 options.filter_geom_consistency_max_cost) {
               consistency_mask.Set(row, col, image_idx, 1);
               num_consistent += 1;
             }
           } else {
             if (sel_prob_map.Get(row, col, image_idx) >= min_ncc_prob &&
-                ComputeGeomConsistencyCost(camera,
-                                           poses_texture,
-                                           src_depth_maps_texture,
-                                           row,
-                                           col,
-                                           best_depth,
-                                           image_idx,
-                                           options.geom_consistency_max_cost) <=
+                winning_geometric_cost(image_idx) <=
                     options.filter_geom_consistency_max_cost) {
               consistency_mask.Set(row, col, image_idx, 1);
               num_consistent += 1;
@@ -1637,8 +2256,136 @@ __global__ void SweepFromTopToBottom(
   }
 
   if (owner && col < cost_map.GetWidth()) {
-    rand_state_map.Set(0, col, rand_state);
+    if constexpr (kLookAhead) {
+      // Filtering may zero the public map. Propagation carries the selected,
+      // unfiltered tuple, just as it does inside an uninterrupted Sweep.
+      look_ahead.previous_parameters.Set(0, col, 0, prev_param_state.depth);
+      for (int axis = 0; axis < 3; ++axis) {
+        look_ahead.previous_parameters.Set(
+            0, col, axis + 1, prev_param_state.normal[axis]);
+      }
+    } else {
+      rand_state_map.Set(0, col, rand_state);
+    }
   }
+}
+
+// Both production and the traced private probe use this dispatcher. Band
+// kernels stay in the default stream, including the full backward prepass.
+template <int kWindowSize,
+          int kWindowStep,
+          bool kGeomConsistencyTerm,
+          bool kFilterPhotoConsistency,
+          bool kFilterGeomConsistency,
+          bool kCooperative,
+          int kBlockWidth
+#ifdef COLMAP_PATCH_MATCH_TESTING
+          ,
+          bool kTrace = false
+#endif
+          >
+void LaunchSweep(
+    LookAheadWorkspace* workspace,
+    const RefCamera camera,
+    GpuMatView<float> global_workspace,
+    GpuMatView<curandState> rand_state_map,
+    GpuMatView<float> cost_map,
+    GpuMatView<float> depth_map,
+    GpuMatView<float> normal_map,
+    GpuMatView<uint8_t> consistency_mask,
+    GpuMatView<float> sel_prob_map,
+    const GpuMatView<float> prev_sel_prob_map,
+    const cudaTextureObject_t ref_image_texture,
+    const GpuMatView<float> ref_sum_image,
+    const GpuMatView<float> ref_squared_sum_image,
+    const cudaTextureObject_t src_images_texture,
+    const cudaTextureObject_t src_depth_maps_texture,
+    const cudaTextureObject_t poses_texture,
+    const SweepOptions options
+#ifdef COLMAP_PATCH_MATCH_TESTING
+    ,
+    SweepTrace trace
+#endif
+) {
+  const dim3 grid((cost_map.GetWidth() + kBlockWidth - 1) / kBlockWidth);
+  const dim3 block(kBlockWidth,
+                    kCooperative ? 4 * kCooperativeSampleBatchSize : 1);
+#define LAUNCH_SWEEP_KERNEL(LOOK_AHEAD, BAND)                    \
+  SweepFromTopToBottom<kWindowSize,                             \
+                       kWindowStep,                             \
+                       kGeomConsistencyTerm,                    \
+                       kFilterPhotoConsistency,                 \
+                       kFilterGeomConsistency,                  \
+                       kCooperative,                            \
+                       kBlockWidth,                             \
+                       LOOK_AHEAD SWEEP_TRACE_TEMPLATE>          \
+      <<<grid, block>>>(camera,                                 \
+                         global_workspace,                      \
+                         rand_state_map,                        \
+                         cost_map,                              \
+                         depth_map,                             \
+                         normal_map,                            \
+                         consistency_mask,                      \
+                         sel_prob_map,                          \
+                         prev_sel_prob_map,                      \
+                         ref_image_texture,                     \
+                         ref_sum_image,                         \
+                         ref_squared_sum_image,                 \
+                         src_images_texture,                    \
+                         src_depth_maps_texture,                \
+                         poses_texture,                         \
+                         options,                               \
+                         BAND SWEEP_TRACE_VALUE)
+#ifdef COLMAP_PATCH_MATCH_TESTING
+#define SWEEP_TRACE_TEMPLATE , kTrace
+#define SWEEP_TRACE_VALUE , trace
+#else
+#define SWEEP_TRACE_TEMPLATE
+#define SWEEP_TRACE_VALUE
+#endif
+#ifndef COLMAP_HIP_ENABLED
+  if constexpr (kCooperative && kWindowSize == 11 && kWindowStep == 1) {
+    if (workspace != nullptr) {
+      InitializeSweepMessages<<<
+          dim3((cost_map.GetWidth() + 31) / 32,
+               (cost_map.GetDepth() + 3) / 4),
+          dim3(32, 4)>>>(global_workspace, cost_map, sel_prob_map, options);
+      for (int first_row = 0; first_row < cost_map.GetHeight();
+           first_row += workspace->Rows()) {
+        const int num_rows =
+            std::min(workspace->Rows(),
+                     static_cast<int>(cost_map.GetHeight()) - first_row);
+        const LookAheadViews band = workspace->Views(first_row, num_rows);
+        GenerateBandHypotheses<<<(cost_map.GetWidth() + 31) / 32, 32>>>(
+            camera, depth_map, normal_map, rand_state_map, options, band);
+        PrecomputeBandCosts<kGeomConsistencyTerm><<<
+            dim3((cost_map.GetWidth() + 7) / 8,
+                 (num_rows + kLookAheadStripeRows - 1) / kLookAheadStripeRows),
+            dim3(8, 12)>>>(camera,
+                           depth_map,
+                           normal_map,
+                           ref_image_texture,
+                           ref_sum_image,
+                           ref_squared_sum_image,
+                           src_images_texture,
+                           src_depth_maps_texture,
+                           poses_texture,
+                           options,
+                           band);
+        if (cost_map.GetDepth() <= 16) {
+          LAUNCH_SWEEP_KERNEL(16, band);
+        } else {
+          LAUNCH_SWEEP_KERNEL(32, band);
+        }
+      }
+      return;
+    }
+  }
+#endif
+  LAUNCH_SWEEP_KERNEL(0, LookAheadViews{});
+#undef SWEEP_TRACE_VALUE
+#undef SWEEP_TRACE_TEMPLATE
+#undef LAUNCH_SWEEP_KERNEL
 }
 
 PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
@@ -1751,6 +2498,16 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
   CudaTimer total_timer;
   CudaTimer init_timer;
+  std::unique_ptr<LookAheadWorkspace> look_ahead_workspace;
+#ifndef COLMAP_HIP_ENABLED
+  if constexpr (kWindowSize == 11 && kWindowStep == 1) {
+    look_ahead_workspace = MakeLookAheadWorkspace(
+        std::max(ref_width_, ref_height_),
+        problem_.src_image_idxs.size(),
+        options_.num_samples,
+        options_.geom_consistency);
+  }
+#endif
 
   ComputeCudaConfig();
   dim3 initial_cost_grid = sweep_grid_size_;
@@ -1804,19 +2561,12 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   // Only radius 5 / step 1 uses cooperative sweeping (and never on HIP).
   // Initial-cost and element-wise kernels retain their existing launch shape.
   constexpr int kSweepBlockWidth = kCooperative ? 8 : THREADS_PER_BLOCK;
-  constexpr int kSampleBatchSize =
-      kCooperative ? kCooperativeSampleBatchSize : 1;
-  const dim3 sweep_kernel_block_size(
-      kSweepBlockWidth, kCooperative ? 4 * kSampleBatchSize : 1, 1);
 
   for (int iter = 0; iter < options_.num_iterations; ++iter) {
     CudaTimer iter_timer;
 
     for (int sweep = 0; sweep < 4; ++sweep) {
       CudaTimer sweep_timer;
-      const dim3 sweep_kernel_grid_size(
-          (cost_map_->GetWidth() - 1) / kSweepBlockWidth + 1, 1, 1);
-
       // Expenentially reduce amount of perturbation during the optimization.
       sweep_options.perturbation = 1.0f / std::pow(2.0f, iter + sweep / 4.0f);
 
@@ -1827,14 +2577,14 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
       const bool last_sweep = iter == options_.num_iterations - 1 && sweep == 3;
 
 #define CALL_SWEEP_FUNC                                         \
-  SweepFromTopToBottom<kWindowSize,                             \
-                       kWindowStep,                             \
-                       kGeomConsistencyTerm,                    \
-                       kFilterPhotoConsistency,                 \
-                       kFilterGeomConsistency,                  \
-                       kCooperative,                            \
-                       kSweepBlockWidth>                        \
-      <<<sweep_kernel_grid_size, sweep_kernel_block_size>>>(    \
+  LaunchSweep<kWindowSize,                                     \
+               kWindowStep,                                     \
+               kGeomConsistencyTerm,                            \
+               kFilterPhotoConsistency,                         \
+               kFilterGeomConsistency,                          \
+               kCooperative,                                    \
+               kSweepBlockWidth>(                               \
+          look_ahead_workspace.get(),                           \
           MakeRefCamera(ref_K_host_[rotation_in_half_pi_],      \
                         ref_inv_K_host_[rotation_in_half_pi_]), \
           global_workspace_->View(),                            \
@@ -1922,6 +2672,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
     iter_timer.Print("Iteration " + std::to_string(iter + 1));
   }
 
+  look_ahead_workspace.reset();
   total_timer.Print("Total");
 }
 
@@ -2373,6 +3124,14 @@ struct PatchMatchCudaTestAccess {
   static SweepTraceResult Sweep(PatchMatchCuda& pm,
                                 const bool cooperative,
                                 const unsigned long long seed) {
+    std::unique_ptr<LookAheadWorkspace> look_ahead_workspace;
+    if (cooperative) {
+      look_ahead_workspace = MakeLookAheadWorkspace(
+          std::max(pm.cost_map_->GetWidth(), pm.cost_map_->GetHeight()),
+          pm.cost_map_->GetDepth(),
+          pm.options_.num_samples,
+          true);  // The existing private probe instantiates the GEO term.
+    }
     const Mat<float> initial_cost = InitialCost(pm, seed);
     const size_t width = pm.cost_map_->GetWidth();
     const size_t height = pm.cost_map_->GetHeight();
@@ -2403,15 +3162,25 @@ struct PatchMatchCudaTestAccess {
     options.geom_consistency_regularizer =
         pm.options_.geom_consistency_regularizer;
     options.geom_consistency_max_cost = pm.options_.geom_consistency_max_cost;
+    options.filter_min_ncc = pm.options_.filter_min_ncc;
+    options.filter_min_triangulation_angle =
+        DEG2RAD(pm.options_.filter_min_triangulation_angle);
+    options.filter_min_num_consistent = pm.options_.filter_min_num_consistent;
+    options.filter_geom_consistency_max_cost =
+        pm.options_.filter_geom_consistency_max_cost;
+    if (pm.options_.filter) {
+      pm.consistency_mask_ =
+          std::make_unique<GpuMat<uint8_t>>(width, height, sources);
+      pm.consistency_mask_->FillWithScalar(0);
+    }
     const RefCamera camera =
         MakeRefCamera(pm.ref_K_host_[0], pm.ref_inv_K_host_[0]);
 
-    // The only difference between these launches is the actual specialization
-    // and its block geometry. InitialCost seeded each instance identically.
-#define LAUNCH_TEST_SWEEP(COOPERATIVE, WIDTH)                               \
-  SweepFromTopToBottom<11, 1, true, false, false, COOPERATIVE, WIDTH, true> \
-      <<<dim3((width + (WIDTH) - 1) / (WIDTH)),                             \
-         dim3(WIDTH, (COOPERATIVE) ? 16 : 1)>>>(                            \
+    // Use the production dispatcher so eligible traces exercise every band.
+    // InitialCost seeded each instance identically before either execution.
+#define LAUNCH_TEST_SWEEP(COOPERATIVE, WIDTH, FILTER)                       \
+  LaunchSweep<11, 1, true, FILTER, FILTER, COOPERATIVE, WIDTH, true>(        \
+          look_ahead_workspace.get(),                                      \
           camera,                                                           \
           pm.global_workspace_->View(),                                     \
           pm.rand_state_map_->View(),                                       \
@@ -2430,9 +3199,17 @@ struct PatchMatchCudaTestAccess {
           options,                                                          \
           trace)
     if (cooperative) {
-      LAUNCH_TEST_SWEEP(true, 8);
+      if (pm.options_.filter) {
+        LAUNCH_TEST_SWEEP(true, 8, true);
+      } else {
+        LAUNCH_TEST_SWEEP(true, 8, false);
+      }
     } else {
-      LAUNCH_TEST_SWEEP(false, THREADS_PER_BLOCK);
+      if (pm.options_.filter) {
+        LAUNCH_TEST_SWEEP(false, THREADS_PER_BLOCK, true);
+      } else {
+        LAUNCH_TEST_SWEEP(false, THREADS_PER_BLOCK, false);
+      }
     }
 #undef LAUNCH_TEST_SWEEP
     CUDA_SYNC_AND_CHECK();
