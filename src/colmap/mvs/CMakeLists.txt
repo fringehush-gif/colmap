@@ -92,6 +92,10 @@ COLMAP_ADD_TEST(
     SRCS patch_match_sampling_test.cc
 )
 COLMAP_ADD_TEST(
+    NAME patch_match_cuda_workspace_test
+    SRCS patch_match_cuda_workspace_test.cc
+)
+COLMAP_ADD_TEST(
     NAME poisson_meshing_test
     SRCS poisson_meshing_test.cc
     LINK_LIBS colmap_mvs
@@ -137,6 +141,7 @@ if(CUDA_ENABLED)
             gpu_mat_prng.h gpu_mat_prng.cu
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match_rng_perimeter.h
+            patch_match_cuda_workspace.h
             packed_consistency_mask.h
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu patch_match_geometry.cuh
@@ -333,6 +338,7 @@ if(HIP_ENABLED)
             gpu_mat_prng.h gpu_mat_prng.cu
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match_rng_perimeter.h
+            patch_match_cuda_workspace.h
             packed_consistency_mask.h
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu patch_match_geometry.cuh

@@ -11,6 +11,7 @@
 
 #include "colmap/mvs/packed_consistency_mask.h"
 #include "colmap/mvs/patch_match_cuda.h"
+#include "colmap/mvs/patch_match_cuda_workspace.h"
 #include "colmap/mvs/patch_match_geometry.cuh"
 #include "colmap/mvs/patch_match_rng_perimeter.h"
 #include "colmap/mvs/patch_match_sampling.cuh"
@@ -987,88 +988,47 @@ struct LookAheadViews {
 
 class LookAheadWorkspace {
  public:
-  static constexpr size_t kMaxBytes = 64 * 1024 * 1024;
-  static constexpr int kMaxRows = 128;
-
-  static int PlanRows(const size_t width,
-                      const size_t sources,
-                      const int samples,
-                      const bool geom_consistency_term) {
-    // This limits speculative work and memory, not a measured speed crossover.
-    if (width == 0 || sources == 0 || samples <= 0 || sources > 32 ||
-        sources > static_cast<size_t>(samples)) {
-      return 0;
-    }
-    constexpr size_t kFloatCapacity = kMaxBytes / sizeof(float);
-    if (width > kFloatCapacity / 4) return 0;
-    const size_t remaining = kFloatCapacity - 4 * width;
-    const size_t planes = (geom_consistency_term ? 5 : 3) * sources +
-                          static_cast<size_t>(samples) + 4;
-    // Divide before multiplying, so every subsequent allocation fits the cap.
-    const size_t rows = remaining / width / planes;
-    return static_cast<int>(std::min<size_t>(kMaxRows, rows));
-  }
-
-  LookAheadWorkspace(const size_t width,
-                     const size_t sources,
-                     const int samples,
-                     const bool geom_consistency_term,
-                     const int rows)
-      : width_(width),
-        sources_(sources),
-        samples_(samples),
-        geom_consistency_term_(geom_consistency_term),
-        rows_(rows) {
-    CHECK_GT(rows_, 0);
-    CHECK_LE(rows_,
-             PlanRows(width_, sources_, samples_, geom_consistency_term_));
-    const size_t planes = (geom_consistency_term_ ? 5 : 3) * sources_ +
-                          static_cast<size_t>(samples_) + 4;
-    const size_t num_floats = width_ * (4 + rows_ * planes);
-    CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&data_),
-                              num_floats * sizeof(float)));
+  explicit LookAheadWorkspace(const internal::PatchMatchLookAheadPlan& plan)
+      : plan_(plan) {
+    CHECK_GT(plan_.rows, 0);
+    CUDA_SAFE_CALL(
+        cudaMalloc(reinterpret_cast<void**>(&data_), plan_.num_bytes));
   }
 
   ~LookAheadWorkspace() { (void)cudaFree(data_); }
   LookAheadWorkspace(const LookAheadWorkspace&) = delete;
   LookAheadWorkspace& operator=(const LookAheadWorkspace&) = delete;
 
-  int Rows() const { return rows_; }
+  int Rows() const { return plan_.rows; }
 
   LookAheadViews Views(const int first_row, const int num_rows) const {
-    const size_t band_pixels = width_ * rows_;
-    float* random = data_;
-    float* uniforms = random + 4 * band_pixels;
-    float* costs = uniforms + samples_ * band_pixels;
-    float* geometry = costs + 3 * sources_ * band_pixels;
-    float* previous =
-        geometry + (geom_consistency_term_ ? 2 * sources_ * band_pixels : 0);
-    const size_t pitch = width_ * sizeof(float);
+    const size_t width = plan_.width;
+    const size_t rows = plan_.rows;
+    const size_t sources = plan_.sources;
+    const size_t pitch = width * sizeof(float);
     const GpuMatView<float> geometric_costs =
-        geom_consistency_term_
-            ? GpuMatView<float>{geometry,
-                                pitch,
-                                width_,
-                                static_cast<size_t>(rows_),
-                                2 * sources_}
-            : GpuMatView<float>{};
-    return {{random, pitch, width_, static_cast<size_t>(rows_), 4},
-            {uniforms, pitch, width_, static_cast<size_t>(rows_),
-             static_cast<size_t>(samples_)},
-            {costs, pitch, width_, static_cast<size_t>(rows_), 3 * sources_},
+        plan_.geometry ? GpuMatView<float>{data_ + plan_.geometry_offset,
+                                           pitch,
+                                           width,
+                                           rows,
+                                           2 * sources}
+                       : GpuMatView<float>{};
+    return {{data_, pitch, width, rows, 4},
+            {data_ + plan_.uniforms_offset,
+             pitch,
+             width,
+             rows,
+             static_cast<size_t>(plan_.samples)},
+            {data_ + plan_.costs_offset, pitch, width, rows, 3 * sources},
             geometric_costs,
-            {previous, pitch, width_, 1, 4},
+            {data_ + plan_.previous_offset, pitch, width, 1, 4},
             first_row,
             num_rows};
   }
 
  private:
   float* data_ = nullptr;
-  const size_t width_;
-  const size_t sources_;
-  const int samples_;
-  const bool geom_consistency_term_;
-  const int rows_;
+  const internal::PatchMatchLookAheadPlan plan_;
 };
 
 std::unique_ptr<LookAheadWorkspace> MakeLookAheadWorkspace(
@@ -1079,12 +1039,11 @@ std::unique_ptr<LookAheadWorkspace> MakeLookAheadWorkspace(
 #ifdef COLMAP_HIP_ENABLED
   return nullptr;
 #else
-  const int rows =
-      LookAheadWorkspace::PlanRows(width, sources, samples, geom_consistency_term);
-  if (rows == 0) return nullptr;
+  const auto plan = internal::PatchMatchLookAheadPlan::Make(
+      width, sources, samples, geom_consistency_term);
+  if (plan.rows == 0) return nullptr;
   // Allocation errors follow CUDA_SAFE_CALL; do not fall back after mutation.
-  return std::make_unique<LookAheadWorkspace>(
-      width, sources, samples, geom_consistency_term, rows);
+  return std::make_unique<LookAheadWorkspace>(plan);
 #endif
 }
 
