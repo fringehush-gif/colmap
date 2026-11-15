@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include "colmap/mvs/patch_match_cuda.h"
-
 #include "colmap/mvs/consistency_graph.h"
+#include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/cudacc.h"
 #include "colmap/util/hash_containers.h"

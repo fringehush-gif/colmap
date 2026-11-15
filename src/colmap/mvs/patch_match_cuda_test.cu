@@ -66,11 +66,11 @@ __global__ void LegacyConstructorNormal(const float4 inv_K,
   normal[0] = 2.0f * v1 * s_norm;
   normal[1] = 2.0f * v2 * s_norm;
   normal[2] = 1.0f - 2.0f * s;
-  const float view_ray[3] = {inv_K.x * col + inv_K.y,
-                             inv_K.z * row + inv_K.w,
-                             1.0f};
+  const float view_ray[3] = {
+      inv_K.x * col + inv_K.y, inv_K.z * row + inv_K.w, 1.0f};
   if (normal[0] * view_ray[0] + normal[1] * view_ray[1] +
-          normal[2] * view_ray[2] > 0) {
+          normal[2] * view_ray[2] >
+      0) {
     normal[0] = -normal[0];
     normal[1] = -normal[1];
     normal[2] = -normal[2];
@@ -80,8 +80,8 @@ __global__ void LegacyConstructorNormal(const float4 inv_K,
   states.Set(row, col, state);
 }
 
-__global__ void LegacyConstructorContinuation(
-    GpuMatView<curandState> states, GpuMatView<uint32_t> draws) {
+__global__ void LegacyConstructorContinuation(GpuMatView<curandState> states,
+                                              GpuMatView<uint32_t> draws) {
   const int row = blockIdx.y * blockDim.y + threadIdx.y;
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   if (row >= states.GetHeight() || col >= states.GetWidth()) return;
@@ -247,11 +247,15 @@ PhotoInitializationResult ProbeLegacyPhotoInitialization(
   const dim3 normal_grid((width + 31) / 32, (height + 31) / 32);
   LegacyConstructorNormal<<<normal_grid, normal_block>>>(
       make_float4(inv_K[0], inv_K[1], inv_K[2], inv_K[3]),
-      normal.View(), states.View(), normal_pairs.View());
+      normal.View(),
+      states.View(),
+      normal_pairs.View());
   LegacyConstructorContinuation<<<map_grid, map_block>>>(states.View(),
-                                                           continuation.View());
+                                                         continuation.View());
   CUDA_SYNC_AND_CHECK();
-  return {depth.CopyToMat(), normal.CopyToMat(), continuation.CopyToMat(),
+  return {depth.CopyToMat(),
+          normal.CopyToMat(),
+          continuation.CopyToMat(),
           normal_pairs.CopyToMat()};
 }
 

@@ -397,8 +397,7 @@ TEST_F(CudaTest, PhotoConstructorMatchesRetainedThreeStageInitialization) {
   const float* K = inputs.images[0].GetK();
   ASSERT_NE(K[0], K[4]);
   const std::array<float, 4> inv_K = {
-      1.0f / K[0], -(K[2] - 0.5f) / K[0],
-      1.0f / K[4], -(K[5] - 0.5f) / K[4]};
+      1.0f / K[0], -(K[2] - 0.5f) / K[0], 1.0f / K[4], -(K[5] - 0.5f) / K[4]};
   const auto expected = internal::ProbeLegacyPhotoInitialization(
       kWidth, kHeight, inv_K, options.depth_min, options.depth_max);
 

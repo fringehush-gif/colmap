@@ -55,8 +55,9 @@ SweepTraceResult ProbeSweep(PatchMatchCuda& patch_match,
 
 // Four real sweeps and rotations, with one seed operation at sequence start.
 // Uses the existing GEO trace contract and requires filtering to be disabled.
-std::vector<SweepTraceResult> ProbeSweepSequence(
-    PatchMatchCuda& patch_match, bool cooperative, unsigned long long seed);
+std::vector<SweepTraceResult> ProbeSweepSequence(PatchMatchCuda& patch_match,
+                                                 bool cooperative,
+                                                 unsigned long long seed);
 
 }  // namespace internal
 }  // namespace mvs

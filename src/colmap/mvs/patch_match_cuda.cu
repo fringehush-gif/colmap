@@ -9,8 +9,8 @@
 
 #define _USE_MATH_DEFINES
 
-#include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/mvs/packed_consistency_mask.h"
+#include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/mvs/patch_match_geometry.cuh"
 #include "colmap/mvs/patch_match_rng_perimeter.h"
 #include "colmap/mvs/patch_match_sampling.cuh"
@@ -2301,8 +2301,9 @@ __global__ void SweepFromTopToBottom(
             0, col, axis + 1, prev_param_state.normal[axis]);
       }
     } else {
-      rand_state_map.Set(
-          0, rand_state_layout.SweepIndex(rand_state_rotation, col), rand_state);
+      rand_state_map.Set(0,
+                         rand_state_layout.SweepIndex(rand_state_rotation, col),
+                         rand_state);
     }
   }
 }
@@ -2321,62 +2322,61 @@ template <int kWindowSize,
           bool kTrace = false
 #endif
           >
-void LaunchSweep(
-    LookAheadWorkspace* workspace,
-    const RefCamera camera,
-    GpuMatView<float> global_workspace,
-    GpuMatView<curandState> rand_state_map,
-    const PatchMatchRngPerimeter rand_state_layout,
-    const unsigned int rand_state_rotation,
-    GpuMatView<float> cost_map,
-    GpuMatView<float> depth_map,
-    GpuMatView<float> normal_map,
-    PackedConsistencyMaskView consistency_mask,
-    GpuMatView<float> sel_prob_map,
-    const GpuMatView<float> prev_sel_prob_map,
-    const cudaTextureObject_t ref_image_texture,
-    const GpuMatView<float> ref_sum_image,
-    const GpuMatView<float> ref_squared_sum_image,
-    const cudaTextureObject_t src_images_texture,
-    const cudaTextureObject_t src_depth_maps_texture,
-    const cudaTextureObject_t poses_texture,
-    const SweepOptions options
+void LaunchSweep(LookAheadWorkspace* workspace,
+                 const RefCamera camera,
+                 GpuMatView<float> global_workspace,
+                 GpuMatView<curandState> rand_state_map,
+                 const PatchMatchRngPerimeter rand_state_layout,
+                 const unsigned int rand_state_rotation,
+                 GpuMatView<float> cost_map,
+                 GpuMatView<float> depth_map,
+                 GpuMatView<float> normal_map,
+                 PackedConsistencyMaskView consistency_mask,
+                 GpuMatView<float> sel_prob_map,
+                 const GpuMatView<float> prev_sel_prob_map,
+                 const cudaTextureObject_t ref_image_texture,
+                 const GpuMatView<float> ref_sum_image,
+                 const GpuMatView<float> ref_squared_sum_image,
+                 const cudaTextureObject_t src_images_texture,
+                 const cudaTextureObject_t src_depth_maps_texture,
+                 const cudaTextureObject_t poses_texture,
+                 const SweepOptions options
 #ifdef COLMAP_PATCH_MATCH_TESTING
-    ,
-    SweepTrace trace
+                 ,
+                 SweepTrace trace
 #endif
 ) {
   const dim3 grid((cost_map.GetWidth() + kBlockWidth - 1) / kBlockWidth);
   const dim3 block(kBlockWidth,
                     kCooperative ? 4 * kCooperativeSampleBatchSize : 1);
-#define LAUNCH_SWEEP_KERNEL(LOOK_AHEAD, BAND)                                 \
-  SweepFromTopToBottom<kWindowSize,                                           \
-                       kWindowStep,                                           \
-                       kGeomConsistencyTerm,                                  \
-                       kFilterPhotoConsistency,                               \
-                       kFilterGeomConsistency,                                \
-                       kCooperative,                                          \
-                       kBlockWidth,                                           \
-                       LOOK_AHEAD SWEEP_TRACE_TEMPLATE>                       \
-      <<<grid, block>>>(camera,                                               \
-                         global_workspace,                                    \
-                         rand_state_map,                                      \
-                         rand_state_layout,                                   \
-                         rand_state_rotation,                                 \
-                         cost_map,                                            \
-                         depth_map,                                           \
-                         normal_map,                                          \
-                         consistency_mask,                                    \
-                         sel_prob_map,                                        \
-                         prev_sel_prob_map,                                   \
-                         ref_image_texture,                                   \
-                         ref_sum_image,                                       \
-                         ref_squared_sum_image,                               \
-                         src_images_texture,                                  \
-                         src_depth_maps_texture,                              \
-                         poses_texture,                                       \
-                         options,                                             \
-                         BAND SWEEP_TRACE_VALUE)
+#define LAUNCH_SWEEP_KERNEL(LOOK_AHEAD, BAND)           \
+  SweepFromTopToBottom<kWindowSize,                     \
+                       kWindowStep,                     \
+                       kGeomConsistencyTerm,            \
+                       kFilterPhotoConsistency,         \
+                       kFilterGeomConsistency,          \
+                       kCooperative,                    \
+                       kBlockWidth,                     \
+                       LOOK_AHEAD SWEEP_TRACE_TEMPLATE> \
+      <<<grid, block>>>(camera,                         \
+                        global_workspace,               \
+                        rand_state_map,                 \
+                        rand_state_layout,              \
+                        rand_state_rotation,            \
+                        cost_map,                       \
+                        depth_map,                      \
+                        normal_map,                     \
+                        consistency_mask,               \
+                        sel_prob_map,                   \
+                        prev_sel_prob_map,              \
+                        ref_image_texture,              \
+                        ref_sum_image,                  \
+                        ref_squared_sum_image,          \
+                        src_images_texture,             \
+                        src_depth_maps_texture,         \
+                        poses_texture,                  \
+                        options,                        \
+                        BAND SWEEP_TRACE_VALUE)
 #ifdef COLMAP_PATCH_MATCH_TESTING
 #define SWEEP_TRACE_TEMPLATE , kTrace
 #define SWEEP_TRACE_VALUE , trace
@@ -2647,42 +2647,40 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
 #define CALL_SWEEP_FUNC                                                       \
   LaunchSweep<kWindowSize,                                                    \
-               kWindowStep,                                                   \
-               kGeomConsistencyTerm,                                          \
-               kFilterPhotoConsistency,                                       \
-               kFilterGeomConsistency,                                        \
-               kCooperative,                                                  \
-               kSweepBlockWidth>(                                             \
-          look_ahead_workspace.get(),                                         \
-          MakeRefCamera(ref_K_host_[rotation_in_half_pi_],                    \
-                        ref_inv_K_host_[rotation_in_half_pi_]),               \
-          global_workspace_->View(),                                          \
-          rand_state_map_->View(),                                            \
-          (PatchMatchRngPerimeter{ref_width_, ref_height_}),                  \
-          static_cast<unsigned int>(rotation_in_half_pi_),                    \
-          cost_map_->View(),                                                  \
-          depth_map_->View(),                                                 \
-          normal_map_->View(),                                                \
-          PackedConsistencyMaskView{consistency_mask_->View()},               \
-          sel_prob_map_->View(),                                              \
-          prev_sel_prob_map_->View(),                                         \
-          ref_image_texture_->GetObj(),                                       \
-          ref_image_->sum_image->View(),                                      \
-          ref_image_->squared_sum_image->View(),                              \
-          src_images_texture_->GetObj(),                                      \
-          src_depth_maps_texture_ == nullptr                                  \
-              ? 0                                                             \
-              : src_depth_maps_texture_->GetObj(),                            \
-          poses_texture_[rotation_in_half_pi_]->GetObj(),                     \
-          sweep_options SWEEP_TRACE_ARGUMENT);
+              kWindowStep,                                                    \
+              kGeomConsistencyTerm,                                           \
+              kFilterPhotoConsistency,                                        \
+              kFilterGeomConsistency,                                         \
+              kCooperative,                                                   \
+              kSweepBlockWidth>(                                              \
+      look_ahead_workspace.get(),                                             \
+      MakeRefCamera(ref_K_host_[rotation_in_half_pi_],                        \
+                    ref_inv_K_host_[rotation_in_half_pi_]),                   \
+      global_workspace_->View(),                                              \
+      rand_state_map_->View(),                                                \
+      (PatchMatchRngPerimeter{ref_width_, ref_height_}),                      \
+      static_cast<unsigned int>(rotation_in_half_pi_),                        \
+      cost_map_->View(),                                                      \
+      depth_map_->View(),                                                     \
+      normal_map_->View(),                                                    \
+      PackedConsistencyMaskView{consistency_mask_->View()},                   \
+      sel_prob_map_->View(),                                                  \
+      prev_sel_prob_map_->View(),                                             \
+      ref_image_texture_->GetObj(),                                           \
+      ref_image_->sum_image->View(),                                          \
+      ref_image_->squared_sum_image->View(),                                  \
+      src_images_texture_->GetObj(),                                          \
+      src_depth_maps_texture_ == nullptr ? 0                                  \
+                                         : src_depth_maps_texture_->GetObj(), \
+      poses_texture_[rotation_in_half_pi_]->GetObj(),                         \
+      sweep_options SWEEP_TRACE_ARGUMENT);
 
       if (last_sweep) {
         if (options_.filter) {
-          consistency_mask_ =
-              std::make_unique<GpuMat<uint8_t>>(cost_map_->GetWidth(),
-                                                cost_map_->GetHeight(),
-                                                PackedConsistencyMaskDepth(
-                                                    cost_map_->GetDepth()));
+          consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
+              cost_map_->GetWidth(),
+              cost_map_->GetHeight(),
+              PackedConsistencyMaskDepth(cost_map_->GetDepth()));
           consistency_mask_->FillWithScalar(0);
         }
         if (options_.geom_consistency) {
@@ -3295,9 +3293,8 @@ struct PatchMatchCudaTestAccess {
     options.filter_geom_consistency_max_cost =
         pm.options_.filter_geom_consistency_max_cost;
     if (pm.options_.filter) {
-      pm.consistency_mask_ =
-          std::make_unique<GpuMat<uint8_t>>(
-              width, height, PackedConsistencyMaskDepth(sources));
+      pm.consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
+          width, height, PackedConsistencyMaskDepth(sources));
       pm.consistency_mask_->FillWithScalar(0);
     }
     const RefCamera camera =
@@ -3307,28 +3304,28 @@ struct PatchMatchCudaTestAccess {
     // Use the production dispatcher so eligible traces exercise every band.
     // Only the first sequence sweep seeds states and recomputes initial NCC.
     // Later sweeps consume the actual rotated maps and shared corner histories.
-#define LAUNCH_TEST_SWEEP(COOPERATIVE, WIDTH, FILTER)                         \
-  LaunchSweep<11, 1, true, FILTER, FILTER, COOPERATIVE, WIDTH, true>(         \
-          look_ahead_workspace.get(),                                         \
-          camera,                                                             \
-          pm.global_workspace_->View(),                                       \
-          pm.rand_state_map_->View(),                                         \
-          (PatchMatchRngPerimeter{pm.ref_width_, pm.ref_height_}),            \
-          static_cast<unsigned int>(pm.rotation_in_half_pi_),                 \
-          pm.cost_map_->View(),                                               \
-          pm.depth_map_->View(),                                              \
-          pm.normal_map_->View(),                                             \
-          PackedConsistencyMaskView{pm.consistency_mask_->View()},            \
-          pm.sel_prob_map_->View(),                                           \
-          pm.prev_sel_prob_map_->View(),                                      \
-          pm.ref_image_texture_->GetObj(),                                    \
-          pm.ref_image_->sum_image->View(),                                   \
-          pm.ref_image_->squared_sum_image->View(),                           \
-          pm.src_images_texture_->GetObj(),                                   \
-          pm.src_depth_maps_texture_->GetObj(),                               \
-          pm.poses_texture_[pm.rotation_in_half_pi_]->GetObj(),               \
-          options,                                                            \
-          trace)
+#define LAUNCH_TEST_SWEEP(COOPERATIVE, WIDTH, FILTER)                 \
+  LaunchSweep<11, 1, true, FILTER, FILTER, COOPERATIVE, WIDTH, true>( \
+      look_ahead_workspace.get(),                                     \
+      camera,                                                         \
+      pm.global_workspace_->View(),                                   \
+      pm.rand_state_map_->View(),                                     \
+      (PatchMatchRngPerimeter{pm.ref_width_, pm.ref_height_}),        \
+      static_cast<unsigned int>(pm.rotation_in_half_pi_),             \
+      pm.cost_map_->View(),                                           \
+      pm.depth_map_->View(),                                          \
+      pm.normal_map_->View(),                                         \
+      PackedConsistencyMaskView{pm.consistency_mask_->View()},        \
+      pm.sel_prob_map_->View(),                                       \
+      pm.prev_sel_prob_map_->View(),                                  \
+      pm.ref_image_texture_->GetObj(),                                \
+      pm.ref_image_->sum_image->View(),                               \
+      pm.ref_image_->squared_sum_image->View(),                       \
+      pm.src_images_texture_->GetObj(),                               \
+      pm.src_depth_maps_texture_->GetObj(),                           \
+      pm.poses_texture_[pm.rotation_in_half_pi_]->GetObj(),           \
+      options,                                                        \
+      trace)
     if (cooperative) {
       if (pm.options_.filter) {
         LAUNCH_TEST_SWEEP(true, 8, true);
@@ -3367,7 +3364,9 @@ struct PatchMatchCudaTestAccess {
   }
 
   static std::vector<SweepTraceResult> SweepSequence(
-      PatchMatchCuda& pm, const bool cooperative, const unsigned long long seed) {
+      PatchMatchCuda& pm,
+      const bool cooperative,
+      const unsigned long long seed) {
     THROW_CHECK(!pm.options_.filter);
     THROW_CHECK_EQ(pm.rotation_in_half_pi_, 0);
     std::vector<SweepTraceResult> result;
