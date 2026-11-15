@@ -3059,9 +3059,13 @@ void PatchMatchCuda::InitSourceImages() {
       //                        row-wise copy   [a b 0; c d 0] (correct)
       const uint8_t* src = bitmap.RowMajorData().data();
       uint8_t* dest = src_images_host_data.data() + max_width * max_height * i;
-      for (size_t r = 0; r < image.GetHeight(); ++r) {
-        memcpy(dest, src + r * image.GetWidth(), image.GetWidth());
-        dest += max_width;
+      if (image.GetWidth() == max_width) {
+        memcpy(dest, src, max_width * image.GetHeight());
+      } else {
+        for (size_t r = 0; r < image.GetHeight(); ++r) {
+          memcpy(dest, src + r * image.GetWidth(), image.GetWidth());
+          dest += max_width;
+        }
       }
     }
 
@@ -3109,11 +3113,17 @@ void PatchMatchCuda::InitSourceImages() {
           problem_.depth_maps->at(problem_.src_image_idxs[i]);
       float* dest =
           src_depth_maps_host_data.data() + max_width * max_height * i;
-      for (size_t r = 0; r < depth_map.GetHeight(); ++r) {
+      if (depth_map.GetWidth() == max_width) {
         memcpy(dest,
-               depth_map.GetPtr() + r * depth_map.GetWidth(),
-               depth_map.GetWidth() * sizeof(float));
-        dest += max_width;
+               depth_map.GetPtr(),
+               max_width * depth_map.GetHeight() * sizeof(float));
+      } else {
+        for (size_t r = 0; r < depth_map.GetHeight(); ++r) {
+          memcpy(dest,
+                 depth_map.GetPtr() + r * depth_map.GetWidth(),
+                 depth_map.GetWidth() * sizeof(float));
+          dest += max_width;
+        }
       }
     }
 
