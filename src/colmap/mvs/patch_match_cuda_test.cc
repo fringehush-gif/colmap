@@ -385,6 +385,68 @@ TEST_F(CudaTest, DirectInstancesOwnReferenceCalibration) {
       [](float depth) { return std::isfinite(depth) && depth > 0; }));
 }
 
+TEST_F(CudaTest, NccNormalizationMatchesRetainedArithmeticAcrossRows) {
+  constexpr int kWidth = 35, kHeight = 67;
+  auto inputs = MakeInputs(0, 3, kHeight, kWidth);
+  // One complete flat reference patch and many textured patches exercise both
+  // the early rejection and the remaining NCC arithmetic. The height crosses
+  // an initial-cost stripe and leaves a partial three-row tail.
+  Bitmap reference = inputs.images[0].GetBitmap().Clone();
+  for (int row = 16; row <= 34; ++row) {
+    for (int col = 10; col <= 24; ++col) {
+      reference.SetPixel(col, row, BitmapColor<uint8_t>(128));
+    }
+  }
+  inputs.images[0].SetBitmap(std::move(reference));
+  // On positive-reference patches the first source rejects by source variance
+  // only after its complete weight fold; later useful sources reuse that fold.
+  Bitmap constant = inputs.images[3].GetBitmap().Clone();
+  constant.Fill(BitmapColor<uint8_t>(128));
+  inputs.images[3].SetBitmap(std::move(constant));
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  problem.src_image_idxs = {3, 2, 1};
+  problem.images = &inputs.images;
+  problem.depth_maps = &inputs.depths;
+  problem.normal_maps = &inputs.normals;
+  for (const int radius : {5, 2}) {
+    SCOPED_TRACE(::testing::Message() << "radius=" << radius);
+    auto options = MakeOptions(true, false, false);
+    options.window_radius = radius;
+    options.sigma_spatial = 5.0;
+    PatchMatchCuda pm(options, problem);
+    const auto costs = internal::ProbeNccCosts(pm);
+    ExpectExactlyEqual(costs.reference, costs.candidate);
+    ASSERT_EQ(costs.candidate.GetWidth(), kWidth);
+    ASSERT_EQ(costs.candidate.GetHeight(), kHeight);
+    ASSERT_EQ(costs.candidate.GetDepth(), 3);
+    int useful_after_source_rejection = 0;
+    int distinct_useful_sources = 0;
+    int useful_final_stripe = 0;
+    for (int row = 0; row < kHeight; ++row) {
+      for (int col = 0; col < kWidth; ++col) {
+        const float first = costs.reference.Get(row, col, 0);
+        const float second = costs.reference.Get(row, col, 1);
+        const float third = costs.reference.Get(row, col, 2);
+        useful_after_source_rejection += first == 2.0f && second < 1.9f;
+        distinct_useful_sources +=
+            second < 1.9f && third < 1.9f && second != third;
+        useful_final_stripe += row >= 64 && (second < 1.9f || third < 1.9f);
+      }
+    }
+    EXPECT_GT(useful_after_source_rejection, 0);
+    EXPECT_GT(distinct_useful_sources, 0);
+    EXPECT_GT(useful_final_stripe, 0);
+    for (int row = 21; row <= 29; ++row) {
+      for (int col = 15; col <= 19; ++col) {
+        for (int source = 0; source < 3; ++source) {
+          EXPECT_EQ(costs.candidate.Get(row, col, source), 2.0f);
+        }
+      }
+    }
+  }
+}
+
 TEST_F(CudaTest, PhotoConstructorMatchesRetainedThreeStageInitialization) {
   constexpr int kWidth = 35, kHeight = 19;
   auto inputs = MakeInputs(1, 2, kHeight, kWidth);
@@ -534,6 +596,83 @@ TEST_F(CudaTest, BandAndScalarKeepPerimeterHistoriesAcrossFourRotations) {
   ExpectExactlyEqual(scalar.GetDepthMap(), band.GetDepthMap());
   ExpectExactlyEqual(scalar.GetNormalMap(), band.GetNormalMap());
   ExpectExactlyEqual(scalar.GetSelProbMap(), band.GetSelProbMap());
+}
+
+TEST_F(CudaTest, ImmutableReferenceStatisticsMatchRotatedPlanesAcrossBands) {
+  constexpr int kWidth = 35, kHeight = 259, kSources = 8;
+  auto inputs = MakeInputs(1, kSources, kHeight, kWidth);
+  MakeSourceTexturesDistinct(&inputs);
+  AddDistinctSourceDepthErrors(&inputs);
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  for (int source = 1; source <= kSources; ++source) {
+    problem.src_image_idxs.push_back(source);
+  }
+  problem.images = &inputs.images;
+  problem.depth_maps = &inputs.depths;
+  problem.normal_maps = &inputs.normals;
+  auto options = MakeOptions(true, false, false);
+  options.window_radius = 5;
+  options.num_samples = 17;
+  options.num_iterations = 1;
+  options.sigma_spatial = 5.0;
+
+  PatchMatchCuda rotated_planes(options, problem);
+  PatchMatchCuda immutable(options, problem);
+  // This control retains a single original-orientation Filter result and uses
+  // actual GpuMat rotations. It never calls OriginalCoordinates for moments.
+  internal::UseLegacyReferenceStatistics(rotated_planes);
+  const auto expected =
+      internal::ProbeSweepSequence(rotated_planes, false, 7147);
+  const auto actual = internal::ProbeSweepSequence(immutable, true, 7147);
+  ASSERT_EQ(expected.size(), 4);
+  ASSERT_EQ(actual.size(), 4);
+  for (int orientation = 0; orientation < 4; ++orientation) {
+    SCOPED_TRACE(::testing::Message() << "orientation=" << orientation);
+    const auto& a = expected[orientation];
+    const auto& b = actual[orientation];
+    ASSERT_FALSE(a.immutable_reference_statistics);
+    ASSERT_TRUE(b.immutable_reference_statistics);
+    ASSERT_EQ(a.reference_statistics.GetWidth(),
+              orientation % 2 == 0 ? kWidth : kHeight);
+    ASSERT_EQ(a.reference_statistics.GetHeight(),
+              orientation % 2 == 0 ? kHeight : kWidth);
+    ASSERT_EQ(a.reference_statistics.GetData(),
+              b.reference_statistics.GetData());
+    int distinct_moments = 0;
+    for (uint32_t word : a.reference_statistics.GetData()) {
+      distinct_moments += word != a.reference_statistics.Get(0, 0);
+    }
+    EXPECT_GT(distinct_moments, kWidth * kHeight);
+    ASSERT_EQ(a.draws.GetData(), b.draws.GetData());
+    ASSERT_EQ(a.winners.GetData(), b.winners.GetData());
+    ASSERT_EQ(a.support.GetData(), b.support.GetData());
+    ExpectExactlyEqual(a.initial_cost, b.initial_cost);
+    ExpectExactlyEqual(a.hypotheses, b.hypotheses);
+    ExpectExactlyEqual(a.hypothesis_costs, b.hypothesis_costs);
+    ExpectExactlyEqual(a.forward, b.forward);
+    ExpectExactlyEqual(a.cost, b.cost);
+    ExpectExactlyEqual(a.depth, b.depth);
+    ExpectExactlyEqual(a.normal, b.normal);
+    ExpectExactlyEqual(a.selection, b.selection);
+    ASSERT_EQ(a.continuation.GetData(), b.continuation.GetData());
+    if (a.draws.GetHeight() > 128) {
+      for (int row : {128, 256}) {
+        int supported = 0, row_sensitive = 0;
+        for (int col = 0; col < a.draws.GetWidth(); ++col) {
+          supported += a.support.Get(row, col) != 0;
+          row_sensitive += a.reference_statistics.Get(row, col) !=
+                           a.reference_statistics.Get(0, col);
+        }
+        EXPECT_GT(supported, 0) << "band boundary " << row;
+        EXPECT_GT(row_sensitive, 0) << "global row must differ from band row";
+      }
+    }
+  }
+  // Both owners finish in original orientation and keep the ordinary getters.
+  ExpectExactlyEqual(rotated_planes.GetDepthMap(), immutable.GetDepthMap());
+  ExpectExactlyEqual(rotated_planes.GetNormalMap(), immutable.GetNormalMap());
+  ExpectExactlyEqual(rotated_planes.GetSelProbMap(), immutable.GetSelProbMap());
 }
 
 TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {

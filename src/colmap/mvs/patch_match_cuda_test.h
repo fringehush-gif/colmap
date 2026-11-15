@@ -12,6 +12,15 @@ namespace mvs {
 class PatchMatchCuda;
 namespace internal {
 
+struct NccCostComparison {
+  Mat<float> candidate;
+  Mat<float> reference;
+};
+
+// Uses the literal retained PR59 NCC body as an independent arithmetic arm.
+// Both arms share reference statistics, whose owner has separate qualification.
+NccCostComparison ProbeNccCosts(PatchMatchCuda& patch_match);
+
 struct PhotoInitializationResult {
   Mat<float> depth;
   Mat<float> normal;
@@ -47,6 +56,9 @@ struct SweepTraceResult {
   Mat<uint32_t> continuation;
   // Raw draws from a state copy before this sweep, for shared-corner checks.
   Mat<uint32_t> continuation_before;
+  // Direct raw moment observations from the production reader, before sweep.
+  Mat<uint32_t> reference_statistics;
+  bool immutable_reference_statistics = false;
 };
 
 SweepTraceResult ProbeSweep(PatchMatchCuda& patch_match,
@@ -58,6 +70,11 @@ SweepTraceResult ProbeSweep(PatchMatchCuda& patch_match,
 std::vector<SweepTraceResult> ProbeSweepSequence(PatchMatchCuda& patch_match,
                                                  bool cooperative,
                                                  unsigned long long seed);
+
+// Constructor-stage test control: filter the original bitmap once and retain
+// its two float planes for the legacy physical-rotation path. Never re-filter
+// a rotated image or derive the oracle from the immutable texture reader.
+void UseLegacyReferenceStatistics(PatchMatchCuda& patch_match);
 
 }  // namespace internal
 }  // namespace mvs

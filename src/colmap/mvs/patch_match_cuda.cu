@@ -42,6 +42,33 @@
 namespace colmap {
 namespace mvs {
 
+namespace internal {
+// A launch-local reader. The texture owns unchanged original-orientation bits;
+// fallback planes already have the current orientation. Rows passed here are
+// global image rows, including reads performed by a band producer.
+struct ReferenceStatisticsView {
+  GpuMatView<float> sum;
+  GpuMatView<float> squared_sum;
+  cudaTextureObject_t texture;
+  PatchMatchRngPerimeter original;
+  unsigned int rotation;
+
+  __device__ float2 Get(const size_t row, const size_t col) const {
+#ifndef COLMAP_HIP_ENABLED
+    if (texture != 0) {
+      size_t original_row, original_col;
+      original.OriginalCoordinates(
+          rotation, row, col, &original_row, &original_col);
+      const uint2 bits = tex2DLayered<uint2>(
+          texture, original_col + 0.5f, original_row + 0.5f, 0);
+      return make_float2(__uint_as_float(bits.x), __uint_as_float(bits.y));
+    }
+#endif
+    return make_float2(sum.Get(row, col), squared_sum.Get(row, col));
+  }
+};
+}  // namespace internal
+
 namespace {
 
 // An immutable value copied into each kernel launch's parameter state.
@@ -414,7 +441,10 @@ __device__ inline float SampleLayeredBilinear(const cudaTextureObject_t texture,
 
 // The return values is 1 - NCC, so the range is [0, 2], the smaller the
 // value, the better the color consistency.
-template <int kWindowSize, int kWindowStep, int kBlockWidth = THREADS_PER_BLOCK>
+template <int kWindowSize,
+          int kWindowStep,
+          int kBlockWidth = THREADS_PER_BLOCK,
+          bool kReuseNormalization = false>
 struct PhotoConsistencyCostComputer {
   const static int kWindowRadius = kWindowSize / 2;
   static constexpr int kNumTapsPerAxis = (kWindowSize - 1) / kWindowStep + 1;
@@ -422,6 +452,8 @@ struct PhotoConsistencyCostComputer {
   // Restrict cached weights to the retained default specialization. Other
   // windows preserve native inline FP32 evaluation rather than widen caching.
   static constexpr bool kCacheWeights = kWindowSize == 11 && kWindowStep == 1;
+  static constexpr bool kPrepareNormalization =
+      kCacheWeights && kReuseNormalization;
   static constexpr int kWeightCacheSize =
       kCacheWeights ? kNumTaps * kBlockWidth : 1;
   float* local_weights = nullptr;
@@ -463,12 +495,16 @@ struct PhotoConsistencyCostComputer {
 
   __device__ inline void ReadRef(const int row,
                                  const bool stripe_start = false) {
+    if constexpr (kPrepareNormalization) normalization_is_prepared_ = false;
     local_ref_image.Read(row, stripe_start);
   }
 
   __device__ inline void ReadWeights(const int first_row = 0,
                                      const int row_stride = 1) {
     if constexpr (kCacheWeights) {
+      // Every worker must invalidate, including workers whose assigned weight
+      // row is beyond the patch. Such workers still evaluate source jobs.
+      if constexpr (kPrepareNormalization) normalization_is_prepared_ = false;
       const int thread_id = threadIdx.x;
       int ref_image_idx = kBlockWidth - kWindowRadius + thread_id;
       const float ref_center_color =
@@ -500,6 +536,17 @@ struct PhotoConsistencyCostComputer {
   }
 
   __device__ inline float Compute() const {
+    if constexpr (kPrepareNormalization) {
+      if (normalization_is_prepared_) return ComputeImpl<true>();
+    }
+    return ComputeImpl<false>();
+  }
+
+#ifdef COLMAP_PATCH_MATCH_TESTING
+  // Literal PR59 arithmetic, including late reference-variance rejection and
+  // the per-call weight fold. Keep the native oracle independent of
+  // ComputeImpl.
+  __device__ inline float ComputeReferenceForTesting() const {
     float tform[9];
     ComposeHomography(
         camera_, poses_texture_, src_image_idx, row, col, depth, normal, tform);
@@ -611,8 +658,151 @@ struct PhotoConsistencyCostComputer {
                  min(kMaxCost, 1.0f - src_ref_color_covar / src_ref_color_var));
     }
   }
+#endif
 
  private:
+  template <bool kPreparedNormalization>
+  __device__ inline float ComputeImpl() const {
+    static_assert(!kPreparedNormalization || kPrepareNormalization);
+    const float ref_color_sum = local_ref_sum;
+    const float ref_color_squared_sum = local_ref_squared_sum;
+    const float ref_color_var =
+        ref_color_squared_sum - ref_color_sum * ref_color_sum;
+    // Keep the original expression and comparison. In particular, NaN does
+    // not satisfy this rejection and follows the remaining arithmetic.
+    constexpr float kMinVar = 1e-5f;
+    if (ref_color_var < kMinVar) {
+      if constexpr (kPrepareNormalization) normalization_is_prepared_ = false;
+      return kMaxCost;
+    }
+
+    float tform[9];
+    ComposeHomography(
+        camera_, poses_texture_, src_image_idx, row, col, depth, normal, tform);
+
+    float tform_step[8];
+    for (int i = 0; i < 8; ++i) {
+      tform_step[i] = kWindowStep * tform[i];
+    }
+
+    const int thread_id = threadIdx.x;
+    const int row_start = row - kWindowRadius;
+    const int col_start = col - kWindowRadius;
+
+    float col_src = tform[0] * col_start + tform[1] * row_start + tform[2];
+    float row_src = tform[3] * col_start + tform[4] * row_start + tform[5];
+    float z = tform[6] * col_start + tform[7] * row_start + tform[8];
+    float base_col_src = col_src;
+    float base_row_src = row_src;
+    float base_z = z;
+
+    int ref_image_idx = kBlockWidth - kWindowRadius + thread_id;
+    int ref_image_base_idx = ref_image_idx;
+
+    const float ref_center_color =
+        local_ref_image.data[ref_image_idx + kWindowRadius * 3 * kBlockWidth +
+                             kWindowRadius];
+    float src_color_sum = 0.0f;
+    float src_color_squared_sum = 0.0f;
+    float src_ref_color_sum = 0.0f;
+    float bilateral_weight_sum = 0.0f;
+    int weight_tap = 0;
+
+    for (int row = -kWindowRadius; row <= kWindowRadius; row += kWindowStep) {
+      for (int col = -kWindowRadius; col <= kWindowRadius; col += kWindowStep) {
+        const float inv_z = 1.0f / z;
+        const float norm_col_src = inv_z * col_src + 0.5f;
+        const float norm_row_src = inv_z * row_src + 0.5f;
+        const float ref_color = local_ref_image.data[ref_image_idx];
+#if defined(__GFX9__)
+        const float src_color = SampleLayeredBilinear(
+            src_images_texture_, norm_col_src, norm_row_src, src_image_idx);
+#else
+        const float src_color = tex2DLayered<float>(
+            src_images_texture_, norm_col_src, norm_row_src, src_image_idx);
+#endif
+
+        float bilateral_weight;
+        if constexpr (kCacheWeights) {
+          bilateral_weight =
+              local_weights[weight_tap * kBlockWidth + thread_id];
+          ++weight_tap;
+        } else {
+          bilateral_weight = bilateral_weight_computer_.Compute(
+              row, col, ref_center_color, ref_color);
+        }
+
+        const float bilateral_weight_src = bilateral_weight * src_color;
+
+        src_color_sum += bilateral_weight_src;
+        src_color_squared_sum += bilateral_weight_src * src_color;
+        src_ref_color_sum += bilateral_weight_src * ref_color;
+        if constexpr (!kPreparedNormalization) {
+          bilateral_weight_sum += bilateral_weight;
+        }
+
+        ref_image_idx += kWindowStep;
+
+        // Accumulate warped source coordinates per row to reduce numerical
+        // errors. Note that this is necessary since coordinates usually are in
+        // the order of 1000s as opposed to the color values which are
+        // normalized to the range [0, 1].
+        col_src += tform_step[0];
+        row_src += tform_step[3];
+        z += tform_step[6];
+      }
+
+      ref_image_base_idx += kWindowStep * 3 * kBlockWidth;
+      ref_image_idx = ref_image_base_idx;
+
+      base_col_src += tform_step[1];
+      base_row_src += tform_step[4];
+      base_z += tform_step[7];
+
+      col_src = base_col_src;
+      row_src = base_row_src;
+      z = base_z;
+    }
+
+    float inv_bilateral_weight_sum;
+    if constexpr (kPreparedNormalization) {
+      inv_bilateral_weight_sum = prepared_inverse_weight_sum_;
+    } else {
+      // The first actual NCC evaluation retains the original ordered fold.
+      // Reuse its reciprocal only while this thread owns the same weight row.
+      inv_bilateral_weight_sum = 1.0f / bilateral_weight_sum;
+      if constexpr (kPrepareNormalization) {
+        prepared_inverse_weight_sum_ = inv_bilateral_weight_sum;
+        normalization_is_prepared_ = true;
+      }
+    }
+    src_color_sum *= inv_bilateral_weight_sum;
+    src_color_squared_sum *= inv_bilateral_weight_sum;
+    src_ref_color_sum *= inv_bilateral_weight_sum;
+
+    const float src_color_var =
+        src_color_squared_sum - src_color_sum * src_color_sum;
+
+    // The reference variance was checked before any warped source tap.
+    // Do not make the retained variance threshold smaller.
+    if (src_color_var < kMinVar) {
+      return kMaxCost;
+    } else {
+      const float src_ref_color_covar =
+          src_ref_color_sum - ref_color_sum * src_color_sum;
+      const float src_ref_color_var = sqrt(ref_color_var * src_color_var);
+      return max(0.0f,
+                 min(kMaxCost, 1.0f - src_ref_color_covar / src_ref_color_var));
+    }
+  }
+
+  // Only phases with repeated source jobs opt in to this cache. It belongs to
+  // one thread's current reference weights, independent of source/hypothesis.
+  // ReadRef and every ReadWeights call invalidate it, including workers that
+  // load no weight taps. It never spans rows, stripes or rotations.
+  mutable float prepared_inverse_weight_sum_ = 0.0f;
+  mutable bool normalization_is_prepared_ = false;
+
   const RefCamera& camera_;
   const cudaTextureObject_t src_images_texture_;
   const cudaTextureObject_t poses_texture_;
@@ -889,24 +1079,50 @@ __global__ void RotateNormalMap(GpuMatView<float> normal_map) {
   }
 }
 
+#ifndef COLMAP_HIP_ENABLED
+// Store float representations in integer channels: texture reads perform no
+// floating-point normalization, filtering, or denormal conversion.
+__global__ void PackReferenceStatistics(const GpuMatView<float> sum,
+                                        const GpuMatView<float> squared_sum,
+                                        GpuMatView<uint2> packed) {
+  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  if (row < packed.height && col < packed.width) {
+    packed.Set(row,
+               col,
+               make_uint2(__float_as_uint(sum.Get(row, col)),
+                          __float_as_uint(squared_sum.Get(row, col))));
+  }
+}
+
+#endif
+
 constexpr int kInitialCostStripeRows = 64;
 
-template <int kWindowSize, int kWindowStep>
+template <int kWindowSize,
+          int kWindowStep
+#ifdef COLMAP_PATCH_MATCH_TESTING
+          ,
+          bool kReferenceArithmetic = false
+#endif
+          >
 __global__ void ComputeInitialCost(
     const RefCamera camera,
     GpuMatView<float> cost_map,
     const GpuMatView<float> depth_map,
     const GpuMatView<float> normal_map,
     const cudaTextureObject_t ref_image_texture,
-    const GpuMatView<float> ref_sum_image,
-    const GpuMatView<float> ref_squared_sum_image,
+    const internal::ReferenceStatisticsView ref_statistics,
     const cudaTextureObject_t src_images_texture,
     const cudaTextureObject_t poses_texture,
     const float sigma_spatial,
     const float sigma_color) {
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
 
-  typedef PhotoConsistencyCostComputer<kWindowSize, kWindowStep>
+  typedef PhotoConsistencyCostComputer<kWindowSize,
+                                       kWindowStep,
+                                       THREADS_PER_BLOCK,
+                                       true>
       PhotoConsistencyCostComputerType;
   PhotoConsistencyCostComputerType pcc_computer(camera,
                                                 ref_image_texture,
@@ -941,12 +1157,21 @@ __global__ void ComputeInitialCost(
       normal_map.GetSlice(row, col, normal);
 
       pcc_computer.row = row;
-      pcc_computer.local_ref_sum = ref_sum_image.Get(row, col);
-      pcc_computer.local_ref_squared_sum = ref_squared_sum_image.Get(row, col);
+      const float2 statistics = ref_statistics.Get(row, col);
+      pcc_computer.local_ref_sum = statistics.x;
+      pcc_computer.local_ref_squared_sum = statistics.y;
 
       for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
         pcc_computer.src_image_idx = image_idx;
-        cost_map.Set(row, col, image_idx, pcc_computer.Compute());
+#ifdef COLMAP_PATCH_MATCH_TESTING
+        if constexpr (kReferenceArithmetic) {
+          cost_map.Set(
+              row, col, image_idx, pcc_computer.ComputeReferenceForTesting());
+        } else
+#endif
+        {
+          cost_map.Set(row, col, image_idx, pcc_computer.Compute());
+        }
       }
     }
   }
@@ -1134,8 +1359,7 @@ __global__ void PrecomputeBandCosts(
     const GpuMatView<float> depth_map,
     const GpuMatView<float> normal_map,
     const cudaTextureObject_t ref_image_texture,
-    const GpuMatView<float> ref_sum_image,
-    const GpuMatView<float> ref_squared_sum_image,
+    const internal::ReferenceStatisticsView ref_statistics,
     const cudaTextureObject_t src_images_texture,
     const cudaTextureObject_t src_depth_maps_texture,
     const cudaTextureObject_t poses_texture,
@@ -1148,7 +1372,7 @@ __global__ void PrecomputeBandCosts(
   const int first_local_row = blockIdx.y * kLookAheadStripeRows;
   const int last_local_row =
       min(first_local_row + kLookAheadStripeRows, band.num_rows);
-  using CostComputer = PhotoConsistencyCostComputer<11, 1, 8>;
+  using CostComputer = PhotoConsistencyCostComputer<11, 1, 8, true>;
   CostComputer computer(camera,
                         ref_image_texture,
                         src_images_texture,
@@ -1213,8 +1437,9 @@ __global__ void PrecomputeBandCosts(
     computer.depth = hypothesis == 1
                          ? depth_map.Get(row, col)
                          : band.random_parameters.Get(local_row, col, 0);
-    computer.local_ref_sum = ref_sum_image.Get(row, col);
-    computer.local_ref_squared_sum = ref_squared_sum_image.Get(row, col);
+    const float2 statistics = ref_statistics.Get(row, col);
+    computer.local_ref_sum = statistics.x;
+    computer.local_ref_squared_sum = statistics.y;
     for (int source = first_source; source < num_sources; source += 4) {
       computer.src_image_idx = source;
       const float cost = computer.Compute();
@@ -1427,8 +1652,7 @@ __global__ void SweepFromTopToBottom(
     GpuMatView<float> sel_prob_map,
     const GpuMatView<float> prev_sel_prob_map,
     const cudaTextureObject_t ref_image_texture,
-    const GpuMatView<float> ref_sum_image,
-    const GpuMatView<float> ref_squared_sum_image,
+    const internal::ReferenceStatisticsView ref_statistics,
     const cudaTextureObject_t src_images_texture,
     const cudaTextureObject_t src_depth_maps_texture,
     const cudaTextureObject_t poses_texture,
@@ -1599,8 +1823,9 @@ __global__ void SweepFromTopToBottom(
     bool empty_sampling_support = false;
     if (owner && col < cost_map.GetWidth()) {
       pcc_computer.row = row;
-      pcc_computer.local_ref_sum = ref_sum_image.Get(row, col);
-      pcc_computer.local_ref_squared_sum = ref_squared_sum_image.Get(row, col);
+      const float2 statistics = ref_statistics.Get(row, col);
+      pcc_computer.local_ref_sum = statistics.x;
+      pcc_computer.local_ref_squared_sum = statistics.y;
 
       // Propagate the depth at which the current ray intersects with the plane
       // of the normal of the previous ray. This helps to better estimate
@@ -2294,8 +2519,7 @@ void LaunchSweep(LookAheadWorkspace* workspace,
                  GpuMatView<float> sel_prob_map,
                  const GpuMatView<float> prev_sel_prob_map,
                  const cudaTextureObject_t ref_image_texture,
-                 const GpuMatView<float> ref_sum_image,
-                 const GpuMatView<float> ref_squared_sum_image,
+                 const internal::ReferenceStatisticsView ref_statistics,
                  const cudaTextureObject_t src_images_texture,
                  const cudaTextureObject_t src_depth_maps_texture,
                  const cudaTextureObject_t poses_texture,
@@ -2329,8 +2553,7 @@ void LaunchSweep(LookAheadWorkspace* workspace,
                         sel_prob_map,                   \
                         prev_sel_prob_map,              \
                         ref_image_texture,              \
-                        ref_sum_image,                  \
-                        ref_squared_sum_image,          \
+                        ref_statistics,          \
                         src_images_texture,             \
                         src_depth_maps_texture,         \
                         poses_texture,                  \
@@ -2372,8 +2595,7 @@ void LaunchSweep(LookAheadWorkspace* workspace,
                            depth_map,
                            normal_map,
                            ref_image_texture,
-                           ref_sum_image,
-                           ref_squared_sum_image,
+                           ref_statistics,
                            src_images_texture,
                            src_depth_maps_texture,
                            poses_texture,
@@ -2549,8 +2771,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           depth_map_->View(),
           normal_map_->View(),
           ref_image_texture_->GetObj(),
-          ref_image_->sum_image->View(),
-          ref_image_->squared_sum_image->View(),
+          ReferenceStatistics(),
           src_images_texture_->GetObj(),
           poses_texture_[0]->GetObj(),
           options_.sigma_spatial,
@@ -2626,8 +2847,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
       sel_prob_map_->View(),                                                  \
       prev_sel_prob_map_->View(),                                             \
       ref_image_texture_->GetObj(),                                           \
-      ref_image_->sum_image->View(),                                          \
-      ref_image_->squared_sum_image->View(),                                  \
+      ReferenceStatistics(),                                  \
       src_images_texture_->GetObj(),                                          \
       src_depth_maps_texture_ == nullptr ? 0                                  \
                                          : src_depth_maps_texture_->GetObj(), \
@@ -2735,7 +2955,16 @@ void PatchMatchCuda::BindRefImageTexture() {
   texture_desc.readMode = cudaReadModeNormalizedFloat;
   texture_desc.normalizedCoords = false;
   ref_image_texture_ = CudaArrayLayeredTexture<uint8_t>::FromGpuMat(
-      texture_desc, *ref_image_->image);
+      texture_desc, *ref_image_);
+}
+
+internal::ReferenceStatisticsView PatchMatchCuda::ReferenceStatistics() const {
+  const GpuMatView<float> empty{nullptr, 0, 0, 0, 0};
+  return {ref_sum_image_ ? ref_sum_image_->View() : empty,
+          ref_squared_sum_image_ ? ref_squared_sum_image_->View() : empty,
+          ref_statistics_texture_ ? ref_statistics_texture_->GetObj() : 0,
+          PatchMatchRngPerimeter{ref_width_, ref_height_},
+          static_cast<unsigned int>(rotation_in_half_pi_)};
 }
 
 void PatchMatchCuda::InitRefImage() {
@@ -2744,13 +2973,46 @@ void PatchMatchCuda::InitRefImage() {
   ref_width_ = ref_image.GetWidth();
   ref_height_ = ref_image.GetHeight();
 
-  // Upload to device and filter.
-  ref_image_ = std::make_unique<GpuMatRefImage>(ref_width_, ref_height_);
-  ref_image_->Filter(ref_image.GetBitmap().RowMajorData().data(),
-                     options_.window_radius,
-                     options_.window_step,
-                     options_.sigma_spatial,
-                     options_.sigma_color);
+  // Preserve the original filtering arithmetic and its ordered tap folds.
+  // Only ownership/read coordinates change after this one original-image pass.
+  {
+    GpuMatRefImage filtered(ref_width_, ref_height_);
+    filtered.Filter(ref_image.GetBitmap().RowMajorData().data(),
+                    options_.window_radius,
+                    options_.window_step,
+                    options_.sigma_spatial,
+                    options_.sigma_color);
+    ref_image_ = std::move(filtered.image);
+#ifndef COLMAP_HIP_ENABLED
+    if (options_.window_radius == 5 && options_.window_step == 1) {
+      static_assert(sizeof(uint2) == 2 * sizeof(float));
+      GpuMat<uint2> packed(ref_width_, ref_height_);
+      const dim3 block(32, 16);
+      const dim3 grid((ref_width_ - 1) / block.x + 1,
+                      (ref_height_ - 1) / block.y + 1);
+      PackReferenceStatistics<<<grid, block>>>(filtered.sum_image->View(),
+                                               filtered.squared_sum_image->View(),
+                                               packed.View());
+      CUDA_SYNC_AND_CHECK();
+      // The pack has finished reading both float planes. Release them before
+      // allocating the immutable array instead of overlapping all three copies.
+      filtered.sum_image.reset();
+      filtered.squared_sum_image.reset();
+      cudaTextureDesc desc = {};
+      desc.addressMode[0] = cudaAddressModeClamp;
+      desc.addressMode[1] = cudaAddressModeClamp;
+      desc.filterMode = cudaFilterModePoint;
+      desc.readMode = cudaReadModeElementType;
+      desc.normalizedCoords = 0;
+      ref_statistics_texture_ =
+          CudaArrayLayeredTexture<uint2>::FromGpuMat(desc, packed);
+    } else
+#endif
+    {
+      ref_sum_image_ = std::move(filtered.sum_image);
+      ref_squared_sum_image_ = std::move(filtered.squared_sum_image);
+    }
+  }
 
   BindRefImageTexture();
 }
@@ -3085,14 +3347,22 @@ void PatchMatchCuda::Rotate() {
     normal_map_.swap(rotated_normal_map);
   }
 
-  // Rotate reference image.
+  // Rotate byte pixels. Only fallback moment planes rotate; the default CUDA
+  // texture retains original-orientation float representations for every Run.
   {
-    std::unique_ptr<GpuMatRefImage> rotated_ref_image(
-        new GpuMatRefImage(width, height));
-    ref_image_->image->Rotate(rotated_ref_image->image.get());
-    ref_image_->sum_image->Rotate(rotated_ref_image->sum_image.get());
-    ref_image_->squared_sum_image->Rotate(
-        rotated_ref_image->squared_sum_image.get());
+    auto rotated_ref_image = std::make_unique<GpuMat<uint8_t>>(width, height);
+    std::unique_ptr<GpuMat<float>> rotated_sum, rotated_squared_sum;
+    if (ref_sum_image_) {
+      rotated_sum = std::make_unique<GpuMat<float>>(width, height);
+      rotated_squared_sum = std::make_unique<GpuMat<float>>(width, height);
+    }
+    ref_image_->Rotate(rotated_ref_image.get());
+    if (ref_sum_image_) {
+      ref_sum_image_->Rotate(rotated_sum.get());
+      ref_squared_sum_image_->Rotate(rotated_squared_sum.get());
+      ref_sum_image_.swap(rotated_sum);
+      ref_squared_sum_image_.swap(rotated_squared_sum);
+    }
     ref_image_.swap(rotated_ref_image);
     BindRefImageTexture();
   }
@@ -3125,6 +3395,17 @@ void PatchMatchCuda::Rotate() {
 // PRNG state and computes the same initial cost used by Run, before any sweep.
 namespace internal {
 namespace {
+__global__ void CaptureReferenceStatistics(
+    const ReferenceStatisticsView statistics, GpuMatView<uint32_t> bits) {
+  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row < bits.GetHeight() && col < bits.GetWidth()) {
+    const float2 value = statistics.Get(row, col);
+    bits.Set(row, col, 0, __float_as_uint(value.x));
+    bits.Set(row, col, 1, __float_as_uint(value.y));
+  }
+}
+
 __global__ void ConstructorContinuation(GpuMatView<curandState> states,
                                         GpuMatView<uint32_t> draws) {
   const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3156,6 +3437,59 @@ __global__ void SweepContinuation(GpuMatView<curandState> states,
 }  // namespace
 
 struct PatchMatchCudaTestAccess {
+  template <int kWindowSize>
+  static NccCostComparison NccCostsForWindow(PatchMatchCuda& pm) {
+    pm.ComputeCudaConfig();
+    const size_t width = pm.cost_map_->GetWidth();
+    const size_t height = pm.cost_map_->GetHeight();
+    const size_t sources = pm.cost_map_->GetDepth();
+    GpuMat<float> candidate(width, height, sources);
+    GpuMat<float> reference(width, height, sources);
+    dim3 grid = pm.sweep_grid_size_;
+    grid.y = (height + kInitialCostStripeRows - 1) / kInitialCostStripeRows;
+#define COMPUTE_NCC_COST(REFERENCE, OUTPUT)                           \
+  ComputeInitialCost<kWindowSize, 1, REFERENCE>                       \
+      <<<grid, pm.sweep_block_size_>>>(                               \
+          MakeRefCamera(pm.ref_K_host_[pm.rotation_in_half_pi_],      \
+                        pm.ref_inv_K_host_[pm.rotation_in_half_pi_]), \
+          OUTPUT.View(),                                              \
+          pm.depth_map_->View(),                                      \
+          pm.normal_map_->View(),                                     \
+          pm.ref_image_texture_->GetObj(),                            \
+          pm.ReferenceStatistics(),                                  \
+          pm.src_images_texture_->GetObj(),                           \
+          pm.poses_texture_[pm.rotation_in_half_pi_]->GetObj(),       \
+          pm.options_.sigma_spatial,                                  \
+          pm.options_.sigma_color)
+    COMPUTE_NCC_COST(false, candidate);
+    COMPUTE_NCC_COST(true, reference);
+#undef COMPUTE_NCC_COST
+    CUDA_SYNC_AND_CHECK();
+    return {candidate.CopyToMat(), reference.CopyToMat()};
+  }
+
+  static NccCostComparison NccCosts(PatchMatchCuda& pm) {
+    THROW_CHECK_EQ(pm.options_.window_step, 1);
+    if (pm.options_.window_radius == 5) return NccCostsForWindow<11>(pm);
+    THROW_CHECK_EQ(pm.options_.window_radius, 2);
+    return NccCostsForWindow<5>(pm);
+  }
+
+  static void LegacyReferenceStatistics(PatchMatchCuda& pm) {
+    THROW_CHECK_EQ(pm.rotation_in_half_pi_, 0);
+    const auto& bitmap =
+        pm.problem_.images->at(pm.problem_.ref_image_idx).GetBitmap();
+    GpuMatRefImage filtered(pm.ref_width_, pm.ref_height_);
+    filtered.Filter(bitmap.RowMajorData().data(),
+                    pm.options_.window_radius,
+                    pm.options_.window_step,
+                    pm.options_.sigma_spatial,
+                    pm.options_.sigma_color);
+    pm.ref_sum_image_ = std::move(filtered.sum_image);
+    pm.ref_squared_sum_image_ = std::move(filtered.squared_sum_image);
+    pm.ref_statistics_texture_.reset();
+  }
+
   static Mat<uint32_t> ConstructorState(PatchMatchCuda& pm) {
     const size_t count = pm.rand_state_map_->GetWidth();
     GpuMat<uint32_t> draws(count, 1, 3);
@@ -3181,8 +3515,7 @@ struct PatchMatchCudaTestAccess {
         pm.depth_map_->View(),
         pm.normal_map_->View(),
         pm.ref_image_texture_->GetObj(),
-        pm.ref_image_->sum_image->View(),
-        pm.ref_image_->squared_sum_image->View(),
+        pm.ReferenceStatistics(),
         pm.src_images_texture_->GetObj(),
         pm.poses_texture_[pm.rotation_in_half_pi_]->GetObj(),
         pm.options_.sigma_spatial,
@@ -3218,6 +3551,10 @@ struct PatchMatchCudaTestAccess {
     GpuMat<float> forward(width, height, sources);
     GpuMat<uint32_t> continuation(width, 1, 3);
     GpuMat<uint32_t> continuation_before(width, 1, 3);
+    GpuMat<uint32_t> reference_statistics(width, height, 2);
+    CaptureReferenceStatistics<<<dim3((width + 31) / 32, (height + 15) / 16),
+                                 dim3(32, 16)>>>(
+        pm.ReferenceStatistics(), reference_statistics.View());
     SweepContinuation<<<(width + 31) / 32, 32>>>(
         pm.rand_state_map_->View(),
         PatchMatchRngPerimeter{pm.ref_width_, pm.ref_height_},
@@ -3278,8 +3615,7 @@ struct PatchMatchCudaTestAccess {
       pm.sel_prob_map_->View(),                                       \
       pm.prev_sel_prob_map_->View(),                                  \
       pm.ref_image_texture_->GetObj(),                                \
-      pm.ref_image_->sum_image->View(),                               \
-      pm.ref_image_->squared_sum_image->View(),                       \
+      pm.ReferenceStatistics(),                       \
       pm.src_images_texture_->GetObj(),                               \
       pm.src_depth_maps_texture_->GetObj(),                           \
       pm.poses_texture_[pm.rotation_in_half_pi_]->GetObj(),           \
@@ -3319,7 +3655,9 @@ struct PatchMatchCudaTestAccess {
             pm.normal_map_->CopyToMat(),
             pm.sel_prob_map_->CopyToMat(),
             continuation.CopyToMat(),
-            continuation_before.CopyToMat()};
+            continuation_before.CopyToMat(),
+            reference_statistics.CopyToMat(),
+            pm.ref_statistics_texture_ != nullptr};
   }
 
   static std::vector<SweepTraceResult> SweepSequence(
@@ -3339,6 +3677,10 @@ struct PatchMatchCudaTestAccess {
   }
 };
 
+NccCostComparison ProbeNccCosts(PatchMatchCuda& pm) {
+  return PatchMatchCudaTestAccess::NccCosts(pm);
+}
+
 Mat<uint32_t> ProbeConstructorContinuation(PatchMatchCuda& pm) {
   return PatchMatchCudaTestAccess::ConstructorState(pm);
 }
@@ -3352,6 +3694,10 @@ SweepTraceResult ProbeSweep(PatchMatchCuda& pm,
 std::vector<SweepTraceResult> ProbeSweepSequence(
     PatchMatchCuda& pm, const bool cooperative, const unsigned long long seed) {
   return PatchMatchCudaTestAccess::SweepSequence(pm, cooperative, seed);
+}
+
+void UseLegacyReferenceStatistics(PatchMatchCuda& pm) {
+  PatchMatchCudaTestAccess::LegacyReferenceStatistics(pm);
 }
 
 Mat<float> ProbeOwnershipInitialCost(PatchMatchCuda& pm,

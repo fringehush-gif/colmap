@@ -96,6 +96,10 @@ COLMAP_ADD_TEST(
     SRCS patch_match_cuda_workspace_test.cc
 )
 COLMAP_ADD_TEST(
+    NAME patch_match_rng_perimeter_layout_test
+    SRCS patch_match_rng_perimeter_layout_test.cc
+)
+COLMAP_ADD_TEST(
     NAME poisson_meshing_test
     SRCS poisson_meshing_test.cc
     LINK_LIBS colmap_mvs

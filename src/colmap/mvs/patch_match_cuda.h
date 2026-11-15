@@ -21,6 +21,7 @@ namespace mvs {
 
 namespace internal {
 struct PatchMatchCudaTestAccess;
+struct ReferenceStatisticsView;
 }  // namespace internal
 
 class PatchMatchCuda {
@@ -46,6 +47,7 @@ class PatchMatchCuda {
   void BindRefImageTexture();
 
   void InitRefImage();
+  internal::ReferenceStatisticsView ReferenceStatistics() const;
   void InitSourceImages();
   void InitTransforms();
   void InitWorkspaceMemory();
@@ -98,7 +100,12 @@ class PatchMatchCuda {
   float ref_inv_K_host_[4][4];
 
   // Data for reference image.
-  std::unique_ptr<GpuMatRefImage> ref_image_;
+  std::unique_ptr<GpuMat<uint8_t>> ref_image_;
+  // Default CUDA windows keep original-orientation FP32 representations in
+  // integer texture channels. Nondefault/HIP paths rotate the original planes.
+  std::unique_ptr<CudaArrayLayeredTexture<uint2>> ref_statistics_texture_;
+  std::unique_ptr<GpuMat<float>> ref_sum_image_;
+  std::unique_ptr<GpuMat<float>> ref_squared_sum_image_;
   std::unique_ptr<GpuMat<float>> depth_map_;
   std::unique_ptr<GpuMat<float>> normal_map_;
   std::unique_ptr<GpuMat<float>> sel_prob_map_;
