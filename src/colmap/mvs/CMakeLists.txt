@@ -132,6 +132,7 @@ if(CUDA_ENABLED)
         SRCS
             gpu_mat_prng.h gpu_mat_prng.cu
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
+            packed_consistency_mask.h
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu patch_match_geometry.cuh
             patch_match_sampling.cuh
@@ -289,6 +290,12 @@ if(CUDA_ENABLED)
     )
 
     COLMAP_ADD_TEST(
+        NAME packed_consistency_mask_test
+        SRCS packed_consistency_mask_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
+
+    COLMAP_ADD_TEST(
         NAME gpu_mat_test
         SRCS gpu_mat_test.cu
         LINK_LIBS colmap_mvs_cuda
@@ -308,6 +315,7 @@ if(HIP_ENABLED)
         SRCS
             gpu_mat_prng.h gpu_mat_prng.cu
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
+            packed_consistency_mask.h
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu patch_match_geometry.cuh
             patch_match_sampling.cuh
@@ -326,9 +334,18 @@ if(HIP_ENABLED)
     )
 
     COLMAP_ADD_TEST(
+        NAME packed_consistency_mask_test
+        SRCS packed_consistency_mask_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
+
+    COLMAP_ADD_TEST(
         NAME gpu_mat_test
         SRCS gpu_mat_test.cu
         LINK_LIBS colmap_mvs_cuda
     )
-    set_source_files_properties(gpu_mat_test.cu PROPERTIES LANGUAGE HIP)
+    set_source_files_properties(
+        gpu_mat_test.cu packed_consistency_mask_test.cu
+        PROPERTIES LANGUAGE HIP
+    )
 endif()

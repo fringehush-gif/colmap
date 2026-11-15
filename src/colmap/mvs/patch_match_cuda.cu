@@ -10,6 +10,7 @@
 #define _USE_MATH_DEFINES
 
 #include "colmap/mvs/patch_match_cuda.h"
+#include "colmap/mvs/packed_consistency_mask.h"
 #include "colmap/mvs/patch_match_geometry.cuh"
 #include "colmap/mvs/patch_match_sampling.cuh"
 #ifdef COLMAP_PATCH_MATCH_TESTING
@@ -1435,7 +1436,7 @@ __global__ void SweepFromTopToBottom(
     GpuMatView<float> cost_map,
     GpuMatView<float> depth_map,
     GpuMatView<float> normal_map,
-    GpuMatView<uint8_t> consistency_mask,
+    PackedConsistencyMaskView consistency_mask,
     GpuMatView<float> sel_prob_map,
     const GpuMatView<float> prev_sel_prob_map,
     const cudaTextureObject_t ref_image_texture,
@@ -2293,7 +2294,7 @@ void LaunchSweep(
     GpuMatView<float> cost_map,
     GpuMatView<float> depth_map,
     GpuMatView<float> normal_map,
-    GpuMatView<uint8_t> consistency_mask,
+    PackedConsistencyMaskView consistency_mask,
     GpuMatView<float> sel_prob_map,
     const GpuMatView<float> prev_sel_prob_map,
     const cudaTextureObject_t ref_image_texture,
@@ -2404,6 +2405,7 @@ PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
 }
 
 void PatchMatchCuda::Run() {
+  consistency_mask_valid_ = false;
 #define CASE_WINDOW_RADIUS(window_radius, window_step)              \
   case window_radius:                                               \
     RunWithWindowSizeAndStep<2 * window_radius + 1, window_step>(); \
@@ -2467,16 +2469,32 @@ Mat<float> PatchMatchCuda::GetSelProbMap() const {
 }
 
 std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
+  if (!consistency_mask_valid_) {
+    return {};
+  }
   const Mat<uint8_t> mask = consistency_mask_->CopyToMat();
+  const size_t num_sources = problem_.src_image_idxs.size();
+  const size_t num_planes = PackedConsistencyMaskDepth(num_sources);
+  THROW_CHECK_EQ(mask.GetDepth(), num_planes);
   std::vector<int> consistent_image_idxs;
   std::vector<int> pixel_consistent_image_idxs;
-  pixel_consistent_image_idxs.reserve(mask.GetDepth());
+  pixel_consistent_image_idxs.reserve(num_sources);
   for (size_t r = 0; r < mask.GetHeight(); ++r) {
     for (size_t c = 0; c < mask.GetWidth(); ++c) {
       pixel_consistent_image_idxs.clear();
-      for (size_t d = 0; d < mask.GetDepth(); ++d) {
-        if (mask.Get(r, c, d)) {
-          pixel_consistent_image_idxs.push_back(problem_.src_image_idxs[d]);
+      for (size_t plane = 0; plane < num_planes; ++plane) {
+        const uint8_t packed = mask.Get(r, c, plane);
+        if (packed == 0) {
+          continue;
+        }
+        const size_t first = plane * kConsistencyFlagsPerByte;
+        const size_t count =
+            std::min(kConsistencyFlagsPerByte, num_sources - first);
+        for (size_t bit = 0; bit < count; ++bit) {
+          if ((packed & PackedConsistencyMaskBit(bit)) != 0) {
+            pixel_consistent_image_idxs.push_back(
+                problem_.src_image_idxs[first + bit]);
+          }
         }
       }
       if (pixel_consistent_image_idxs.size() > 0) {
@@ -2593,7 +2611,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           cost_map_->View(),                                    \
           depth_map_->View(),                                   \
           normal_map_->View(),                                  \
-          consistency_mask_->View(),                            \
+          PackedConsistencyMaskView{consistency_mask_->View()},                            \
           sel_prob_map_->View(),                                \
           prev_sel_prob_map_->View(),                           \
           ref_image_texture_->GetObj(),                         \
@@ -2611,7 +2629,8 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           consistency_mask_ =
               std::make_unique<GpuMat<uint8_t>>(cost_map_->GetWidth(),
                                                 cost_map_->GetHeight(),
-                                                cost_map_->GetDepth());
+                                                PackedConsistencyMaskDepth(
+                                                    cost_map_->GetDepth()));
           consistency_mask_->FillWithScalar(0);
         }
         if (options_.geom_consistency) {
@@ -2661,7 +2680,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           std::unique_ptr<GpuMat<uint8_t>> rot_consistency_mask_(
               new GpuMat<uint8_t>(cost_map_->GetWidth(),
                                   cost_map_->GetHeight(),
-                                  cost_map_->GetDepth()));
+                                  consistency_mask_->GetDepth()));
           consistency_mask_->Rotate(rot_consistency_mask_.get());
           consistency_mask_.swap(rot_consistency_mask_);
         }
@@ -2675,6 +2694,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
   look_ahead_workspace.reset();
   total_timer.Print("Total");
+  consistency_mask_valid_ = options_.filter;
 }
 
 #undef SWEEP_TRACE_ARGUMENT
@@ -3125,6 +3145,7 @@ struct PatchMatchCudaTestAccess {
   static SweepTraceResult Sweep(PatchMatchCuda& pm,
                                 const bool cooperative,
                                 const unsigned long long seed) {
+    pm.consistency_mask_valid_ = false;
     std::unique_ptr<LookAheadWorkspace> look_ahead_workspace;
     if (cooperative) {
       look_ahead_workspace = MakeLookAheadWorkspace(
@@ -3171,7 +3192,8 @@ struct PatchMatchCudaTestAccess {
         pm.options_.filter_geom_consistency_max_cost;
     if (pm.options_.filter) {
       pm.consistency_mask_ =
-          std::make_unique<GpuMat<uint8_t>>(width, height, sources);
+          std::make_unique<GpuMat<uint8_t>>(
+              width, height, PackedConsistencyMaskDepth(sources));
       pm.consistency_mask_->FillWithScalar(0);
     }
     const RefCamera camera =
@@ -3188,7 +3210,7 @@ struct PatchMatchCudaTestAccess {
           pm.cost_map_->View(),                                             \
           pm.depth_map_->View(),                                            \
           pm.normal_map_->View(),                                           \
-          pm.consistency_mask_->View(),                                     \
+          PackedConsistencyMaskView{pm.consistency_mask_->View()},                                     \
           pm.sel_prob_map_->View(),                                         \
           pm.prev_sel_prob_map_->View(),                                    \
           pm.ref_image_texture_->GetObj(),                                  \
@@ -3217,6 +3239,7 @@ struct PatchMatchCudaTestAccess {
     SweepContinuation<<<(width + 31) / 32, 32>>>(pm.rand_state_map_->View(),
                                                  continuation.View());
     CUDA_SYNC_AND_CHECK();
+    pm.consistency_mask_valid_ = pm.options_.filter;
     return {draws.CopyToMat(),
             winners.CopyToMat(),
             support.CopyToMat(),
