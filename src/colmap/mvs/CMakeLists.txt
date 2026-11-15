@@ -383,7 +383,7 @@ if(CUDA_ENABLED OR HIP_ENABLED)
             # Compile AND link the real CUDA symbol/forwarding contract; do not
             # run it or rely solely on acceptance of a linker option. Function
             # scope prevents changes to any other capability check or target.
-            function(colmap_mvs_check_cuda_wrap)
+            function(colmap_mvs_check_rotation_cuda_wrap)
                 include(CheckCXXSourceCompiles)
                 set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
                 set(CMAKE_REQUIRED_LIBRARIES CUDA::cudart)
@@ -418,17 +418,17 @@ if(CUDA_ENABLED OR HIP_ENABLED)
                         return static_cast<int>(status == cudaSuccess
                             ? cudaFree(p) : status);
                     }
-                ]=] _COLMAP_MVS_HAS_CUDA_WRAP)
-                if(_COLMAP_MVS_HAS_CUDA_WRAP)
+                ]=] _COLMAP_MVS_HAS_CUDA_LINEAR_AND_PITCHED_WRAP)
+                if(_COLMAP_MVS_HAS_CUDA_LINEAR_AND_PITCHED_WRAP)
                     target_compile_definitions(colmap_mvs_patch_match_rotation_lifetime_test
                         PRIVATE COLMAP_MVS_CUDA_ALLOCATION_WRAP=1)
                     target_link_options(colmap_mvs_patch_match_rotation_lifetime_test PRIVATE
                         "LINKER:--wrap=cudaMalloc"
-                    "LINKER:--wrap=cudaMallocPitch"
+                        "LINKER:--wrap=cudaMallocPitch"
                         "LINKER:--wrap=cudaFree")
                 endif()
             endfunction()
-            colmap_mvs_check_cuda_wrap()
+            colmap_mvs_check_rotation_cuda_wrap()
         endif()
     endif()
 endif()
