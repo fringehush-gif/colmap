@@ -71,6 +71,10 @@ COLMAP_ADD_TEST(
     LINK_LIBS colmap_mvs
 )
 COLMAP_ADD_TEST(
+    NAME patch_match_test
+    SRCS patch_match_test.cc
+)
+COLMAP_ADD_TEST(
     NAME patch_match_input_test
     SRCS patch_match_input_test.cc
     LINK_LIBS colmap_mvs
@@ -303,6 +307,12 @@ if(CUDA_ENABLED)
     )
 
     COLMAP_ADD_TEST(
+        NAME cuda_texture_test
+        SRCS cuda_texture_test.cc
+        LINK_LIBS colmap_util_cuda CUDA::cudart CUDA::curand
+    )
+
+    COLMAP_ADD_TEST(
         NAME gpu_mat_test
         SRCS gpu_mat_test.cu
         LINK_LIBS colmap_mvs_cuda
@@ -351,6 +361,12 @@ if(HIP_ENABLED)
         NAME patch_match_rng_perimeter_test
         SRCS patch_match_rng_perimeter_test.cu
         LINK_LIBS colmap_mvs_cuda
+    )
+
+    COLMAP_ADD_TEST(
+        NAME cuda_texture_test
+        SRCS cuda_texture_test.cc
+        LINK_LIBS colmap_util_cuda hip::host hip::hiprand roc::rocrand
     )
 
     COLMAP_ADD_TEST(
