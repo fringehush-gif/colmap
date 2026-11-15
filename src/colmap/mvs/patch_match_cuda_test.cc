@@ -13,6 +13,7 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <set>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -447,6 +448,85 @@ TEST_F(CudaTest, NccNormalizationMatchesRetainedArithmeticAcrossRows) {
   }
 }
 
+TEST_F(CudaTest, FreshProposalAliasesMatchIndependentProducer) {
+  constexpr int kWidth = 35, kHeight = 19, kSources = 5;
+  auto inputs = MakeInputs(1, kSources, kHeight, kWidth);
+  MakeSourceTexturesDistinct(&inputs);
+  AddDistinctSourceDepthErrors(&inputs);
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  problem.src_image_idxs = {1, 2, 3, 4, 5};
+  problem.images = &inputs.images;
+  problem.depth_maps = &inputs.depths;
+  problem.normal_maps = &inputs.normals;
+  auto options = MakeOptions(true, false, false);
+  options.window_radius = 5;
+  options.sigma_spatial = 5.0;
+  options.num_samples = 17;
+  PatchMatchCuda pm(options, problem);
+  const auto result = internal::ProbeFreshProposalAliases(pm);
+
+  // The probe stages a nonzero first row and nine rows, crossing an eight-row
+  // producer stripe. Width35 leaves both eight- and32-column partial blocks.
+  // All output planes are poisoned before the actual producer is launched.
+  ExpectExactlyEqual(result.reference, result.candidate);
+  ExpectExactlyEqual(result.reference_geometry, result.candidate_geometry);
+  ASSERT_EQ(result.candidate.GetWidth(), kWidth);
+  ASSERT_EQ(result.candidate.GetHeight(), 9);
+  ASSERT_EQ(result.candidate.GetDepth(), 3 * kSources);
+  ASSERT_EQ(result.candidate_geometry.GetDepth(), 2 * kSources);
+  ASSERT_EQ(result.aliases.GetWidth(), kWidth);
+  ASSERT_EQ(result.aliases.GetHeight(), 9);
+
+  std::array<int, 4> alias_pixels{}, useful_geometry{};
+  std::array<std::set<float>, 4> useful_costs;
+  int fresh_current_tuple_differs_from_incumbent = 0;
+  int useful_tail = 0;
+  for (int row = 0; row < 9; ++row) {
+    for (int col = 0; col < kWidth; ++col) {
+      const int aliases = result.aliases.Get(row, col);
+      ASSERT_GE(aliases, 0);
+      ASSERT_LE(aliases, 3);
+      ++alias_pixels[aliases];
+      for (int source = 0; source < kSources; ++source) {
+        for (int hypothesis = 0; hypothesis < 3; ++hypothesis) {
+          const float cost =
+              result.reference.Get(row, col, hypothesis * kSources + source);
+          if (cost > 0.0f && cost < 2.0f) {
+            useful_costs[aliases].insert(cost);
+            useful_tail += row == 8 && col >= 32;
+          }
+        }
+        for (int depth_kind = 0; depth_kind < 2; ++depth_kind) {
+          const float cost = result.reference_geometry.Get(
+              row, col, depth_kind * kSources + source);
+          useful_geometry[aliases] +=
+              cost > 0.0f && cost < options.geom_consistency_max_cost;
+        }
+        if ((aliases & 1) != 0) {
+          // h2 uses the current normal. When the random depth is identical,
+          // h2 is a fresh evaluation of the incoming tuple, whose old cost
+          // is deliberately different. Parameter equality is insufficient
+          // permission to substitute the incoming incumbent cost map.
+          const float fresh_current =
+              result.reference.Get(row, col, 2 * kSources + source);
+          fresh_current_tuple_differs_from_incumbent +=
+              fresh_current > 0.0f && fresh_current < 2.0f &&
+              fresh_current != result.incoming_cost;
+        }
+      }
+    }
+  }
+  for (int aliases = 0; aliases < 4; ++aliases) {
+    SCOPED_TRACE(::testing::Message() << "alias flags=" << aliases);
+    EXPECT_GT(alias_pixels[aliases], 0);
+    EXPECT_GT(useful_costs[aliases].size(), 1);
+    EXPECT_GT(useful_geometry[aliases], 0);
+  }
+  EXPECT_GT(fresh_current_tuple_differs_from_incumbent, 0);
+  EXPECT_GT(useful_tail, 0);
+}
+
 TEST_F(CudaTest, PhotoConstructorMatchesRetainedThreeStageInitialization) {
   constexpr int kWidth = 35, kHeight = 19;
   auto inputs = MakeInputs(1, 2, kHeight, kWidth);
@@ -686,6 +766,7 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
   };
   const Case cases[] = {
       {8, 17, 257, true},
+      {31, 33, 65, true},   // Last second-history slot is inactive, not source 31.
       {32, 17, 65, false},  // Retain the S>P fallback control.
       {32, 33, 65, true},   // Two source slots per worker; P exceeds 32.
       {33, 33, 65, false},  // Source-capacity fallback while S<=P.
@@ -772,8 +853,10 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
     int supported_rows = 0;
     int duplicate_pixels = 0;
     int cross_window_duplicate_pixels = 0;
+    int high30 = 0;
     int high31 = 0;
     int high32 = 0;
+    int source_30_14_distinct_sampled_cost_pixels = 0;
     int source_31_15_distinct_sampled_cost_pixels = 0;
     int strict_new_winners = 0;
     int propagated_earlier_window_sources = 0;
@@ -820,6 +903,7 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
                   a.initial_cost.Get(row, col, source) !=
                       a.initial_cost.Get(row, col, first_sampled_source);
             }
+            high30 += source == 30;
             high31 += source == 31;
             high32 += source == 32;
           }
@@ -827,6 +911,17 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
         duplicate_pixels += duplicate;
         cross_window_duplicate_pixels += cross_window_duplicate;
         distinct_sampled_costs += distinct_sampled_cost;
+        if (sources == 31 && first_window[30] >= 0 && first_window[14] >= 0 &&
+            std::count_if(first_window.begin(), first_window.end(),
+                          [](int window) { return window >= 0; }) > 16) {
+          const float high_cost = a.initial_cost.Get(row, col, 30);
+          const float other_cost = a.initial_cost.Get(row, col, 14);
+          // Worker 14 has a live second history; worker 15 has none. Require
+          // distinct useful values so a partial second-history row is tested.
+          source_30_14_distinct_sampled_cost_pixels +=
+              std::isfinite(high_cost) && std::isfinite(other_cost) &&
+              high_cost < 1.9f && other_cost < 1.9f && high_cost != other_cost;
+        }
         if (sources == 32 && c.look_ahead && first_window[31] >= 0 &&
             first_window[15] >= 0 &&
             std::count_if(first_window.begin(), first_window.end(),
@@ -894,6 +989,7 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
     EXPECT_GT(supported_pixels, 0);
     EXPECT_GT(supported_rows, 1);
     EXPECT_GT(duplicate_pixels, 0);
+    if (sources == 31) EXPECT_GT(high30, 0);
     if (sources >= 32) EXPECT_GT(high31, 0);
     if (c.look_ahead) {
       EXPECT_GT(distinct_sampled_costs, 0);
@@ -908,6 +1004,10 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
       // boundaries; the same probe must compare all three bands.
       EXPECT_GT(supported_band_boundary_pixels[0], 0);
       EXPECT_GT(supported_band_boundary_pixels[1], 0);
+    }
+    if (sources == 31) {
+      EXPECT_GT(source_30_14_distinct_sampled_cost_pixels, 0);
+      EXPECT_GT(nontrivial_second_pair_incumbent_pixels, 0);
     }
     if (sources == 32 && c.look_ahead) {
       EXPECT_GT(source_31_15_distinct_sampled_cost_pixels, 0);
@@ -931,6 +1031,9 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
                    nontrivial_second_pair_incumbent_pixels);
     RecordProperty(property_prefix + "_source_31_15_distinct_sampled_cost_pixels",
                    source_31_15_distinct_sampled_cost_pixels);
+    RecordProperty(property_prefix + "_source_30_14_distinct_sampled_cost_pixels",
+                   source_30_14_distinct_sampled_cost_pixels);
+    RecordProperty(property_prefix + "_draws_30", high30);
     RecordProperty(property_prefix + "_draws_31", high31);
     RecordProperty(property_prefix + "_draws_32", high32);
     RecordProperty(property_prefix + "_strict_winners", strict_new_winners);

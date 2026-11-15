@@ -21,6 +21,21 @@ struct NccCostComparison {
 // Both arms share reference statistics, whose owner has separate qualification.
 NccCostComparison ProbeNccCosts(PatchMatchCuda& patch_match);
 
+struct FreshProposalAliasComparison {
+  Mat<float> candidate;
+  Mat<float> reference;
+  Mat<float> candidate_geometry;
+  Mat<float> reference_geometry;
+  // Bit0: staged depth equality; bit1: staged normal equality.
+  Mat<int> aliases;
+  float incoming_cost;
+};
+
+// Inject controlled finite proposals into the actual band producer, without
+// running a sweep or relying on a random draw to hit an alias.
+FreshProposalAliasComparison ProbeFreshProposalAliases(
+    PatchMatchCuda& patch_match);
+
 struct PhotoInitializationResult {
   Mat<float> depth;
   Mat<float> normal;

@@ -26,6 +26,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <sstream>
 
@@ -3406,6 +3407,110 @@ __global__ void CaptureReferenceStatistics(
   }
 }
 
+// Independent producer oracle: use one column owner, visit every source and
+// proposal without aliasing, and execute the retained literal PR59 NCC body.
+// The shared geometry helper is unchanged; this fixture tests its depth routing
+// and destination publication, not the reprojection arithmetic itself.
+__global__ void ComputeFreshProposalReference(
+    const RefCamera camera,
+    const GpuMatView<float> depth,
+    const GpuMatView<float> normal,
+    const cudaTextureObject_t ref_texture,
+    const ReferenceStatisticsView statistics,
+    const cudaTextureObject_t sources_texture,
+    const cudaTextureObject_t depths_texture,
+    const cudaTextureObject_t poses_texture,
+    const SweepOptions options,
+    const LookAheadViews band,
+    GpuMatView<float> costs,
+    GpuMatView<float> geometry) {
+  const int col = blockIdx.x * blockDim.x + threadIdx.x;
+  using Computer = PhotoConsistencyCostComputer<11, 1>;
+  Computer computer(camera,
+                    ref_texture,
+                    sources_texture,
+                    poses_texture,
+                    options.sigma_spatial,
+                    options.sigma_color);
+  __shared__ float reference[Computer::LocalRefImageType::kDataSize];
+  __shared__ float weights[Computer::kWeightCacheSize];
+  computer.local_ref_image.data = reference;
+  computer.local_weights = weights;
+  computer.col = col;
+  const int num_sources = costs.GetDepth() / 3;
+  for (int local_row = 0; local_row < band.num_rows; ++local_row) {
+    const int row = band.first_row + local_row;
+    __syncthreads();
+    computer.Read(row, local_row == 0);
+    if (col >= depth.GetWidth()) continue;
+    computer.row = row;
+    const float2 moments = statistics.Get(row, col);
+    computer.local_ref_sum = moments.x;
+    computer.local_ref_squared_sum = moments.y;
+    float current_normal[3], random_normal[3];
+    normal.GetSlice(row, col, current_normal);
+    for (int axis = 0; axis < 3; ++axis) {
+      random_normal[axis] =
+          band.random_parameters.Get(local_row, col, axis + 1);
+    }
+    const float current_depth = depth.Get(row, col);
+    const float random_depth = band.random_parameters.Get(local_row, col, 0);
+    for (int source = 0; source < num_sources; ++source) {
+      computer.src_image_idx = source;
+      for (int hypothesis = 0; hypothesis < 3; ++hypothesis) {
+        computer.depth = hypothesis == 1 ? current_depth : random_depth;
+        computer.normal = hypothesis == 2 ? current_normal : random_normal;
+        costs.Set(local_row,
+                  col,
+                  hypothesis * num_sources + source,
+                  computer.ComputeReferenceForTesting());
+      }
+      geometry.Set(
+          local_row,
+          col,
+          source,
+          ComputeGeomConsistencyCost(camera,
+                                     poses_texture,
+                                     depths_texture,
+                                     row,
+                                     col,
+                                     current_depth,
+                                     source,
+                                     options.geom_consistency_max_cost));
+      geometry.Set(
+          local_row,
+          col,
+          num_sources + source,
+          ComputeGeomConsistencyCost(camera,
+                                     poses_texture,
+                                     depths_texture,
+                                     row,
+                                     col,
+                                     random_depth,
+                                     source,
+                                     options.geom_consistency_max_cost));
+    }
+  }
+}
+
+Mat<float> CopyActiveBand(const GpuMatView<float> view,
+                          const size_t width,
+                          const size_t rows) {
+  Mat<float> result(width, rows, view.GetDepth());
+  for (size_t plane = 0; plane < view.GetDepth(); ++plane) {
+    const auto* source = reinterpret_cast<const char*>(view.GetPtr()) +
+                         plane * view.GetHeight() * view.pitch;
+    CUDA_SAFE_CALL(cudaMemcpy2D(result.GetPtr() + plane * width * rows,
+                                width * sizeof(float),
+                                source,
+                                view.pitch,
+                                width * sizeof(float),
+                                rows,
+                                cudaMemcpyDeviceToHost));
+  }
+  return result;
+}
+
 __global__ void ConstructorContinuation(GpuMatView<curandState> states,
                                         GpuMatView<uint32_t> draws) {
   const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3437,6 +3542,133 @@ __global__ void SweepContinuation(GpuMatView<curandState> states,
 }  // namespace
 
 struct PatchMatchCudaTestAccess {
+  static FreshProposalAliasComparison FreshProposalAliases(PatchMatchCuda& pm) {
+    THROW_CHECK(pm.options_.geom_consistency);
+    THROW_CHECK_EQ(pm.rotation_in_half_pi_, 0);
+    THROW_CHECK_EQ(pm.options_.window_radius, 5);
+    THROW_CHECK_EQ(pm.options_.window_step, 1);
+    constexpr int first_row = 7;
+    constexpr int rows = 9;  // Two producer stripes, with a one-row tail.
+    const size_t width = pm.depth_map_->GetWidth();
+    const size_t sources = pm.cost_map_->GetDepth();
+    THROW_CHECK_GE(pm.depth_map_->GetHeight(), first_row + rows);
+    auto workspace = MakeLookAheadWorkspace(
+        std::max(pm.ref_width_, pm.ref_height_),
+        sources,
+        std::max(pm.options_.num_samples, static_cast<int>(sources)),
+        true);
+    THROW_CHECK_NOTNULL(workspace.get());
+    THROW_CHECK_GE(workspace->Rows(), rows);
+    LookAheadViews band = workspace->Views(first_row, rows);
+    const auto current_depth = pm.depth_map_->CopyToMat();
+    const auto current_normal = pm.normal_map_->CopyToMat();
+    Mat<float> random(width, rows, 4);
+    Mat<int> aliases(width, rows, 1);
+    for (int local_row = 0; local_row < rows; ++local_row) {
+      for (size_t col = 0; col < width; ++col) {
+        const int row = first_row + local_row;
+        const int pattern = (local_row + col) % 4;
+        const bool same_depth = pattern == 0 || pattern == 1;
+        const bool same_normal = pattern == 0 || pattern == 2;
+        const float depth = current_depth.Get(row, col);
+        random.Set(local_row, col, 0, same_depth ? depth : 1.15f * depth + .1f);
+        float normal[3];
+        for (int axis = 0; axis < 3; ++axis) {
+          normal[axis] = current_normal.Get(row, col, axis);
+        }
+        if (!same_normal) {
+          normal[0] += .07f;
+          normal[1] -= .04f;
+          const float inverse =
+              1.0f / std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] +
+                               normal[2] * normal[2]);
+          for (float& value : normal) value *= inverse;
+        }
+        for (int axis = 0; axis < 3; ++axis)
+          random.Set(local_row, col, axis + 1, normal[axis]);
+        const auto same_bits = [](const float lhs, const float rhs) {
+          return std::memcmp(&lhs, &rhs, sizeof(float)) == 0;
+        };
+        const bool equal_depth = same_bits(random.Get(local_row, col, 0),
+                                           current_depth.Get(row, col));
+        bool equal_normal = true;
+        for (int axis = 0; axis < 3; ++axis) {
+          equal_normal &= same_bits(random.Get(local_row, col, axis + 1),
+                                    current_normal.Get(row, col, axis));
+        }
+        THROW_CHECK_EQ(equal_depth, same_depth);
+        THROW_CHECK_EQ(equal_normal, same_normal);
+        aliases.Set(local_row, col, int(equal_depth) + 2 * int(equal_normal));
+      }
+    }
+    for (size_t plane = 0; plane < 4; ++plane) {
+      auto* destination =
+          reinterpret_cast<char*>(band.random_parameters.GetPtr()) +
+          plane * band.random_parameters.GetHeight() *
+              band.random_parameters.pitch;
+      CUDA_SAFE_CALL(cudaMemcpy2D(destination,
+                                  band.random_parameters.pitch,
+                                  random.GetPtr() + plane * width * rows,
+                                  width * sizeof(float),
+                                  width * sizeof(float),
+                                  rows,
+                                  cudaMemcpyHostToDevice));
+    }
+    // Missing h0 alias publication must leave a visibly invalid destination.
+    for (auto view : {band.costs, band.geometric_costs}) {
+      CUDA_SAFE_CALL(cudaMemset2D(view.GetPtr(),
+                                  view.pitch,
+                                  0xff,
+                                  view.GetWidth() * sizeof(float),
+                                  view.GetHeight() * view.GetDepth()));
+    }
+    // A freshly evaluated current tuple must not be substituted with an
+    // incoming incumbent cost just because its parameters happen to match.
+    constexpr float incoming_cost = 1.75f;
+    pm.cost_map_->FillWithScalar(incoming_cost);
+    GpuMat<float> reference(width, rows, 3 * sources);
+    GpuMat<float> reference_geometry(width, rows, 2 * sources);
+    SweepOptions options;
+    options.sigma_spatial = pm.options_.sigma_spatial;
+    options.sigma_color = pm.options_.sigma_color;
+    options.geom_consistency_max_cost = pm.options_.geom_consistency_max_cost;
+    const RefCamera camera =
+        MakeRefCamera(pm.ref_K_host_[0], pm.ref_inv_K_host_[0]);
+    PrecomputeBandCosts<true>
+        <<<dim3((width + 7) / 8,
+                (rows + kLookAheadStripeRows - 1) / kLookAheadStripeRows),
+           dim3(8, 12)>>>(camera,
+                          pm.depth_map_->View(),
+                          pm.normal_map_->View(),
+                          pm.ref_image_texture_->GetObj(),
+                          pm.ReferenceStatistics(),
+                          pm.src_images_texture_->GetObj(),
+                          pm.src_depth_maps_texture_->GetObj(),
+                          pm.poses_texture_[0]->GetObj(),
+                          options,
+                          band);
+    ComputeFreshProposalReference<<<(width + 31) / 32, 32>>>(
+        camera,
+        pm.depth_map_->View(),
+        pm.normal_map_->View(),
+        pm.ref_image_texture_->GetObj(),
+        pm.ReferenceStatistics(),
+        pm.src_images_texture_->GetObj(),
+        pm.src_depth_maps_texture_->GetObj(),
+        pm.poses_texture_[0]->GetObj(),
+        options,
+        band,
+        reference.View(),
+        reference_geometry.View());
+    CUDA_SYNC_AND_CHECK();
+    return {CopyActiveBand(band.costs, width, rows),
+            reference.CopyToMat(),
+            CopyActiveBand(band.geometric_costs, width, rows),
+            reference_geometry.CopyToMat(),
+            std::move(aliases),
+            incoming_cost};
+  }
+
   template <int kWindowSize>
   static NccCostComparison NccCostsForWindow(PatchMatchCuda& pm) {
     pm.ComputeCudaConfig();
@@ -3679,6 +3911,10 @@ struct PatchMatchCudaTestAccess {
 
 NccCostComparison ProbeNccCosts(PatchMatchCuda& pm) {
   return PatchMatchCudaTestAccess::NccCosts(pm);
+}
+
+FreshProposalAliasComparison ProbeFreshProposalAliases(PatchMatchCuda& pm) {
+  return PatchMatchCudaTestAccess::FreshProposalAliases(pm);
 }
 
 Mat<uint32_t> ProbeConstructorContinuation(PatchMatchCuda& pm) {
