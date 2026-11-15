@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "colmap/mvs/gpu_mat.h"
+#include "colmap/mvs/patch_match_cuda_test.h"
 #include "colmap/mvs/patch_match_geometry.cuh"
 #include "colmap/mvs/patch_match_sampling.cuh"
 #include "colmap/util/cudacc.h"
@@ -12,6 +13,82 @@
 namespace colmap {
 namespace mvs {
 namespace {
+// Retained from exact public 020cbb9e: gpu_mat_prng.cu's initializer,
+// gpu_mat.h's float fill, and patch_match_cuda.cu's normal initialization.
+// Keep this legacy arm independent of GpuMatPRNGSeed, DrawUniformInterval,
+// InitDepthNormalMaps and GenerateRandomNormal in the candidate owner.
+__global__ void LegacyConstructorSeed(GpuMatView<curandState> output) {
+  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t uniqueBlockIndex = blockIdx.y * gridDim.x + blockIdx.x;
+  const size_t id = uniqueBlockIndex * blockDim.y * blockDim.x +
+                    threadIdx.y * blockDim.x + threadIdx.x;
+  if (col < output.GetWidth() && row < output.GetHeight()) {
+    curand_init(id, 0, 0, &output.GetRef(row, col));
+  }
+}
+
+__global__ void LegacyConstructorDepth(GpuMatView<float> depth,
+                                       GpuMatView<curandState> states,
+                                       const float depth_min,
+                                       const float depth_max) {
+  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row < depth.GetHeight() && col < depth.GetWidth()) {
+    curandState state = states.Get(row, col);
+    const float value =
+        curand_uniform(&state) * (depth_max - depth_min) + depth_min;
+    depth.Set(row, col, value);
+    states.Set(row, col, state);
+  }
+}
+
+__global__ void LegacyConstructorNormal(const float4 inv_K,
+                                        GpuMatView<float> normals,
+                                        GpuMatView<curandState> states,
+                                        GpuMatView<int> normal_pairs) {
+  const int row = blockDim.y * blockIdx.y + threadIdx.y;
+  const int col = blockDim.x * blockIdx.x + threadIdx.x;
+  if (col >= normals.GetWidth() || row >= normals.GetHeight()) return;
+  curandState state = states.Get(row, col);
+  float v1 = 0.0f;
+  float v2 = 0.0f;
+  float s = 2.0f;
+  int pairs = 0;
+  while (s >= 1.0f) {
+    v1 = 2.0f * curand_uniform(&state) - 1.0f;
+    v2 = 2.0f * curand_uniform(&state) - 1.0f;
+    s = v1 * v1 + v2 * v2;
+    ++pairs;  // Observation only; it does not consume or reorder a draw.
+  }
+  const float s_norm = sqrt(1.0f - s);
+  float normal[3];
+  normal[0] = 2.0f * v1 * s_norm;
+  normal[1] = 2.0f * v2 * s_norm;
+  normal[2] = 1.0f - 2.0f * s;
+  const float view_ray[3] = {inv_K.x * col + inv_K.y,
+                             inv_K.z * row + inv_K.w,
+                             1.0f};
+  if (normal[0] * view_ray[0] + normal[1] * view_ray[1] +
+          normal[2] * view_ray[2] > 0) {
+    normal[0] = -normal[0];
+    normal[1] = -normal[1];
+    normal[2] = -normal[2];
+  }
+  normals.SetSlice(row, col, normal);
+  normal_pairs.Set(row, col, pairs);
+  states.Set(row, col, state);
+}
+
+__global__ void LegacyConstructorContinuation(
+    GpuMatView<curandState> states, GpuMatView<uint32_t> draws) {
+  const int row = blockIdx.y * blockDim.y + threadIdx.y;
+  const int col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row >= states.GetHeight() || col >= states.GetWidth()) return;
+  curandState state = states.Get(row, col);
+  for (int i = 0; i < 3; ++i) draws.Set(row, col, i, curand(&state));
+}
+
 __global__ void ProbeSamplingSupportKernel(int* errors) {
   int failures = 0;
   const int strides[] = {1, 8, 23, 32, 47};
@@ -149,6 +226,35 @@ __global__ void ProbeSampledSourcesKernel(const GpuMatView<int> draws,
 
 }  // namespace
 namespace internal {
+PhotoInitializationResult ProbeLegacyPhotoInitialization(
+    const int width,
+    const int height,
+    const std::array<float, 4>& inv_K,
+    const float depth_min,
+    const float depth_max) {
+  GpuMat<curandState> states(width, height);
+  GpuMat<float> depth(width, height);
+  GpuMat<float> normal(width, height, 3);
+  GpuMat<uint32_t> continuation(width, height, 3);
+  GpuMat<int> normal_pairs(width, height);
+  // Original GpuMat PRNG/fill shape and PatchMatch element-wise shape differ.
+  const dim3 map_block(32, 16);
+  const dim3 map_grid((width + 31) / 32, (height + 15) / 16);
+  LegacyConstructorSeed<<<map_grid, map_block>>>(states.View());
+  LegacyConstructorDepth<<<map_grid, map_block>>>(
+      depth.View(), states.View(), depth_min, depth_max);
+  const dim3 normal_block(32, 32);
+  const dim3 normal_grid((width + 31) / 32, (height + 31) / 32);
+  LegacyConstructorNormal<<<normal_grid, normal_block>>>(
+      make_float4(inv_K[0], inv_K[1], inv_K[2], inv_K[3]),
+      normal.View(), states.View(), normal_pairs.View());
+  LegacyConstructorContinuation<<<map_grid, map_block>>>(states.View(),
+                                                           continuation.View());
+  CUDA_SYNC_AND_CHECK();
+  return {depth.CopyToMat(), normal.CopyToMat(), continuation.CopyToMat(),
+          normal_pairs.CopyToMat()};
+}
+
 int ProbeSamplingSupport() {
   GpuMat<int> errors(1, 1);
   ProbeSamplingSupportKernel<<<1, 1>>>(errors.GetPtr());

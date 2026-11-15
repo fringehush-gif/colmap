@@ -385,6 +385,63 @@ TEST_F(CudaTest, DirectInstancesOwnReferenceCalibration) {
       [](float depth) { return std::isfinite(depth) && depth > 0; }));
 }
 
+TEST_F(CudaTest, PhotoConstructorMatchesRetainedThreeStageInitialization) {
+  constexpr int kWidth = 35, kHeight = 19;
+  auto inputs = MakeInputs(1, 2, kHeight, kWidth);
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  problem.src_image_idxs = {2, 1};
+  problem.images = &inputs.images;
+  auto options = MakeOptions(false, false, false);
+  options.window_radius = 5;
+  const float* K = inputs.images[0].GetK();
+  ASSERT_NE(K[0], K[4]);
+  const std::array<float, 4> inv_K = {
+      1.0f / K[0], -(K[2] - 0.5f) / K[0],
+      1.0f / K[4], -(K[5] - 0.5f) / K[4]};
+  const auto expected = internal::ProbeLegacyPhotoInitialization(
+      kWidth, kHeight, inv_K, options.depth_min, options.depth_max);
+
+  PatchMatchCuda actual(options, problem);
+  // No Run, ProbeSweep or probe reseed intervenes before these observations.
+  ExpectExactlyEqual(expected.depth, actual.GetDepthMap());
+  ExpectExactlyEqual(expected.normal, actual.GetNormalMap());
+  const auto retained = internal::ProbeConstructorContinuation(actual);
+  std::vector<std::pair<int, int>> perimeter;
+  for (int col = 0; col < kWidth; ++col) perimeter.emplace_back(0, col);
+  for (int row = 1; row < kHeight; ++row)
+    perimeter.emplace_back(row, kWidth - 1);
+  for (int col = kWidth - 2; col >= 0; --col)
+    perimeter.emplace_back(kHeight - 1, col);
+  for (int row = kHeight - 2; row > 0; --row) perimeter.emplace_back(row, 0);
+  ASSERT_EQ(retained.GetWidth(), perimeter.size());
+  ASSERT_EQ(retained.GetHeight(), 1);
+  ASSERT_EQ(retained.GetDepth(), 3);
+  int perimeter_retries = 0;
+  for (size_t index = 0; index < perimeter.size(); ++index) {
+    const auto [row, col] = perimeter[index];
+    perimeter_retries += expected.normal_pairs.Get(row, col) > 1;
+    for (int draw = 0; draw < 3; ++draw) {
+      EXPECT_EQ(retained.Get(0, index, draw),
+                expected.continuation.Get(row, col, draw));
+    }
+  }
+  EXPECT_GT(perimeter_retries, 0);
+  EXPECT_TRUE(std::any_of(expected.normal_pairs.GetData().begin(),
+                          expected.normal_pairs.GetData().end(),
+                          [](int pairs) { return pairs > 1; }));
+  int distinct_components = 0;
+  for (int row = 0; row < kHeight; ++row) {
+    for (int col = 0; col < kWidth; ++col) {
+      const float nx = expected.normal.Get(row, col, 0);
+      const float ny = expected.normal.Get(row, col, 1);
+      const float nz = expected.normal.Get(row, col, 2);
+      distinct_components += nx != ny && ny != nz && nx != nz;
+    }
+  }
+  EXPECT_GT(distinct_components, kWidth * kHeight / 2);
+}
+
 // Compose real band execution, perimeter histories and Rotate. The independent
 // perimeter test compares integer ownership/seed evolution against a dense map;
 // this test additionally requires the production scalar/band traces to agree.

@@ -3168,6 +3168,14 @@ void PatchMatchCuda::Rotate() {
 // PRNG state and computes the same initial cost used by Run, before any sweep.
 namespace internal {
 namespace {
+__global__ void ConstructorContinuation(GpuMatView<curandState> states,
+                                        GpuMatView<uint32_t> draws) {
+  const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= states.GetWidth()) return;
+  curandState state = states.Get(0, index);
+  for (int i = 0; i < 3; ++i) draws.Set(0, index, i, curand(&state));
+}
+
 __global__ void SeedOwnershipTest(GpuMatView<curandState> states,
                                   const PatchMatchRngPerimeter layout,
                                   const unsigned long long seed) {
@@ -3191,6 +3199,15 @@ __global__ void SweepContinuation(GpuMatView<curandState> states,
 }  // namespace
 
 struct PatchMatchCudaTestAccess {
+  static Mat<uint32_t> ConstructorState(PatchMatchCuda& pm) {
+    const size_t count = pm.rand_state_map_->GetWidth();
+    GpuMat<uint32_t> draws(count, 1, 3);
+    ConstructorContinuation<<<(count + 255) / 256, 256>>>(
+        pm.rand_state_map_->View(), draws.View());
+    CUDA_SYNC_AND_CHECK();
+    return draws.CopyToMat();
+  }
+
   static Mat<float> InitialCost(PatchMatchCuda& pm,
                                 const unsigned long long seed) {
     const PatchMatchRngPerimeter layout{pm.ref_width_, pm.ref_height_};
@@ -3363,6 +3380,10 @@ struct PatchMatchCudaTestAccess {
     return result;
   }
 };
+
+Mat<uint32_t> ProbeConstructorContinuation(PatchMatchCuda& pm) {
+  return PatchMatchCudaTestAccess::ConstructorState(pm);
+}
 
 SweepTraceResult ProbeSweep(PatchMatchCuda& pm,
                             const bool cooperative,

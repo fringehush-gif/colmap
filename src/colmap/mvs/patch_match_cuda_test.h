@@ -3,6 +3,7 @@
 
 #include "colmap/mvs/mat.h"
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -10,6 +11,25 @@ namespace colmap {
 namespace mvs {
 class PatchMatchCuda;
 namespace internal {
+
+struct PhotoInitializationResult {
+  Mat<float> depth;
+  Mat<float> normal;
+  Mat<uint32_t> continuation;
+  Mat<int> normal_pairs;
+};
+
+// Independent retained 020c three-stage initialization, implemented in the test
+// CUDA translation unit. It does not call the new fused production helpers.
+PhotoInitializationResult ProbeLegacyPhotoInitialization(
+    int width,
+    int height,
+    const std::array<float, 4>& inv_K,
+    float depth_min,
+    float depth_max);
+
+// Read-only state-copy draws in canonical perimeter order, before any reseed.
+Mat<uint32_t> ProbeConstructorContinuation(PatchMatchCuda& patch_match);
 
 struct SweepTraceResult {
   Mat<int> draws;
