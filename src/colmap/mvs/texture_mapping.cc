@@ -651,6 +651,8 @@ void BakeTexture(Bitmap* atlas,
                  const MeshTextureMappingOptions& options) {
   const int aw = layout.atlas_width;
   const int ah = layout.atlas_height;
+  const float texture_inv_scale_factor =
+      static_cast<float>(1.0 / options.texture_scale_factor);
 
   baked_mask->assign(static_cast<size_t>(aw) * ah, false);
 
@@ -686,9 +688,6 @@ void BakeTexture(Bitmap* atlas,
           static_cast<int>(std::ceil(std::max(
               {atlas_verts[0].y(), atlas_verts[1].y(), atlas_verts[2].y()}))) +
               1);
-
-      const float texture_inv_scale_factor =
-          static_cast<float>(1.0 / options.texture_scale_factor);
 
       for (int py = min_py; py <= max_py; ++py) {
         for (int px = min_px; px <= max_px; ++px) {
