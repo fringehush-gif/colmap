@@ -521,7 +521,7 @@ double ComputeCosFacetCellAngle(const Delaunay& triangulation,
   }
 
   const K::Vector_3 co_tangent = facet.first->circumcenter() - triangle[0];
-  const float co_tangent_length_squared = co_tangent.squared_length();
+  const double co_tangent_length_squared = co_tangent.squared_length();
   if (co_tangent_length_squared == 0.0) {
     return 0.5;
   }
