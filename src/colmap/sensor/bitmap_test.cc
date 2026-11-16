@@ -411,13 +411,19 @@ TEST(Bitmap, InterpolateBilinearGrey) {
 }
 
 TEST(Bitmap, InterpolationRejectsNonfiniteAndHugeCoordinates) {
+  const double max_int = static_cast<double>(std::numeric_limits<int>::max());
   const std::vector<double> invalid_coordinates = {
       std::numeric_limits<double>::quiet_NaN(),
       std::numeric_limits<double>::infinity(),
       -std::numeric_limits<double>::infinity(),
       std::numeric_limits<double>::max(),
       -std::numeric_limits<double>::max(),
-      static_cast<double>(std::numeric_limits<int>::max()),
+      std::nextafter(max_int, 0.0),
+      -std::nextafter(max_int, 0.0),
+      max_int,
+      -max_int,
+      std::nextafter(max_int, std::numeric_limits<double>::infinity()),
+      std::nextafter(-max_int, -std::numeric_limits<double>::infinity()),
       static_cast<double>(std::numeric_limits<int>::min())};
   for (const bool as_rgb : {false, true}) {
     const Bitmap bitmap(10, 9, as_rgb);

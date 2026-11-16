@@ -310,9 +310,10 @@ bool Bitmap::SetPixel(const int x,
 
 std::optional<BitmapColor<uint8_t>> Bitmap::InterpolateNearestNeighbor(
     const double x, const double y) const {
-  // Check the floating-point domain before converting to integer indices.
-  // The strict half-pixel bounds preserve round's ties-away-from-zero rule.
-  if (!(x > -0.5 && x < width_ - 0.5 && y > -0.5 && y < height_ - 0.5)) {
+  // Keep rounding and conversion representable. GetPixel checks image bounds.
+  constexpr double kMaxCoordinate =
+      static_cast<double>(std::numeric_limits<int>::max());
+  if (!(std::abs(x) < kMaxCoordinate && std::abs(y) < kMaxCoordinate)) {
     return std::nullopt;
   }
   const int xx = static_cast<int>(std::round(x));
