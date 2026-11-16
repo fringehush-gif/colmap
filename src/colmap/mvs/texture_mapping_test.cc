@@ -2,6 +2,7 @@
 
 #include "colmap/mvs/texture_mapping.h"
 
+#include <array>
 #include <cmath>
 #include <utility>
 #include <vector>
@@ -404,6 +405,61 @@ TEST(MeshTextureMapping, NeighborSmoothing) {
   int first_view = result.face_view_ids[0];
   for (size_t i = 1; i < result.face_view_ids.size(); ++i) {
     EXPECT_EQ(result.face_view_ids[i], first_view);
+  }
+}
+
+TEST(MeshTextureMapping, SmoothingUsesPreviousIteration) {
+  // Both views see both sides of this ridge. Each face initially prefers
+  // its nearer view, then takes its only neighbor's label every iteration.
+  PlyMesh mesh;
+  mesh.vertices = {PlyMeshVertex(-1, -1, 0),
+                   PlyMeshVertex(0, -1, 1),
+                   PlyMeshVertex(0, 1, 1),
+                   PlyMeshVertex(1, -1, 0),
+                   PlyMeshVertex(0, 0, -1)};
+  mesh.faces = {
+      PlyMeshFace(0, 1, 2), PlyMeshFace(1, 3, 2), PlyMeshFace(4, 4, 4)};
+
+  const float K[9] = {64, 0, 128, 0, 64, 128, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, -1, 0, 0, 0, -1};
+  std::vector<Image> images;
+  for (const float camera_x : {-3.0f, 3.0f}) {
+    const float T[3] = {-camera_x, 0, 5};
+    images.emplace_back("ridge.png", 256, 256, K, R, T);
+    Bitmap bitmap(256, 256, /*as_rgb=*/true);
+    bitmap.Fill(camera_x < 0 ? BitmapColor<uint8_t>(180, 70, 40)
+                             : BitmapColor<uint8_t>(30, 150, 200));
+    images.back().SetBitmap(std::move(bitmap));
+  }
+
+  MeshTextureMappingOptions options;
+  options.apply_color_correction = false;
+  options.inpaint_radius = 0;
+  options.num_threads = 1;
+  std::array<MeshTextureMappingResult, 2> references;
+  for (const int iterations : {0, 1, 2, 3, 5}) {
+    SCOPED_TRACE(iterations);
+    options.view_selection_smoothing_iterations = iterations;
+    auto result = MeshTextureMapping(mesh, images, options);
+    const int parity = iterations % 2;
+    ASSERT_EQ(result.face_view_ids, (std::vector<int>{parity, 1 - parity, -1}));
+    ASSERT_GT(result.atlas_width, 0);
+    ASSERT_GT(result.atlas_height, 0);
+    ASSERT_EQ(result.face_uvs.size(), 18);
+    for (const float uv : result.face_uvs) EXPECT_TRUE(std::isfinite(uv));
+    EXPECT_EQ(
+        std::vector<float>(result.face_uvs.begin() + 12, result.face_uvs.end()),
+        std::vector<float>(6, 0.0f));
+    if (iterations < 2) {
+      references[parity] = std::move(result);
+    } else {
+      const auto& reference = references[parity];
+      EXPECT_EQ(result.face_uvs, reference.face_uvs);
+      EXPECT_EQ(result.atlas_width, reference.atlas_width);
+      EXPECT_EQ(result.atlas_height, reference.atlas_height);
+      EXPECT_EQ(result.texture_atlas.RowMajorData(),
+                reference.texture_atlas.RowMajorData());
+    }
   }
 }
 
