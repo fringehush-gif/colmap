@@ -630,11 +630,13 @@ TEST(MeshTextureMapping, InpaintDoesNotOverwriteBaked) {
   Bitmap pattern(64, 64, /*as_rgb=*/true);
   for (int y = 0; y < 64; ++y) {
     for (int x = 0; x < 64; ++x) {
-      pattern.SetPixel(x,
-                       y,
-                       BitmapColor<uint8_t>(static_cast<uint8_t>(1 + 3 * x),
-                                            static_cast<uint8_t>(1 + 3 * y),
-                                            200));
+      pattern.SetPixel(
+          x,
+          y,
+          x < 32 ? BitmapColor<uint8_t>(0)
+                 : BitmapColor<uint8_t>(static_cast<uint8_t>(1 + 3 * x),
+                                        static_cast<uint8_t>(1 + 3 * y),
+                                        200));
     }
   }
   images.back().SetBitmap(std::move(pattern));
@@ -645,67 +647,101 @@ TEST(MeshTextureMapping, InpaintDoesNotOverwriteBaked) {
   options.view_selection_smoothing_iterations = 0;
   options.inpaint_radius = 0;
   const auto result_base = MeshTextureMapping(mesh, images, options);
-
-  // Run with inpainting.
-  options.inpaint_radius = 5;
-  const auto result_inpaint = MeshTextureMapping(mesh, images, options);
+  // A companion white render exposes coverage independently of the actual RGB.
+  // Black source pixels are valid baked seeds, not holes in the atlas.
+  const auto coverage = MeshTextureMapping(
+      mesh, {MakeTestImage(64, 64, BitmapColor<uint8_t>(255))}, options);
+  ASSERT_EQ(coverage.atlas_width, result_base.atlas_width);
+  ASSERT_EQ(coverage.atlas_height, result_base.atlas_height);
+  ASSERT_EQ(coverage.face_view_ids, result_base.face_view_ids);
+  ASSERT_EQ(coverage.face_uvs, result_base.face_uvs);
 
   ASSERT_GT(result_base.atlas_width, 0);
   ASSERT_GT(result_base.atlas_height, 0);
-  ASSERT_EQ(result_inpaint.atlas_width, result_base.atlas_width);
-  ASSERT_EQ(result_inpaint.atlas_height, result_base.atlas_height);
-  ASSERT_EQ(result_inpaint.face_view_ids, result_base.face_view_ids);
-  ASSERT_EQ(result_inpaint.face_uvs, result_base.face_uvs);
 
-  // Every source color is nonblack, so the unpainted atlas identifies its
-  // baked mask. The nearest seed in Manhattan distance wins; equal distances
-  // retain the first seed in scan order. This oracle does not traverse a queue.
-  size_t baked_count = 0;
-  size_t filled_count = 0;
-  size_t distinct_color_ties = 0;
+  // The nearest covered seed in Manhattan distance wins, including black.
+  // Equal distances retain the first seed in scan order; no queue is replayed.
+  std::vector<uint8_t> baked_mask(result_base.atlas_width *
+                                  result_base.atlas_height);
   for (int y = 0; y < result_base.atlas_height; ++y) {
     for (int x = 0; x < result_base.atlas_width; ++x) {
-      const auto base_color = result_base.texture_atlas.GetPixel(x, y);
-      const auto inpaint_color = result_inpaint.texture_atlas.GetPixel(x, y);
-      ASSERT_TRUE(base_color.has_value());
-      ASSERT_TRUE(inpaint_color.has_value());
-      auto expected = *base_color;
-      if (expected != BitmapColor<uint8_t>(0)) {
-        ++baked_count;
-      } else {
-        int best_distance = options.inpaint_radius + 1;
-        size_t pixel_ties = 0;
-        for (int sy = std::max(0, y - options.inpaint_radius);
-             sy <=
-             std::min(result_base.atlas_height - 1, y + options.inpaint_radius);
-             ++sy) {
-          for (int sx = std::max(0, x - options.inpaint_radius);
-               sx <= std::min(result_base.atlas_width - 1,
-                              x + options.inpaint_radius);
-               ++sx) {
-            const int distance = std::abs(sx - x) + std::abs(sy - y);
-            if (distance > options.inpaint_radius) continue;
-            const auto seed = result_base.texture_atlas.GetPixel(sx, sy);
-            ASSERT_TRUE(seed.has_value());
-            if (*seed == BitmapColor<uint8_t>(0)) continue;
-            if (distance < best_distance) {
-              best_distance = distance;
-              expected = *seed;
-              pixel_ties = 0;
-            } else if (distance == best_distance && *seed != expected) {
-              ++pixel_ties;
-            }
-          }
-        }
-        distinct_color_ties += pixel_ties;
-        filled_count += expected != BitmapColor<uint8_t>(0);
-      }
-      EXPECT_EQ(*inpaint_color, expected) << "atlas pixel " << x << ", " << y;
+      const auto pixel = coverage.texture_atlas.GetPixel(x, y);
+      ASSERT_TRUE(pixel.has_value());
+      baked_mask[y * result_base.atlas_width + x] =
+          *pixel != BitmapColor<uint8_t>(0);
     }
   }
-  EXPECT_GT(baked_count, 0);
-  EXPECT_GT(filled_count, 0);
-  EXPECT_GT(distinct_color_ties, 0);
+  for (const int radius : {1, 3, 5, 1000}) {
+    SCOPED_TRACE(radius);
+    options.inpaint_radius = radius;
+    const auto result_inpaint = MeshTextureMapping(mesh, images, options);
+    ASSERT_EQ(result_inpaint.atlas_width, result_base.atlas_width);
+    ASSERT_EQ(result_inpaint.atlas_height, result_base.atlas_height);
+    ASSERT_EQ(result_inpaint.face_view_ids, result_base.face_view_ids);
+    ASSERT_EQ(result_inpaint.face_uvs, result_base.face_uvs);
+    size_t baked_count = 0;
+    size_t black_baked_count = 0;
+    size_t black_winners_against_color = 0;
+    size_t filled_count = 0;
+    size_t distinct_color_ties = 0;
+    for (int y = 0; y < result_base.atlas_height; ++y) {
+      for (int x = 0; x < result_base.atlas_width; ++x) {
+        const auto base_color = result_base.texture_atlas.GetPixel(x, y);
+        const auto inpaint_color = result_inpaint.texture_atlas.GetPixel(x, y);
+        ASSERT_TRUE(base_color.has_value());
+        ASSERT_TRUE(inpaint_color.has_value());
+        auto expected = *base_color;
+        if (baked_mask[y * result_base.atlas_width + x]) {
+          ++baked_count;
+          black_baked_count += expected == BitmapColor<uint8_t>(0);
+        } else {
+          int best_distance = options.inpaint_radius + 1;
+          size_t pixel_ties = 0;
+          bool colored_seed_in_range = false;
+          for (int sy = std::max(0, y - options.inpaint_radius);
+               sy <= std::min(result_base.atlas_height - 1,
+                              y + options.inpaint_radius);
+               ++sy) {
+            for (int sx = std::max(0, x - options.inpaint_radius);
+                 sx <= std::min(result_base.atlas_width - 1,
+                                x + options.inpaint_radius);
+                 ++sx) {
+              const int distance = std::abs(sx - x) + std::abs(sy - y);
+              if (distance > options.inpaint_radius) continue;
+              const auto seed = result_base.texture_atlas.GetPixel(sx, sy);
+              ASSERT_TRUE(seed.has_value());
+              if (!baked_mask[sy * result_base.atlas_width + sx]) continue;
+              colored_seed_in_range |= *seed != BitmapColor<uint8_t>(0);
+              if (distance < best_distance) {
+                best_distance = distance;
+                expected = *seed;
+                pixel_ties = 0;
+              } else if (distance == best_distance && *seed != expected) {
+                ++pixel_ties;
+              }
+            }
+          }
+          distinct_color_ties += pixel_ties;
+          black_winners_against_color +=
+              best_distance <= options.inpaint_radius &&
+              expected == BitmapColor<uint8_t>(0) && colored_seed_in_range;
+          filled_count += expected != BitmapColor<uint8_t>(0);
+        }
+        EXPECT_EQ(*inpaint_color, expected) << "atlas pixel " << x << ", " << y;
+      }
+    }
+    EXPECT_GT(baked_count, 0);
+    EXPECT_GT(black_baked_count, 0);
+    // Ignoring black seeds must cause a visible error, not simply leave holes
+    // black.
+    if (radius == 5) {
+      EXPECT_GT(black_winners_against_color, 0);
+    }
+    EXPECT_GT(filled_count, 0);
+    if (radius == 5) {
+      EXPECT_GT(distinct_color_ties, 0);
+    }
+  }
 }
 
 TEST(MeshTextureMapping, GlobalColorCorrectionNoSeams) {
