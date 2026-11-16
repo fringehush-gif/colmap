@@ -10,7 +10,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <queue>
+#include <utility>
 #include <variant>
 
 #include <Eigen/Core>
@@ -50,6 +52,12 @@ using FaceAdjacencyMap = std::vector<std::vector<size_t>>;
 struct FaceRegion {
   int view_id = -1;
   std::vector<size_t> face_ids;
+};
+
+// Per-region seam-vertex indices and their solved RGB offsets.
+struct ColorCorrection {
+  std::vector<FlatHashMap<size_t, size_t>> region_vertex_variables;
+  std::array<Eigen::VectorXd, 3> offsets;
 };
 
 // Axis-aligned bounding box in 2D (integer coordinates).
@@ -102,12 +110,6 @@ float ProjectPointDepth(const float* P, const Eigen::Vector3f& point) {
   const Eigen::Map<const Eigen::Matrix<float, 3, 4, Eigen::RowMajor>> P_m(P);
   const Eigen::Vector4f ph(point.x(), point.y(), point.z(), 1.0f);
   return (P_m.row(2) * ph)(0, 0);
-}
-
-Eigen::Vector3f ComputeCameraCenter(const float* R, const float* T) {
-  const Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>> R_m(R);
-  const Eigen::Map<const Eigen::Vector3f> T_m(T);
-  return -R_m.transpose() * T_m;
 }
 
 std::vector<Eigen::Vector3f> ComputeFaceNormals(const PlyMesh& mesh) {
@@ -263,8 +265,18 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
   occlusion_tester.Build(mesh);
 #endif
 
-  // Flat score buffer: scores[fi * num_images + ii].
-  std::vector<double> scores(num_faces * num_images, -1.0);
+  std::vector<Eigen::Vector3f> camera_centers(num_images);
+  for (size_t ii = 0; ii < num_images; ++ii) {
+    ComputeProjectionCenter(
+        images[ii].GetR(), images[ii].GetT(), camera_centers[ii].data());
+  }
+
+  std::vector<int> view_per_face(num_faces, -1);
+  // Smoothing only needs positive-score eligibility, not the scores themselves.
+  std::vector<uint8_t> eligible_views;
+  if (options.view_selection_smoothing_iterations > 0) {
+    eligible_views.resize(num_faces * num_images, 0);
+  }
 
 #ifdef _OPENMP
   [[maybe_unused]] const int num_threads =
@@ -283,11 +295,11 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
     const Eigen::Vector3f v2 = GetVertex(mesh, idx[2]);
     const Eigen::Vector3f centroid = (v0 + v1 + v2) / 3.0f;
     const std::array<Eigen::Vector3f, 3> verts = {v0, v1, v2};
+    double best_score = -1.0;
 
     for (size_t ii = 0; ii < num_images; ++ii) {
       const Image& img = images[ii];
-      const Eigen::Vector3f cam_center =
-          ComputeCameraCenter(img.GetR(), img.GetT());
+      const Eigen::Vector3f& cam_center = camera_centers[ii];
 
       const Eigen::Vector3f view_dir = (cam_center - centroid).normalized();
       const float cos_angle = normal.dot(view_dir);
@@ -331,17 +343,11 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
       const double area =
           std::abs(static_cast<double>(e1.x()) * static_cast<double>(e2.y()) -
                    static_cast<double>(e1.y()) * static_cast<double>(e2.x()));
-      scores[fi * num_images + ii] = area;
-    }
-  }
-
-  std::vector<int> view_per_face(num_faces, -1);
-  for (size_t fi = 0; fi < num_faces; ++fi) {
-    double best_score = -1.0;
-    for (size_t ii = 0; ii < num_images; ++ii) {
-      const double s = scores[fi * num_images + ii];
-      if (s > best_score) {
-        best_score = s;
+      if (!eligible_views.empty()) {
+        eligible_views[fi * num_images + ii] = area > 0;
+      }
+      if (area > best_score) {
+        best_score = area;
         view_per_face[fi] = static_cast<int>(ii);
       }
     }
@@ -364,7 +370,7 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
       int best_count =
           label_counts.count(best_label) ? label_counts[best_label] : 0;
       for (const auto& [label, count] : label_counts) {
-        if (count > best_count && scores[fi * num_images + label] > 0) {
+        if (count > best_count && eligible_views[fi * num_images + label]) {
           best_count = count;
           best_label = label;
         }
@@ -647,7 +653,8 @@ void BakeTexture(Bitmap* atlas,
                  const std::vector<RegionProjection>& projections,
                  const AtlasLayout& layout,
                  const std::vector<Image>& images,
-                 const MeshTextureMappingOptions& options) {
+                 const MeshTextureMappingOptions& options,
+                 const ColorCorrection* color_correction) {
   const int aw = layout.atlas_width;
   const int ah = layout.atlas_height;
 
@@ -661,6 +668,23 @@ void BakeTexture(Bitmap* atlas,
     const Bitmap& src_bmp = img.GetBitmap();
 
     for (size_t i = 0; i < region.face_ids.size(); ++i) {
+      std::array<std::array<double, 3>, 3> vertex_offsets;
+      if (color_correction != nullptr) {
+        const auto indices = GetFaceIndices(mesh.faces[region.face_ids[i]]);
+        const auto& variables = color_correction->region_vertex_variables[ri];
+        for (size_t vi = 0; vi < indices.size(); ++vi) {
+          const auto variable = variables.find(indices[vi]);
+          // Vertices away from seams have only a zero-target regularizer.
+          if (variable == variables.end()) {
+            vertex_offsets[vi].fill(0.0);
+            continue;
+          }
+          for (size_t ch = 0; ch < vertex_offsets[vi].size(); ++ch) {
+            vertex_offsets[vi][ch] =
+                color_correction->offsets[ch](variable->second);
+          }
+        }
+      }
       const std::array<Eigen::Vector2f, 3> atlas_verts =
           ComputeAtlasVerts(rp, placement, i);
 
@@ -714,7 +738,25 @@ void BakeTexture(Bitmap* atlas,
             continue;
           }
 
-          atlas->SetPixel(px, py, color->Cast<uint8_t>());
+          // Preserve the bake's byte quantization before applying an offset.
+          // Applying it here also corrects shared-edge pixels exactly once,
+          // using the same last successful face sample as the uncorrected bake.
+          auto pixel_color = color->Cast<uint8_t>();
+          if (color_correction != nullptr) {
+            std::array<double, 3> offset;
+            for (size_t ch = 0; ch < offset.size(); ++ch) {
+              offset[ch] = bary.x() * vertex_offsets[0][ch] +
+                           bary.y() * vertex_offsets[1][ch] +
+                           bary.z() * vertex_offsets[2][ch];
+            }
+            pixel_color.r = static_cast<uint8_t>(
+                std::clamp(pixel_color.r + offset[0], 0.0, 255.0));
+            pixel_color.g = static_cast<uint8_t>(
+                std::clamp(pixel_color.g + offset[1], 0.0, 255.0));
+            pixel_color.b = static_cast<uint8_t>(
+                std::clamp(pixel_color.b + offset[2], 0.0, 255.0));
+          }
+          atlas->SetPixel(px, py, pixel_color);
           (*baked_mask)[static_cast<size_t>(py) * aw + px] = true;
         }
       }
@@ -722,16 +764,12 @@ void BakeTexture(Bitmap* atlas,
   }
 }
 
-void ApplyGlobalColorCorrection(
-    Bitmap* atlas,
+std::optional<ColorCorrection> ComputeGlobalColorCorrection(
     const PlyMesh& mesh,
     const std::vector<FaceRegion>& regions,
-    const std::vector<RegionProjection>& projections,
-    const AtlasLayout& layout,
     const std::vector<Image>& images,
     const FaceAdjacencyMap& adjacency,
     const std::vector<int>& view_per_face,
-    const std::vector<bool>& baked_mask,
     const MeshTextureMappingOptions& options) {
   struct SeamEdge {
     size_t face_l;
@@ -772,209 +810,134 @@ void ApplyGlobalColorCorrection(
     }
   }
 
-  if (seam_edges.empty()) return;
-
-  // Build per-region vertex-to-variable mapping.
-  struct RegionVertexMap {
-    NodeHashMap<size_t, size_t> vert_to_var;
-  };
-  std::vector<RegionVertexMap> region_vert_maps(regions.size());
+  if (seam_edges.empty()) return std::nullopt;
 
   std::vector<int> face_to_region(num_faces, -1);
-  size_t total_vars = 0;
   for (size_t ri = 0; ri < regions.size(); ++ri) {
     for (const size_t fi : regions[ri].face_ids) {
       face_to_region[fi] = static_cast<int>(ri);
-      const std::array<size_t, 3> idx = GetFaceIndices(mesh.faces[fi]);
-      for (int vi = 0; vi < 3; ++vi) {
-        if (region_vert_maps[ri].vert_to_var.count(idx[vi]) == 0) {
-          region_vert_maps[ri].vert_to_var[idx[vi]] = total_vars++;
+    }
+  }
+
+  // Only seam vertices participate in color constraints. All other variables
+  // have independent zero-target regularizers and therefore zero offsets.
+  ColorCorrection correction;
+  auto& region_vert_maps = correction.region_vertex_variables;
+  region_vert_maps.resize(regions.size());
+  size_t total_vars = 0;
+  for (const SeamEdge& se : seam_edges) {
+    for (const size_t fi : {se.face_l, se.face_r}) {
+      const int ri = face_to_region[fi];
+      if (ri < 0) continue;
+      for (const size_t sv : {se.vert_a, se.vert_b}) {
+        if (region_vert_maps[ri].try_emplace(sv, total_vars).second) {
+          ++total_vars;
         }
       }
     }
   }
 
-  if (total_vars == 0) return;
+  if (total_vars == 0) return std::nullopt;
 
-  const int aw = layout.atlas_width;
-  const int ah = layout.atlas_height;
   const double beta = options.color_correction_regularization;
 
-  std::vector<std::array<double, 3>> offsets(total_vars, {0.0, 0.0, 0.0});
+  // The matrix is shared by RGB. Accumulate each right-hand side in its
+  // offset vector, then replace it with the solution after one factorization.
+  auto& offsets = correction.offsets;
+  for (auto& channel : offsets) {
+    channel = Eigen::VectorXd::Zero(total_vars);
+  }
 
   // Estimate triplet count: 4 per seam vertex pair + 1 per variable.
   const size_t estimated_triplets = seam_edges.size() * 8 + total_vars;
 
-  for (int ch = 0; ch < 3; ++ch) {
-    std::vector<Eigen::Triplet<double>> triplets;
-    triplets.reserve(estimated_triplets);
-    Eigen::VectorXd rhs = Eigen::VectorXd::Zero(total_vars);
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(estimated_triplets);
 
-    for (const SeamEdge& se : seam_edges) {
-      const int ri_l = face_to_region[se.face_l];
-      const int ri_r = face_to_region[se.face_r];
-      if (ri_l < 0 || ri_r < 0) continue;
+  for (const SeamEdge& se : seam_edges) {
+    const int ri_l = face_to_region[se.face_l];
+    const int ri_r = face_to_region[se.face_r];
+    if (ri_l < 0 || ri_r < 0) continue;
 
-      for (const size_t sv : {se.vert_a, se.vert_b}) {
-        const auto it_l = region_vert_maps[ri_l].vert_to_var.find(sv);
-        const auto it_r = region_vert_maps[ri_r].vert_to_var.find(sv);
-        if (it_l == region_vert_maps[ri_l].vert_to_var.end() ||
-            it_r == region_vert_maps[ri_r].vert_to_var.end()) {
-          continue;
-        }
+    for (const size_t sv : {se.vert_a, se.vert_b}) {
+      const size_t var_l = region_vert_maps[ri_l].at(sv);
+      const size_t var_r = region_vert_maps[ri_r].at(sv);
 
-        const size_t var_l = it_l->second;
-        const size_t var_r = it_r->second;
+      const Eigen::Vector3f vert = GetVertex(mesh, sv);
+      const Image& img_l = images[regions[ri_l].view_id];
+      const Image& img_r = images[regions[ri_r].view_id];
 
-        const Eigen::Vector3f vert = GetVertex(mesh, sv);
-        const Image& img_l = images[regions[ri_l].view_id];
-        const Image& img_r = images[regions[ri_r].view_id];
+      const Eigen::Vector2f proj_l = ProjectPoint(img_l.GetP(), vert);
+      const Eigen::Vector2f proj_r = ProjectPoint(img_r.GetP(), vert);
 
-        const Eigen::Vector2f proj_l = ProjectPoint(img_l.GetP(), vert);
-        const Eigen::Vector2f proj_r = ProjectPoint(img_r.GetP(), vert);
+      // Projections are in continuous coordinates (pixel centers at
+      // integer + 0.5), while Bitmap sampling expects pixel centers
+      // at integers.
+      const auto color_l = img_l.GetBitmap().InterpolateBilinear(
+          proj_l.x() - 0.5, proj_l.y() - 0.5);
+      const auto color_r = img_r.GetBitmap().InterpolateBilinear(
+          proj_r.x() - 0.5, proj_r.y() - 0.5);
+      if (!color_l || !color_r) {
+        continue;
+      }
 
-        // Projections are in continuous coordinates (pixel centers at
-        // integer + 0.5), while Bitmap sampling expects pixel centers
-        // at integers.
-        const auto color_l = img_l.GetBitmap().InterpolateBilinear(
-            proj_l.x() - 0.5, proj_l.y() - 0.5);
-        const auto color_r = img_r.GetBitmap().InterpolateBilinear(
-            proj_r.x() - 0.5, proj_r.y() - 0.5);
-        if (!color_l || !color_r) {
-          continue;
-        }
-
-        const double f_l = (ch == 0)   ? color_l->r
-                           : (ch == 1) ? color_l->g
-                                       : color_l->b;
-        const double f_r = (ch == 0)   ? color_r->r
-                           : (ch == 1) ? color_r->g
-                                       : color_r->b;
-
-        triplets.emplace_back(var_l, var_l, 1.0);
-        triplets.emplace_back(var_r, var_r, 1.0);
-        triplets.emplace_back(var_l, var_r, -1.0);
-        triplets.emplace_back(var_r, var_l, -1.0);
-        rhs(var_l) += (f_r - f_l);
-        rhs(var_r) += (f_l - f_r);
+      triplets.emplace_back(var_l, var_l, 1.0);
+      triplets.emplace_back(var_r, var_r, 1.0);
+      triplets.emplace_back(var_l, var_r, -1.0);
+      triplets.emplace_back(var_r, var_l, -1.0);
+      const std::array<double, 3> rgb_l = {color_l->r, color_l->g, color_l->b};
+      const std::array<double, 3> rgb_r = {color_r->r, color_r->g, color_r->b};
+      for (size_t ch = 0; ch < offsets.size(); ++ch) {
+        offsets[ch](var_l) += rgb_r[ch] - rgb_l[ch];
+        offsets[ch](var_r) += rgb_l[ch] - rgb_r[ch];
       }
     }
+  }
 
-    for (size_t i = 0; i < total_vars; ++i) {
-      triplets.emplace_back(i, i, beta);
-    }
+  for (size_t i = 0; i < total_vars; ++i) {
+    triplets.emplace_back(i, i, beta);
+  }
 
-    Eigen::SparseMatrix<double> A(total_vars, total_vars);
-    A.setFromTriplets(triplets.begin(), triplets.end());
+  Eigen::SparseMatrix<double> A(total_vars, total_vars);
+  A.setFromTriplets(triplets.begin(), triplets.end());
 
-    Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver;
-    solver.compute(A);
-    if (solver.info() != Eigen::Success) {
-      LOG(WARNING) << "Color correction: failed to factorize system";
-      return;
-    }
+  Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver;
+  solver.compute(A);
+  if (solver.info() != Eigen::Success) {
+    LOG(WARNING) << "Color correction: failed to factorize system";
+    return std::nullopt;
+  }
 
-    const Eigen::VectorXd x = solver.solve(rhs);
-    if (solver.info() != Eigen::Success) {
+  for (auto& channel : offsets) {
+    channel = solver.solve(channel).eval();
+    if (solver.info() != Eigen::Success || !channel.allFinite()) {
       LOG(WARNING) << "Color correction: failed to solve system";
-      return;
-    }
-
-    for (size_t i = 0; i < total_vars; ++i) {
-      offsets[i][ch] = x(i);
+      return std::nullopt;
     }
   }
 
-  // Apply offsets to the atlas.
-  for (size_t ri = 0; ri < regions.size(); ++ri) {
-    const FaceRegion& region = regions[ri];
-    const RegionProjection& rp = projections[ri];
-    const PackRect& placement = layout.placements[ri];
-
-    for (size_t i = 0; i < region.face_ids.size(); ++i) {
-      const size_t fi = region.face_ids[i];
-      const std::array<size_t, 3> idx = GetFaceIndices(mesh.faces[fi]);
-
-      std::array<std::array<double, 3>, 3> vert_offsets;
-      for (int vi = 0; vi < 3; ++vi) {
-        const size_t var_id = region_vert_maps[ri].vert_to_var[idx[vi]];
-        vert_offsets[vi] = offsets[var_id];
-      }
-
-      const std::array<Eigen::Vector2f, 3> atlas_verts =
-          ComputeAtlasVerts(rp, placement, i);
-
-      const int min_px = std::max(
-          0,
-          static_cast<int>(std::floor(std::min(
-              {atlas_verts[0].x(), atlas_verts[1].x(), atlas_verts[2].x()}))));
-      const int min_py = std::max(
-          0,
-          static_cast<int>(std::floor(std::min(
-              {atlas_verts[0].y(), atlas_verts[1].y(), atlas_verts[2].y()}))));
-      const int max_px = std::min(
-          aw - 1,
-          static_cast<int>(std::ceil(std::max(
-              {atlas_verts[0].x(), atlas_verts[1].x(), atlas_verts[2].x()}))));
-      const int max_py = std::min(
-          ah - 1,
-          static_cast<int>(std::ceil(std::max(
-              {atlas_verts[0].y(), atlas_verts[1].y(), atlas_verts[2].y()}))));
-
-      for (int py = min_py; py <= max_py; ++py) {
-        for (int px = min_px; px <= max_px; ++px) {
-          if (!baked_mask[static_cast<size_t>(py) * aw + px]) continue;
-
-          const Eigen::Vector2f pixel_center(px + 0.5f, py + 0.5f);
-          const Eigen::Vector3f bary = Barycentric(
-              pixel_center, atlas_verts[0], atlas_verts[1], atlas_verts[2]);
-          if (bary.x() < -0.01f || bary.y() < -0.01f || bary.z() < -0.01f) {
-            continue;
-          }
-
-          std::array<double, 3> offset_interp = {0, 0, 0};
-          for (int c = 0; c < 3; ++c) {
-            offset_interp[c] = bary.x() * vert_offsets[0][c] +
-                               bary.y() * vert_offsets[1][c] +
-                               bary.z() * vert_offsets[2][c];
-          }
-
-          auto color =
-              atlas->GetPixel(px, py).value_or(BitmapColor<uint8_t>(0));
-          color.r = static_cast<uint8_t>(
-              std::clamp(color.r + offset_interp[0], 0.0, 255.0));
-          color.g = static_cast<uint8_t>(
-              std::clamp(color.g + offset_interp[1], 0.0, 255.0));
-          color.b = static_cast<uint8_t>(
-              std::clamp(color.b + offset_interp[2], 0.0, 255.0));
-          atlas->SetPixel(px, py, color);
-        }
-      }
-    }
-  }
+  return correction;
 }
 
 void InpaintAtlas(Bitmap* atlas,
-                  const std::vector<bool>& baked_mask,
+                  std::vector<bool> visited,
                   const int inpaint_radius) {
   const int aw = atlas->Width();
   const int ah = atlas->Height();
 
   if (inpaint_radius <= 0 || aw == 0 || ah == 0) return;
 
-  const size_t num_pixels = static_cast<size_t>(aw) * ah;
-
-  std::vector<int> dist(num_pixels, std::numeric_limits<int>::max());
-  std::vector<BitmapColor<uint8_t>> fill_colors(num_pixels);
   std::queue<std::pair<int, int>> queue;
 
   for (int y = 0; y < ah; ++y) {
     for (int x = 0; x < aw; ++x) {
       const size_t idx = static_cast<size_t>(y) * aw + x;
-      if (baked_mask[idx]) {
-        dist[idx] = 0;
-        fill_colors[idx] =
-            atlas->GetPixel(x, y).value_or(BitmapColor<uint8_t>(0));
+      // Interior baked pixels cannot improve any neighbor's distance.
+      // Keep boundary seeds in their original scan order for equal distances.
+      if (visited[idx] &&
+          ((x > 0 && !visited[idx - 1]) || (x + 1 < aw && !visited[idx + 1]) ||
+           (y > 0 && !visited[idx - aw]) ||
+           (y + 1 < ah && !visited[idx + aw]))) {
         queue.push({x, y});
       }
     }
@@ -983,30 +946,25 @@ void InpaintAtlas(Bitmap* atlas,
   constexpr std::array<int, 4> kDx = {-1, 1, 0, 0};
   constexpr std::array<int, 4> kDy = {0, 0, -1, 1};
 
-  while (!queue.empty()) {
-    const auto [cx, cy] = queue.front();
-    queue.pop();
-    const size_t cidx = static_cast<size_t>(cy) * aw + cx;
-    const int cdist = dist[cidx];
-    if (cdist >= inpaint_radius) continue;
-
-    for (int d = 0; d < 4; ++d) {
-      const int nx = cx + kDx[d];
-      const int ny = cy + kDy[d];
-      if (nx < 0 || nx >= aw || ny < 0 || ny >= ah) continue;
-      const size_t nidx = static_cast<size_t>(ny) * aw + nx;
-      if (dist[nidx] <= cdist + 1) continue;
-      dist[nidx] = cdist + 1;
-      fill_colors[nidx] = fill_colors[cidx];
-      queue.push({nx, ny});
-    }
-  }
-
-  for (int y = 0; y < ah; ++y) {
-    for (int x = 0; x < aw; ++x) {
-      const size_t idx = static_cast<size_t>(y) * aw + x;
-      if (!baked_mask[idx] && dist[idx] <= inpaint_radius) {
-        atlas->SetPixel(x, y, fill_colors[idx]);
+  // FIFO layers preserve shortest distances and the first seed at equal
+  // distance.
+  for (int distance = 0; distance < inpaint_radius && !queue.empty();
+       ++distance) {
+    const size_t layer_size = queue.size();
+    for (size_t i = 0; i < layer_size; ++i) {
+      const auto [cx, cy] = queue.front();
+      queue.pop();
+      const auto color =
+          atlas->GetPixel(cx, cy).value_or(BitmapColor<uint8_t>(0));
+      for (int d = 0; d < 4; ++d) {
+        const int nx = cx + kDx[d];
+        const int ny = cy + kDy[d];
+        if (nx < 0 || nx >= aw || ny < 0 || ny >= ah) continue;
+        const size_t nidx = static_cast<size_t>(ny) * aw + nx;
+        if (visited[nidx]) continue;
+        visited[nidx] = true;
+        atlas->SetPixel(nx, ny, color);
+        queue.push({nx, ny});
       }
     }
   }
@@ -1113,37 +1071,33 @@ MeshTextureMappingResult MeshTextureMapping(
   result.face_uvs =
       ComputeFaceUVs(regions, projections, layout, mesh.faces.size());
 
-  LOG(INFO) << "Baking texture...";
-  result.texture_atlas =
-      Bitmap(layout.atlas_width, layout.atlas_height, /*as_rgb=*/true);
-  result.texture_atlas.Fill(BitmapColor<uint8_t>(0));
   std::vector<bool> baked_mask;
-  BakeTexture(&result.texture_atlas,
-              &baked_mask,
-              mesh,
-              regions,
-              projections,
-              layout,
-              images,
-              options);
-
-  if (options.apply_color_correction) {
-    LOG(INFO) << "Applying global color correction...";
-    ApplyGlobalColorCorrection(&result.texture_atlas,
-                               mesh,
-                               regions,
-                               projections,
-                               layout,
-                               images,
-                               adjacency,
-                               view_per_face,
-                               baked_mask,
-                               options);
+  {
+    std::optional<ColorCorrection> color_correction;
+    if (options.apply_color_correction) {
+      LOG(INFO) << "Computing global color correction...";
+      color_correction = ComputeGlobalColorCorrection(
+          mesh, regions, images, adjacency, view_per_face, options);
+    }
+    LOG(INFO) << "Baking texture...";
+    result.texture_atlas =
+        Bitmap(layout.atlas_width, layout.atlas_height, /*as_rgb=*/true);
+    result.texture_atlas.Fill(BitmapColor<uint8_t>(0));
+    BakeTexture(&result.texture_atlas,
+                &baked_mask,
+                mesh,
+                regions,
+                projections,
+                layout,
+                images,
+                options,
+                color_correction ? &*color_correction : nullptr);
   }
 
   if (options.inpaint_radius > 0) {
     LOG(INFO) << "Inpainting atlas...";
-    InpaintAtlas(&result.texture_atlas, baked_mask, options.inpaint_radius);
+    InpaintAtlas(
+        &result.texture_atlas, std::move(baked_mask), options.inpaint_radius);
   }
 
   LOG(INFO) << "Surface texture mapping complete";
