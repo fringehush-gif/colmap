@@ -4,10 +4,14 @@
 
 #include "colmap/util/testing.h"
 
+#include <array>
+#include <cmath>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <OpenImageIO/imagebufalgo.h>
@@ -404,6 +408,85 @@ TEST(Bitmap, InterpolateBilinearGrey) {
   color = bitmap.InterpolateBilinear(5.5, 4.5);
   ASSERT_TRUE(color.has_value());
   EXPECT_NEAR(color->r, 25.0f, 1e-5);
+}
+
+TEST(Bitmap, InterpolationRejectsNonfiniteAndHugeCoordinates) {
+  const std::vector<double> invalid_coordinates = {
+      std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::infinity(),
+      -std::numeric_limits<double>::infinity(),
+      std::numeric_limits<double>::max(),
+      -std::numeric_limits<double>::max(),
+      static_cast<double>(std::numeric_limits<int>::max()),
+      static_cast<double>(std::numeric_limits<int>::min())};
+  for (const bool as_rgb : {false, true}) {
+    const Bitmap bitmap(10, 9, as_rgb);
+    for (const double value : invalid_coordinates) {
+      EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(value, 0.0));
+      EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(0.0, value));
+      EXPECT_FALSE(bitmap.InterpolateBilinear(value, 0.0));
+      EXPECT_FALSE(bitmap.InterpolateBilinear(0.0, value));
+    }
+  }
+}
+
+TEST(Bitmap, InterpolationPreservesBorderConventions) {
+  for (const bool as_rgb : {false, true}) {
+    Bitmap bitmap(3, 2, as_rgb);
+    for (int y = 0; y < bitmap.Height(); ++y) {
+      for (int x = 0; x < bitmap.Width(); ++x) {
+        const uint8_t value = 1 + 3 * x + 10 * y;
+        ASSERT_TRUE(bitmap.SetPixel(
+            x, y, BitmapColor<uint8_t>(value, value + 1, value + 2)));
+      }
+    }
+
+    for (const auto& [x, y, pixel_x, pixel_y] :
+         std::array<std::tuple<double, double, int, int>, 5>{{
+             {std::nextafter(-0.5, 0.0), 0.0, 0, 0},
+             {std::nextafter(2.5, 0.0), 0.0, 2, 0},
+             {0.0, std::nextafter(1.5, 0.0), 0, 1},
+             {-0.0, -0.0, 0, 0},
+             {0.5, 0.5, 1, 1},
+         }}) {
+      const auto color = bitmap.InterpolateNearestNeighbor(x, y);
+      ASSERT_TRUE(color);
+      EXPECT_EQ(color, bitmap.GetPixel(pixel_x, pixel_y));
+    }
+    EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(-0.5, 0.0));
+    EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(0.0, -0.5));
+    EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(2.5, 0.0));
+    EXPECT_FALSE(bitmap.InterpolateNearestNeighbor(0.0, 1.5));
+
+    for (const auto& [x, y, value] :
+         std::array<std::tuple<double, double, float>, 4>{{
+             {-0.0, -0.0, 1.0f},
+             {std::nextafter(2.0, 0.0), 0.0, 7.0f},
+             {0.0, std::nextafter(1.0, 0.0), 11.0f},
+             {0.25, 0.75, 9.25f},
+         }}) {
+      const auto color = bitmap.InterpolateBilinear(x, y);
+      ASSERT_TRUE(color);
+      EXPECT_EQ(
+          *color,
+          BitmapColor<float>(
+              value, as_rgb ? value + 1 : value, as_rgb ? value + 2 : value));
+    }
+    EXPECT_FALSE(bitmap.InterpolateBilinear(2.0, 0.0));
+    EXPECT_FALSE(bitmap.InterpolateBilinear(0.0, 1.0));
+    EXPECT_FALSE(bitmap.InterpolateBilinear(std::nextafter(0.0, -1.0), 0.0));
+    EXPECT_FALSE(bitmap.InterpolateBilinear(0.0, std::nextafter(0.0, -1.0)));
+
+    for (const auto& [width, height] :
+         std::array<std::pair<int, int>, 3>{{{1, 1}, {1, 2}, {2, 1}}}) {
+      const Bitmap thin(width, height, as_rgb);
+      EXPECT_TRUE(thin.InterpolateNearestNeighbor(0.0, 0.0));
+      EXPECT_FALSE(thin.InterpolateBilinear(0.0, 0.0));
+    }
+  }
+  const Bitmap empty;
+  EXPECT_FALSE(empty.InterpolateNearestNeighbor(0.0, 0.0));
+  EXPECT_FALSE(empty.InterpolateBilinear(0.0, 0.0));
 }
 
 TEST(Bitmap, InterpolateBilinearOutOfBounds) {
