@@ -132,23 +132,34 @@ std::vector<Eigen::Vector3f> ComputeFaceNormals(const PlyMesh& mesh) {
 }
 
 FaceAdjacencyMap BuildFaceAdjacency(const PlyMesh& mesh) {
+  struct EdgeFaces {
+    std::array<size_t, 2> face_ids;
+    int num_faces = 0;
+  };
+
   const size_t num_faces = mesh.faces.size();
-  NodeHashMap<uint64_t, std::vector<size_t>> edge_to_faces;
+  FlatHashMap<uint64_t, EdgeFaces> edge_to_faces;
   edge_to_faces.reserve(num_faces * 3);
 
   for (size_t fi = 0; fi < num_faces; ++fi) {
     const std::array<size_t, 3> idx = GetFaceIndices(mesh.faces[fi]);
     for (int e = 0; e < 3; ++e) {
       const uint64_t key = EdgeKey(idx[e], idx[(e + 1) % 3]);
-      edge_to_faces[key].push_back(fi);
+      EdgeFaces& faces = edge_to_faces[key];
+      if (faces.num_faces < 2) {
+        faces.face_ids[faces.num_faces++] = fi;
+      } else {
+        // Edges with more than two occurrences do not connect any faces.
+        faces.num_faces = 3;
+      }
     }
   }
 
   FaceAdjacencyMap adjacency(num_faces);
-  for (const auto& [edge_key, face_list] : edge_to_faces) {
-    if (face_list.size() == 2) {
-      adjacency[face_list[0]].push_back(face_list[1]);
-      adjacency[face_list[1]].push_back(face_list[0]);
+  for (const auto& [edge_key, faces] : edge_to_faces) {
+    if (faces.num_faces == 2) {
+      adjacency[faces.face_ids[0]].push_back(faces.face_ids[1]);
+      adjacency[faces.face_ids[1]].push_back(faces.face_ids[0]);
     }
   }
 
@@ -205,7 +216,6 @@ struct OcclusionTester {
       triangle_to_face.push_back(i);
     }
     tree.rebuild(triangles.begin(), triangles.end());
-    tree.accelerate_distance_queries();
   }
 
   bool IsOccluded(const Eigen::Vector3f& camera_center,
@@ -353,11 +363,15 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
     }
   }
 
+  std::vector<int> new_views;
   for (int iter = 0; iter < options.view_selection_smoothing_iterations;
        ++iter) {
-    std::vector<int> new_views = view_per_face;
+    new_views.resize(num_faces);
     for (size_t fi = 0; fi < num_faces; ++fi) {
-      if (view_per_face[fi] < 0) continue;
+      if (view_per_face[fi] < 0) {
+        new_views[fi] = -1;
+        continue;
+      }
 
       NodeHashMap<int, int> label_counts;
       for (const size_t ni : adjacency[fi]) {
@@ -377,7 +391,7 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
       }
       new_views[fi] = best_label;
     }
-    view_per_face = new_views;
+    view_per_face.swap(new_views);
   }
 
   return view_per_face;
@@ -396,19 +410,16 @@ std::vector<FaceRegion> ExtractFaceRegions(
     FaceRegion region;
     region.view_id = view_per_face[fi];
 
-    std::queue<size_t> queue;
-    queue.push(fi);
+    region.face_ids.push_back(fi);
     visited[fi] = true;
 
-    while (!queue.empty()) {
-      const size_t current = queue.front();
-      queue.pop();
-      region.face_ids.push_back(current);
+    for (size_t i = 0; i < region.face_ids.size(); ++i) {
+      const size_t current = region.face_ids[i];
 
       for (const size_t ni : adjacency[current]) {
         if (!visited[ni] && view_per_face[ni] == region.view_id) {
           visited[ni] = true;
-          queue.push(ni);
+          region.face_ids.push_back(ni);
         }
       }
     }
@@ -1021,17 +1032,18 @@ MeshTextureMappingResult MeshTextureMapping(
     return result;
   }
 
-  LOG(INFO) << "Computing face normals...";
-  const std::vector<Eigen::Vector3f> face_normals = ComputeFaceNormals(mesh);
-
   LOG(INFO) << "Building face adjacency...";
   const FaceAdjacencyMap adjacency = BuildFaceAdjacency(mesh);
 
-  LOG(INFO) << "Selecting views for " << mesh.faces.size() << " faces from "
-            << images.size() << " images...";
-  const std::vector<int> view_per_face =
-      SelectViews(mesh, face_normals, images, adjacency, options);
-  result.face_view_ids = view_per_face;
+  {
+    LOG(INFO) << "Computing face normals...";
+    const std::vector<Eigen::Vector3f> face_normals = ComputeFaceNormals(mesh);
+    LOG(INFO) << "Selecting views for " << mesh.faces.size() << " faces from "
+              << images.size() << " images...";
+    result.face_view_ids =
+        SelectViews(mesh, face_normals, images, adjacency, options);
+  }
+  const std::vector<int>& view_per_face = result.face_view_ids;
 
   const size_t num_assigned = std::count_if(view_per_face.begin(),
                                             view_per_face.end(),
