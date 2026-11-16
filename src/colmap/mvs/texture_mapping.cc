@@ -975,7 +975,14 @@ void InpaintAtlas(Bitmap* atlas,
         dist[idx] = 0;
         fill_colors[idx] =
             atlas->GetPixel(x, y).value_or(BitmapColor<uint8_t>(0));
-        queue.push({x, y});
+        // Interior baked pixels cannot improve any neighbor's distance.
+        // Keep boundary seeds in their original scan order for equal distances.
+        if ((x > 0 && !baked_mask[idx - 1]) ||
+            (x + 1 < aw && !baked_mask[idx + 1]) ||
+            (y > 0 && !baked_mask[idx - aw]) ||
+            (y + 1 < ah && !baked_mask[idx + aw])) {
+          queue.push({x, y});
+        }
       }
     }
   }
