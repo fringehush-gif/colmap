@@ -834,21 +834,30 @@ TEST(MeshTextureMapping, GlobalColorCorrectionNoSeams) {
 }
 
 TEST(MeshTextureMapping, GlobalColorCorrectionMatchesAnalyticSeam) {
-  PlyMesh mesh;
-  mesh.vertices = {PlyMeshVertex(0, 0, 0),
-                   PlyMeshVertex(1, 0, 0),
-                   PlyMeshVertex(0, 1, 0),
-                   PlyMeshVertex(0, 0, 1)};
-  mesh.faces = {PlyMeshFace(0, 1, 2), PlyMeshFace(1, 0, 3)};
   const float K[9] = {64, 0, 32, 0, 64, 32, 0, 0, 1};
   const float R_front[9] = {1, 0, 0, 0, -1, 0, 0, 0, -1};
   const float R_side[9] = {1, 0, 0, 0, 0, 1, 0, -1, 0};
+  const float R_right[9] = {0, 1, 0, 0, 0, -1, -1, 0, 0};
 
-  for (const int scenario : {0, 1, 2}) {
+  for (const int scenario : {0, 1, 2, 3, 4, 5}) {
+    PlyMesh mesh;
+    mesh.vertices = {PlyMeshVertex(0, 0, 0),
+                     PlyMeshVertex(1, 0, 0),
+                     PlyMeshVertex(0, 1, 0),
+                     PlyMeshVertex(0, 0, 1)};
+
     SCOPED_TRACE(scenario);
-    const bool skip_first_endpoint = scenario == 1;
+    const bool skip_first_endpoint = scenario == 1 || scenario == 5;
     const bool equal_colors = scenario == 2;
-    const std::array<BitmapColor<uint8_t>, 2> colors = {
+    const bool three_regions = scenario == 3;
+    const bool split_front = scenario >= 4;
+    mesh.faces = {PlyMeshFace(0, 1, 2), PlyMeshFace(1, 0, 3)};
+    if (split_front) {
+      mesh.vertices.emplace_back(0.5f, 0.5f, 0.0f);
+      mesh.faces = {
+          PlyMeshFace(0, 1, 4), PlyMeshFace(0, 4, 2), PlyMeshFace(1, 0, 3)};
+    }
+    std::vector<BitmapColor<uint8_t>> colors = {
         BitmapColor<uint8_t>(30, 100, 200),
         equal_colors ? BitmapColor<uint8_t>(30, 100, 200)
                      : BitmapColor<uint8_t>(210, 60, 80)};
@@ -860,6 +869,11 @@ TEST(MeshTextureMapping, GlobalColorCorrectionMatchesAnalyticSeam) {
     std::vector<Image> images;
     images.emplace_back("front.png", 64, 64, K, R_front, T_front);
     images.emplace_back("side.png", 64, 64, K, R_side, T_side);
+    if (three_regions) {
+      mesh.faces.emplace_back(0, 2, 3);
+      colors.emplace_back(90, 220, 40);
+      images.emplace_back("right.png", 64, 64, K, R_right, T_front);
+    }
     for (size_t i = 0; i < images.size(); ++i) {
       Bitmap bitmap(64, 64, /*as_rgb=*/true);
       bitmap.Fill(colors[i]);
@@ -873,10 +887,13 @@ TEST(MeshTextureMapping, GlobalColorCorrectionMatchesAnalyticSeam) {
     options.num_threads = 1;
     options.apply_color_correction = false;
     const auto base = MeshTextureMapping(mesh, images, options);
-    ASSERT_EQ(base.face_view_ids, std::vector<int>({0, 1}));
+    ASSERT_EQ(base.face_view_ids,
+              three_regions ? std::vector<int>({0, 1, 2})
+              : split_front ? std::vector<int>({0, 0, 1})
+                            : std::vector<int>({0, 1}));
     const auto& base_pixels = base.texture_atlas.RowMajorData();
 
-    for (const double beta : {0.1, 2.0}) {
+    for (const double beta : {0.001, 0.1, 2.0, 100.0}) {
       SCOPED_TRACE(beta);
       options.apply_color_correction = true;
       options.color_correction_regularization = beta;
@@ -887,7 +904,42 @@ TEST(MeshTextureMapping, GlobalColorCorrectionMatchesAnalyticSeam) {
       ASSERT_EQ(result.atlas_height, base.atlas_height);
       std::vector<uint8_t> expected = base_pixels;
       size_t checked_pixels = 0;
+      size_t shared_pixels = 0;
+      std::vector<bool> covered(base_pixels.size() / 3, false);
       for (size_t fi = 0; fi < mesh.faces.size(); ++fi) {
+        const int view_id = base.face_view_ids[fi];
+        const auto& face = mesh.faces[fi];
+        const std::array<size_t, 3> vertices = {
+            face.vertex_idx1, face.vertex_idx2, face.vertex_idx3};
+        std::array<Eigen::Vector3d, 3> vertex_offsets;
+        for (size_t vi = 0; vi < vertices.size(); ++vi) {
+          const Eigen::Vector3d color(
+              colors[view_id].r, colors[view_id].g, colors[view_id].b);
+          Eigen::Vector3d difference = Eigen::Vector3d::Zero();
+          int num_neighbors = 0;
+          std::vector<bool> neighboring_views(images.size(), false);
+          if (!(skip_first_endpoint && vertices[vi] == 0)) {
+            for (size_t other = 0; other < mesh.faces.size(); ++other) {
+              const auto& other_face = mesh.faces[other];
+              const int other_view = base.face_view_ids[other];
+              if (other_view == view_id || neighboring_views[other_view] ||
+                  (vertices[vi] != other_face.vertex_idx1 &&
+                   vertices[vi] != other_face.vertex_idx2 &&
+                   vertices[vi] != other_face.vertex_idx3)) {
+                continue;
+              }
+              difference += Eigen::Vector3d(colors[other_view].r,
+                                            colors[other_view].g,
+                                            colors[other_view].b) -
+                            color;
+              neighboring_views[other_view] = true;
+              ++num_neighbors;
+            }
+          }
+          // At each vertex these two/three regions form a complete graph.
+          // Its zero-sum color difference has eigenvalue num_regions + beta.
+          vertex_offsets[vi] = difference / (num_neighbors + 1 + beta);
+        }
         std::array<Eigen::Vector2d, 3> p;
         for (size_t vi = 0; vi < p.size(); ++vi) {
           p[vi] = Eigen::Vector2d(
@@ -909,24 +961,20 @@ TEST(MeshTextureMapping, GlobalColorCorrectionMatchesAnalyticSeam) {
             const auto color = base.texture_atlas.GetPixel(x, y);
             ASSERT_TRUE(color.has_value());
             if (*color == BitmapColor<uint8_t>(0)) continue;
-            ASSERT_EQ(*color, colors[fi]);
+            ASSERT_EQ(*color, colors[view_id]);
             ++face_pixels;
-            // Each available shared vertex has the independent 2x2 system
-            // [[1+beta,-1],[-1,1+beta]], hence offsets +/-difference/(beta+2).
-            // The unshared vertex and any unsampled endpoint have zero offset.
-            const double weight =
-                skip_first_endpoint ? (fi == 0 ? w1 : w0) : w0 + w1;
-            const std::array<double, 3> difference = {
-                double(colors[1].r) - colors[0].r,
-                double(colors[1].g) - colors[0].g,
-                double(colors[1].b) - colors[0].b};
+            const Eigen::Vector3d offset = w0 * vertex_offsets[0] +
+                                           w1 * vertex_offsets[1] +
+                                           w2 * vertex_offsets[2];
             const size_t pixel =
                 3 * (static_cast<size_t>(y) * base.atlas_width + x);
-            for (size_t ch = 0; ch < difference.size(); ++ch) {
-              const double offset =
-                  (fi == 0 ? 1 : -1) * weight * difference[ch] / (beta + 2);
+            // A face writes a corrected source sample, never a correction
+            // added to another face's already-corrected shared-edge sample.
+            shared_pixels += covered[pixel / 3];
+            covered[pixel / 3] = true;
+            for (size_t ch = 0; ch < 3; ++ch) {
               expected[pixel + ch] = static_cast<uint8_t>(
-                  std::clamp(expected[pixel + ch] + offset, 0.0, 255.0));
+                  std::clamp(base_pixels[pixel + ch] + offset[ch], 0.0, 255.0));
             }
           }
         }
@@ -934,6 +982,9 @@ TEST(MeshTextureMapping, GlobalColorCorrectionMatchesAnalyticSeam) {
         checked_pixels += face_pixels;
       }
       EXPECT_GT(checked_pixels, 0);
+      if (split_front && !skip_first_endpoint) {
+        EXPECT_GT(shared_pixels, 0);
+      }
       const auto& actual = result.texture_atlas.RowMajorData();
       ASSERT_EQ(actual.size(), expected.size());
       size_t changed_bytes = 0;
@@ -952,6 +1003,14 @@ TEST(MeshTextureMapping, GlobalColorCorrectionMatchesAnalyticSeam) {
         EXPECT_GT(changed_bytes, 0);
       }
     }
+
+    // Positive but lost when added to the unit seam coefficients: the
+    // singular system must leave the original bake intact in every channel.
+    options.color_correction_regularization = 1e-30;
+    const auto failed_correction = MeshTextureMapping(mesh, images, options);
+    EXPECT_EQ(failed_correction.face_view_ids, base.face_view_ids);
+    EXPECT_EQ(failed_correction.face_uvs, base.face_uvs);
+    EXPECT_EQ(failed_correction.texture_atlas.RowMajorData(), base_pixels);
   }
 }
 
