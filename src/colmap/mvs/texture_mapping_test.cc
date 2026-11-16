@@ -3,10 +3,12 @@
 #include "colmap/mvs/texture_mapping.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <utility>
 #include <vector>
 
+#include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <gtest/gtest.h>
 
@@ -773,6 +775,128 @@ TEST(MeshTextureMapping, GlobalColorCorrectionNoSeams) {
       EXPECT_EQ(c1->r, c2->r);
       EXPECT_EQ(c1->g, c2->g);
       EXPECT_EQ(c1->b, c2->b);
+    }
+  }
+}
+
+TEST(MeshTextureMapping, GlobalColorCorrectionMatchesAnalyticSeam) {
+  PlyMesh mesh;
+  mesh.vertices = {PlyMeshVertex(0, 0, 0),
+                   PlyMeshVertex(1, 0, 0),
+                   PlyMeshVertex(0, 1, 0),
+                   PlyMeshVertex(0, 0, 1)};
+  mesh.faces = {PlyMeshFace(0, 1, 2), PlyMeshFace(1, 0, 3)};
+  const float K[9] = {64, 0, 32, 0, 64, 32, 0, 0, 1};
+  const float R_front[9] = {1, 0, 0, 0, -1, 0, 0, 0, -1};
+  const float R_side[9] = {1, 0, 0, 0, 0, 1, 0, -1, 0};
+
+  for (const int scenario : {0, 1, 2}) {
+    SCOPED_TRACE(scenario);
+    const bool skip_first_endpoint = scenario == 1;
+    const bool equal_colors = scenario == 2;
+    const std::array<BitmapColor<uint8_t>, 2> colors = {
+        BitmapColor<uint8_t>(30, 100, 200),
+        equal_colors ? BitmapColor<uint8_t>(30, 100, 200)
+                     : BitmapColor<uint8_t>(210, 60, 80)};
+    // In the boundary case, vertex 0 projects to x=0.25 in the front
+    // image. Its bilinear sample at x=-0.25 is unavailable for all channels.
+    const float T_front[3] = {
+        skip_first_endpoint ? -2.48046875f : -0.5f, 0.5f, 5};
+    const float T_side[3] = {-0.5f, -0.5f, 5};
+    std::vector<Image> images;
+    images.emplace_back("front.png", 64, 64, K, R_front, T_front);
+    images.emplace_back("side.png", 64, 64, K, R_side, T_side);
+    for (size_t i = 0; i < images.size(); ++i) {
+      Bitmap bitmap(64, 64, /*as_rgb=*/true);
+      bitmap.Fill(colors[i]);
+      images[i].SetBitmap(std::move(bitmap));
+    }
+
+    MeshTextureMappingOptions options;
+    options.min_cos_normal_angle = 0.5;
+    options.view_selection_smoothing_iterations = 0;
+    options.inpaint_radius = 0;
+    options.num_threads = 1;
+    options.apply_color_correction = false;
+    const auto base = MeshTextureMapping(mesh, images, options);
+    ASSERT_EQ(base.face_view_ids, std::vector<int>({0, 1}));
+    const auto& base_pixels = base.texture_atlas.RowMajorData();
+
+    for (const double beta : {0.1, 2.0}) {
+      SCOPED_TRACE(beta);
+      options.apply_color_correction = true;
+      options.color_correction_regularization = beta;
+      const auto result = MeshTextureMapping(mesh, images, options);
+      ASSERT_EQ(result.face_view_ids, base.face_view_ids);
+      ASSERT_EQ(result.face_uvs, base.face_uvs);
+      ASSERT_EQ(result.atlas_width, base.atlas_width);
+      ASSERT_EQ(result.atlas_height, base.atlas_height);
+      std::vector<uint8_t> expected = base_pixels;
+      size_t checked_pixels = 0;
+      for (size_t fi = 0; fi < mesh.faces.size(); ++fi) {
+        std::array<Eigen::Vector2d, 3> p;
+        for (size_t vi = 0; vi < p.size(); ++vi) {
+          p[vi] = Eigen::Vector2d(
+              base.face_uvs[6 * fi + 2 * vi] * base.atlas_width,
+              (1.0 - base.face_uvs[6 * fi + 2 * vi + 1]) * base.atlas_height);
+        }
+        const Eigen::Vector2d ab = p[1] - p[0];
+        const Eigen::Vector2d ac = p[2] - p[0];
+        const double area = ab.x() * ac.y() - ab.y() * ac.x();
+        ASSERT_NE(area, 0);
+        size_t face_pixels = 0;
+        for (int y = 0; y < base.atlas_height; ++y) {
+          for (int x = 0; x < base.atlas_width; ++x) {
+            const Eigen::Vector2d q = Eigen::Vector2d(x + 0.5, y + 0.5) - p[0];
+            const double w1 = (q.x() * ac.y() - q.y() * ac.x()) / area;
+            const double w2 = (ab.x() * q.y() - ab.y() * q.x()) / area;
+            const double w0 = 1 - w1 - w2;
+            if (std::min({w0, w1, w2}) < -1e-4) continue;
+            const auto color = base.texture_atlas.GetPixel(x, y);
+            ASSERT_TRUE(color.has_value());
+            if (*color == BitmapColor<uint8_t>(0)) continue;
+            ASSERT_EQ(*color, colors[fi]);
+            ++face_pixels;
+            // Each available shared vertex has the independent 2x2 system
+            // [[1+beta,-1],[-1,1+beta]], hence offsets +/-difference/(beta+2).
+            // The unshared vertex and any unsampled endpoint have zero offset.
+            const double weight =
+                skip_first_endpoint ? (fi == 0 ? w1 : w0) : w0 + w1;
+            const std::array<double, 3> difference = {
+                double(colors[1].r) - colors[0].r,
+                double(colors[1].g) - colors[0].g,
+                double(colors[1].b) - colors[0].b};
+            const size_t pixel =
+                3 * (static_cast<size_t>(y) * base.atlas_width + x);
+            for (size_t ch = 0; ch < difference.size(); ++ch) {
+              const double offset =
+                  (fi == 0 ? 1 : -1) * weight * difference[ch] / (beta + 2);
+              expected[pixel + ch] = static_cast<uint8_t>(
+                  std::clamp(expected[pixel + ch] + offset, 0.0, 255.0));
+            }
+          }
+        }
+        EXPECT_GT(face_pixels, 0);
+        checked_pixels += face_pixels;
+      }
+      EXPECT_GT(checked_pixels, 0);
+      const auto& actual = result.texture_atlas.RowMajorData();
+      ASSERT_EQ(actual.size(), expected.size());
+      size_t changed_bytes = 0;
+      for (size_t i = 0; i < actual.size(); ++i) {
+        // The oracle reconstructs atlas vertices from normalized UVs and uses
+        // double barycentrics; allow one final byte of raster quantization.
+        EXPECT_NEAR(actual[i], expected[i], 1);
+        changed_bytes += actual[i] != base_pixels[i];
+        if (base_pixels[i] == 0) {
+          EXPECT_EQ(actual[i], 0);
+        }
+      }
+      if (equal_colors) {
+        EXPECT_EQ(changed_bytes, 0);
+      } else {
+        EXPECT_GT(changed_bytes, 0);
+      }
     }
   }
 }
