@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include <Eigen/Geometry>
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -807,6 +808,42 @@ TEST(MeshTextureMapping, SamplesAtPixelCenters) {
   EXPECT_EQ(color->r, 255);
   EXPECT_EQ(color->g, 255);
   EXPECT_EQ(color->b, 255);
+}
+
+TEST(MeshTextureMapping, RotatedCameraCenterSelection) {
+  const Eigen::Matrix3f rotation =
+      (Eigen::AngleAxisf(0.23f, Eigen::Vector3f::UnitZ()) *
+       Eigen::AngleAxisf(0.12f, Eigen::Vector3f::UnitY()) *
+       Eigen::AngleAxisf(3.03f, Eigen::Vector3f::UnitX()))
+          .toRotationMatrix();
+  const Eigen::Matrix<float, 3, 3, Eigen::RowMajor> row_rotation = rotation;
+  const float K[9] = {256, 0, 128, 0, 256, 128, 0, 0, 1};
+  std::vector<Image> images;
+  for (const float z : {5.0f, 12.0f}) {
+    const Eigen::Vector3f center(0.5f, 0.5f, z);
+    const Eigen::Vector3f translation = -rotation * center;
+    Image image(
+        "rotated.png", 256, 256, K, row_rotation.data(), translation.data());
+    Bitmap bitmap(256, 256, /*as_rgb=*/true);
+    bitmap.Fill(BitmapColor<uint8_t>(100, 150, 200));
+    image.SetBitmap(std::move(bitmap));
+    images.push_back(std::move(image));
+  }
+  MeshTextureMappingOptions options;
+  options.apply_color_correction = false;
+  options.inpaint_radius = 0;
+  options.view_selection_smoothing_iterations = 0;
+  options.num_threads = 1;
+  const auto result = MeshTextureMapping(MakeTriangleMesh(), images, options);
+  EXPECT_EQ(result.face_view_ids, (std::vector<int>{0, 0}));
+  ASSERT_EQ(result.face_uvs.size(), 12);
+  for (float uv : result.face_uvs) EXPECT_TRUE(std::isfinite(uv));
+  const auto far_only =
+      MeshTextureMapping(MakeTriangleMesh(), {images[1]}, options);
+  EXPECT_EQ(far_only.face_view_ids, (std::vector<int>{0, 0}));
+  std::reverse(images.begin(), images.end());
+  const auto reversed = MeshTextureMapping(MakeTriangleMesh(), images, options);
+  EXPECT_EQ(reversed.face_view_ids, (std::vector<int>{1, 1}));
 }
 
 }  // namespace

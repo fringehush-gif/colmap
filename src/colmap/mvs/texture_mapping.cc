@@ -104,12 +104,6 @@ float ProjectPointDepth(const float* P, const Eigen::Vector3f& point) {
   return (P_m.row(2) * ph)(0, 0);
 }
 
-Eigen::Vector3f ComputeCameraCenter(const float* R, const float* T) {
-  const Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>> R_m(R);
-  const Eigen::Map<const Eigen::Vector3f> T_m(T);
-  return -R_m.transpose() * T_m;
-}
-
 std::vector<Eigen::Vector3f> ComputeFaceNormals(const PlyMesh& mesh) {
   const size_t num_faces = mesh.faces.size();
   std::vector<Eigen::Vector3f> normals(num_faces);
@@ -263,6 +257,12 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
   occlusion_tester.Build(mesh);
 #endif
 
+  std::vector<Eigen::Vector3f> camera_centers(num_images);
+  for (size_t ii = 0; ii < num_images; ++ii) {
+    ComputeProjectionCenter(
+        images[ii].GetR(), images[ii].GetT(), camera_centers[ii].data());
+  }
+
   std::vector<int> view_per_face(num_faces, -1);
   // Smoothing only needs positive-score eligibility, not the scores themselves.
   std::vector<uint8_t> eligible_views;
@@ -291,8 +291,7 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
 
     for (size_t ii = 0; ii < num_images; ++ii) {
       const Image& img = images[ii];
-      const Eigen::Vector3f cam_center =
-          ComputeCameraCenter(img.GetR(), img.GetT());
+      const Eigen::Vector3f& cam_center = camera_centers[ii];
 
       const Eigen::Vector3f view_dir = (cam_center - centroid).normalized();
       const float cos_angle = normal.dot(view_dir);
