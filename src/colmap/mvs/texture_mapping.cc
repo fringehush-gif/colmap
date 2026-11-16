@@ -54,7 +54,7 @@ struct FaceRegion {
   std::vector<size_t> face_ids;
 };
 
-// Per-region mesh-vertex indices and their solved RGB offsets.
+// Per-region seam-vertex indices and their solved RGB offsets.
 struct ColorCorrection {
   std::vector<FlatHashMap<size_t, size_t>> region_vertex_variables;
   std::array<Eigen::VectorXd, 3> offsets;
@@ -671,11 +671,17 @@ void BakeTexture(Bitmap* atlas,
       std::array<std::array<double, 3>, 3> vertex_offsets;
       if (color_correction != nullptr) {
         const auto indices = GetFaceIndices(mesh.faces[region.face_ids[i]]);
+        const auto& variables = color_correction->region_vertex_variables[ri];
         for (size_t vi = 0; vi < indices.size(); ++vi) {
-          const size_t variable =
-              color_correction->region_vertex_variables[ri].at(indices[vi]);
+          const auto variable = variables.find(indices[vi]);
+          // Vertices away from seams have only a zero-target regularizer.
+          if (variable == variables.end()) {
+            vertex_offsets[vi].fill(0.0);
+            continue;
+          }
           for (size_t ch = 0; ch < vertex_offsets[vi].size(); ++ch) {
-            vertex_offsets[vi][ch] = color_correction->offsets[ch](variable);
+            vertex_offsets[vi][ch] =
+                color_correction->offsets[ch](variable->second);
           }
         }
       }
@@ -806,19 +812,25 @@ std::optional<ColorCorrection> ComputeGlobalColorCorrection(
 
   if (seam_edges.empty()) return std::nullopt;
 
-  // Build per-region vertex-to-variable mapping.
-  ColorCorrection correction;
-  auto& region_vert_maps = correction.region_vertex_variables;
-  region_vert_maps.resize(regions.size());
-
   std::vector<int> face_to_region(num_faces, -1);
-  size_t total_vars = 0;
   for (size_t ri = 0; ri < regions.size(); ++ri) {
     for (const size_t fi : regions[ri].face_ids) {
       face_to_region[fi] = static_cast<int>(ri);
-      const std::array<size_t, 3> idx = GetFaceIndices(mesh.faces[fi]);
-      for (int vi = 0; vi < 3; ++vi) {
-        if (region_vert_maps[ri].try_emplace(idx[vi], total_vars).second) {
+    }
+  }
+
+  // Only seam vertices participate in color constraints. All other variables
+  // have independent zero-target regularizers and therefore zero offsets.
+  ColorCorrection correction;
+  auto& region_vert_maps = correction.region_vertex_variables;
+  region_vert_maps.resize(regions.size());
+  size_t total_vars = 0;
+  for (const SeamEdge& se : seam_edges) {
+    for (const size_t fi : {se.face_l, se.face_r}) {
+      const int ri = face_to_region[fi];
+      if (ri < 0) continue;
+      for (const size_t sv : {se.vert_a, se.vert_b}) {
+        if (region_vert_maps[ri].try_emplace(sv, total_vars).second) {
           ++total_vars;
         }
       }
@@ -848,15 +860,8 @@ std::optional<ColorCorrection> ComputeGlobalColorCorrection(
     if (ri_l < 0 || ri_r < 0) continue;
 
     for (const size_t sv : {se.vert_a, se.vert_b}) {
-      const auto it_l = region_vert_maps[ri_l].find(sv);
-      const auto it_r = region_vert_maps[ri_r].find(sv);
-      if (it_l == region_vert_maps[ri_l].end() ||
-          it_r == region_vert_maps[ri_r].end()) {
-        continue;
-      }
-
-      const size_t var_l = it_l->second;
-      const size_t var_r = it_r->second;
+      const size_t var_l = region_vert_maps[ri_l].at(sv);
+      const size_t var_r = region_vert_maps[ri_r].at(sv);
 
       const Eigen::Vector3f vert = GetVertex(mesh, sv);
       const Image& img_l = images[regions[ri_l].view_id];
@@ -905,7 +910,7 @@ std::optional<ColorCorrection> ComputeGlobalColorCorrection(
 
   for (auto& channel : offsets) {
     channel = solver.solve(channel).eval();
-    if (solver.info() != Eigen::Success) {
+    if (solver.info() != Eigen::Success || !channel.allFinite()) {
       LOG(WARNING) << "Color correction: failed to solve system";
       return std::nullopt;
     }
