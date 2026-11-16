@@ -2,12 +2,14 @@
 
 #include "colmap/mvs/delaunay_meshing.h"
 
+#include "colmap/math/random.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/file.h"
 #include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
 #include <fstream>
 
 #include <gtest/gtest.h>
@@ -91,6 +93,39 @@ TEST(SparseDelaunayMeshing, PointAtCameraCenter) {
   EXPECT_TRUE(ExistsFile(output_path));
   const std::vector<PlyPoint> mesh_vertices = ReadPly(output_path);
   EXPECT_GE(mesh_vertices.size(), 3);
+}
+
+TEST(SparseDelaunayMeshing, NearlyPlanarPoints) {
+  const auto test_dir = CreateTestDir();
+  const auto sparse_path = test_dir / "sparse";
+  const auto output_path = test_dir / "mesh.ply";
+  SetPRNGSeed(17);
+  Reconstruction reconstruction =
+      CreateAndWriteSyntheticReconstruction(sparse_path, 5, 500);
+  std::vector<point3D_t> point3D_ids;
+  point3D_ids.reserve(reconstruction.NumPoints3D());
+  for (const auto point3D_id : reconstruction.Point3DIds()) {
+    point3D_ids.push_back(point3D_id);
+  }
+  std::sort(point3D_ids.begin(), point3D_ids.end());
+  for (const auto point3D_id : point3D_ids) {
+    auto& position = reconstruction.Point3D(point3D_id).xyz;
+    position *= RandomUniformReal<double>(0.2, 1.0);
+    position.z() *= 1e-5;
+  }
+  reconstruction.Write(sparse_path);
+
+  // The thin but still volumetric cloud produces nearly parallel facet
+  // normals and cell co-tangents. Rounding just one squared norm to float can
+  // make their computed cosine exceed one and create a negative graph weight.
+  DelaunayMeshingOptions options;
+  options.num_threads = 1;
+  SetPRNGSeed(0);
+  SparseDelaunayMeshing(options, sparse_path, output_path);
+
+  const auto mesh = ReadPlyMesh(output_path).mesh;
+  EXPECT_GE(mesh.vertices.size(), 3);
+  EXPECT_FALSE(mesh.faces.empty());
 }
 
 TEST(DenseDelaunayMeshing, Integration) {
