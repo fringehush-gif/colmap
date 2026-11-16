@@ -1379,6 +1379,117 @@ TEST(Bitmap, ReadNonExistentFile) {
       << "OIIO error was not cleared: " << pending_error;
 }
 
+TEST(Bitmap, ReadTruncatedImage) {
+  const auto directory = CreateTestDir();
+  const std::vector<uint8_t> pixels = {
+      10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120};
+  for (const bool truncated : {false, true}) {
+    const auto filename =
+        directory / (truncated ? "truncated.ppm" : "complete.ppm");
+    {
+      std::ofstream output(filename, std::ios::binary);
+      ASSERT_TRUE(output);
+      output << "P6\n2 2\n255\n";
+      output.write(reinterpret_cast<const char*>(pixels.data()),
+                   truncated ? 3 : pixels.size());
+      output.close();
+      ASSERT_TRUE(output);
+    }
+
+    // Both headers are valid; only reading the truncated pixel data fails.
+    const auto input = OIIO::ImageInput::open(filename.string());
+    ASSERT_NE(input, nullptr);
+    ASSERT_EQ(input->spec().width, 2);
+    ASSERT_EQ(input->spec().height, 2);
+    ASSERT_EQ(input->spec().nchannels, 3);
+    std::vector<uint8_t> decoded(pixels.size());
+    EXPECT_EQ(
+        input->read_image(0, 0, 0, 3, OIIO::TypeDesc::UINT8, decoded.data()),
+        !truncated);
+    input->geterror();
+    EXPECT_TRUE(input->close());
+
+    Bitmap bitmap;
+    if (truncated) {
+      EXPECT_FALSE(bitmap.Read(filename, /*as_rgb=*/false));
+      EXPECT_FALSE(bitmap.Read(filename, /*as_rgb=*/true));
+    } else {
+      ASSERT_TRUE(bitmap.Read(filename, /*as_rgb=*/true));
+      EXPECT_EQ(bitmap.Width(), 2);
+      EXPECT_EQ(bitmap.Height(), 2);
+      EXPECT_EQ(bitmap.Channels(), 3);
+      EXPECT_EQ(bitmap.RowMajorData(), pixels);
+    }
+  }
+}
+
+TEST(Bitmap, ReadDecoderFailureStatus) {
+  static int read_calls = 0;
+  static int close_calls = 0;
+  static bool closed_after_read = false;
+  class StatusInput : public OIIO::ImageInput {
+   public:
+    const char* format_name() const override { return "colmap_read_status"; }
+    bool open(const std::string& name, OIIO::ImageSpec& spec) override {
+      const std::filesystem::path path(name);
+      if (path.extension() != ".colmap_read_status") return false;
+      fail_read_ = path.stem() == "read_failure";
+      fail_close_ = path.stem() == "close_failure";
+      m_spec = OIIO::ImageSpec(2, 1, 1, OIIO::TypeDesc::UINT8);
+      spec = m_spec;
+      return true;
+    }
+    bool close() override {
+      ++close_calls;
+      closed_after_read |= read_calls > 0;
+      if (fail_close_) {
+        errorfmt("Intentional test close failure");
+        return false;
+      }
+      return true;
+    }
+    bool read_native_scanline(int, int, int, int, void* data) override {
+      ++read_calls;
+      if (fail_read_) {
+        errorfmt("Intentional test pixel-read failure");
+        return false;
+      }
+      const std::array<uint8_t, 2> pixels = {17, 34};
+      std::copy(pixels.begin(), pixels.end(), static_cast<uint8_t*>(data));
+      return true;
+    }
+
+   private:
+    bool fail_read_ = false;
+    bool fail_close_ = false;
+  };
+  static const char* extensions[] = {"colmap_read_status", nullptr};
+  OIIO::declare_imageio_format(
+      "colmap_read_status",
+      []() -> OIIO::ImageInput* { return new StatusInput; },
+      extensions,
+      nullptr,
+      nullptr,
+      "test");
+  const auto directory = CreateTestDir();
+  for (const std::string mode : {"success", "read_failure", "close_failure"}) {
+    SCOPED_TRACE(mode);
+    const auto filename = directory / (mode + ".colmap_read_status");
+    std::ofstream(filename).close();
+    read_calls = 0;
+    close_calls = 0;
+    closed_after_read = false;
+    Bitmap bitmap;
+    EXPECT_EQ(bitmap.Read(filename, /*as_rgb=*/false), mode == "success");
+    EXPECT_EQ(read_calls, 1);
+    EXPECT_GE(close_calls, 1);
+    EXPECT_TRUE(closed_after_read);
+    if (mode == "success") {
+      EXPECT_EQ(bitmap.RowMajorData(), (std::vector<uint8_t>{17, 34}));
+    }
+  }
+}
+
 TEST(Bitmap, ReadUnsupportedChannels) {
   const auto filename = CreateTestDir() / "5channel.tif";
 
