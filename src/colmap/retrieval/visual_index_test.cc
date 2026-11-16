@@ -83,6 +83,7 @@ void WriteExactVocabulary(const std::filesystem::path& path) {
     ASSERT_EQ(actual, expected);
   };
   ASSERT_NO_FATAL_FAILURE(check_words(175, {1, 0, 2}));
+  ASSERT_NO_FATAL_FAILURE(check_words(125, {0, 1, 2}));
   ASSERT_NO_FATAL_FAILURE(check_words(160, {1, 0}));
   ASSERT_NO_FATAL_FAILURE(check_words(240, {1, 2}));
 
@@ -265,15 +266,23 @@ TEST(VisualIndex, MultiwordMatchesRetainMaximumScore) {
   // first. Correct weighting selects D, giving the identity geometry above.
   const auto descriptors =
       CreateScalarDescriptors({1003, 2003, 175, 175, 3003});
-  std::vector<ImageScore> plain, verified;
-  index->Query(query, query_keypoints, descriptors, &plain);
+  auto scoring_query = query;
   query.num_images_after_verification = 1;
-  index->Query(query, query_keypoints, descriptors, &verified);
-  ASSERT_EQ(plain.size(), 1);
-  ASSERT_EQ(verified.size(), 1);
-  EXPECT_EQ(plain[0].image_id, 0);
-  EXPECT_EQ(verified[0].image_id, 0);
-  EXPECT_NEAR(verified[0].score - plain[0].score, expected, 1e-5);
+  // Encounter the lower score before the higher score, and then reverse that
+  // order. Both queries must retain the strongest word-specific match.
+  for (const float value : {175, 125}) {
+    SCOPED_TRACE(value);
+    const auto ordered_descriptors =
+        CreateScalarDescriptors({1003, 2003, value, value, 3003});
+    std::vector<ImageScore> plain, verified;
+    index->Query(scoring_query, query_keypoints, ordered_descriptors, &plain);
+    index->Query(query, query_keypoints, ordered_descriptors, &verified);
+    ASSERT_EQ(plain.size(), 1);
+    ASSERT_EQ(verified.size(), 1);
+    EXPECT_EQ(plain[0].image_id, 0);
+    EXPECT_EQ(verified[0].image_id, 0);
+    EXPECT_NEAR(verified[0].score - plain[0].score, expected, 1e-5);
+  }
 
   // FAISS pads the extra neighbor slots with invalid word IDs. They must not
   // change the weighted spatial matches or the final verified score.
