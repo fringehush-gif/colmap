@@ -318,6 +318,70 @@ TEST(MeshTextureMapping, SingleFaceTwoViews) {
   EXPECT_EQ(result.face_view_ids[0], 0);
 }
 
+TEST(MeshTextureMapping, OcclusionWithSkippedTriangles) {
+  PlyMesh mesh;
+  mesh.vertices = {PlyMeshVertex(0, 0, 0),
+                   PlyMeshVertex(1, 0, 0),
+                   PlyMeshVertex(0, 1, 0),
+                   PlyMeshVertex(-0.5f, -0.5f, 2),
+                   PlyMeshVertex(0.5f, 1.5f, 2),
+                   PlyMeshVertex(1.5f, -0.5f, 2)};
+  // Skipping the first triangle must preserve the remaining face indices.
+  // The reverse-wound blocker is not textured but still occludes the target.
+  mesh.faces = {
+      PlyMeshFace(0, 0, 0), PlyMeshFace(0, 1, 2), PlyMeshFace(3, 4, 5)};
+  const Image front = MakeTestImage(64, 64, BitmapColor<uint8_t>(200, 50, 50));
+  const float K[9] = {16, 0, 32, 0, 16, 32, 0, 0, 1};
+  const float T[3] = {-5, 0.5f, 5};
+  Image lateral("lateral.png", 64, 64, K, front.GetR(), T);
+  Bitmap bitmap(64, 64, /*as_rgb=*/true);
+  bitmap.Fill(BitmapColor<uint8_t>(50, 200, 50));
+  lateral.SetBitmap(std::move(bitmap));
+  const std::vector<Image> images = {front, lateral};
+
+  // Front-camera rays hit the blocker. Lateral-camera rays pass to its right.
+#if defined(COLMAP_CGAL_ENABLED)
+  constexpr int kExpectedView = 1;
+#else
+  constexpr int kExpectedView = 0;
+#endif
+  const auto expected_color = images[kExpectedView].GetBitmap().GetPixel(0, 0);
+  ASSERT_TRUE(expected_color.has_value());
+  MeshTextureMappingOptions options;
+  options.apply_color_correction = false;
+  options.inpaint_radius = 0;
+  MeshTextureMappingResult reference;
+  for (const int num_threads : {1, 3}) {
+    SCOPED_TRACE(num_threads);
+    options.num_threads = num_threads;
+    auto result = MeshTextureMapping(mesh, images, options);
+    ASSERT_EQ(result.face_view_ids, (std::vector<int>{-1, kExpectedView, -1}));
+    size_t num_colored = 0;
+    for (int y = 0; y < result.atlas_height; ++y) {
+      for (int x = 0; x < result.atlas_width; ++x) {
+        const auto color = result.texture_atlas.GetPixel(x, y);
+        ASSERT_TRUE(color.has_value());
+        if (color->r != 0 || color->g != 0 || color->b != 0) {
+          EXPECT_EQ(color->r, expected_color->r);
+          EXPECT_EQ(color->g, expected_color->g);
+          EXPECT_EQ(color->b, expected_color->b);
+          ++num_colored;
+        }
+      }
+    }
+    EXPECT_GT(num_colored, 0);
+    if (num_threads == 1) {
+      reference = std::move(result);
+    } else {
+      EXPECT_EQ(result.face_uvs, reference.face_uvs);
+      EXPECT_EQ(result.atlas_width, reference.atlas_width);
+      EXPECT_EQ(result.atlas_height, reference.atlas_height);
+      EXPECT_EQ(result.texture_atlas.RowMajorData(),
+                reference.texture_atlas.RowMajorData());
+    }
+  }
+}
+
 TEST(MeshTextureMapping, FaceBehindCamera) {
   PlyMesh mesh;
   mesh.vertices = {
@@ -431,6 +495,42 @@ TEST(MeshTextureMapping, CubeAdjacency) {
     if (v >= 0) ++assigned;
   }
   EXPECT_GT(assigned, 0);
+}
+
+TEST(MeshTextureMapping, SharedEdgeIncidence) {
+  const std::vector<Image> images = {
+      MakeTestImage(64, 64, BitmapColor<uint8_t>(128))};
+  MeshTextureMappingOptions options;
+  options.apply_color_correction = false;
+  options.view_selection_smoothing_iterations = 0;
+  options.inpaint_radius = 0;
+  options.num_threads = 1;
+
+  for (const bool duplicate_face : {false, true}) {
+    for (const size_t num_faces : {2, 3, 4, 258}) {
+      SCOPED_TRACE(duplicate_face);
+      SCOPED_TRACE(num_faces);
+      PlyMesh mesh = MakeTriangleMesh();
+      if (duplicate_face) mesh.faces[1] = mesh.faces[0];
+      mesh.faces.resize(num_faces, mesh.faces[0]);
+      const auto result = MeshTextureMapping(mesh, images, options);
+      ASSERT_EQ(result.face_view_ids, std::vector<int>(num_faces, 0));
+      ASSERT_EQ(result.face_uvs.size(), num_faces * 6);
+      // Shared vertices have the same UV only when the faces share a region.
+      const bool same_uv = result.face_uvs[0] == result.face_uvs[6] &&
+                           result.face_uvs[1] == result.face_uvs[7];
+      EXPECT_EQ(same_uv, num_faces == 2);
+    }
+  }
+
+  // Count edge occurrences, including repeated edges within a degenerate face.
+  PlyMesh mesh = MakeTriangleMesh();
+  mesh.faces.emplace_back(0, 2, 2);
+  const auto result = MeshTextureMapping(mesh, images, options);
+  ASSERT_EQ(result.face_view_ids, (std::vector<int>{0, 0, -1}));
+  ASSERT_EQ(result.face_uvs.size(), 18);
+  EXPECT_TRUE(result.face_uvs[0] != result.face_uvs[6] ||
+              result.face_uvs[1] != result.face_uvs[7]);
 }
 
 TEST(MeshTextureMapping, UVRange) {
