@@ -164,26 +164,29 @@ int RunMeshTexturer(int argc, char** argv) {
   }
 
   LOG(INFO) << "Reading input mesh from " << input_path << "...";
-  const PlyMesh mesh = ReadPlyMesh(input_path).mesh;
+  PlyMesh mesh = ReadPlyMesh(input_path).mesh;
   LOG(INFO) << "Mesh has " << mesh.vertices.size() << " vertices and "
             << mesh.faces.size() << " faces";
 
   options.mesh_texture_mapping->Print();
 
   LOG(INFO) << "Running surface texture mapping...";
-  const mvs::MeshTextureMappingResult result = mvs::MeshTextureMapping(
+  mvs::MeshTextureMappingResult result = mvs::MeshTextureMapping(
       mesh, model.images, *options.mesh_texture_mapping);
+  THROW_CHECK(!result.texture_atlas.IsEmpty())
+      << "No texture atlas was generated";
 
   CreateDirIfNotExists(output_path);
 
   const std::filesystem::path texture_filename = "texture.png";
   const std::filesystem::path texture_path = output_path / texture_filename;
   LOG(INFO) << "Writing texture atlas to " << texture_path << "...";
-  result.texture_atlas.Write(texture_path);
+  THROW_CHECK(result.texture_atlas.Write(texture_path))
+      << "Failed to write texture atlas: " << texture_path;
 
   PlyTexturedMesh textured_mesh;
-  textured_mesh.mesh = mesh;
-  textured_mesh.face_uvs = result.face_uvs;
+  textured_mesh.mesh = std::move(mesh);
+  textured_mesh.face_uvs = std::move(result.face_uvs);
   textured_mesh.texture_file = texture_filename.string();
 
   const std::filesystem::path mesh_path = output_path / "mesh.ply";
