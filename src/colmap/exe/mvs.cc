@@ -173,13 +173,16 @@ int RunMeshTexturer(int argc, char** argv) {
   LOG(INFO) << "Running surface texture mapping...";
   const mvs::MeshTextureMappingResult result = mvs::MeshTextureMapping(
       mesh, model.images, *options.mesh_texture_mapping);
+  THROW_CHECK(!result.texture_atlas.IsEmpty())
+      << "No texture atlas was generated";
 
   CreateDirIfNotExists(output_path);
 
   const std::filesystem::path texture_filename = "texture.png";
   const std::filesystem::path texture_path = output_path / texture_filename;
   LOG(INFO) << "Writing texture atlas to " << texture_path << "...";
-  result.texture_atlas.Write(texture_path);
+  THROW_CHECK(result.texture_atlas.Write(texture_path))
+      << "Failed to write texture atlas: " << texture_path;
 
   PlyTexturedMesh textured_mesh;
   textured_mesh.mesh = mesh;
