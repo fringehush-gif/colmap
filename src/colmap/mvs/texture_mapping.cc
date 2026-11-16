@@ -394,19 +394,16 @@ std::vector<FaceRegion> ExtractFaceRegions(
     FaceRegion region;
     region.view_id = view_per_face[fi];
 
-    std::queue<size_t> queue;
-    queue.push(fi);
+    region.face_ids.push_back(fi);
     visited[fi] = true;
 
-    while (!queue.empty()) {
-      const size_t current = queue.front();
-      queue.pop();
-      region.face_ids.push_back(current);
+    for (size_t i = 0; i < region.face_ids.size(); ++i) {
+      const size_t current = region.face_ids[i];
 
       for (const size_t ni : adjacency[current]) {
         if (!visited[ni] && view_per_face[ni] == region.view_id) {
           visited[ni] = true;
-          queue.push(ni);
+          region.face_ids.push_back(ni);
         }
       }
     }
