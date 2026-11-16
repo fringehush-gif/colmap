@@ -347,11 +347,15 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
     }
   }
 
+  std::vector<int> new_views;
   for (int iter = 0; iter < options.view_selection_smoothing_iterations;
        ++iter) {
-    std::vector<int> new_views = view_per_face;
+    new_views.resize(num_faces);
     for (size_t fi = 0; fi < num_faces; ++fi) {
-      if (view_per_face[fi] < 0) continue;
+      if (view_per_face[fi] < 0) {
+        new_views[fi] = -1;
+        continue;
+      }
 
       NodeHashMap<int, int> label_counts;
       for (const size_t ni : adjacency[fi]) {
@@ -371,7 +375,7 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
       }
       new_views[fi] = best_label;
     }
-    view_per_face = new_views;
+    view_per_face.swap(new_views);
   }
 
   return view_per_face;
@@ -1063,17 +1067,18 @@ MeshTextureMappingResult MeshTextureMapping(
     return result;
   }
 
-  LOG(INFO) << "Computing face normals...";
-  const std::vector<Eigen::Vector3f> face_normals = ComputeFaceNormals(mesh);
-
   LOG(INFO) << "Building face adjacency...";
   const FaceAdjacencyMap adjacency = BuildFaceAdjacency(mesh);
 
-  LOG(INFO) << "Selecting views for " << mesh.faces.size() << " faces from "
-            << images.size() << " images...";
-  const std::vector<int> view_per_face =
-      SelectViews(mesh, face_normals, images, adjacency, options);
-  result.face_view_ids = view_per_face;
+  {
+    LOG(INFO) << "Computing face normals...";
+    const std::vector<Eigen::Vector3f> face_normals = ComputeFaceNormals(mesh);
+    LOG(INFO) << "Selecting views for " << mesh.faces.size() << " faces from "
+              << images.size() << " images...";
+    result.face_view_ids =
+        SelectViews(mesh, face_normals, images, adjacency, options);
+  }
+  const std::vector<int>& view_per_face = result.face_view_ids;
 
   const size_t num_assigned = std::count_if(view_per_face.begin(),
                                             view_per_face.end(),
