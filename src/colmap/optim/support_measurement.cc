@@ -64,26 +64,28 @@ UniqueInlierSupportMeasurer::Support UniqueInlierSupportMeasurer::Evaluate(
   support.num_unique_inliers = 0;
   support.residual_sum = 0;
 
-  size_t idx = 0;
-  while (idx < residuals.size() && !(residuals[idx] <= max_residual)) {
-    ++idx;
-  }
-  if (idx == residuals.size()) {
+  const auto is_inlier = [max_residual](const double residual) {
+    return residual <= max_residual;
+  };
+  auto residual_it =
+      std::find_if(residuals.begin(), residuals.end(), is_inlier);
+  if (residual_it == residuals.end()) {
     return support;
   }
 
   // Keep scratch local: independent Evaluate calls may share a measurer.
   std::vector<char> inlier_point_ids(num_label_slots_, false);
-  for (; idx < residuals.size(); ++idx) {
-    if (residuals[idx] <= max_residual) {
-      support.num_inliers += 1;
-      const size_t id = unique_sample_ids_[idx];
-      if (!inlier_point_ids[id]) {
-        inlier_point_ids[id] = true;
-        ++support.num_unique_inliers;
-      }
-      support.residual_sum += residuals[idx];
+  for (; residual_it != residuals.end();
+       residual_it =
+           std::find_if(residual_it + 1, residuals.end(), is_inlier)) {
+    const size_t idx = residual_it - residuals.begin();
+    support.num_inliers += 1;
+    const size_t id = unique_sample_ids_[idx];
+    if (!inlier_point_ids[id]) {
+      inlier_point_ids[id] = true;
+      ++support.num_unique_inliers;
     }
+    support.residual_sum += *residual_it;
   }
   return support;
 }
