@@ -322,6 +322,60 @@ TEST(MeshTextureMapping, SingleFaceTwoViews) {
   EXPECT_EQ(result.face_view_ids[0], 0);
 }
 
+TEST(MeshTextureMapping, OccludedViewSelection) {
+  PlyMesh mesh;
+  mesh.vertices = {PlyMeshVertex(0, 0, 0),
+                   PlyMeshVertex(1, 0, 0),
+                   PlyMeshVertex(0, 1, 0),
+                   PlyMeshVertex(-0.5f, -0.5f, 2),
+                   PlyMeshVertex(0.5f, 1.5f, 2),
+                   PlyMeshVertex(1.5f, -0.5f, 2)};
+  // The blocker faces away from both cameras but still occludes the target.
+  mesh.faces = {PlyMeshFace(0, 1, 2), PlyMeshFace(3, 4, 5)};
+  const Image front = MakeTestImage(64, 64, BitmapColor<uint8_t>(200, 50, 50));
+  const float K[9] = {16, 0, 32, 0, 16, 32, 0, 0, 1};
+  const float T[3] = {-5, 0.5f, 5};
+  Image lateral("lateral.png", 64, 64, K, front.GetR(), T);
+  Bitmap bitmap(64, 64, /*as_rgb=*/true);
+  bitmap.Fill(BitmapColor<uint8_t>(50, 200, 50));
+  lateral.SetBitmap(std::move(bitmap));
+  const std::vector<Image> images = {front, lateral};
+
+  // Front-camera rays intersect the blocker at z=2; lateral-camera rays
+  // pass beyond its right edge. Without occlusion testing, the larger
+  // projected area of the front view wins instead.
+#if defined(COLMAP_CGAL_ENABLED)
+  constexpr int kExpectedView = 1;
+#else
+  constexpr int kExpectedView = 0;
+#endif
+  MeshTextureMappingOptions options;
+  options.apply_color_correction = false;
+  options.inpaint_radius = 0;
+  MeshTextureMappingResult reference;
+  for (const int smoothing : {0, 3}) {
+    SCOPED_TRACE(smoothing);
+    options.view_selection_smoothing_iterations = smoothing;
+    for (const int num_threads : {1, 3}) {
+      SCOPED_TRACE(num_threads);
+      options.num_threads = num_threads;
+      auto result = MeshTextureMapping(mesh, images, options);
+      ASSERT_EQ(result.face_view_ids, (std::vector<int>{kExpectedView, -1}));
+      ASSERT_GT(result.atlas_width, 0);
+      ASSERT_GT(result.atlas_height, 0);
+      if (smoothing == 0 && num_threads == 1) {
+        reference = std::move(result);
+      } else {
+        EXPECT_EQ(result.face_uvs, reference.face_uvs);
+        EXPECT_EQ(result.atlas_width, reference.atlas_width);
+        EXPECT_EQ(result.atlas_height, reference.atlas_height);
+        EXPECT_EQ(result.texture_atlas.RowMajorData(),
+                  reference.texture_atlas.RowMajorData());
+      }
+    }
+  }
+}
+
 TEST(MeshTextureMapping, FaceBehindCamera) {
   PlyMesh mesh;
   mesh.vertices = {
