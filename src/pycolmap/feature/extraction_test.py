@@ -136,4 +136,6 @@ def test_feature_extractor_array_paths_match_bitmap() -> None:
             pycolmap.keypoints_to_matrix(keypoints), reference
         )
         assert descriptors.type == reference_descriptors.type
-        np.testing.assert_array_equal(descriptors.data, reference_descriptors.data)
+        np.testing.assert_array_equal(
+            descriptors.data, reference_descriptors.data
+        )

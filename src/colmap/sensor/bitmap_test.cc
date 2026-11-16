@@ -1459,8 +1459,34 @@ TEST(Bitmap, ReadUnsupportedChannels) {
   const std::vector<uint8_t> data(kWidth * kHeight * kChannels, 128);
   WriteImageOIIO(kWidth, kHeight, kChannels, filename, data.data());
 
+  const auto input = OIIO::ImageInput::open(filename.string());
+  ASSERT_NE(input, nullptr);
+  ASSERT_EQ(input->spec().nchannels, kChannels);
+  ASSERT_TRUE(input->close());
+
   Bitmap bitmap;
   EXPECT_FALSE(bitmap.Read(filename));
+  EXPECT_EQ(bitmap.Width(), 0);
+  EXPECT_EQ(bitmap.Height(), 0);
+  EXPECT_EQ(bitmap.Channels(), 0);
+  EXPECT_TRUE(bitmap.RowMajorData().empty());
+
+  for (const bool source_as_rgb : {false, true}) {
+    for (const bool read_as_rgb : {false, true}) {
+      Bitmap source(3, 1, source_as_rgb, /*linear_colorspace=*/true);
+      source.Fill(BitmapColor<uint8_t>(17, 34, 51));
+      source.SetMetaData("TestSentinel", "preserved");
+      const auto pixels = source.RowMajorData();
+      const auto colorspace = source.GetMetaData("oiio:ColorSpace");
+      EXPECT_FALSE(source.Read(filename, read_as_rgb));
+      EXPECT_EQ(source.Width(), 3);
+      EXPECT_EQ(source.Height(), 1);
+      EXPECT_EQ(source.Channels(), source_as_rgb ? 3 : 1);
+      EXPECT_EQ(source.RowMajorData(), pixels);
+      EXPECT_EQ(source.GetMetaData("TestSentinel"), "preserved");
+      EXPECT_EQ(source.GetMetaData("oiio:ColorSpace"), colorspace);
+    }
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(
