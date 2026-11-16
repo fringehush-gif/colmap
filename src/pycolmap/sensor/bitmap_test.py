@@ -286,10 +286,11 @@ def test_bitmap_thumbnail_noop() -> None:
     ],
 )
 def test_bitmap_from_array_rejects_dimensions_before_narrowing(shape, strides):
-    if np.dtype(np.intp).itemsize <= 4:
-        pytest.skip("requires NumPy dimensions wider than a C++ int")
-    # Metadata-only view: validation must reject before accessing its pixels.
-    # Each oversized axis would otherwise narrow to one on a 32-bit int.
+    if np.dtype(np.intc).itemsize != 4 or np.dtype(np.intp).itemsize <= 4:
+        pytest.skip("requires 32-bit C++ int and wider NumPy dimensions")
+    # Neither implementation traverses the advertised extent of this view:
+    # the fixed binding rejects its shape, while the old 32-bit narrowing
+    # produces a one-byte bitmap. Do not iterate over or copy the view itself.
     backing = np.zeros(1, dtype=np.uint8)
     view = np.lib.stride_tricks.as_strided(
         backing, shape=shape, strides=strides, writeable=False
@@ -297,3 +298,15 @@ def test_bitmap_from_array_rejects_dimensions_before_narrowing(shape, strides):
     assert view.flags.c_contiguous
     with pytest.raises(RuntimeError):
         pycolmap.Bitmap.from_array(view)
+
+
+@pytest.mark.parametrize("width,height", [(0, 0), (0, 4), (4, 0)])
+@pytest.mark.parametrize("as_rgb", [False, True])
+def test_bitmap_to_array_empty_dimensions(width, height, as_rgb):
+    bitmap = pycolmap.Bitmap(width=width, height=height, as_rgb=as_rgb)
+    array = bitmap.to_array()
+    expected_shape = (height, width, 3) if as_rgb else (height, width)
+    assert array.shape == expected_shape
+    assert array.dtype == np.uint8
+    assert array.size == 0
+    assert array.flags.c_contiguous

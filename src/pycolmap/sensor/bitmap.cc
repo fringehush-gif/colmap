@@ -10,19 +10,14 @@
 #include <pybind11/eigen.h>
 #include <pybind11/pybind11.h>
 
-using namespace colmap;
-using namespace pybind11::literals;
+using colmap::Bitmap;
+using pybind11::literals::operator""_a;
 namespace py = pybind11;
 
-#ifdef _MSC_VER  // If compiling with MSVC
-#include <stddef.h>
-typedef ptrdiff_t ssize_t;
-#endif
-
 py::array_t<uint8_t> ArrayFromBitmap(const Bitmap& self) {
-  std::vector<ssize_t> shape = {static_cast<ssize_t>(self.Height()),
-                                static_cast<ssize_t>(self.Width())};
-  const auto channels = static_cast<ssize_t>(self.Channels());
+  std::vector<py::ssize_t> shape = {static_cast<py::ssize_t>(self.Height()),
+                                    static_cast<py::ssize_t>(self.Width())};
+  const auto channels = static_cast<py::ssize_t>(self.Channels());
   if (channels != 1) {
     if (channels != 3) {
       throw std::runtime_error(
@@ -32,9 +27,10 @@ py::array_t<uint8_t> ArrayFromBitmap(const Bitmap& self) {
     shape.push_back(channels);
   }
   py::array_t<uint8_t> output(shape);
-  py::buffer_info output_into = output.request();
-  uint8_t* output_row_ptr = reinterpret_cast<uint8_t*>(output.request().ptr);
-  std::memcpy(output_row_ptr, self.RowMajorData().data(), self.NumBytes());
+  if (!self.IsEmpty()) {
+    std::memcpy(
+        output.mutable_data(), self.RowMajorData().data(), self.NumBytes());
+  }
   return output;
 }
 
