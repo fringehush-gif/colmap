@@ -1,8 +1,17 @@
 name: PyCOLMAP
 
 concurrency:
-  # Adding any label other than "full-ci" must not cancel an in-progress run.
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'full-ci' && format('-{0}', github.run_id) || '' }}
+  # Events that skip builds must not cancel an explicit run on the same PR/ref.
+  group: >-
+    ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{
+      ((github.event.action == 'labeled' && (
+        github.event.label.name != 'full-ci' &&
+        (github.repository == 'colmap/colmap' ||
+         github.event.label.name != 'run-ci' ||
+         contains(github.event.pull_request.labels.*.name, 'full-ci')))) ||
+       (github.repository != 'colmap/colmap' &&
+        (github.event_name == 'push' || github.event_name == 'release'))) &&
+      format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 on:
@@ -17,11 +26,23 @@ on:
     types: [ published, edited ]
 
 jobs:
-  # The Linux wheel always builds, as the docs job depends on it. The remaining
-  # wheels are built by the build-gated job, which reuses this job's name, env,
-  # and steps through YAML anchors.
+  # The Linux wheel builds in the normal suite, as the docs job depends on it.
+  # The remaining wheels are built by the build-gated job, which reuses this
+  # job's name, env, and steps through YAML anchors.
   build:
     name: &build-name ${{ matrix.config.os }} ${{ matrix.config.arch }} ${{ matrix.config.cudaEnabled && 'CUDA' || '' }}
+    # Fork builds are opt-in; use run-ci for the normal suite or full-ci for all jobs.
+    if: >-
+      github.repository == 'colmap/colmap' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.repository != 'colmap/colmap' &&
+       github.event_name == 'pull_request' &&
+       (contains(github.event.pull_request.labels.*.name, 'run-ci') ||
+        contains(github.event.pull_request.labels.*.name, 'full-ci')) &&
+       (github.event.action != 'labeled' ||
+        github.event.label.name == 'full-ci' ||
+        (github.event.label.name == 'run-ci' &&
+         !contains(github.event.pull_request.labels.*.name, 'full-ci'))))
     runs-on: ${{ matrix.config.os }}
     permissions:
       contents: read
@@ -295,11 +316,12 @@ jobs:
 
   build-gated:
     name: *build-name
-    # Pull requests only run this job once a maintainer adds the "full-ci"
-    # label. Until then, its required status checks remain pending.
+    # Pull requests require full-ci; fork push/release events do not start builds.
     if: >-
-      github.event_name != 'pull_request' ||
-      (contains(github.event.pull_request.labels.*.name, 'full-ci') &&
+      github.event_name == 'workflow_dispatch' ||
+      (github.repository == 'colmap/colmap' && github.event_name != 'pull_request') ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'full-ci') &&
        (github.event.action != 'labeled' || github.event.label.name == 'full-ci'))
     runs-on: ${{ matrix.config.os }}
     permissions:

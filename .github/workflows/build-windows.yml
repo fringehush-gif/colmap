@@ -1,8 +1,14 @@
 name: COLMAP (Windows)
 
 concurrency:
-  # Adding any label other than "full-ci" must not cancel an in-progress run.
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'full-ci' && format('-{0}', github.run_id) || '' }}
+  # Events that skip builds must not cancel an explicit run on the same PR/ref.
+  group: >-
+    ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{
+      ((github.event.action == 'labeled' && (
+        github.event.label.name != 'full-ci')) ||
+       (github.repository != 'colmap/colmap' &&
+        (github.event_name == 'push' || github.event_name == 'release'))) &&
+      format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 on:
@@ -19,11 +25,12 @@ on:
 jobs:
   build:
     name: ${{ matrix.config.os }} ${{ matrix.config.cmakeBuildType }} ${{ matrix.config.cudaEnabled && 'CUDA' || '' }}
-    # Pull requests only run this job once a maintainer adds the "full-ci"
-    # label. Until then, its required status checks remain pending.
+    # Pull requests require full-ci; fork push/release events do not start builds.
     if: >-
-      github.event_name != 'pull_request' ||
-      (contains(github.event.pull_request.labels.*.name, 'full-ci') &&
+      github.event_name == 'workflow_dispatch' ||
+      (github.repository == 'colmap/colmap' && github.event_name != 'pull_request') ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'full-ci') &&
        (github.event.action != 'labeled' || github.event.label.name == 'full-ci'))
     runs-on: ${{ matrix.config.os }}
     permissions:
