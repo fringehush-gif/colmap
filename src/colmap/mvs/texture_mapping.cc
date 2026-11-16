@@ -203,7 +203,6 @@ struct OcclusionTester {
       triangle_to_face.push_back(i);
     }
     tree.rebuild(triangles.begin(), triangles.end());
-    tree.accelerate_distance_queries();
   }
 
   bool IsOccluded(const Eigen::Vector3f& camera_center,
