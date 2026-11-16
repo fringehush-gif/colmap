@@ -1,16 +1,27 @@
 name: COLMAP (Mac)
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Events that skip builds must not cancel an explicit run on the same PR/ref.
+  group: >-
+    ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{
+      ((github.event.action == 'labeled' && (
+        github.repository == 'colmap/colmap' ||
+        (github.event.label.name != 'full-ci' &&
+         (github.event.label.name != 'run-ci' ||
+          contains(github.event.pull_request.labels.*.name, 'full-ci'))))) ||
+       (github.repository != 'colmap/colmap' &&
+        (github.event_name == 'push' || github.event_name == 'release'))) &&
+      format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
       - release/*
   pull_request:
-    types: [ opened, synchronize, reopened ]
+    types: [ opened, synchronize, reopened, labeled ]
   release:
     types: [ published, edited ]
 
@@ -20,6 +31,18 @@ env:
 jobs:
   build:
     name: ${{ matrix.config.os }} ${{ matrix.config.arch }} ${{ matrix.config.cmakeBuildType }}
+    # Fork builds are opt-in; use run-ci for the normal suite or full-ci for all jobs.
+    if: >-
+      (github.repository == 'colmap/colmap' && github.event.action != 'labeled') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.repository != 'colmap/colmap' &&
+       github.event_name == 'pull_request' &&
+       (contains(github.event.pull_request.labels.*.name, 'run-ci') ||
+        contains(github.event.pull_request.labels.*.name, 'full-ci')) &&
+       (github.event.action != 'labeled' ||
+        github.event.label.name == 'full-ci' ||
+        (github.event.label.name == 'run-ci' &&
+         !contains(github.event.pull_request.labels.*.name, 'full-ci'))))
     runs-on: ${{ matrix.config.os }}
     permissions:
       contents: read

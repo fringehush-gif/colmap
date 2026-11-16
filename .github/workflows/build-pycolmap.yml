@@ -1,8 +1,17 @@
 name: PyCOLMAP
 
 concurrency:
-  # Adding any label other than "full-ci" must not cancel an in-progress run.
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'full-ci' && format('-{0}', github.run_id) || '' }}
+  # Events that skip builds must not cancel an explicit run on the same PR/ref.
+  group: >-
+    ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{
+      ((github.event.action == 'labeled' && (
+        github.event.label.name != 'full-ci' &&
+        (github.repository == 'colmap/colmap' ||
+         github.event.label.name != 'run-ci' ||
+         contains(github.event.pull_request.labels.*.name, 'full-ci')))) ||
+       (github.repository != 'colmap/colmap' &&
+        (github.event_name == 'push' || github.event_name == 'release'))) &&
+      format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 on:
@@ -17,11 +26,23 @@ on:
     types: [ published, edited ]
 
 jobs:
-  # The Linux wheel always builds, as the docs job depends on it. The remaining
-  # wheels are built by the build-gated job, which reuses this job's name, env,
-  # and steps through YAML anchors.
+  # The Linux wheel builds in the normal suite, as the docs job depends on it.
+  # The remaining wheels are built by the build-gated job, which reuses this
+  # job's name, env, and steps through YAML anchors.
   build:
     name: &build-name ${{ matrix.config.os }} ${{ matrix.config.arch }} ${{ matrix.config.cudaEnabled && 'CUDA' || '' }}
+    # Fork builds are opt-in; use run-ci for the normal suite or full-ci for all jobs.
+    if: >-
+      github.repository == 'colmap/colmap' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.repository != 'colmap/colmap' &&
+       github.event_name == 'pull_request' &&
+       (contains(github.event.pull_request.labels.*.name, 'run-ci') ||
+        contains(github.event.pull_request.labels.*.name, 'full-ci')) &&
+       (github.event.action != 'labeled' ||
+        github.event.label.name == 'full-ci' ||
+        (github.event.label.name == 'run-ci' &&
+         !contains(github.event.pull_request.labels.*.name, 'full-ci'))))
     runs-on: ${{ matrix.config.os }}
     permissions:
       contents: read
@@ -29,7 +50,7 @@ jobs:
     strategy:
       matrix:
         config: [
-          {os: ubuntu-24.04, cudaEnabled: false, ccacheMaxSize: 800M},
+          {os: ubuntu-24.04, arch: "", deploymentTarget: "", cudaEnabled: false, ccacheMaxSize: 800M},
         ]
     env: &build-env
       COMPILER_CACHE_DIR: ${{ github.workspace }}/compiler-cache
@@ -112,8 +133,11 @@ jobs:
           echo "FETCHCONTENT_BASE_DIR=${FETCHCONTENT_CACHE_DIR}" >> "$GITHUB_ENV"
 
           # vcpkg binary caching
-          # !!!PLEASE!!! be nice and don't use this cache for your own purposes. This is only meant for CI purposes in this repository.
-          VCPKG_BINARY_SOURCES="clear;x-azblob,https://colmap.blob.core.windows.net/github-actions-cache,sp=r&st=2024-12-10T17:29:32Z&se=2030-12-31T01:29:32Z&spr=https&sv=2022-11-02&sr=c&sig=bWydkilTMjRn3LHKTxLgdWrFpV4h%2Finzoe9QCOcPpYQ%3D,read"
+          # The upstream cache is reserved for CI in colmap/colmap.
+          VCPKG_BINARY_SOURCES="clear"
+          if [ "$GITHUB_REPOSITORY" = "colmap/colmap" ]; then
+            VCPKG_BINARY_SOURCES="clear;x-azblob,https://colmap.blob.core.windows.net/github-actions-cache,sp=r&st=2024-12-10T17:29:32Z&se=2030-12-31T01:29:32Z&spr=https&sv=2022-11-02&sr=c&sig=bWydkilTMjRn3LHKTxLgdWrFpV4h%2Finzoe9QCOcPpYQ%3D,read"
+          fi
           if [ -n "${{ secrets.VCPKG_BINARY_CACHE_AZBLOB_URL }}" ]; then
             # The secrets are only accessible in runs triggered from within the target repository and not forks.
             VCPKG_BINARY_SOURCES="${VCPKG_BINARY_SOURCES};x-azblob,${{ secrets.VCPKG_BINARY_CACHE_AZBLOB_URL }},${{ secrets.VCPKG_BINARY_CACHE_AZBLOB_SAS }},write"
@@ -169,8 +193,11 @@ jobs:
           echo "FETCHCONTENT_BASE_DIR=${FETCHCONTENT_BASE_DIR}" >> "${env:GITHUB_ENV}"
 
           # vcpkg binary caching
-          # !!!PLEASE!!! be nice and don't use this cache for your own purposes. This is only meant for CI purposes in this repository.
-          $VCPKG_BINARY_SOURCES = "clear;x-azblob,https://colmap.blob.core.windows.net/github-actions-cache,sp=r&st=2024-12-10T17:29:32Z&se=2030-12-31T01:29:32Z&spr=https&sv=2022-11-02&sr=c&sig=bWydkilTMjRn3LHKTxLgdWrFpV4h%2Finzoe9QCOcPpYQ%3D,read"
+          # The upstream cache is reserved for CI in colmap/colmap.
+          $VCPKG_BINARY_SOURCES = "clear"
+          if ($env:GITHUB_REPOSITORY -eq "colmap/colmap") {
+            $VCPKG_BINARY_SOURCES = "clear;x-azblob,https://colmap.blob.core.windows.net/github-actions-cache,sp=r&st=2024-12-10T17:29:32Z&se=2030-12-31T01:29:32Z&spr=https&sv=2022-11-02&sr=c&sig=bWydkilTMjRn3LHKTxLgdWrFpV4h%2Finzoe9QCOcPpYQ%3D,read"
+          }
           if ("${{ secrets.VCPKG_BINARY_CACHE_AZBLOB_URL }}") {
             # The secrets are only accessible in runs triggered from within the target repository and not forks.
             $VCPKG_BINARY_SOURCES += ";x-azblob,${{ secrets.VCPKG_BINARY_CACHE_AZBLOB_URL }},${{ secrets.VCPKG_BINARY_CACHE_AZBLOB_SAS }},write"
@@ -207,8 +234,11 @@ jobs:
           echo "FETCHCONTENT_BASE_DIR=${CONTAINER_FETCHCONTENT_CACHE_DIR}" >> "$GITHUB_ENV"
 
           # vcpkg binary caching
-          # !!!PLEASE!!! be nice and don't use this cache for your own purposes. This is only meant for CI purposes in this repository.
-          VCPKG_BINARY_SOURCES="clear;x-azblob,https://colmap.blob.core.windows.net/github-actions-cache,sp=r&st=2024-12-10T17:29:32Z&se=2030-12-31T01:29:32Z&spr=https&sv=2022-11-02&sr=c&sig=bWydkilTMjRn3LHKTxLgdWrFpV4h%2Finzoe9QCOcPpYQ%3D,read"
+          # The upstream cache is reserved for CI in colmap/colmap.
+          VCPKG_BINARY_SOURCES="clear"
+          if [ "$GITHUB_REPOSITORY" = "colmap/colmap" ]; then
+            VCPKG_BINARY_SOURCES="clear;x-azblob,https://colmap.blob.core.windows.net/github-actions-cache,sp=r&st=2024-12-10T17:29:32Z&se=2030-12-31T01:29:32Z&spr=https&sv=2022-11-02&sr=c&sig=bWydkilTMjRn3LHKTxLgdWrFpV4h%2Finzoe9QCOcPpYQ%3D,read"
+          fi
           if [ -n "${{ secrets.VCPKG_BINARY_CACHE_AZBLOB_URL }}" ]; then
             # The secrets are only accessible in runs triggered from within the target repository and not forks.
             VCPKG_BINARY_SOURCES="${VCPKG_BINARY_SOURCES};x-azblob,${{ secrets.VCPKG_BINARY_CACHE_AZBLOB_URL }},${{ secrets.VCPKG_BINARY_CACHE_AZBLOB_SAS }},write"
@@ -286,11 +316,12 @@ jobs:
 
   build-gated:
     name: *build-name
-    # Pull requests only run this job once a maintainer adds the "full-ci"
-    # label. Until then, its required status checks remain pending.
+    # Pull requests require full-ci; fork push/release events do not start builds.
     if: >-
-      github.event_name != 'pull_request' ||
-      (contains(github.event.pull_request.labels.*.name, 'full-ci') &&
+      github.event_name == 'workflow_dispatch' ||
+      (github.repository == 'colmap/colmap' && github.event_name != 'pull_request') ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'full-ci') &&
        (github.event.action != 'labeled' || github.event.label.name == 'full-ci'))
     runs-on: ${{ matrix.config.os }}
     permissions:
@@ -318,7 +349,9 @@ jobs:
       id-token: write
     # We publish the wheel to pypi when a new tag is pushed,
     # either by creating a new GitHub release or explicitly with `git tag`
-    if: ${{ github.event_name == 'release' || startsWith(github.ref, 'refs/tags') }}
+    if: >-
+      github.repository == 'colmap/colmap' &&
+      (github.event_name == 'release' || startsWith(github.ref, 'refs/tags'))
     steps:
       - name: Download wheels
         uses: actions/download-artifact@v8
@@ -336,6 +369,9 @@ jobs:
     name: Build and deploy documentation
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v7   # conf.py's get_git_revision() needs a git checkout
 
@@ -395,6 +431,7 @@ jobs:
 
       - name: Deploy to colmap.github.io
         if: >-
+          github.repository == 'colmap/colmap' &&
           github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
           steps.filter.outputs.docs == 'true'
