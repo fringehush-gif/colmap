@@ -433,6 +433,42 @@ TEST(MeshTextureMapping, CubeAdjacency) {
   EXPECT_GT(assigned, 0);
 }
 
+TEST(MeshTextureMapping, SharedEdgeIncidence) {
+  const std::vector<Image> images = {
+      MakeTestImage(64, 64, BitmapColor<uint8_t>(128))};
+  MeshTextureMappingOptions options;
+  options.apply_color_correction = false;
+  options.view_selection_smoothing_iterations = 0;
+  options.inpaint_radius = 0;
+  options.num_threads = 1;
+
+  for (const bool duplicate_face : {false, true}) {
+    for (const size_t num_faces : {2, 3, 4, 258}) {
+      SCOPED_TRACE(duplicate_face);
+      SCOPED_TRACE(num_faces);
+      PlyMesh mesh = MakeTriangleMesh();
+      if (duplicate_face) mesh.faces[1] = mesh.faces[0];
+      mesh.faces.resize(num_faces, mesh.faces[0]);
+      const auto result = MeshTextureMapping(mesh, images, options);
+      ASSERT_EQ(result.face_view_ids, std::vector<int>(num_faces, 0));
+      ASSERT_EQ(result.face_uvs.size(), num_faces * 6);
+      // Shared vertices have the same UV only when the faces share a region.
+      const bool same_uv = result.face_uvs[0] == result.face_uvs[6] &&
+                           result.face_uvs[1] == result.face_uvs[7];
+      EXPECT_EQ(same_uv, num_faces == 2);
+    }
+  }
+
+  // Count edge occurrences, including repeated edges within a degenerate face.
+  PlyMesh mesh = MakeTriangleMesh();
+  mesh.faces.emplace_back(0, 2, 2);
+  const auto result = MeshTextureMapping(mesh, images, options);
+  ASSERT_EQ(result.face_view_ids, (std::vector<int>{0, 0, -1}));
+  ASSERT_EQ(result.face_uvs.size(), 18);
+  EXPECT_TRUE(result.face_uvs[0] != result.face_uvs[6] ||
+              result.face_uvs[1] != result.face_uvs[7]);
+}
+
 TEST(MeshTextureMapping, UVRange) {
   const PlyMesh mesh = MakeTriangleMesh();
   std::vector<Image> images;

@@ -130,23 +130,34 @@ std::vector<Eigen::Vector3f> ComputeFaceNormals(const PlyMesh& mesh) {
 }
 
 FaceAdjacencyMap BuildFaceAdjacency(const PlyMesh& mesh) {
+  struct EdgeFaces {
+    std::array<size_t, 2> face_ids;
+    int num_faces = 0;
+  };
+
   const size_t num_faces = mesh.faces.size();
-  NodeHashMap<uint64_t, std::vector<size_t>> edge_to_faces;
+  FlatHashMap<uint64_t, EdgeFaces> edge_to_faces;
   edge_to_faces.reserve(num_faces * 3);
 
   for (size_t fi = 0; fi < num_faces; ++fi) {
     const std::array<size_t, 3> idx = GetFaceIndices(mesh.faces[fi]);
     for (int e = 0; e < 3; ++e) {
       const uint64_t key = EdgeKey(idx[e], idx[(e + 1) % 3]);
-      edge_to_faces[key].push_back(fi);
+      EdgeFaces& faces = edge_to_faces[key];
+      if (faces.num_faces < 2) {
+        faces.face_ids[faces.num_faces++] = fi;
+      } else {
+        // Edges with more than two occurrences do not connect any faces.
+        faces.num_faces = 3;
+      }
     }
   }
 
   FaceAdjacencyMap adjacency(num_faces);
-  for (const auto& [edge_key, face_list] : edge_to_faces) {
-    if (face_list.size() == 2) {
-      adjacency[face_list[0]].push_back(face_list[1]);
-      adjacency[face_list[1]].push_back(face_list[0]);
+  for (const auto& [edge_key, faces] : edge_to_faces) {
+    if (faces.num_faces == 2) {
+      adjacency[faces.face_ids[0]].push_back(faces.face_ids[1]);
+      adjacency[faces.face_ids[1]].push_back(faces.face_ids[0]);
     }
   }
 
