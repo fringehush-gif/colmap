@@ -121,3 +121,6 @@ COLMAP_ADD_TEST(
     SRCS imopv_test.cc
     LINK_LIBS colmap_vlfeat
 )
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    target_link_options(colmap_vlfeat_imopv_test PRIVATE -coverage)
+endif()
