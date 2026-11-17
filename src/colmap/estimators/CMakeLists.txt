@@ -8,6 +8,7 @@ add_subdirectory(solvers)
 set(ESTIMATORS_SRCS
     alignment.h alignment.cc
     bundle_adjustment.h bundle_adjustment.cc
+    bundle_adjustment_internal.h
     bundle_adjustment_caspar.h bundle_adjustment_caspar.cc
     bundle_adjustment_ceres.h bundle_adjustment_ceres.cc
     ceres_loss_function.h ceres_loss_function.cc

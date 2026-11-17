@@ -737,6 +737,211 @@ TEST(DefaultBundleAdjuster, ConstantExtraParam) {
   }
 }
 
+TEST(DefaultBundleAdjuster, ThreePointGaugeIsIndependentOfPlaneOffset) {
+  for (const double scale : {1e-6, 1.0, 1e6}) {
+    for (const double offset : {0.0, 4.0}) {
+      for (const int num_constant : {0, 1, 2, 3, 4}) {
+        SCOPED_TRACE(scale);
+        SCOPED_TRACE(offset);
+        SCOPED_TRACE(num_constant);
+        Reconstruction reconstruction;
+        SyntheticDatasetOptions options;
+        options.num_rigs = 2;
+        options.num_cameras_per_rig = 1;
+        options.num_frames_per_rig = 1;
+        options.num_points3D = 4;
+        SynthesizeDataset(options, &reconstruction);
+        reconstruction.Point3D(1).xyz = scale * Eigen::Vector3d(0, 0, offset);
+        reconstruction.Point3D(2).xyz = scale * Eigen::Vector3d(1, 0, offset);
+        reconstruction.Point3D(3).xyz = scale * Eigen::Vector3d(0, 1, offset);
+        reconstruction.Point3D(4).xyz = scale * Eigen::Vector3d(1, 1, offset);
+
+        // Inspect construction only: the synthetic tracks provide the parameter
+        // blocks, while the coordinates deliberately exercise the gauge
+        // selector.
+        BundleAdjustmentConfig config;
+        config.AddImage(1);
+        config.AddImage(2);
+        config.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
+        for (int id = 1; id <= num_constant; ++id) {
+          config.AddConstantPoint(id);
+        }
+        auto adjuster = CreateDefaultCeresBundleAdjuster(
+            BundleAdjustmentOptions(), config, reconstruction);
+        const auto& problem = GetCeresProblem(*adjuster);
+        EXPECT_EQ(problem.NumResiduals(), 16);
+        int num_fixed = 0;
+        for (const point3D_t id : {1, 2, 3, 4}) {
+          const Point3D& point = reconstruction.Point3D(id);
+          ASSERT_EQ(point.track.Length(), 2);
+          ASSERT_TRUE(problem.HasParameterBlock(point.xyz.data()));
+          const bool is_fixed =
+              problem.IsParameterBlockConstant(point.xyz.data());
+          num_fixed += is_fixed;
+          if (id <= static_cast<point3D_t>(num_constant)) {
+            EXPECT_TRUE(is_fixed);
+          }
+        }
+        // Any three corners are non-collinear. Do not depend on hash-map order,
+        // and preserve extra constants explicitly requested by the caller.
+        EXPECT_EQ(num_fixed, std::max(3, num_constant));
+      }
+    }
+  }
+}
+
+TEST(DefaultBundleAdjuster, ThreePointGaugeRejectsDegenerateAnchors) {
+  for (const double offset : {0.0, 4.0}) {
+    for (const bool collinear : {false, true}) {
+      SCOPED_TRACE(offset);
+      SCOPED_TRACE(collinear);
+      Reconstruction reconstruction;
+      SyntheticDatasetOptions options;
+      options.num_rigs = 2;
+      options.num_cameras_per_rig = 1;
+      options.num_frames_per_rig = 1;
+      options.num_points3D = 4;
+      SynthesizeDataset(options, &reconstruction);
+      for (const point3D_t id : {1, 2, 3, 4}) {
+        reconstruction.Point3D(id).xyz =
+            Eigen::Vector3d(collinear ? id - 1 : 0, 0, offset);
+      }
+
+      BundleAdjustmentConfig config;
+      config.AddImage(1);
+      config.AddImage(2);
+      config.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
+      auto adjuster = CreateDefaultCeresBundleAdjuster(
+          BundleAdjustmentOptions(), config, reconstruction);
+      const auto& problem = GetCeresProblem(*adjuster);
+      EXPECT_EQ(problem.NumResiduals(), 16);
+      int num_fixed = 0;
+      for (const point3D_t id : {1, 2, 3, 4}) {
+        const Point3D& point = reconstruction.Point3D(id);
+        ASSERT_EQ(point.track.Length(), 2);
+        ASSERT_TRUE(problem.HasParameterBlock(point.xyz.data()));
+        num_fixed += problem.IsParameterBlockConstant(point.xyz.data());
+      }
+      EXPECT_EQ(num_fixed, collinear ? 2 : 1);
+    }
+  }
+}
+
+TEST(DefaultBundleAdjuster, ThreePointGaugeSolvesPlaneThroughWorldOrigin) {
+  for (const double offset : {0.0, 4.0}) {
+    SCOPED_TRACE(offset);
+    Reconstruction reconstruction;
+    SyntheticDatasetOptions synthetic_options;
+    synthetic_options.num_rigs = 1;
+    synthetic_options.num_cameras_per_rig = 1;
+    synthetic_options.num_frames_per_rig = 3;
+    synthetic_options.num_points3D = 9;
+    SynthesizeDataset(synthetic_options, &reconstruction);
+
+    for (point3D_t id = 1; id <= 9; ++id) {
+      reconstruction.Point3D(id).xyz =
+          Eigen::Vector3d(0.2 * (static_cast<int>((id - 1) % 3) - 1),
+                          0.2 * (static_cast<int>((id - 1) / 3) - 1),
+                          0);
+    }
+    // Recompute observations so the planar scene is a consistent BA problem.
+    for (const image_t image_id : reconstruction.RegImageIds()) {
+      Image& image = reconstruction.Image(image_id);
+      for (Point2D& point2D : image.Points2D()) {
+        if (!point2D.HasPoint3D()) continue;
+        const auto xy = image.CameraPtr()->ImgFromCam(
+            image.CamFromWorld() *
+            reconstruction.Point3D(point2D.point3D_id).xyz);
+        ASSERT_TRUE(xy.has_value());
+        point2D.xy = *xy;
+      }
+    }
+    reconstruction.Transform(Sim3d(1,
+                                   Eigen::Quaterniond::Identity(),
+                                   Eigen::Vector3d(offset, -offset, offset)));
+    const Reconstruction ground_truth = reconstruction;
+    BundleAdjustmentConfig config;
+    for (const image_t image_id : reconstruction.RegImageIds()) {
+      Image& image = reconstruction.Image(image_id);
+      image.FramePtr()->RigFromWorld().translation() +=
+          Eigen::Vector3d(0.02 * image_id, -0.01, 0.015);
+      config.AddImage(image_id);
+      config.SetConstantCamIntrinsics(image.CameraId());
+    }
+    config.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
+    BundleAdjustmentOptions options;
+    options.ceres->solver_options.gradient_tolerance = 1e-12;
+    auto adjuster =
+        CreateDefaultBundleAdjuster(options, config, reconstruction);
+    const auto& problem = GetCeresProblem(*adjuster);
+    EXPECT_EQ(problem.NumResiduals(), 54);
+    std::vector<point3D_t> fixed_points;
+    fixed_points.reserve(3);
+    for (const auto& [id, point3D] : reconstruction.Points3D()) {
+      if (problem.IsParameterBlockConstant(point3D.xyz.data())) {
+        fixed_points.push_back(id);
+      }
+    }
+    EXPECT_EQ(fixed_points.size(), 3);
+
+    const auto summary = adjuster->Solve();
+    ASSERT_TRUE(summary->IsSolutionUsable());
+    EXPECT_GT(GetCeresSummary(summary.get()).initial_cost, 0.1);
+    EXPECT_GT(GetCeresSummary(summary.get()).num_successful_steps, 0);
+    EXPECT_LT(GetCeresSummary(summary.get()).final_cost, 1e-10);
+    for (const auto& [id, point3D] : reconstruction.Points3D()) {
+      EXPECT_LT((point3D.xyz - ground_truth.Point3D(id).xyz).norm(), 1e-6);
+    }
+    for (const point3D_t id : fixed_points) {
+      EXPECT_EQ(reconstruction.Point3D(id).xyz, ground_truth.Point3D(id).xyz);
+    }
+    for (const image_t id : reconstruction.RegImageIds()) {
+      EXPECT_THAT(
+          reconstruction.Image(id).CamFromWorld(),
+          Rigid3dNear(ground_truth.Image(id).CamFromWorld(), 1e-6, 1e-6));
+    }
+  }
+}
+
+TEST(DefaultBundleAdjuster, TwoCameraGaugeFallsBackToAffinePointAnchors) {
+  Reconstruction reconstruction;
+  SyntheticDatasetOptions synthetic_options;
+  synthetic_options.num_rigs = 1;
+  synthetic_options.num_cameras_per_rig = 2;
+  synthetic_options.num_frames_per_rig = 1;
+  synthetic_options.num_points3D = 4;
+  SynthesizeDataset(synthetic_options, &reconstruction);
+  for (point3D_t id = 1; id <= 4; ++id) {
+    const point3D_t row = (id - 1) / 2;
+    reconstruction.Point3D(id).xyz = Eigen::Vector3d((id - 1) % 2, row, 0);
+  }
+  BundleAdjustmentConfig config;
+  config.AddImage(1);
+  config.AddImage(2);
+  config.FixGauge(BundleAdjustmentGauge::TWO_CAMS_FROM_WORLD);
+  BundleAdjustmentOptions options;
+  options.refine_sensor_from_rig = false;
+  auto adjuster =
+      CreateDefaultCeresBundleAdjuster(options, config, reconstruction);
+  const auto& problem = GetCeresProblem(*adjuster);
+  EXPECT_EQ(problem.NumResiduals(), 16);
+  for (const image_t image_id : config.Images()) {
+    const Camera& camera = *reconstruction.Image(image_id).CameraPtr();
+    ASSERT_TRUE(problem.HasParameterBlock(camera.params.data()));
+    std::vector<ceres::ResidualBlockId> residuals;
+    problem.GetResidualBlocksForParameterBlock(camera.params.data(),
+                                               &residuals);
+    EXPECT_EQ(residuals.size(), 4);
+  }
+  EXPECT_FALSE(problem.IsParameterBlockConstant(
+      reconstruction.Frame(1).RigFromWorld().params.data()));
+  int num_fixed = 0;
+  for (const auto& [id, point3D] : reconstruction.Points3D()) {
+    num_fixed += problem.IsParameterBlockConstant(point3D.xyz.data());
+  }
+  EXPECT_EQ(num_fixed, 3);
+}
+
 TEST(DefaultBundleAdjuster, FixGaugeWithThreePoints) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions synthetic_dataset_options;
