@@ -46,6 +46,8 @@ TEST(SparseMatrixMoveTest, ConstructByMoveAndReuseSource) {
   Fill(source);
   Matrix destination(std::move(source));
   ExpectFilled(destination, 16);
+  // Exercise the moved-from container's reuse contract.
+  // NOLINTNEXTLINE(bugprone-use-after-move)
   source.resize(8);
   Fill(source);
   ExpectFilled(source, 8);
@@ -74,6 +76,8 @@ TEST(SparseMatrixMoveTest, AssignLargerMatrixAndReuseSource) {
   Fill(source);
   destination = std::move(source);
   ExpectFilled(destination, 64);
+  // Exercise the moved-from container's reuse contract.
+  // NOLINTNEXTLINE(bugprone-use-after-move)
   source.resize(32);
   Fill(source);
   ExpectFilled(source, 32);
@@ -85,6 +89,8 @@ TEST(SparseMatrixMoveTest, MoveIntoEmptyMatrixAndReuseSource) {
   Fill(source);
   destination = std::move(source);
   ExpectFilled(destination, 32);
+  // Exercise the moved-from container's reuse contract.
+  // NOLINTNEXTLINE(bugprone-use-after-move)
   source.resize(12);
   Fill(source);
   ExpectFilled(source, 12);
@@ -186,10 +192,14 @@ TEST(SparseMatrixCopyTest, EmptyCopiesAndCopyAfterMove) {
   ConvertedMatrix converted(moved);
   ExpectCopyFixture(copy);
   ExpectCopyFixture(converted);
+  // Exercise the moved-from container's reuse contract.
+  // NOLINTNEXTLINE(bugprone-use-after-move)
   source.resize(4);
   FillCopyFixture(source);
   ExpectCopyFixture(source);
   const Matrix empty;
+  // Exercise the copy constructor for an empty container.
+  // NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
   const Matrix empty_copy(empty);
   const ConvertedMatrix empty_converted(empty);
   EXPECT_EQ(empty_copy.rows(), 0);
