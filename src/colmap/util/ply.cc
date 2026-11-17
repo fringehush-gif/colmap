@@ -375,6 +375,7 @@ void WriteTextPlyPoints(const std::filesystem::path& path,
   }
 
   file.close();
+  THROW_CHECK(file.good()) << "Failed to write PLY file: " << path;
 }
 
 void WriteBinaryPlyPoints(const std::filesystem::path& path,
@@ -407,6 +408,7 @@ void WriteBinaryPlyPoints(const std::filesystem::path& path,
 
   text_file << "end_header\n";
   text_file.close();
+  THROW_CHECK(text_file.good()) << "Failed to write PLY file: " << path;
 
   std::fstream binary_file(path,
                            std::ios::out | std::ios::binary | std::ios::app);
@@ -431,6 +433,7 @@ void WriteBinaryPlyPoints(const std::filesystem::path& path,
   }
 
   binary_file.close();
+  THROW_CHECK(binary_file.good()) << "Failed to write PLY file: " << path;
 }
 
 PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
@@ -856,6 +859,9 @@ void WriteTextPlyMesh(const std::filesystem::path& path,
     }
     file << '\n';
   }
+
+  file.close();
+  THROW_CHECK(file.good()) << "Failed to write PLY file: " << path;
 }
 
 void WriteBinaryPlyMesh(const std::filesystem::path& path,
@@ -888,6 +894,7 @@ void WriteBinaryPlyMesh(const std::filesystem::path& path,
   }
   text_file << "end_header\n";
   text_file.close();
+  THROW_CHECK(text_file.good()) << "Failed to write PLY file: " << path;
 
   std::fstream binary_file(path,
                            std::ios::out | std::ios::binary | std::ios::app);
@@ -920,6 +927,7 @@ void WriteBinaryPlyMesh(const std::filesystem::path& path,
   }
 
   binary_file.close();
+  THROW_CHECK(binary_file.good()) << "Failed to write PLY file: " << path;
 }
 
 bool HasPlyMeshFaces(const std::filesystem::path& path) {

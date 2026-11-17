@@ -6,12 +6,21 @@
 #include "colmap/util/testing.h"
 
 #include <array>
+#include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
+#include <iterator>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
+
+#ifdef __linux__
+#include <sys/resource.h>
+#endif  // __linux__
 
 namespace colmap {
 namespace {
@@ -151,6 +160,26 @@ TEST(PlyMeshFace, ParameterizedConstructor) {
   EXPECT_EQ(face.vertex_idx2, 20);
   EXPECT_EQ(face.vertex_idx3, 30);
 }
+
+#ifdef __linux__
+TEST(Ply, FailedOutputIsReported) {
+  const std::filesystem::path path = "/dev/full";
+  const std::vector<PlyPoint> points(1);
+  const PlyTexturedMesh mesh;
+  const auto throws_write_error = testing::ThrowsMessage<std::invalid_argument>(
+      testing::HasSubstr("Failed to write PLY file"));
+  for (const bool normals : {false, true}) {
+    for (const bool colors : {false, true}) {
+      EXPECT_THAT([&] { WriteTextPlyPoints(path, points, normals, colors); },
+                  throws_write_error);
+      EXPECT_THAT([&] { WriteBinaryPlyPoints(path, points, normals, colors); },
+                  throws_write_error);
+    }
+  }
+  EXPECT_THAT([&] { WriteTextPlyMesh(path, mesh); }, throws_write_error);
+  EXPECT_THAT([&] { WriteBinaryPlyMesh(path, mesh); }, throws_write_error);
+}
+#endif  // __linux__
 
 TEST(Ply, RoundTripTextPlyPointsFullData) {
   const auto test_dir = CreateTestDir();
@@ -501,6 +530,61 @@ TEST(Ply, RoundTripBinaryTexturedPlyMesh) {
   PlyTexturedMesh loaded = ReadPlyMesh(test_file);
   VerifyTexturedMesh(loaded, original);
 }
+
+#ifdef __linux__
+TEST(Ply, BinaryPayloadFailureIsReported) {
+  const auto path = CreateTestDir() / "limited.ply";
+  const std::vector<PlyPoint> points(64);
+  auto mesh = CreateTestTexturedMesh();
+  mesh.face_uvs.clear();
+  mesh.mesh.faces.resize(128, mesh.mesh.faces.front());
+  for (const bool write_mesh : {false, true}) {
+    SCOPED_TRACE(write_mesh);
+    const auto Write = [&] {
+      if (write_mesh) {
+        WriteBinaryPlyMesh(path, mesh);
+      } else {
+        WriteBinaryPlyPoints(path, points);
+      }
+    };
+    Write();
+    std::ifstream input(path, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(input)), {});
+    input.close();
+    const size_t header_end = bytes.find("end_header\n");
+    ASSERT_NE(header_end, std::string::npos);
+    ASSERT_LT(header_end + std::string("end_header\n").size(), 1024);
+    ASSERT_GT(bytes.size(), 1024);
+    ASSERT_LT(bytes.size(), 4096);
+    ASSERT_TRUE(std::filesystem::remove(path));
+    // Restrict only the isolated child. The header fits; the buffered binary
+    // payload reaches the file-size limit and must be reported on completion.
+    EXPECT_EXIT(
+        {
+          struct rlimit limit;
+          if (getrlimit(RLIMIT_FSIZE, &limit) != 0 ||
+              std::signal(SIGXFSZ, SIG_IGN) == SIG_ERR) {
+            std::_Exit(2);
+          }
+          limit.rlim_cur = 1024;
+          if (setrlimit(RLIMIT_FSIZE, &limit) != 0) std::_Exit(2);
+          try {
+            Write();
+          } catch (const std::invalid_argument& error) {
+            std::_Exit(
+                std::string(error.what()).find("Failed to write PLY file") !=
+                        std::string::npos
+                    ? 0
+                    : 1);
+          }
+          std::_Exit(1);
+        },
+        testing::ExitedWithCode(0),
+        "");
+    EXPECT_EQ(std::filesystem::file_size(path), 1024);
+  }
+}
+#endif  // __linux__
 
 TEST(Ply, ReadPlyMeshWithoutTexcoords) {
   const auto test_dir = CreateTestDir();
