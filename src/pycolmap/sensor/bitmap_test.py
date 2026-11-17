@@ -277,27 +277,32 @@ def test_bitmap_thumbnail_noop() -> None:
     assert bitmap.height == 30
 
 
+@pytest.mark.parametrize("as_buffer", [False, True])
 @pytest.mark.parametrize(
-    ("shape", "strides"),
+    ("shape", "error"),
     [
-        ((1, (1 << 32) + 1), (0, 1)),
-        (((1 << 32) + 1, 1), (1, 0)),
-        ((1, 1, (1 << 32) + 1), (0, 0, 1)),
+        ((1, (1 << 32) + 1), "dimensions must be positive and fit in int"),
+        (((1 << 32) + 1, 1), "dimensions must be positive and fit in int"),
+        ((1, 1, (1 << 32) + 1), "must have 1 or 3 channels"),
+        ((46341, 46341), "exceeds bitmap storage capacity"),
+        ((1, (1 << 31) // 3 + 1, 3), "exceeds bitmap storage capacity"),
     ],
 )
-def test_bitmap_from_array_rejects_dimensions_before_narrowing(shape, strides):
+def test_bitmap_from_array_rejects_oversized_buffer_before_copy(
+    shape, error, as_buffer
+):
     if np.dtype(np.intc).itemsize != 4 or np.dtype(np.intp).itemsize <= 4:
         pytest.skip("requires 32-bit C++ int and wider NumPy dimensions")
-    # Neither implementation traverses the advertised extent of this view:
-    # the fixed binding rejects its shape, while the old 32-bit narrowing
-    # produces a one-byte bitmap. Do not iterate over or copy the view itself.
-    backing = np.zeros(1, dtype=np.uint8)
-    view = np.lib.stride_tricks.as_strided(
-        backing, shape=shape, strides=strides, writeable=False
-    )
-    assert view.flags.c_contiguous
-    with pytest.raises(RuntimeError):
-        pycolmap.Bitmap.from_array(view)
+    # Every virtual pixel refers to the same allocated byte. Unlike fabricated
+    # contiguous strides, this is a valid buffer even at these large shapes.
+    backing = np.array(71, dtype=np.uint8)
+    view = np.broadcast_to(backing, shape)
+    assert all(stride == 0 for stride in view.strides)
+    assert np.shares_memory(backing, view)
+    source = memoryview(view) if as_buffer else view
+    with pytest.raises(RuntimeError, match=error):
+        pycolmap.Bitmap.from_array(source)
+    assert backing.item() == 71
 
 
 @pytest.mark.parametrize("width,height", [(0, 0), (0, 4), (4, 0)])
