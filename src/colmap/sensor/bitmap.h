@@ -310,6 +310,12 @@ bool Bitmap::SetPixel(const int x,
 
 std::optional<BitmapColor<uint8_t>> Bitmap::InterpolateNearestNeighbor(
     const double x, const double y) const {
+  // Keep rounding and conversion representable. GetPixel checks image bounds.
+  constexpr double kMaxCoordinate =
+      static_cast<double>(std::numeric_limits<int>::max());
+  if (!(std::abs(x) < kMaxCoordinate && std::abs(y) < kMaxCoordinate)) {
+    return std::nullopt;
+  }
   const int xx = static_cast<int>(std::round(x));
   const int yy = static_cast<int>(std::round(y));
   return GetPixel(xx, yy);
@@ -317,14 +323,16 @@ std::optional<BitmapColor<uint8_t>> Bitmap::InterpolateNearestNeighbor(
 
 std::optional<BitmapColor<float>> Bitmap::InterpolateBilinear(
     const double x, const double y) const {
-  const int x0 = static_cast<int>(std::floor(x));
-  const int x1 = x0 + 1;
-  const int y0 = static_cast<int>(std::floor(y));
-  const int y1 = y0 + 1;
-
-  if (x0 < 0 || x1 >= width_ || y0 < 0 || y1 >= height_) {
+  // A full 2x2 neighborhood must exist. This also rejects NaN, infinity,
+  // and out-of-range finite values before the floating-to-integer casts.
+  if (!(x >= 0.0 && x < width_ - 1.0 && y >= 0.0 && y < height_ - 1.0)) {
     return std::nullopt;
   }
+  // The guard makes truncation equivalent to floor.
+  const int x0 = static_cast<int>(x);
+  const int x1 = x0 + 1;
+  const int y0 = static_cast<int>(y);
+  const int y1 = y0 + 1;
 
   const double dx = x - x0;
   const double dy = y - y0;
