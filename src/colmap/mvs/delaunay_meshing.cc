@@ -310,8 +310,7 @@ struct DelaunayMeshingEdgeWeightComputer {
   DelaunayMeshingEdgeWeightComputer(const Delaunay& triangulation,
                                     const double visibility_sigma,
                                     const double distance_sigma_factor)
-      : visibility_threshold_(5 * visibility_sigma),
-        visibility_normalization_(-0.5 /
+      : visibility_normalization_(-0.5 /
                                   (visibility_sigma * visibility_sigma)) {
     std::vector<float> edge_lengths;
     edge_lengths.reserve(triangulation.number_of_finite_edges());
@@ -326,35 +325,24 @@ struct DelaunayMeshingEdgeWeightComputer {
 
     distance_sigma_ = distance_sigma_factor *
                       std::max(std::sqrt(Percentile(edge_lengths, 25)), 1e-7);
-    distance_threshold_ = 5 * distance_sigma_;
     distance_normalization_ = -0.5 / (distance_sigma_ * distance_sigma_);
   }
 
   double DistanceSigma() const { return distance_sigma_; }
 
   double ComputeVisibilityProb(const double visibility_squared) const {
-    if (visibility_squared < visibility_threshold_) {
-      return std::max(
-          0.0, 1.0 - std::exp(visibility_squared * visibility_normalization_));
-    } else {
-      return 1.0;
-    }
+    return internal::ComputeDelaunayMeshingProbability(
+        visibility_squared, visibility_normalization_);
   }
 
   double ComputeDistanceProb(const double distance_squared) const {
-    if (distance_squared < distance_threshold_) {
-      return std::max(
-          0.0, 1.0 - std::exp(distance_squared * distance_normalization_));
-    } else {
-      return 1.0;
-    }
+    return internal::ComputeDelaunayMeshingProbability(distance_squared,
+                                                       distance_normalization_);
   }
 
  private:
-  double visibility_threshold_;
   double visibility_normalization_;
   double distance_sigma_;
-  double distance_threshold_;
   double distance_normalization_;
 };
 
