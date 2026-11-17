@@ -166,6 +166,10 @@ class FaissVisualIndex : public VisualIndex {
 
     THROW_CHECK_EQ(descriptors.data.rows(), keypoints.size());
 
+    if (image_scores->empty()) {
+      return;
+    }
+
     // Extract top-ranked images to verify.
     FlatHashSet<int> image_ids;
     for (const auto& image_score : *image_scores) {

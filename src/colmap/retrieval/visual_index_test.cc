@@ -13,6 +13,7 @@
 #include <bitset>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -302,9 +303,28 @@ TEST(VisualIndex, MultiwordMatchesRetainMaximumScore) {
   std::vector<ImageScore> empty(1);
   index->Query(query, FeatureKeypoints{}, CreateScalarDescriptors({}), &empty);
   EXPECT_TRUE(empty.empty());
+  EXPECT_THROW(
+      index->Query(
+          query, FeatureKeypoints(1), CreateScalarDescriptors({}), &empty),
+      std::invalid_argument);
   query.image_id_filter = [](const int) { return false; };
+  empty.resize(1);
   index->Query(query, query_keypoints, descriptors, &empty);
   EXPECT_TRUE(empty.empty());
+  EXPECT_THROW(index->Query(query, FeatureKeypoints{}, descriptors, &empty),
+               std::invalid_argument);
+
+  // A zero result limit also leaves no candidates to verify. The keypoint
+  // contract still applies, even when spatial verification has no work.
+  auto zero_limit_query = query;
+  zero_limit_query.image_id_filter = nullptr;
+  zero_limit_query.max_num_images = 0;
+  empty.resize(1);
+  index->Query(zero_limit_query, query_keypoints, descriptors, &empty);
+  EXPECT_TRUE(empty.empty());
+  EXPECT_THROW(
+      index->Query(zero_limit_query, FeatureKeypoints{}, descriptors, &empty),
+      std::invalid_argument);
 
   // Identical database images must remain a score tie after verification.
   // Compare by image ID rather than depending on an order among equal scores.
