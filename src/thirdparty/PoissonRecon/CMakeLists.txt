@@ -24,3 +24,6 @@ COLMAP_ADD_TEST(
 if(TESTS_ENABLED AND OPENMP_FOUND)
     target_link_libraries(${COLMAP_ADD_TEST_TARGET} OpenMP::OpenMP_CXX)
 endif()
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    target_link_options(${COLMAP_ADD_TEST_TARGET} PRIVATE -coverage)
+endif()
