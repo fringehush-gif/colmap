@@ -98,6 +98,8 @@ std::vector<PlyPoint> ReadPly(const std::filesystem::path& path) {
   bool NZ_double = false;
 
   bool in_vertex_section = false;
+  bool seen_vertex_section = false;
+  bool seen_other_nonempty_element = false;
   bool is_binary = false;
   bool is_little_endian = false;
   size_t num_bytes_per_line = 0;
@@ -132,9 +134,14 @@ std::vector<PlyPoint> ReadPly(const std::filesystem::path& path) {
     if (line_elems.size() >= 3 && line_elems[0] == "element") {
       in_vertex_section = false;
       if (line_elems[1] == "vertex") {
+        THROW_CHECK(!seen_vertex_section) << "Duplicate PLY vertex element";
         num_vertices = std::stoll(line_elems[2]);
+        THROW_CHECK(num_vertices == 0 || !seen_other_nonempty_element)
+            << "PLY import does not support nonempty elements before vertices";
         in_vertex_section = true;
+        seen_vertex_section = true;
       } else if (std::stoll(line_elems[2]) > 0) {
+        seen_other_nonempty_element = true;
         LOG(WARNING) << "Only vertex elements supported; ignoring "
                      << line_elems[1];
       }
@@ -455,6 +462,11 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
   // Track vertex properties for proper parsing.
   bool in_vertex_section = false;
   bool in_face_section = false;
+  bool seen_vertex_section = false;
+  bool seen_face_section = false;
+  bool has_face_indices = false;
+  size_t num_face_properties = 0;
+  std::string preceding_nonempty_element;
   std::string face_count_type = "uchar";
   std::string face_index_type = "int";
   size_t num_bytes_per_vertex = 0;
@@ -507,28 +519,54 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
     if (line_elems.size() >= 3 && line_elems[0] == "element") {
       in_vertex_section = false;
       in_face_section = false;
+      const size_t num_elements = std::stoll(line_elems[2]);
+      // The payload reader consumes vertices followed by faces. Other
+      // nonempty elements can only be ignored after all consumed elements.
       if (line_elems[1] == "vertex") {
-        num_vertices = std::stoll(line_elems[2]);
+        THROW_CHECK(!seen_vertex_section) << "Duplicate PLY vertex element";
+        THROW_CHECK(num_elements == 0 || preceding_nonempty_element.empty())
+            << "Unsupported nonempty PLY element before vertices";
+        num_vertices = num_elements;
         in_vertex_section = true;
+        seen_vertex_section = true;
       } else if (line_elems[1] == "face") {
-        num_faces = std::stoll(line_elems[2]);
+        THROW_CHECK(!seen_face_section) << "Duplicate PLY face element";
+        THROW_CHECK(num_elements == 0 || preceding_nonempty_element.empty() ||
+                    preceding_nonempty_element == "vertex")
+            << "Unsupported nonempty PLY element before faces";
+        num_faces = num_elements;
         in_face_section = true;
+        seen_face_section = true;
+      }
+      if (num_elements > 0) {
+        preceding_nonempty_element = line_elems[1];
       }
     }
 
-    // Parse face property lists.
-    if (in_face_section && num_faces > 0 && line_elems.size() >= 5 &&
-        line_elems[0] == "property" && line_elems[1] == "list") {
-      if (line_elems[4] == "texcoord") {
+    // The payload reader consumes vertex indices followed by optional UVs.
+    // Only the ASCII reader can ignore trailing properties on the same line.
+    if (in_face_section && num_faces > 0 && line_elems.size() >= 3 &&
+        line_elems[0] == "property") {
+      const bool is_list = line_elems.size() >= 5 && line_elems[1] == "list";
+      const std::string& name = line_elems.back();
+      if (is_list && (name == "vertex_index" || name == "vertex_indices")) {
+        THROW_CHECK_EQ(num_face_properties, 0)
+            << "Vertex indices must be the first PLY face property";
+        face_count_type = line_elems[2];
+        face_index_type = line_elems[3];
+        has_face_indices = true;
+      } else if (is_list && name == "texcoord") {
+        THROW_CHECK(has_face_indices && num_face_properties == 1)
+            << "PLY texture coordinates must immediately follow vertex indices";
         THROW_CHECK(!is_binary ||
                     ((line_elems[2] == "uchar" || line_elems[2] == "uint8") &&
                      (line_elems[3] == "float" || line_elems[3] == "float32")))
             << "Unsupported binary PLY texcoord data types";
         has_texcoord = true;
       } else {
-        face_count_type = line_elems[2];
-        face_index_type = line_elems[3];
+        THROW_CHECK(!is_binary) << "Unsupported binary PLY face property";
       }
+      ++num_face_properties;
     }
 
     if (in_vertex_section && line_elems.size() >= 3 &&
@@ -569,6 +607,8 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
 
   THROW_CHECK(X_index != -1 && Y_index != -1 && Z_index != -1)
       << "Invalid PLY mesh format: x, y, z properties missing";
+  THROW_CHECK(num_faces == 0 || has_face_indices)
+      << "Invalid PLY mesh format: face vertex indices missing";
 
   const bool has_colors = (R_index != -1) && (G_index != -1) && (B_index != -1);
 

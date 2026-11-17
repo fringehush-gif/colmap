@@ -5,6 +5,7 @@
 #include "colmap/util/endian.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
 #include <array>
 #include <csignal>
 #include <cstdint>
@@ -371,6 +372,98 @@ TEST(Ply, ReadMeshVerticesAsPoints) {
                        mesh.vertices[i].y,
                        mesh.vertices[i].z);
     }
+  }
+}
+
+TEST(Ply, ReadRejectsNonemptyElementsBeforeVertices) {
+  for (const std::string format :
+       {"ascii", "binary_little_endian", "binary_big_endian"}) {
+    SCOPED_TRACE(format);
+    const auto path = CreateTestDir() / "preceding.ply";
+    std::ofstream file(path, std::ios::binary);
+    file << "ply\nformat " << format
+         << " 1.0\n"
+            "element junk 1\nproperty float a\nproperty float b\nproperty "
+            "float c\n"
+            "element vertex 1\nproperty float x\nproperty float y\nproperty "
+            "float z\nend_header\n";
+    if (format == "ascii") {
+      file << "99 98 97\n1 2 3\n";
+    } else {
+      for (const float value : {99.0f, 98.0f, 97.0f, 1.0f, 2.0f, 3.0f}) {
+        if (format == "binary_little_endian")
+          WriteBinaryLittleEndian<float>(&file, value);
+        else {
+          const float encoded = NativeToBigEndian(value);
+          file.write(reinterpret_cast<const char*>(&encoded), sizeof(encoded));
+        }
+      }
+    }
+    file.close();
+    EXPECT_THAT([&] { ReadPly(path); },
+                testing::ThrowsMessage<std::invalid_argument>(
+                    testing::HasSubstr("nonempty elements before vertices")));
+  }
+}
+
+TEST(Ply, ReadAllowsUnconsumedElementsBeforeVertices) {
+  for (const std::string format :
+       {"ascii", "binary_little_endian", "binary_big_endian"}) {
+    for (const bool empty_vertices : {false, true}) {
+      SCOPED_TRACE(format + " " + std::to_string(empty_vertices));
+      const auto path = CreateTestDir() / "preceding-unconsumed.ply";
+      std::ofstream file(path, std::ios::binary);
+      file << "ply\nformat " << format << " 1.0\nelement junk "
+           << (empty_vertices ? 1 : 0)
+           << "\nproperty float a\nproperty float b\nproperty float c\n"
+              "element vertex "
+           << (empty_vertices ? 0 : 1)
+           << "\nproperty float x\nproperty float y\nproperty float z\n"
+              "end_header\n";
+      for (const float value : {1.0f, 2.0f, 3.0f}) {
+        if (format == "ascii") {
+          file << value << ' ';
+        } else {
+          const float encoded = format == "binary_little_endian"
+                                    ? NativeToLittleEndian(value)
+                                    : NativeToBigEndian(value);
+          file.write(reinterpret_cast<const char*>(&encoded), sizeof(encoded));
+        }
+      }
+      if (format == "ascii") file << '\n';
+      file.close();
+      const auto points = ReadPly(path);
+      ASSERT_EQ(points.size(), empty_vertices ? 0 : 1);
+      if (!empty_vertices) {
+        ExpectPositionEq(points.front(), 1.0f, 2.0f, 3.0f);
+      }
+    }
+  }
+}
+
+TEST(Ply, ReadRejectsRepeatedVertices) {
+  for (const std::string format :
+       {"ascii", "binary_little_endian", "binary_big_endian"}) {
+    SCOPED_TRACE(format);
+    const auto path = CreateTestDir() / "repeated-vertices.ply";
+    std::ofstream file(path, std::ios::binary);
+    file << "ply\nformat " << format
+         << " 1.0\nelement vertex 1\nproperty float x\nproperty float y\n"
+            "property float z\nelement vertex 0\nend_header\n";
+    if (format == "ascii") {
+      file << "1 2 3\n";
+    } else {
+      for (const float value : {1.0f, 2.0f, 3.0f}) {
+        const float encoded = format == "binary_little_endian"
+                                  ? NativeToLittleEndian(value)
+                                  : NativeToBigEndian(value);
+        file.write(reinterpret_cast<const char*>(&encoded), sizeof(encoded));
+      }
+    }
+    file.close();
+    EXPECT_THAT([&] { ReadPly(path); },
+                testing::ThrowsMessage<std::invalid_argument>(
+                    testing::HasSubstr("Duplicate PLY vertex element")));
   }
 }
 
@@ -954,6 +1047,217 @@ TEST(Ply, ReadBinaryPlyMeshWithMixedColorTypes) {
   // Out-of-range integer channels clamp to 255; 0-1 float channels scale.
   ExpectColorEq(mesh.vertices[0], 200, 100, 255);
   ExpectColorEq(mesh.vertices[1], 10, 255, 127);
+}
+
+TEST(Ply, ReadMeshElementOrder) {
+  const std::array<std::array<float, 3>, 3> vertices = {
+      {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+  for (const std::string format :
+       {"ascii", "binary_little_endian", "binary_big_endian"}) {
+    for (const int position : {0, 1, 2}) {
+      for (const int metadata_count : {0, 1}) {
+        SCOPED_TRACE(format + " " + std::to_string(position) + " " +
+                     std::to_string(metadata_count));
+        const auto path = CreateTestDir() / "element_order.ply";
+        std::ofstream file(path, std::ios::binary);
+        file << "ply\nformat " << format << " 1.0\n";
+        std::vector<std::string> elements = {"vertex", "face"};
+        elements.insert(elements.begin() + position, "metadata");
+        for (const auto& element : elements) {
+          if (element == "vertex") {
+            file << "element vertex 3\nproperty float x\nproperty float y\n"
+                    "property float z\n";
+          } else {
+            file << "element " << element << " "
+                 << (element == "face" ? 1 : metadata_count)
+                 << "\nproperty list uchar int "
+                 << (element == "face" ? "vertex_index" : "indices") << "\n";
+          }
+        }
+        file << "end_header\n";
+        const auto Write = [&](auto value) {
+          if (format == "ascii") {
+            file << +value << ' ';
+          } else {
+            const auto converted = format == "binary_little_endian"
+                                       ? NativeToLittleEndian(value)
+                                       : NativeToBigEndian(value);
+            file.write(reinterpret_cast<const char*>(&converted),
+                       sizeof(converted));
+          }
+        };
+        for (const auto& element : elements) {
+          if (element == "vertex") {
+            for (const auto& vertex : vertices) {
+              for (const float value : vertex) Write(value);
+              if (format == "ascii") file << '\n';
+            }
+          } else if (element == "face" || metadata_count > 0) {
+            Write(uint8_t(3));
+            for (int32_t i = 0; i < 3; ++i) {
+              Write(element == "face" ? i : 2 - i);
+            }
+            if (format == "ascii") file << '\n';
+          }
+        }
+        file.close();
+        if (metadata_count > 0 && position < 2) {
+          ExpectPlyMeshError(
+              path,
+              position == 0 ? "Unsupported nonempty PLY element before vertices"
+                            : "Unsupported nonempty PLY element before faces");
+        } else {
+          const auto mesh = ReadPlyMesh(path).mesh;
+          ASSERT_EQ(mesh.vertices.size(), 3);
+          for (size_t i = 0; i < vertices.size(); ++i) {
+            ExpectPositionEq(mesh.vertices[i],
+                             vertices[i][0],
+                             vertices[i][1],
+                             vertices[i][2]);
+          }
+          ASSERT_EQ(mesh.faces.size(), 1);
+          EXPECT_EQ(mesh.faces[0].vertex_idx1, 0);
+          EXPECT_EQ(mesh.faces[0].vertex_idx2, 1);
+          EXPECT_EQ(mesh.faces[0].vertex_idx3, 2);
+        }
+      }
+    }
+  }
+}
+
+TEST(Ply, ReadMeshRejectsRepeatedAndReorderedElements) {
+  const std::string vertices =
+      "element vertex 3\nproperty float x\nproperty float y\nproperty float "
+      "z\n";
+  const std::string faces =
+      "element face 1\nproperty list uchar int vertex_index\n";
+  const std::array<std::array<std::string, 3>, 3> cases = {{
+      {faces + vertices,
+       "3 0 1 2\n0 0 0\n1 0 0\n0 1 0\n",
+       "Unsupported nonempty PLY element before vertices"},
+      {vertices + "element vertex 0\n" + faces,
+       "0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n",
+       "Duplicate PLY vertex element"},
+      {vertices + faces + "element face 0\n",
+       "0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n",
+       "Duplicate PLY face element"},
+  }};
+  for (const auto& values : cases) {
+    const auto path = CreateTestDir() / "invalid_elements.ply";
+    std::ofstream file(path);
+    file << "ply\nformat ascii 1.0\n"
+         << values[0] << "end_header\n"
+         << values[1];
+    file.close();
+    ExpectPlyMeshError(path, values[2]);
+  }
+}
+
+TEST(Ply, ReadMeshFacePropertyOrder) {
+  struct Case {
+    std::vector<std::string> properties;
+    std::string ascii_error;
+    std::string binary_error;
+  };
+  const std::string indices_error = "Vertex indices must be the first PLY face";
+  const std::string uv_error = "texture coordinates must immediately follow";
+  const std::string binary_error = "Unsupported binary PLY face property";
+  const std::vector<Case> cases = {
+      {{"indices"}, "", ""},
+      {{"indices", "uvs"}, "", ""},
+      {{"metadata-list", "indices"}, indices_error, binary_error},
+      {{"metadata-scalar", "indices"}, indices_error, binary_error},
+      {{"indices", "metadata-list"}, "", binary_error},
+      {{"indices", "metadata-scalar"}, "", binary_error},
+      {{"indices", "uvs", "metadata-list"}, "", binary_error},
+      {{"indices", "uvs", "metadata-scalar"}, "", binary_error},
+      {{"indices", "indices"}, indices_error, indices_error},
+      {{"uvs", "indices"}, uv_error, uv_error},
+      {{"indices", "uvs", "uvs"}, uv_error, uv_error},
+      {{"indices", "metadata-list", "uvs"}, uv_error, binary_error},
+      {{"metadata-list"}, "face vertex indices missing", binary_error}};
+  const std::array<std::array<uint8_t, 3>, 4> vertices = {
+      {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}}};
+  const std::vector<float> uvs = {0, 0, 1, 0, 0, 1};
+  for (const std::string format :
+       {"ascii", "binary_little_endian", "binary_big_endian"}) {
+    for (size_t case_idx = 0; case_idx < cases.size(); ++case_idx) {
+      SCOPED_TRACE(format + " " + std::to_string(case_idx));
+      const auto& test_case = cases[case_idx];
+      const auto path = CreateTestDir() / "face-property-order.ply";
+      std::ofstream file(path, std::ios::binary);
+      file << "ply\nformat " << format
+           << " 1.0\nelement vertex 4\nproperty uchar x\nproperty uchar y\n"
+              "property uchar z\nelement face 2\n";
+      for (const auto& property : test_case.properties) {
+        if (property == "indices")
+          file << "property list uchar uchar vertex_indices\n";
+        else if (property == "uvs")
+          file << "property list uchar float texcoord\n";
+        else if (property == "metadata-list")
+          file << "property list uchar uchar metadata\n";
+        else
+          file << "property uchar metadata\n";
+      }
+      file << "end_header\n";
+      const auto Write = [&](auto value) {
+        if (format == "ascii") {
+          file << +value << ' ';
+        } else {
+          const auto encoded = format == "binary_little_endian"
+                                   ? NativeToLittleEndian(value)
+                                   : NativeToBigEndian(value);
+          file.write(reinterpret_cast<const char*>(&encoded), sizeof(encoded));
+        }
+      };
+      for (const auto& vertex : vertices) {
+        for (const uint8_t value : vertex) Write(value);
+        if (format == "ascii") file << '\n';
+      }
+      for (int face = 0; face < 2; ++face) {
+        for (const auto& property : test_case.properties) {
+          Write(uint8_t(property == "uvs" ? 6 : 3));
+          if (property == "indices" || property == "metadata-list") {
+            for (uint8_t i = 0; i < 3; ++i) {
+              Write(uint8_t(property == "indices" ? i : 2 - i));
+            }
+          } else if (property == "uvs") {
+            for (const float uv : uvs) Write(uv);
+          }
+        }
+        if (format == "ascii") file << '\n';
+      }
+      file.close();
+      const std::string& error =
+          format == "ascii" ? test_case.ascii_error : test_case.binary_error;
+      if (!error.empty()) {
+        ExpectPlyMeshError(path, error);
+      } else {
+        const auto mesh = ReadPlyMesh(path);
+        ASSERT_EQ(mesh.mesh.vertices.size(), vertices.size());
+        for (size_t i = 0; i < vertices.size(); ++i) {
+          ExpectPositionEq(mesh.mesh.vertices[i],
+                           vertices[i][0],
+                           vertices[i][1],
+                           vertices[i][2]);
+        }
+        ASSERT_EQ(mesh.mesh.faces.size(), 2);
+        for (const auto& face : mesh.mesh.faces) {
+          EXPECT_EQ(face.vertex_idx1, 0);
+          EXPECT_EQ(face.vertex_idx2, 1);
+          EXPECT_EQ(face.vertex_idx3, 2);
+        }
+        std::vector<float> expected_uvs;
+        if (std::find(test_case.properties.begin(),
+                      test_case.properties.end(),
+                      "uvs") != test_case.properties.end()) {
+          expected_uvs = uvs;
+          expected_uvs.insert(expected_uvs.end(), uvs.begin(), uvs.end());
+        }
+        EXPECT_EQ(mesh.face_uvs, expected_uvs);
+      }
+    }
+  }
 }
 
 TEST(Ply, ReadBinaryMeshFaceIntegerTypes) {
