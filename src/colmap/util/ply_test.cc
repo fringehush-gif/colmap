@@ -9,8 +9,10 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -28,7 +30,9 @@ namespace {
 // Write a binary PLY mesh with the given vertex properties (e.g. "short x")
 // and triangular faces. The payload callback receives a Write function that
 // encodes one scalar in the file's endianness; it must write exactly
-// num_vertices vertices. Pass explicitly typed values (e.g. int16_t(-300))
+// num_vertices vertices, followed by the raw faces if face_properties is set.
+// Otherwise, faces are appended using the default uchar/int layout.
+// Pass explicitly typed values (e.g. int16_t(-300))
 // so that scalars get the intended width.
 template <typename WritePayload>
 std::filesystem::path WriteBinaryPlyMesh(
@@ -37,7 +41,9 @@ std::filesystem::path WriteBinaryPlyMesh(
     size_t num_vertices,
     const std::vector<std::string>& properties,
     WritePayload&& write_payload,
-    const std::vector<std::array<int, 3>>& faces = {}) {
+    const std::vector<std::array<int, 3>>& faces = {},
+    const std::string& face_properties = {},
+    size_t raw_face_count = 0) {
   const auto test_file = CreateTestDir() / file_name;
   {
     std::ofstream text_file(test_file);
@@ -47,8 +53,12 @@ std::filesystem::path WriteBinaryPlyMesh(
     for (const auto& property : properties) {
       text_file << "property " << property << "\n";
     }
-    text_file << "element face " << faces.size() << "\n";
-    text_file << "property list uchar int vertex_index\n";
+    text_file << "element face "
+              << (face_properties.empty() ? faces.size() : raw_face_count)
+              << "\n";
+    text_file << (face_properties.empty()
+                      ? "property list uchar int vertex_index\n"
+                      : face_properties);
     text_file << "end_header\n";
     text_file.close();
 
@@ -97,6 +107,18 @@ std::filesystem::path WriteTextPlyMesh(
     file << face_line << "\n";
   }
   return test_file;
+}
+
+void ExpectPlyMeshError(const std::filesystem::path& path,
+                        const std::string& expected_message) {
+  try {
+    ReadPlyMesh(path);
+    ADD_FAILURE() << "Expected PLY mesh read to fail: " << path;
+  } catch (const std::exception& error) {
+    EXPECT_NE(std::string(error.what()).find(expected_message),
+              std::string::npos)
+        << error.what();
+  }
 }
 
 // Check a mesh vertex or point position.
@@ -586,6 +608,53 @@ TEST(Ply, BinaryPayloadFailureIsReported) {
 }
 #endif  // __linux__
 
+TEST(Ply, BinaryMeshRejectsInvalidInputBeforeOpeningOutput) {
+  const auto path = CreateTestDir() / "existing_mesh.ply";
+  const std::string previous = "Retain existing output on invalid mesh";
+  const auto ExpectRefusal = [&](const PlyTexturedMesh& mesh,
+                                 const std::string& message) {
+    {
+      std::ofstream output(path, std::ios::binary);
+      output << previous;
+    }
+    try {
+      WriteBinaryPlyMesh(path, mesh);
+      ADD_FAILURE() << "Expected invalid binary PLY mesh refusal";
+    } catch (const std::invalid_argument& error) {
+      if (!message.empty()) {
+        EXPECT_NE(std::string(error.what()).find(message), std::string::npos);
+      }
+    }
+    std::ifstream input(path, std::ios::binary);
+    const std::string retained((std::istreambuf_iterator<char>(input)), {});
+    EXPECT_EQ(retained, previous);
+  };
+  for (const bool textured : {false, true}) {
+    for (const size_t index :
+         {static_cast<size_t>(std::numeric_limits<int32_t>::max()) + 1,
+          std::numeric_limits<size_t>::max()}) {
+      for (const size_t face_index : {0, 1}) {
+        for (int slot = 0; slot < 3; ++slot) {
+          auto mesh = CreateTestTexturedMesh();
+          if (!textured) mesh.face_uvs.clear();
+          auto& face = mesh.mesh.faces[face_index];
+          const std::array<size_t*, 3> indices = {
+              &face.vertex_idx1, &face.vertex_idx2, &face.vertex_idx3};
+          *indices[slot] = index;
+          ExpectRefusal(mesh, "binary PLY int range");
+        }
+      }
+    }
+    auto mesh = CreateTestTexturedMesh();
+    if (!textured) mesh.face_uvs.clear();
+    mesh.mesh.faces.back().vertex_idx3 = mesh.mesh.vertices.size();
+    ExpectRefusal(mesh, "");
+  }
+  auto mesh = CreateTestTexturedMesh();
+  mesh.face_uvs.pop_back();
+  ExpectRefusal(mesh, "Expected 6 UV coordinates");
+}
+
 TEST(Ply, ReadPlyMeshWithoutTexcoords) {
   const auto test_dir = CreateTestDir();
   const auto test_file = test_dir / "mesh.ply";
@@ -885,6 +954,321 @@ TEST(Ply, ReadBinaryPlyMeshWithMixedColorTypes) {
   // Out-of-range integer channels clamp to 255; 0-1 float channels scale.
   ExpectColorEq(mesh.vertices[0], 200, 100, 255);
   ExpectColorEq(mesh.vertices[1], 10, 255, 127);
+}
+
+TEST(Ply, ReadBinaryMeshFaceIntegerTypes) {
+  for (const std::string format :
+       {"binary_little_endian", "binary_big_endian"}) {
+    for (const std::string type :
+         {"ushort", "uint16", "uchar", "uint8", "uint", "uint32"}) {
+      const size_t num_vertices =
+          (type == "ushort" || type == "uint16") ? 32769 : 256;
+      const uint32_t index = static_cast<uint32_t>(num_vertices - 1);
+      const auto path = WriteBinaryPlyMesh(
+          "face_types.ply",
+          format,
+          num_vertices,
+          {"uchar x", "uchar y", "uchar z"},
+          [&](const auto& Write) {
+            for (size_t i = 0; i < num_vertices * 3; ++i) Write(uint8_t(0));
+            Write(uint8_t(3));
+            for (int i = 0; i < 3; ++i) {
+              if (type == "ushort" || type == "uint16")
+                Write(uint16_t(index));
+              else if (type == "uchar" || type == "uint8")
+                Write(uint8_t(index));
+              else
+                Write(uint32_t(index));
+            }
+          },
+          {},
+          "property list uchar " + type + " vertex_index\n",
+          1);
+      const auto mesh = ReadPlyMesh(path).mesh;
+      ASSERT_EQ(mesh.faces.size(), 1);
+      EXPECT_EQ(mesh.faces[0].vertex_idx1, index) << format << " " << type;
+    }
+    for (const std::string type :
+         {"char", "int8", "short", "int16", "int", "int32"}) {
+      const auto path = WriteBinaryPlyMesh(
+          "negative_index.ply",
+          format,
+          1,
+          {"uchar x", "uchar y", "uchar z"},
+          [&](const auto& Write) {
+            Write(uint8_t(0));
+            Write(uint8_t(0));
+            Write(uint8_t(0));
+            Write(uint8_t(3));
+            if (type == "char" || type == "int8")
+              Write(int8_t(-1));
+            else if (type == "short" || type == "int16")
+              Write(int16_t(-1));
+            else
+              Write(int32_t(-1));
+          },
+          {},
+          "property list uchar " + type + " vertex_index\n",
+          1);
+      ExpectPlyMeshError(path, "Negative face vertex index");
+    }
+    for (const uint32_t index : {uint32_t(1),
+                                 uint32_t(0x7fffffff),
+                                 uint32_t(0x80000000),
+                                 uint32_t(0xffffffff)}) {
+      const auto path = WriteBinaryPlyMesh(
+          "large_index.ply",
+          format,
+          1,
+          {"uchar x", "uchar y", "uchar z"},
+          [&](const auto& Write) {
+            Write(uint8_t(0));
+            Write(uint8_t(0));
+            Write(uint8_t(0));
+            Write(uint8_t(3));
+            Write(index);
+          },
+          {},
+          "property list uchar uint32 vertex_index\n",
+          1);
+      ExpectPlyMeshError(path, "Face vertex index out of bounds");
+    }
+    for (const std::string type : {"char",
+                                   "int8",
+                                   "uchar",
+                                   "uint8",
+                                   "short",
+                                   "int16",
+                                   "ushort",
+                                   "uint16",
+                                   "int",
+                                   "int32",
+                                   "uint",
+                                   "uint32"}) {
+      const auto path = WriteBinaryPlyMesh(
+          "count_type.ply",
+          format,
+          1,
+          {"uchar x", "uchar y", "uchar z"},
+          [&](const auto& Write) {
+            Write(uint8_t(0));
+            Write(uint8_t(0));
+            Write(uint8_t(0));
+            if (type == "char" || type == "int8")
+              Write(int8_t(3));
+            else if (type == "uchar" || type == "uint8")
+              Write(uint8_t(3));
+            else if (type == "short" || type == "int16")
+              Write(int16_t(3));
+            else if (type == "ushort" || type == "uint16")
+              Write(uint16_t(3));
+            else if (type == "int" || type == "int32")
+              Write(int32_t(3));
+            else
+              Write(uint32_t(3));
+            Write(uint8_t(0));
+            Write(uint8_t(0));
+            Write(uint8_t(0));
+          },
+          {},
+          "property list " + type + " uchar vertex_index\n",
+          1);
+      EXPECT_EQ(ReadPlyMesh(path).mesh.faces.size(), 1)
+          << format << " " << type;
+      if (type == "char" || type == "int8" || type == "short" ||
+          type == "int16" || type == "int" || type == "int32") {
+        const auto negative_path = WriteBinaryPlyMesh(
+            "negative_count.ply",
+            format,
+            1,
+            {"uchar x", "uchar y", "uchar z"},
+            [&](const auto& Write) {
+              for (int i = 0; i < 3; ++i) Write(uint8_t(0));
+              if (type == "char" || type == "int8")
+                Write(int8_t(-1));
+              else if (type == "short" || type == "int16")
+                Write(int16_t(-1));
+              else
+                Write(int32_t(-1));
+            },
+            {},
+            "property list " + type + " uchar vertex_index\n",
+            1);
+        ExpectPlyMeshError(negative_path,
+                           "Only triangular faces are supported");
+      }
+    }
+    for (const std::string declaration :
+         {"float uchar", "uchar float", "double uchar", "uchar float64"}) {
+      const auto path = WriteBinaryPlyMesh(
+          "float_face.ply",
+          format,
+          1,
+          {"uchar x", "uchar y", "uchar z"},
+          [](const auto& Write) {
+            Write(uint8_t(0));
+            Write(uint8_t(0));
+            Write(uint8_t(0));
+          },
+          {},
+          "property list " + declaration + " vertex_index\n",
+          1);
+      ExpectPlyMeshError(path, "Unsupported PLY face data type");
+    }
+  }
+}
+
+TEST(Ply, ReadMeshTexcoordTypes) {
+  const std::array<std::array<std::string, 2>, 6> types = {
+      {{"uchar", "float"},
+       {"uint8", "float32"},
+       {"ushort", "float"},
+       {"uint16", "float32"},
+       {"uchar", "double"},
+       {"uint8", "float64"}}};
+  const std::vector<float> uvs = {0, 0, 1, 0, 0, 1};
+  for (const std::string format :
+       {"binary_little_endian", "binary_big_endian"}) {
+    for (const auto& type : types) {
+      SCOPED_TRACE(format + " " + type[0] + " " + type[1]);
+      const bool wide_count = type[0] == "ushort" || type[0] == "uint16";
+      const bool double_uv = type[1] == "double" || type[1] == "float64";
+      const auto path = WriteBinaryPlyMesh(
+          "mesh_uv_types.ply",
+          format,
+          3,
+          {"uchar x", "uchar y", "uchar z"},
+          [&](const auto& Write) {
+            for (const uint8_t value : {0, 0, 0, 1, 0, 0, 0, 1, 0})
+              Write(value);
+            Write(uint8_t(3));
+            for (int32_t i = 0; i < 3; ++i) Write(i);
+            if (wide_count)
+              Write(uint16_t(6));
+            else
+              Write(uint8_t(6));
+            for (const float uv : uvs) {
+              if (double_uv)
+                Write(double{uv});
+              else
+                Write(uv);
+            }
+          },
+          {},
+          "property list uchar int vertex_index\nproperty list " + type[0] +
+              " " + type[1] + " texcoord\n",
+          1);
+      if (wide_count || double_uv) {
+        ExpectPlyMeshError(path, "Unsupported binary PLY texcoord data types");
+      } else {
+        EXPECT_EQ(ReadPlyMesh(path).face_uvs, uvs);
+      }
+    }
+    const auto empty_path = WriteBinaryPlyMesh(
+        "empty_uv_types.ply",
+        format,
+        3,
+        {"uchar x", "uchar y", "uchar z"},
+        [](const auto& Write) {
+          for (const uint8_t value : {0, 0, 0, 1, 0, 0, 0, 1, 0}) Write(value);
+        },
+        {},
+        "property list uchar int vertex_index\n"
+        "property list ushort double texcoord\n",
+        0);
+    const auto empty = ReadPlyMesh(empty_path);
+    EXPECT_EQ(empty.mesh.vertices.size(), 3);
+    EXPECT_TRUE(empty.mesh.faces.empty());
+    EXPECT_TRUE(empty.face_uvs.empty());
+  }
+  // ASCII conversion is independent of the binary list representation.
+  const auto path = CreateTestDir() / "text_uv_types.ply";
+  std::ofstream file(path);
+  file << "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\n"
+          "property float y\nproperty float z\nelement face 1\n"
+          "property list uchar int vertex_index\n"
+          "property list ushort double texcoord\nend_header\n"
+          "0 0 0\n1 0 0\n0 1 0\n3 0 1 2 6 0 0 1 0 0 1\n";
+  file.close();
+  EXPECT_EQ(ReadPlyMesh(path).face_uvs, uvs);
+  file.open(path, std::ios::trunc);
+  file << "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\n"
+          "property float y\nproperty float z\nelement face 0\n"
+          "property list uchar int vertex_index\n"
+          "property list ushort double texcoord\nend_header\n"
+          "0 0 0\n1 0 0\n0 1 0\n";
+  file.close();
+  const auto empty = ReadPlyMesh(path);
+  EXPECT_EQ(empty.mesh.vertices.size(), 3);
+  EXPECT_TRUE(empty.mesh.faces.empty());
+  EXPECT_TRUE(empty.face_uvs.empty());
+}
+
+TEST(Ply, ReadBinaryMeshTexcoordTruncation) {
+  const std::array<uint32_t, 12> uv_bits = {0x00000000,
+                                            0x80000000,
+                                            0x00000001,
+                                            0x3e800000,
+                                            0x3f800000,
+                                            0x7f7fffff,
+                                            0x00800000,
+                                            0xbf800000,
+                                            0x7f800000,
+                                            0xff800000,
+                                            0x7fc12345,
+                                            0x3f012345};
+  for (const std::string format :
+       {"binary_little_endian", "binary_big_endian"}) {
+    const auto path = WriteBinaryPlyMesh(
+        "mesh_uv.ply",
+        format,
+        3,
+        {"uchar x", "uchar y", "uchar z"},
+        [&](const auto& Write) {
+          for (int i = 0; i < 9; ++i) Write(uint8_t(0));
+          for (int face = 0; face < 2; ++face) {
+            Write(uint8_t(3));
+            for (int i = 0; i < 3; ++i) Write(int32_t(i));
+            Write(uint8_t(6));
+            for (int i = 0; i < 6; ++i) Write(uv_bits[face * 6 + i]);
+          }
+        },
+        {},
+        "property list uchar int vertex_index\nproperty list uchar float "
+        "texcoord\n",
+        2);
+    const auto mesh = ReadPlyMesh(path);
+    ASSERT_EQ(mesh.face_uvs.size(), 12);
+    for (size_t i = 0; i < uv_bits.size(); ++i) {
+      uint32_t actual;
+      std::memcpy(&actual, &mesh.face_uvs[i], sizeof(actual));
+      EXPECT_EQ(actual, uv_bits[i]) << format << " " << i;
+    }
+    std::ifstream input(path, std::ios::binary);
+    const std::vector<char> bytes((std::istreambuf_iterator<char>(input)), {});
+    input.close();
+    // Cut at every byte of each face's UV count and payload, including the
+    // first face (which leaves the second face unread).
+    for (int face = 0; face < 2; ++face) {
+      const size_t uv_offset = bytes.size() - (2 - face) * 38 + 13;
+      for (size_t length = 0; length < 25; ++length) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output.write(bytes.data(), uv_offset + length);
+        output.close();
+        const std::string suffix =
+            length == 0
+                ? "texcoord count"
+                : "texcoord " + std::to_string((length - 1) / sizeof(float));
+        ExpectPlyMeshError(path, "face " + std::to_string(face) + " " + suffix);
+      }
+      std::vector<char> wrong_count = bytes;
+      wrong_count[uv_offset] = 5;
+      std::ofstream output(path, std::ios::binary | std::ios::trunc);
+      output.write(wrong_count.data(), wrong_count.size());
+      output.close();
+      ExpectPlyMeshError(path, "Expected 6 texture coordinates");
+    }
+  }
 }
 
 TEST(Ply, ReadTextPlyMeshWithFloatColors) {
