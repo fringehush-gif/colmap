@@ -29,3 +29,26 @@ if(TESTS_ENABLED)
             OpenMP::OpenMP_CXX)
     endif()
 endif()
+
+COLMAP_ADD_TEST(
+    NAME fem_tree_test
+    SRCS fem_tree_test.cc
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_thirdparty_fem_tree_test PRIVATE RELEASE)
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_thirdparty_fem_tree_test
+            OpenMP::OpenMP_CXX)
+    endif()
+endif()
+
+COLMAP_ADD_TEST(
+    NAME ply_scalar_test
+    SRCS ply_scalar_test.cc
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_thirdparty_ply_scalar_test PRIVATE RELEASE)
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_thirdparty_ply_scalar_test OpenMP::OpenMP_CXX)
+    endif()
+endif()
