@@ -172,6 +172,26 @@ TEST(Model, OverlapThresholdRetainsOrderedNeighbors) {
   ExpectReferenceOverlap(model);
 }
 
+TEST(Model, PositiveSubnormalOverlapThresholdRejectsZeroAngle) {
+  auto model = MakeOverlapModel();
+  // Nonzero parallel rays produce an exactly zero triangulation angle.
+  model.points = {{3, 0, 0, {0, 1}}};
+  ASSERT_EQ(model.ComputeTriangulationAngles().at(0).at(1), 0.0f);
+
+  const double degrees =
+      RadToDeg(static_cast<double>(std::numeric_limits<float>::denorm_min()));
+  const float radians = DegToRad(degrees);
+  ASSERT_GT(radians, 0.0f);
+  ASSERT_EQ(std::fpclassify(radians), FP_SUBNORMAL);
+
+  std::vector<std::vector<int>> expected(model.images.size());
+  expected[0] = {1};
+  expected[1] = {0};
+  EXPECT_EQ(model.GetMaxOverlappingImages(model.images.size(), 0.0), expected);
+  EXPECT_EQ(model.GetMaxOverlappingImages(model.images.size(), degrees),
+            std::vector<std::vector<int>>(model.images.size()));
+}
+
 TEST(Model, OverlapMalformedGeometryRetainsFallback) {
   for (const float value : {std::numeric_limits<float>::quiet_NaN(),
                             std::numeric_limits<float>::infinity(),
