@@ -16,3 +16,11 @@ endif()
 if(MSVC)
     target_compile_options(colmap_poisson_recon PRIVATE /bigobj)
 endif()
+
+COLMAP_ADD_TEST(
+    NAME sparse_matrix_test
+    SRCS sparse_matrix_test.cc
+)
+if(TESTS_ENABLED AND OPENMP_FOUND)
+    target_link_libraries(${COLMAP_ADD_TEST_TARGET} OpenMP::OpenMP_CXX)
+endif()
