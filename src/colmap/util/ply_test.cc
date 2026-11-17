@@ -1045,3 +1045,135 @@ TEST(Ply, MeshWriterPayloadAndColorOmission) {
 
 }  // namespace
 }  // namespace colmap
+
+namespace colmap {
+namespace {
+
+TEST(Ply, BinaryPointWireBytes) {
+  const auto test_dir = CreateTestDir();
+  const auto test_file = test_dir / "wire.ply";
+  const std::array<float, 7> values = {0.0f,
+                                       -0.0f,
+                                       std::numeric_limits<float>::denorm_min(),
+                                       std::numeric_limits<float>::max(),
+                                       std::numeric_limits<float>::lowest(),
+                                       std::numeric_limits<float>::infinity(),
+                                       std::numeric_limits<float>::quiet_NaN()};
+  for (const size_t count :
+       {size_t{0}, size_t{1}, size_t{1024}, size_t{1025}, size_t{4097}}) {
+    std::vector<PlyPoint> points(count);
+    for (size_t i = 0; i < count; ++i) {
+      auto& point = points[i];
+      point.x = values[i % values.size()];
+      point.y = values[(i + 1) % values.size()];
+      point.z = values[(i + 2) % values.size()];
+      point.nx = values[(i + 3) % values.size()];
+      point.ny = values[(i + 4) % values.size()];
+      point.nz = values[(i + 5) % values.size()];
+      point.r = static_cast<uint8_t>(i);
+      point.g = static_cast<uint8_t>(17 * i + 3);
+      point.b = static_cast<uint8_t>(31 * i + 7);
+    }
+    for (const bool write_normal : {false, true}) {
+      for (const bool write_rgb : {false, true}) {
+        SCOPED_TRACE(::testing::Message()
+                     << count << " points, normal=" << write_normal
+                     << ", rgb=" << write_rgb);
+        WriteBinaryPlyPoints(test_file, points, write_normal, write_rgb);
+        std::ifstream file(test_file, std::ios::binary);
+        ASSERT_TRUE(file.is_open());
+        const std::string actual((std::istreambuf_iterator<char>(file)),
+                                 std::istreambuf_iterator<char>());
+        const size_t marker = actual.find("end_header");
+        ASSERT_NE(marker, std::string::npos);
+        const size_t header_end = actual.find('\n', marker);
+        ASSERT_NE(header_end, std::string::npos);
+        // The scalar wire writer independently defines field order and endian
+        // conversion, including signed zero and non-finite float bits.
+        std::ostringstream expected(std::ios::out | std::ios::binary);
+        for (const auto& point : points) {
+          WriteBinaryLittleEndian<float>(&expected, point.x);
+          WriteBinaryLittleEndian<float>(&expected, point.y);
+          WriteBinaryLittleEndian<float>(&expected, point.z);
+          if (write_normal) {
+            WriteBinaryLittleEndian<float>(&expected, point.nx);
+            WriteBinaryLittleEndian<float>(&expected, point.ny);
+            WriteBinaryLittleEndian<float>(&expected, point.nz);
+          }
+          if (write_rgb) {
+            WriteBinaryLittleEndian<uint8_t>(&expected, point.r);
+            WriteBinaryLittleEndian<uint8_t>(&expected, point.g);
+            WriteBinaryLittleEndian<uint8_t>(&expected, point.b);
+          }
+        }
+        EXPECT_EQ(actual.substr(header_end + 1), expected.str());
+        const auto decoded = ReadPly(test_file);
+        ASSERT_EQ(decoded.size(), points.size());
+        const auto bits = [](float value) {
+          uint32_t result;
+          std::memcpy(&result, &value, sizeof(result));
+          return result;
+        };
+        for (size_t i = 0; i < points.size(); ++i) {
+          const auto& a = decoded[i];
+          const auto& b = points[i];
+          const std::array<float, 6> actual_values = {
+              a.x, a.y, a.z, a.nx, a.ny, a.nz};
+          const std::array<float, 6> expected_values = {
+              b.x,
+              b.y,
+              b.z,
+              write_normal ? b.nx : 0.0f,
+              write_normal ? b.ny : 0.0f,
+              write_normal ? b.nz : 0.0f};
+          for (size_t field = 0; field < actual_values.size(); ++field) {
+            EXPECT_EQ(bits(actual_values[field]), bits(expected_values[field]));
+          }
+          EXPECT_EQ(a.r, write_rgb ? b.r : 0);
+          EXPECT_EQ(a.g, write_rgb ? b.g : 0);
+          EXPECT_EQ(a.b, write_rgb ? b.b : 0);
+        }
+      }
+    }
+  }
+}
+
+TEST(Ply, RoundTripLargeBinaryPlyPointsFullData) {
+  const auto test_file = CreateTestDir() / "large.ply";
+  // Full records exceed 1 MiB and leave a partial final output buffer.
+  std::vector<PlyPoint> original_points(40001);
+  for (size_t i = 0; i < original_points.size(); ++i) {
+    const float value = static_cast<float>(static_cast<int>(i % 2048) - 1024);
+    auto& point = original_points[i];
+    point.x = value / 8.0f;
+    point.y = -value / 16.0f;
+    point.z = static_cast<float>(i) / 32.0f;
+    point.nx = value / 1024.0f;
+    point.ny = -value / 2048.0f;
+    point.nz = static_cast<float>(i % 513) / 512.0f;
+    point.r = static_cast<uint8_t>(i % 256);
+    point.g = static_cast<uint8_t>((i * 7 + 31) % 256);
+    point.b = static_cast<uint8_t>((i * 13 + 127) % 256);
+  }
+
+  WriteBinaryPlyPoints(test_file, original_points, true, true);
+  ASSERT_GT(std::filesystem::file_size(test_file), 1024 * 1024);
+  const auto loaded_points = ReadPly(test_file);
+  ASSERT_EQ(loaded_points.size(), original_points.size());
+  for (size_t i = 0; i < original_points.size(); ++i) {
+    const auto& expected = original_points[i];
+    const auto& actual = loaded_points[i];
+    EXPECT_EQ(actual.x, expected.x);
+    EXPECT_EQ(actual.y, expected.y);
+    EXPECT_EQ(actual.z, expected.z);
+    EXPECT_EQ(actual.nx, expected.nx);
+    EXPECT_EQ(actual.ny, expected.ny);
+    EXPECT_EQ(actual.nz, expected.nz);
+    EXPECT_EQ(actual.r, expected.r);
+    EXPECT_EQ(actual.g, expected.g);
+    EXPECT_EQ(actual.b, expected.b);
+  }
+}
+
+}  // namespace
+}  // namespace colmap
