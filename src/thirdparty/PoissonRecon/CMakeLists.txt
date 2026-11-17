@@ -27,3 +27,9 @@ if(TESTS_ENABLED)
         target_link_libraries(colmap_thirdparty_ply_scalar_test OpenMP::OpenMP_CXX)
     endif()
 endif()
+
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    # These sibling-directory tests link instrumented COLMAP libraries.
+    target_link_options(colmap_thirdparty_ply_scalar_test
+        PRIVATE -coverage)
+endif()
