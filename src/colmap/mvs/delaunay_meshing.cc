@@ -761,7 +761,7 @@ PlyMesh DelaunayMeshing(const DelaunayMeshingOptions& options,
 
   internal::RunDelaunayImageWorkers(
       input_data.images.size(),
-      GetEffectiveNumThreads(options.num_threads),
+      options.num_threads,
       IntegrateImage,
       [](ThreadPool& pool, const auto& worker) { pool.AddTask(worker); });
 

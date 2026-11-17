@@ -9,6 +9,7 @@
 #include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -16,12 +17,45 @@
 #include <future>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace mvs {
 namespace {
+
+TEST(DelaunayImageWorkers, BoundsPoolAndVisitsEveryImageOnce) {
+  const std::array<std::pair<size_t, int>, 7> cases = {
+      {{0, 8}, {1, 8}, {5, 8}, {17, 2}, {5, 1}, {1, 0}, {1, -1}}};
+  for (const auto& [num_images, num_threads] : cases) {
+    SCOPED_TRACE(testing::Message()
+                 << "images=" << num_images << " threads=" << num_threads);
+    std::vector<std::atomic<size_t>> visits(num_images);
+    for (auto& count : visits) count = 0;
+    size_t num_submitted = 0;
+    size_t num_drains = 0;
+    const size_t expected_workers = std::min(
+        num_images, static_cast<size_t>(GetEffectiveNumThreads(num_threads)));
+    internal::RunDelaunayImageWorkers(
+        num_images,
+        num_threads,
+        [&](const size_t image_idx) { ++visits.at(image_idx); },
+        [&](ThreadPool& pool, const auto& worker) {
+          EXPECT_EQ(pool.NumThreads(), expected_workers);
+          ++num_submitted;
+          pool.AddTask(worker);
+        },
+        [&](ThreadPool& pool) {
+          ++num_drains;
+          pool.Wait();
+        });
+    EXPECT_EQ(num_submitted, expected_workers);
+    EXPECT_EQ(num_drains, num_images == 0 ? 0 : 1);
+    for (const auto& count : visits) EXPECT_EQ(count.load(), 1);
+  }
+}
 
 TEST(DelaunayImageWorkers, WorkerFailureCancelsAndJoins) {
   using namespace std::chrono_literals;

@@ -15,7 +15,7 @@ struct DelaunayWorkerDrain {
   void operator()(ThreadPool& pool) const { pool.Wait(); }
 };
 
-// Submit a bounded set of image workers, draining all accepted tasks before
+// Bound the pool to the image count, draining all accepted tasks before
 // returning or propagating an exception. Submission is injectable so callers
 // can exercise failure after work has already entered the pool.
 template <typename ImageOperation,
@@ -26,6 +26,8 @@ void RunDelaunayImageWorkers(const size_t num_images,
                              ImageOperation&& integrate_image,
                              Submit&& submit,
                              Drain drain = {}) {
+  if (num_images == 0) return;
+
   std::atomic<size_t> next_image_idx{0};
   auto integrate_images = [&]() {
     try {
@@ -42,10 +44,11 @@ void RunDelaunayImageWorkers(const size_t num_images,
   };
 
   // The pool dies before the state and lambdas referenced by its tasks.
-  ThreadPool thread_pool(num_threads);
+  const size_t num_workers = std::min(
+      num_images, static_cast<size_t>(GetEffectiveNumThreads(num_threads)));
+  ThreadPool thread_pool(static_cast<int>(num_workers));
   try {
-    const size_t num_tasks = std::min(num_images, thread_pool.NumThreads());
-    for (size_t i = 0; i < num_tasks; ++i) {
+    for (size_t i = 0; i < num_workers; ++i) {
       submit(thread_pool, integrate_images);
     }
     drain(thread_pool);
