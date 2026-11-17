@@ -141,6 +141,8 @@ class Bitmap {
   Bitmap CloneAsRGB() const;
 
   // Set compression quality when writing to JPEG in the range [1, 100].
+  // Lower values reduce quality and file size. By default, bitmaps are
+  // written in superb (100) quality, if not otherwise specified.
   void SetJpegQuality(int quality);
 
   // Access metadata information (e.g., EXIF).
