@@ -331,28 +331,16 @@ struct DelaunayMeshingEdgeWeightComputer {
   double DistanceSigma() const { return distance_sigma_; }
 
   double ComputeVisibilityProb(const double visibility_squared) const {
-    return ComputeProbability(visibility_squared, visibility_normalization_);
+    return internal::ComputeDelaunayMeshingProbability(
+        visibility_squared, visibility_normalization_);
   }
 
   double ComputeDistanceProb(const double distance_squared) const {
-    return ComputeProbability(distance_squared, distance_normalization_);
+    return internal::ComputeDelaunayMeshingProbability(distance_squared,
+                                                       distance_normalization_);
   }
 
  private:
-  static double ComputeProbability(const double squared,
-                                   const double normalization) {
-    // Preserve zero probability even if sigma squared underflows and the
-    // normalization becomes negative infinity.
-    if (squared == 0.0) return 0.0;
-    const double exponent = squared * normalization;
-    // Saturate beyond five standard deviations in dimensionless units.
-    constexpr double kSaturationExponent = -0.5 * 5.0 * 5.0;
-    if (exponent > kSaturationExponent) {
-      return std::max(0.0, 1.0 - std::exp(exponent));
-    }
-    return 1.0;
-  }
-
   double visibility_normalization_;
   double distance_sigma_;
   double distance_normalization_;

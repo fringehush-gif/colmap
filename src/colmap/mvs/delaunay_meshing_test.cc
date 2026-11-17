@@ -8,13 +8,60 @@
 #include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
 
+#include <cmath>
 #include <fstream>
+#include <limits>
 
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace mvs {
 namespace {
+
+TEST(DelaunayMeshingProbability, StandardDeviationScaling) {
+  // The old squared-input comparison against 5 * sigma saturates too early
+  // for sigma > 0.2 and too late below it. Test both visibility and scene
+  // scales.
+  for (const double sigma : {0.125, 0.5, 1.0, 3.0, 8.0}) {
+    const double normalization = -0.5 / (sigma * sigma);
+    for (const double factor : {0.0, 0.25, 1.0, 2.0, 4.0, 4.999, 5.0, 8.0}) {
+      SCOPED_TRACE(testing::Message()
+                   << "sigma=" << sigma << " factor=" << factor);
+      const double value = factor * sigma;
+      const double probability = internal::ComputeDelaunayMeshingProbability(
+          value * value, normalization);
+      const long double normalized = factor;
+      const double expected =
+          factor >= 5.0 ? 1.0
+                        : static_cast<double>(
+                              -std::expm1(-0.5L * normalized * normalized));
+      EXPECT_NEAR(probability, expected, 1e-15);
+    }
+  }
+  // Four observations at the default sigma must not already saturate.
+  EXPECT_NEAR(internal::ComputeDelaunayMeshingProbability(16.0, -0.5 / 9.0),
+              0.5888877094928125,
+              1e-15);
+}
+
+TEST(DelaunayMeshingProbability, SaturationBoundaryAndZero) {
+  EXPECT_LT(internal::ComputeDelaunayMeshingProbability(
+                std::nextafter(25.0, 0.0), -0.5),
+            1.0);
+  EXPECT_EQ(internal::ComputeDelaunayMeshingProbability(25.0, -0.5), 1.0);
+  EXPECT_EQ(internal::ComputeDelaunayMeshingProbability(
+                std::nextafter(25.0, 26.0), -0.5),
+            1.0);
+  // Positive subnormal sigma can produce negative infinite normalization.
+  EXPECT_EQ(internal::ComputeDelaunayMeshingProbability(
+                0.0, -std::numeric_limits<double>::infinity()),
+            0.0);
+  EXPECT_EQ(internal::ComputeDelaunayMeshingProbability(
+                1.0, -std::numeric_limits<double>::infinity()),
+            1.0);
+}
+
+#if defined(COLMAP_CGAL_ENABLED)
 
 Reconstruction CreateAndWriteSyntheticReconstruction(
     const std::filesystem::path& sparse_path,
@@ -31,8 +78,6 @@ Reconstruction CreateAndWriteSyntheticReconstruction(
   reconstruction.Write(sparse_path);
   return reconstruction;
 }
-
-#if defined(COLMAP_CGAL_ENABLED)
 
 TEST(SparseDelaunayMeshing, Integration) {
   const auto test_dir = CreateTestDir();
