@@ -30,6 +30,12 @@ if(TESTS_ENABLED)
     endif()
 endif()
 
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    # These sibling-directory tests link instrumented COLMAP libraries.
+    target_link_options(colmap_thirdparty_attribute_state_test
+        PRIVATE -coverage)
+endif()
+
 COLMAP_ADD_TEST(
     NAME fem_tree_test
     SRCS fem_tree_test.cc
@@ -42,6 +48,12 @@ if(TESTS_ENABLED)
     endif()
 endif()
 
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    # These sibling-directory tests link instrumented COLMAP libraries.
+    target_link_options(colmap_thirdparty_fem_tree_test
+        PRIVATE -coverage)
+endif()
+
 COLMAP_ADD_TEST(
     NAME ply_scalar_test
     SRCS ply_scalar_test.cc
@@ -51,4 +63,10 @@ if(TESTS_ENABLED)
     if(OPENMP_FOUND)
         target_link_libraries(colmap_thirdparty_ply_scalar_test OpenMP::OpenMP_CXX)
     endif()
+endif()
+
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    # These sibling-directory tests link instrumented COLMAP libraries.
+    target_link_options(colmap_thirdparty_ply_scalar_test
+        PRIVATE -coverage)
 endif()
