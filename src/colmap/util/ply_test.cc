@@ -33,7 +33,8 @@ namespace {
 // and triangular faces. The payload callback receives a Write function that
 // encodes one scalar in the file's endianness; it must write exactly
 // num_vertices vertices, followed by the raw faces if face_properties is set.
-// Otherwise, faces are appended using the default uchar/int layout.
+// Otherwise, faces are appended using the default uchar/int layout,
+// with optional face_uvs containing six coordinates per face.
 // Pass explicitly typed values (e.g. int16_t(-300))
 // so that scalars get the intended width.
 template <typename WritePayload>
@@ -44,6 +45,7 @@ std::filesystem::path WriteBinaryPlyMesh(
     const std::vector<std::string>& properties,
     WritePayload&& write_payload,
     const std::vector<std::array<int, 3>>& faces = {},
+    const std::vector<float>& face_uvs = {},
     const std::string& face_properties = {},
     size_t raw_face_count = 0) {
   const auto test_file = CreateTestDir() / file_name;
@@ -61,6 +63,9 @@ std::filesystem::path WriteBinaryPlyMesh(
     text_file << (face_properties.empty()
                       ? "property list uchar int vertex_index\n"
                       : face_properties);
+    if (!face_uvs.empty()) {
+      text_file << "property list uchar float texcoord\n";
+    }
     text_file << "end_header\n";
     text_file.close();
 
@@ -74,10 +79,16 @@ std::filesystem::path WriteBinaryPlyMesh(
                         sizeof(converted));
     };
     write_payload(Write);
-    for (const auto& face : faces) {
+    for (size_t i = 0; i < faces.size(); ++i) {
       Write(uint8_t(3));
-      for (int idx : face) {
+      for (int idx : faces[i]) {
         Write(int32_t(idx));
+      }
+      if (!face_uvs.empty()) {
+        Write(uint8_t(6));
+        for (size_t j = 0; j < 6; ++j) {
+          Write(face_uvs.at(6 * i + j));
+        }
       }
     }
   }
@@ -533,6 +544,66 @@ TEST(Ply, RoundTripBinaryTexturedPlyMesh) {
   WriteBinaryPlyMesh(test_file, original);
   PlyTexturedMesh loaded = ReadPlyMesh(test_file);
   VerifyTexturedMesh(loaded, original);
+}
+
+TEST(Ply, RejectTruncatedBinaryTextureCoordinates) {
+  PlyTexturedMesh original = CreateTestTexturedMesh();
+  original.texture_file.clear();
+  constexpr size_t kFaceIndexBytes = sizeof(uint8_t) + 3 * sizeof(int32_t);
+  constexpr size_t kFaceTexcoordBytes = sizeof(uint8_t) + 6 * sizeof(float);
+  constexpr size_t kFaceBytes = kFaceIndexBytes + kFaceTexcoordBytes;
+
+  for (const std::string format :
+       {"binary_little_endian", "binary_big_endian"}) {
+    SCOPED_TRACE(format);
+    const auto path = WriteBinaryPlyMesh(
+        "truncated.ply",
+        format,
+        original.mesh.vertices.size(),
+        {"float x", "float y", "float z"},
+        [&](const auto& Write) {
+          for (const auto& vertex : original.mesh.vertices) {
+            Write(vertex.x);
+            Write(vertex.y);
+            Write(vertex.z);
+          }
+        },
+        {{0, 1, 2}, {1, 3, 2}},
+        original.face_uvs);
+    VerifyTexturedMesh(ReadPlyMesh(path), original);
+
+    std::ifstream input(path, std::ios::binary);
+    const std::vector<char> bytes(std::istreambuf_iterator<char>{input}, {});
+    input.close();
+    ASSERT_GE(bytes.size(), original.mesh.faces.size() * kFaceBytes);
+
+    for (size_t face = 0; face < original.mesh.faces.size(); ++face) {
+      SCOPED_TRACE(face);
+      const size_t uv_offset =
+          bytes.size() - (original.mesh.faces.size() - face) * kFaceBytes +
+          kFaceIndexBytes;
+      // Keep zero through 24 bytes: omit the count, or truncate any UV float.
+      for (size_t length = 0; length < kFaceTexcoordBytes; ++length) {
+        SCOPED_TRACE(length);
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output.write(bytes.data(), uv_offset + length);
+        output.close();
+        ASSERT_TRUE(output.good());
+
+        const std::string expected_message =
+            (length == 0 ? "Missing texture coordinate count at face "
+                         : "Unexpected end of texture coordinates at face ") +
+            std::to_string(face);
+        try {
+          ReadPlyMesh(path);
+          FAIL() << "Expected rejection of truncated texture coordinates";
+        } catch (const std::invalid_argument& error) {
+          EXPECT_NE(std::string(error.what()).find(expected_message),
+                    std::string::npos);
+        }
+      }
+    }
+  }
 }
 
 TEST(Ply, ReadPlyMeshWithoutTexcoords) {
@@ -1393,6 +1464,7 @@ TEST(Ply, ReadBinaryMeshFaceIntegerTypes) {
             }
           },
           {},
+          {},
           "property list uchar " + type + " vertex_index\n",
           1);
       const auto mesh = ReadPlyMesh(path).mesh;
@@ -1419,6 +1491,7 @@ TEST(Ply, ReadBinaryMeshFaceIntegerTypes) {
               Write(int32_t(-1));
           },
           {},
+          {},
           "property list uchar " + type + " vertex_index\n",
           1);
       ExpectPlyMeshError(path, "Negative face vertex index");
@@ -1439,6 +1512,7 @@ TEST(Ply, ReadBinaryMeshFaceIntegerTypes) {
             Write(uint8_t(3));
             Write(index);
           },
+          {},
           {},
           "property list uchar uint32 vertex_index\n",
           1);
@@ -1482,6 +1556,7 @@ TEST(Ply, ReadBinaryMeshFaceIntegerTypes) {
             Write(uint8_t(0));
           },
           {},
+          {},
           "property list " + type + " uchar vertex_index\n",
           1);
       EXPECT_EQ(ReadPlyMesh(path).mesh.faces.size(), 1)
@@ -1503,6 +1578,7 @@ TEST(Ply, ReadBinaryMeshFaceIntegerTypes) {
                 Write(int32_t(-1));
             },
             {},
+            {},
             "property list " + type + " uchar vertex_index\n",
             1);
         ExpectPlyMeshError(negative_path,
@@ -1521,6 +1597,7 @@ TEST(Ply, ReadBinaryMeshFaceIntegerTypes) {
             Write(uint8_t(0));
             Write(uint8_t(0));
           },
+          {},
           {},
           "property list " + declaration + " vertex_index\n",
           1);
@@ -1566,6 +1643,7 @@ TEST(Ply, ReadMeshTexcoordTypes) {
             }
           },
           {},
+          {},
           "property list uchar int vertex_index\nproperty list " + type[0] +
               " " + type[1] + " texcoord\n",
           1);
@@ -1583,6 +1661,7 @@ TEST(Ply, ReadMeshTexcoordTypes) {
         [](const auto& Write) {
           for (const uint8_t value : {0, 0, 0, 1, 0, 0, 0, 1, 0}) Write(value);
         },
+        {},
         {},
         "property list uchar int vertex_index\n"
         "property list ushort double texcoord\n",
@@ -1615,7 +1694,7 @@ TEST(Ply, ReadMeshTexcoordTypes) {
   EXPECT_TRUE(empty.face_uvs.empty());
 }
 
-TEST(Ply, ReadBinaryMeshTexcoordTruncation) {
+TEST(Ply, ReadBinaryMeshTexcoordBitsAndCount) {
   const std::array<uint32_t, 12> uv_bits = {0x00000000,
                                             0x80000000,
                                             0x00000001,
@@ -1645,6 +1724,7 @@ TEST(Ply, ReadBinaryMeshTexcoordTruncation) {
           }
         },
         {},
+        {},
         "property list uchar int vertex_index\nproperty list uchar float "
         "texcoord\n",
         2);
@@ -1655,28 +1735,12 @@ TEST(Ply, ReadBinaryMeshTexcoordTruncation) {
       std::memcpy(&actual, &mesh.face_uvs[i], sizeof(actual));
       EXPECT_EQ(actual, uv_bits[i]) << format << " " << i;
     }
-    std::ifstream input(path, std::ios::binary);
-    const std::vector<char> bytes((std::istreambuf_iterator<char>(input)), {});
-    input.close();
-    // Cut at every byte of each face's UV count and payload, including the
-    // first face (which leaves the second face unread).
+    const std::string bytes = ReadTestFile(path);
     for (int face = 0; face < 2; ++face) {
       const size_t uv_offset = bytes.size() - (2 - face) * 38 + 13;
-      for (size_t length = 0; length < 25; ++length) {
-        std::ofstream output(path, std::ios::binary | std::ios::trunc);
-        output.write(bytes.data(), uv_offset + length);
-        output.close();
-        const std::string suffix =
-            length == 0
-                ? "texcoord count"
-                : "texcoord " + std::to_string((length - 1) / sizeof(float));
-        ExpectPlyMeshError(path, "face " + std::to_string(face) + " " + suffix);
-      }
-      std::vector<char> wrong_count = bytes;
+      std::string wrong_count = bytes;
       wrong_count[uv_offset] = 5;
-      std::ofstream output(path, std::ios::binary | std::ios::trunc);
-      output.write(wrong_count.data(), wrong_count.size());
-      output.close();
+      WriteTestFile(path, wrong_count);
       ExpectPlyMeshError(path, "Expected 6 texture coordinates");
     }
   }
@@ -1874,6 +1938,58 @@ TEST(Ply, IncompleteAsciiConsumedFieldsAreRejected) {
   WriteTestFile(p, header + "1 2 3 17 109 233");
   EXPECT_EQ(ReadPly(p)[0].b, 233);
   EXPECT_EQ(ReadPlyMesh(p).mesh.vertices[0].b, 233);
+}
+
+TEST(Ply, MissingAsciiFaceRecordsAreRejected) {
+  const auto path = CreateTestDir() / "missing-faces.ply";
+  const std::string vertex_header =
+      "ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty "
+      "float y\nproperty float z\nproperty uchar red\nproperty uchar "
+      "green\nproperty uchar blue\n";
+  const std::vector<float> uvs = {0, 0.25f, 0.5f, 0.75f, 1, 0};
+  for (const bool has_texcoord : {false, true}) {
+    const std::string face =
+        has_texcoord ? "3 0 0 0 6 0 0.25 0.5 0.75 1 0" : "3 0 0 0";
+    for (const size_t present_faces : {0, 1}) {
+      const std::string header =
+          vertex_header + "element face " + std::to_string(present_faces + 1) +
+          "\nproperty list uchar int vertex_indices\n" +
+          (has_texcoord ? "property list uchar float texcoord\n" : "") +
+          "end_header\n";
+      // This legal vertex record can also be parsed as a triangle if a failed
+      // getline leaves it in the buffer. A prior complete face can be reused
+      // too.
+      std::string payload = "3 0 0 0 0 0";
+      for (size_t i = 0; i < present_faces; ++i) payload += "\n" + face;
+      PlyTexturedMesh expected;
+      expected.mesh.vertices.emplace_back(3, 0, 0, 0, 0, 0);
+      for (size_t i = 0; i <= present_faces; ++i) {
+        expected.mesh.faces.emplace_back(0, 0, 0);
+        if (has_texcoord) {
+          expected.face_uvs.insert(
+              expected.face_uvs.end(), uvs.begin(), uvs.end());
+        }
+      }
+      const std::string incomplete = header + payload;
+      std::string complete = incomplete;
+      complete += '\n';
+      complete += face;
+      for (const bool has_newline : {false, true}) {
+        SCOPED_TRACE(testing::Message() << has_texcoord << ' ' << present_faces
+                                        << ' ' << has_newline);
+        const std::string ending = has_newline ? "\n" : "";
+        WriteTestFile(path, incomplete + ending);
+        ExpectPlyMeshError(path,
+                           "Unexpected end of PLY file at face " +
+                               std::to_string(present_faces));
+
+        WriteTestFile(path, complete + ending);
+        const auto loaded = ReadPlyMesh(path);
+        VerifyTexturedMesh(loaded, expected);
+        ExpectColorEq(loaded.mesh.vertices.at(0), 0, 0, 0);
+      }
+    }
+  }
 }
 
 TEST(Ply, UnsupportedFaceTypePrecedesPayloadReads) {

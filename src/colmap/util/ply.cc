@@ -9,7 +9,6 @@
 #include "colmap/util/string.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -842,19 +841,16 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
 
       if (has_texcoord) {
         uint8_t num_texcoords;
-        file.read(reinterpret_cast<char*>(&num_texcoords), sizeof(uint8_t));
-        THROW_CHECK(file.good())
-            << "Unexpected end of PLY file at face " << i << " texcoord count";
+        THROW_CHECK(file.read(reinterpret_cast<char*>(&num_texcoords),
+                              sizeof(num_texcoords)))
+            << "Missing texture coordinate count at face " << i;
         THROW_CHECK_EQ(num_texcoords, 6)
             << "Expected 6 texture coordinates per triangular face";
 
-        std::array<float, 6> uvs;
-        file.read(reinterpret_cast<char*>(uvs.data()),
-                  uvs.size() * sizeof(float));
-        THROW_CHECK(file.good())
-            << "Unexpected end of PLY file at face " << i << " texcoord "
-            << static_cast<size_t>(file.gcount()) / sizeof(float);
-        for (float uv : uvs) {
+        for (int j = 0; j < 6; ++j) {
+          float uv;
+          THROW_CHECK(file.read(reinterpret_cast<char*>(&uv), sizeof(uv)))
+              << "Unexpected end of texture coordinates at face " << i;
           if (is_little_endian) {
             uv = LittleEndianToNative(uv);
           } else {
@@ -900,7 +896,8 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
 
     // Read ASCII face data
     for (size_t i = 0; i < num_faces; ++i) {
-      std::getline(file, line);
+      THROW_CHECK(std::getline(file, line))
+          << "Unexpected end of PLY file at face " << i;
       StringTrim(&line);
       std::stringstream line_stream(line);
       SetFullPrecTextStream(line_stream);
