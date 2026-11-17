@@ -32,7 +32,12 @@
 #include <CGAL/AABB_triangle_primitive.h>
 #endif
 #include <CGAL/AABB_tree.h>
+#include <CGAL/Cartesian_converter.h>
+#include <CGAL/Exact_predicates_exact_constructions_kernel.h>
+#include <CGAL/Intersections_3/Segment_3_Triangle_3.h>
 #include <CGAL/Simple_cartesian.h>
+#include <CGAL/squared_distance_3.h>
+#include <boost/iterator/function_output_iterator.hpp>
 #endif  // COLMAP_CGAL_ENABLED
 
 #ifdef _OPENMP
@@ -178,6 +183,51 @@ using CGALTraits = CGAL::AABB_traits<CGALKernel, CGALPrimitiveId>;
 #endif
 using CGALAABBTree = CGAL::AABB_tree<CGALTraits>;
 
+bool IsValidOcclusion(const CGALSegment& segment,
+                      const CGALTriangle& triangle,
+                      const CGALPoint& vertex,
+                      const float cutoff) {
+  const auto is_finite = [](const CGALPoint& point) {
+    return std::isfinite(point.x()) && std::isfinite(point.y()) &&
+           std::isfinite(point.z());
+  };
+  if (!(cutoff > 0) || !is_finite(segment.source()) ||
+      !is_finite(segment.target()) || !is_finite(vertex) ||
+      !is_finite(triangle[0]) || !is_finite(triangle[1]) ||
+      !is_finite(triangle[2])) {
+    return false;
+  }
+
+  // Float intersections can lie outside the triangle. Reintersect the original
+  // float coordinates exactly before accepting an occlusion.
+  using ExactKernel = CGAL::Exact_predicates_exact_constructions_kernel;
+  const CGAL::Cartesian_converter<CGALKernel, ExactKernel> convert;
+  const auto exact_segment = convert(segment);
+  const auto exact_triangle = convert(triangle);
+  if (exact_segment.is_degenerate() || exact_triangle.is_degenerate()) {
+    return false;
+  }
+  const auto intersection = CGAL::intersection(exact_segment, exact_triangle);
+  if (!intersection) return false;
+#if CGAL_VERSION_MAJOR >= 6
+  const auto* point = std::get_if<ExactKernel::Point_3>(&*intersection);
+#else
+  const auto* point = boost::get<ExactKernel::Point_3>(&*intersection);
+#endif
+  if (!point) return false;
+
+  const auto squared_distance =
+      CGAL::squared_distance(exact_segment.source(), *point);
+  // Shortening can round back to the original vertex. Contact with that vertex
+  // must not occlude its face, even when the float distance test accepts it.
+  if (squared_distance >=
+      CGAL::squared_distance(exact_segment.source(), convert(vertex))) {
+    return false;
+  }
+  return std::isinf(cutoff) ||
+         squared_distance < ExactKernel::FT(cutoff) * ExactKernel::FT(cutoff);
+}
+
 struct OcclusionTester {
   std::vector<CGALTriangle> triangles;
   // Maps from index in `triangles` back to the original face index.
@@ -224,23 +274,36 @@ struct OcclusionTester {
     const auto intersection = tree.any_intersection(segment);
     if (!intersection) return false;
 
-    const auto& primitive_id = intersection->second;
-    const size_t tri_idx =
-        static_cast<size_t>(primitive_id - triangles.begin());
-    const size_t hit_face = triangle_to_face[tri_idx];
-    if (hit_face == face_idx) return false;
-
+    const float cutoff = dist - kEps;
+    const auto is_occluding = [&](const auto& hit) {
+      const size_t tri_idx =
+          static_cast<size_t>(hit.second - triangles.begin());
+      if (triangle_to_face[tri_idx] == face_idx) return false;
 #if CGAL_VERSION_MAJOR >= 6
-    const auto* hit_point = std::get_if<CGALPoint>(&(intersection->first));
+      const auto* hit_point = std::get_if<CGALPoint>(&hit.first);
 #else
-    const auto* hit_point = boost::get<CGALPoint>(&(intersection->first));
+      const auto* hit_point = boost::get<CGALPoint>(&hit.first);
 #endif
-    if (hit_point) {
+      if (!hit_point) return false;
       const Eigen::Vector3f hp(hit_point->x(), hit_point->y(), hit_point->z());
       const float hit_dist = (hp - camera_center).norm();
-      if (hit_dist < dist - kEps) return true;
-    }
-    return false;
+      return hit_dist < cutoff &&
+             IsValidOcclusion(segment,
+                              triangles[tri_idx],
+                              CGALPoint(vertex.x(), vertex.y(), vertex.z()),
+                              cutoff);
+    };
+    if (is_occluding(*intersection)) return true;
+
+    // any_intersection may return a rejected hit before a genuine blocker.
+    bool occluded = false;
+    tree.all_intersections(
+        segment, boost::make_function_output_iterator([&](const auto& hit) {
+          if (!occluded && hit.second != intersection->second) {
+            occluded = is_occluding(hit);
+          }
+        }));
+    return occluded;
   }
 };
 
