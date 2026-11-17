@@ -3,9 +3,12 @@
 #include "colmap/mvs/texture_mapping.h"
 
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -34,13 +37,16 @@ PlyMesh MakeTriangleMesh() {
 // In COLMAP convention: P_cam = R * P_world + T, camera looks along +Z_cam.
 // To look along -Z_world, use 180° rotation around X: R maps -Z_world to
 // +Z_cam.
-Image MakeTestImage(int width, int height, const BitmapColor<uint8_t>& color) {
+Image MakeTestImage(int width,
+                    int height,
+                    const BitmapColor<uint8_t>& color,
+                    const float focal_scale = 1.0f) {
   // K: focal length = width, principal point at center.
   float K[9] = {0};
-  K[0] = static_cast<float>(width);          // fx
-  K[4] = static_cast<float>(height);         // fy
-  K[2] = static_cast<float>(width) / 2.0f;   // cx
-  K[5] = static_cast<float>(height) / 2.0f;  // cy
+  K[0] = static_cast<float>(width) * focal_scale;   // fx
+  K[4] = static_cast<float>(height) * focal_scale;  // fy
+  K[2] = static_cast<float>(width) / 2.0f;          // cx
+  K[5] = static_cast<float>(height) / 2.0f;         // cy
   K[8] = 1.0f;
 
   // R: 180° rotation around X-axis. Row-major: [1,0,0, 0,-1,0, 0,0,-1].
@@ -63,6 +69,19 @@ Image MakeTestImage(int width, int height, const BitmapColor<uint8_t>& color) {
   image.SetBitmap(std::move(bitmap));
 
   return image;
+}
+
+// At focal_scale=8192 with a 64x64 image, this nondegenerate triangle has
+// the requested bounding box and at least one visible vertex.
+PlyMesh MakeAtlasTestMesh(const int width, const int height) {
+  const float dx = 5.0f * (width - 1) / (64 * 8192);
+  const float dy = 5.0f * (height - 1) / (64 * 8192);
+  PlyMesh mesh;
+  mesh.vertices = {PlyMeshVertex(0.5f, 0.5f, 0),
+                   PlyMeshVertex(0.5f + dx, 0.5f, 0),
+                   PlyMeshVertex(0.5f, 0.5f + dy, 0)};
+  mesh.faces = {PlyMeshFace(0, 1, 2)};
+  return mesh;
 }
 
 // Create a camera where the mesh at Z=0 is behind the camera.
@@ -237,6 +256,163 @@ TEST(MeshTextureMapping, EmptyMesh) {
   EXPECT_EQ(result.atlas_height, 0);
   EXPECT_TRUE(result.face_uvs.empty());
   EXPECT_TRUE(result.face_view_ids.empty());
+}
+
+TEST(MeshTextureMapping, RejectsInvalidTextureScale) {
+  const PlyMesh mesh = MakeTriangleMesh();
+  const std::vector<Image> images = {
+      MakeTestImage(64, 64, BitmapColor<uint8_t>(128))};
+  MeshTextureMappingOptions options;
+  const double max_scale = std::numeric_limits<float>::max();
+  const double min_scale = 1.0 / max_scale;
+  for (const double scale :
+       {std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::max(),
+        1e-100,
+        std::nextafter(min_scale, 0.0),
+        std::nextafter(max_scale, std::numeric_limits<double>::infinity())}) {
+    SCOPED_TRACE(scale);
+    options.texture_scale_factor = scale;
+    EXPECT_FALSE(options.Check());
+    EXPECT_THAT([&] { MeshTextureMapping(mesh, images, options); },
+                testing::ThrowsMessage<std::invalid_argument>(
+                    testing::HasSubstr("options.Check()")));
+  }
+  for (const double scale : {min_scale, 1.0, max_scale}) {
+    SCOPED_TRACE(scale);
+    options.texture_scale_factor = scale;
+    EXPECT_TRUE(options.Check());
+    EXPECT_TRUE(std::isfinite(static_cast<float>(scale)));
+    // BakeTexture divides in double precision before narrowing the reciprocal.
+    EXPECT_TRUE(std::isfinite(static_cast<float>(1.0 / scale)));
+  }
+}
+
+TEST(MeshTextureMapping, RejectsScaledProjectionOverflow) {
+  const PlyMesh mesh = MakeTriangleMesh();
+  const std::vector<Image> images = {
+      MakeTestImage(64, 64, BitmapColor<uint8_t>(128))};
+  MeshTextureMappingOptions options;
+  options.num_threads = 1;
+  for (const double scale : {1e10, double{std::numeric_limits<float>::max()}}) {
+    SCOPED_TRACE(scale);
+    options.texture_scale_factor = scale;
+    ASSERT_TRUE(options.Check());
+    EXPECT_THAT(
+        [&] { MeshTextureMapping(mesh, images, options); },
+        testing::ThrowsMessage<std::invalid_argument>(testing::HasSubstr(
+            "Projected texture coordinates exceed integer range")));
+  }
+}
+
+TEST(MeshTextureMapping, RejectsOffImageProjectionOverflow) {
+  const std::vector<Image> images = {
+      MakeTestImage(64, 64, BitmapColor<uint8_t>(128), 1e9f)};
+  MeshTextureMappingOptions options;
+  options.num_threads = 1;
+  options.min_visible_vertices = 1;
+  for (const float sign : {-1.0f, 1.0f}) {
+    SCOPED_TRACE(sign);
+    PlyMesh mesh = MakeAtlasTestMesh(65537, 2);
+    mesh.vertices[1].x = 0.5f + sign * 0.625f;
+    if (sign < 0) {
+      mesh.faces = {PlyMeshFace(0, 2, 1)};
+    }
+    EXPECT_THAT(
+        [&] { MeshTextureMapping(mesh, images, options); },
+        testing::ThrowsMessage<std::invalid_argument>(testing::HasSubstr(
+            "Projected texture coordinates exceed integer range")));
+  }
+}
+
+TEST(MeshTextureMapping, RejectsProjectionExtentOverflow) {
+  PlyMesh mesh = MakeAtlasTestMesh(65537, 2);
+  mesh.vertices[2].x = -0.125f;
+  const std::vector<Image> images = {
+      MakeTestImage(64, 64, BitmapColor<uint8_t>(128), float{1 << 27})};
+  MeshTextureMappingOptions options;
+  options.num_threads = 1;
+  options.min_visible_vertices = 1;
+  EXPECT_THAT([&] { MeshTextureMapping(mesh, images, options); },
+              testing::ThrowsMessage<std::invalid_argument>(testing::HasSubstr(
+                  "Projected texture dimensions exceed integer range")));
+}
+
+TEST(MeshTextureMapping, RejectsPaddingOverflow) {
+  const PlyMesh mesh = MakeTriangleMesh();
+  const std::vector<Image> images = {
+      MakeTestImage(64, 64, BitmapColor<uint8_t>(128))};
+  MeshTextureMappingOptions options;
+  options.num_threads = 1;
+  options.atlas_patch_padding = std::numeric_limits<int>::max();
+  EXPECT_THAT([&] { MeshTextureMapping(mesh, images, options); },
+              testing::ThrowsMessage<std::invalid_argument>(
+                  testing::HasSubstr("Atlas patch dimensions exceed maximum")));
+}
+
+TEST(MeshTextureMapping, AtlasDimensionLimit) {
+  const std::vector<Image> images = {
+      MakeTestImage(64, 64, BitmapColor<uint8_t>(128), 8192)};
+  MeshTextureMappingOptions options;
+  options.num_threads = 1;
+  options.min_visible_vertices = 1;
+  options.atlas_patch_padding = 0;
+  options.apply_color_correction = false;
+  options.inpaint_radius = 0;
+  const auto result =
+      MeshTextureMapping(MakeAtlasTestMesh(65536, 2), images, options);
+  EXPECT_EQ(result.face_view_ids, std::vector<int>{0});
+  EXPECT_EQ(result.atlas_width, 65536);
+  EXPECT_EQ(result.atlas_height, 2);
+  const auto color = result.texture_atlas.GetPixel(0, 0);
+  ASSERT_TRUE(color.has_value());
+  EXPECT_EQ(color->r, 128);
+  EXPECT_EQ(color->g, 128);
+  EXPECT_EQ(color->b, 128);
+
+  // This would otherwise pack into a 131072x2 atlas on the first attempt.
+  EXPECT_THAT(
+      [&] { MeshTextureMapping(MakeAtlasTestMesh(65537, 2), images, options); },
+      testing::ThrowsMessage<std::invalid_argument>(
+          testing::HasSubstr("Atlas patch dimensions exceed maximum")));
+}
+
+TEST(MeshTextureMapping, RejectsAtlasGrowthPastLimit) {
+  PlyMesh mesh = MakeAtlasTestMesh(65536, 2);
+  const PlyMesh tall_mesh = MakeAtlasTestMesh(2, 65536);
+  mesh.vertices.insert(mesh.vertices.end(),
+                       tall_mesh.vertices.begin(),
+                       tall_mesh.vertices.end());
+  mesh.faces.emplace_back(3, 4, 5);
+  const std::vector<Image> images = {
+      MakeTestImage(64, 64, BitmapColor<uint8_t>(128), 8192)};
+  MeshTextureMappingOptions options;
+  options.num_threads = 1;
+  options.min_visible_vertices = 1;
+  options.atlas_patch_padding = 0;
+  // The two thin patches cannot share a 65536-wide shelf. Reject before
+  // allocating the oversized atlas required by the next packing attempt.
+  EXPECT_THAT([&] { MeshTextureMapping(mesh, images, options); },
+              testing::ThrowsMessage<std::invalid_argument>(
+                  testing::HasSubstr("Atlas dimensions exceeded maximum")));
+}
+
+TEST(MeshTextureMapping, RejectsAtlasStorageOverflow) {
+  const PlyMesh mesh = MakeTriangleMesh();
+  const std::vector<Image> images = {
+      MakeTestImage(64, 64, BitmapColor<uint8_t>(128))};
+  MeshTextureMappingOptions options;
+  options.num_threads = 1;
+  // Exercise both total patch area and the larger power-of-two atlas area.
+  for (const int padding : {20000, 13000}) {
+    SCOPED_TRACE(padding);
+    options.atlas_patch_padding = padding;
+    EXPECT_THAT(
+        [&] { MeshTextureMapping(mesh, images, options); },
+        testing::ThrowsMessage<std::invalid_argument>(
+            testing::HasSubstr("Atlas area exceeds RGB bitmap storage limit")));
+  }
 }
 
 TEST(MeshTextureMapping, NoVisibleFaces) {
