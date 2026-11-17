@@ -240,9 +240,9 @@ void CheckMeshProperties(const std::filesystem::path& path,
 #if GTEST_HAS_DEATH_TEST
 
 // The vendor CLI stores omitted flags globally. Threadsafe death tests re-exec
-// the binary, so each parameter instance invokes the solver exactly once.
-// CreateTestDir also clears its directory on first use in each process: keeping
-// one invocation per instance lets the parent read the actual child output.
+// the binary, so each parameter instance runs in one isolated child.
+// CreateTestDir clears its directory on first use in each process: one child
+// and fixture setup per instance lets the parent read the actual output.
 template <typename Param>
 class IsolatedPoissonTest : public testing::TestWithParam<Param> {
  protected:
@@ -321,6 +321,50 @@ INSTANTIATE_TEST_SUITE_P(ColorDisabledAndEnabled,
                          PoissonMeshingColorlessDeathTest,
                          testing::Bool());
 
+using PoissonMeshingGeometryDeathTest = IsolatedPoissonTest<bool>;
+
+TEST_P(PoissonMeshingGeometryDeathTest,
+       DisabledColorsMatchPhysicallyColorlessInput) {
+  const auto test_dir = CreateTestDir();
+  const auto input = test_dir / "points.ply";
+  const auto stripped_input = test_dir / "stripped.ply";
+  const auto output = test_dir / "mesh.ply";
+  const auto stripped_output = test_dir / "stripped_mesh.ply";
+  const auto points = MakeDeterministicColoredCubePoints();
+  const bool quality = GetParam();
+  if (quality) {
+    ASSERT_TRUE(
+        WriteAuxiliaryAsciiPly(input, points, {"red", "green", "blue"}, true));
+    ASSERT_TRUE(WriteAuxiliaryAsciiPly(stripped_input, points, {}, true));
+  } else {
+    WriteBinaryPlyPoints(input, points, true, true);
+    WriteBinaryPlyPoints(stripped_input, points, true, false);
+  }
+  const auto options = ColorTestOptions(false);
+  // Both calls use identical options, avoiding the vendor CLI's retained flags.
+  ASSERT_EXIT(std::_Exit(PoissonMeshing(options, input, output) &&
+                                 PoissonMeshing(
+                                     options, stripped_input, stripped_output)
+                             ? EXIT_SUCCESS
+                             : EXIT_FAILURE),
+              testing::ExitedWithCode(EXIT_SUCCESS),
+              "");
+  const std::vector<std::string> expected =
+      quality ? std::vector<std::string>{"quality"}
+              : std::vector<std::string>{};
+  CheckMeshProperties(output, expected);
+  CheckMeshProperties(stripped_output, expected);
+  std::vector<char> actual;
+  std::vector<char> stripped;
+  ReadBinaryBlob(output, &actual);
+  ReadBinaryBlob(stripped_output, &stripped);
+  EXPECT_EQ(actual, stripped);
+}
+
+INSTANTIATE_TEST_SUITE_P(WithAndWithoutQuality,
+                         PoissonMeshingGeometryDeathTest,
+                         testing::Bool());
+
 using PoissonMeshingAuxiliaryDeathTest =
     IsolatedPoissonTest<std::tuple<int, bool>>;
 
@@ -357,6 +401,29 @@ INSTANTIATE_TEST_SUITE_P(QualityWithRgbPartialMixedAndRedundantAliases,
                          PoissonMeshingAuxiliaryDeathTest,
                          testing::Combine(testing::Range(0, 6),
                                           testing::Bool()));
+
+using PoissonMeshingTrimDeathTest = IsolatedPoissonTest<bool>;
+
+TEST_P(PoissonMeshingTrimDeathTest, ColorPolicySurvivesTrimming) {
+  const auto dir = CreateTestDir();
+  const auto input = dir / "points.ply";
+  const auto output = dir / "mesh.ply";
+  WriteBinaryPlyPoints(input, MakeDeterministicColoredCubePoints());
+  auto options = ColorTestOptions(GetParam());
+  options.trim = 0.01;
+  ASSERT_EXIT(std::_Exit(PoissonMeshing(options, input, output) ? EXIT_SUCCESS
+                                                                : EXIT_FAILURE),
+              testing::ExitedWithCode(EXIT_SUCCESS),
+              "");
+  CheckMeshProperties(
+      output,
+      GetParam() ? std::vector<std::string>{"value", "red", "green", "blue"}
+                 : std::vector<std::string>{"value"});
+}
+
+INSTANTIATE_TEST_SUITE_P(DisabledAndEnabledWithTrimming,
+                         PoissonMeshingTrimDeathTest,
+                         testing::Bool());
 
 using PoissonMeshingGenericDeathTest = IsolatedPoissonTest<bool>;
 
