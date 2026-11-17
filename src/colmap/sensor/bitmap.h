@@ -141,8 +141,6 @@ class Bitmap {
   Bitmap CloneAsRGB() const;
 
   // Set compression quality when writing to JPEG in the range [1, 100].
-  // Lower values reduce quality and file size. By default, bitmaps are
-  // written in superb (100) quality, if not otherwise specified.
   void SetJpegQuality(int quality);
 
   // Access metadata information (e.g., EXIF).
@@ -328,9 +326,10 @@ std::optional<BitmapColor<float>> Bitmap::InterpolateBilinear(
   if (!(x >= 0.0 && x < width_ - 1.0 && y >= 0.0 && y < height_ - 1.0)) {
     return std::nullopt;
   }
-  const int x0 = static_cast<int>(std::floor(x));
+  // The guard makes truncation equivalent to floor.
+  const int x0 = static_cast<int>(x);
   const int x1 = x0 + 1;
-  const int y0 = static_cast<int>(std::floor(y));
+  const int y0 = static_cast<int>(y);
   const int y1 = y0 + 1;
 
   const double dx = x - x0;
