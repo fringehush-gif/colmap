@@ -29,3 +29,9 @@ if(TESTS_ENABLED)
             OpenMP::OpenMP_CXX)
     endif()
 endif()
+
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    # These sibling-directory tests link instrumented COLMAP libraries.
+    target_link_options(colmap_thirdparty_attribute_state_test
+        PRIVATE -coverage)
+endif()
