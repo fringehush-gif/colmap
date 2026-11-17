@@ -30,6 +30,12 @@ if(TESTS_ENABLED)
     endif()
 endif()
 
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    # These sibling-directory tests link instrumented COLMAP libraries.
+    target_link_options(colmap_thirdparty_attribute_state_test
+        PRIVATE -coverage)
+endif()
+
 COLMAP_ADD_TEST(
     NAME geometry_test
     SRCS geometry_test.cc
@@ -54,4 +60,11 @@ if(TESTS_ENABLED)
         target_link_libraries(colmap_thirdparty_surface_trimmer_geometry_test
             OpenMP::OpenMP_CXX)
     endif()
+endif()
+
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    # These sibling-directory tests link instrumented COLMAP libraries.
+    target_link_options(colmap_thirdparty_geometry_test PRIVATE -coverage)
+    target_link_options(colmap_thirdparty_surface_trimmer_geometry_test
+        PRIVATE -coverage)
 endif()
