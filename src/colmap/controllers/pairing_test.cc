@@ -13,6 +13,7 @@
 #include <chrono>
 #include <fstream>
 #include <future>
+#include <stdexcept>
 #include <thread>
 
 #include <gmock/gmock.h>
@@ -68,7 +69,7 @@ std::unique_ptr<retrieval::VisualIndex> CreateSyntheticVisualIndex() {
 }
 
 void CheckFullConsumption(const int num_threads) {
-  constexpr int kNumImages = 3;
+  constexpr int kNumImages = 12;
   auto database = Database::Open(kInMemorySqliteDatabasePath);
   CreateSyntheticDatabase(kNumImages, *database);
   std::vector<image_t> query_ids;
@@ -99,8 +100,11 @@ void CheckFullConsumption(const int num_threads) {
 
 TEST(VocabTreePairGenerator, ZeroThreadsFirstPass) { CheckFullConsumption(0); }
 
-TEST(VocabTreePairGenerator, FullConsumptionWithOneThread) {
-  CheckFullConsumption(1);
+TEST(VocabTreePairGenerator, FullConsumptionWithBoundedQueue) {
+  for (const int num_threads : {1, 2}) {
+    SCOPED_TRACE(num_threads);
+    CheckFullConsumption(num_threads);
+  }
 }
 
 TEST(VocabTreePairGenerator, ResetAfterPartialConsumptionDiscardsOldResults) {
@@ -199,7 +203,45 @@ TEST(VocabTreePairGenerator, UnexpectedQueryErrorStopsWorkers) {
       options, database, {}, [](image_t, image_t) -> bool { throw 17; });
   EXPECT_THROW(generator.Next(), int);
   EXPECT_TRUE(generator.HasFinished());
-  EXPECT_ANY_THROW(generator.Reset());
+  EXPECT_THROW(generator.Reset(), std::invalid_argument);
+}
+
+TEST(VocabTreePairGenerator, ResetPropagatesUnexpectedQueryError) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  CreateSyntheticDatabase(3, *database);
+  std::vector<image_t> query_ids;
+  for (const auto& image : database->ReadAllImages()) {
+    query_ids.push_back(image.ImageId());
+  }
+  ASSERT_EQ(query_ids.size(), 3);
+  VocabTreePairingOptions options;
+  options.num_threads = 1;
+  options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
+  CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
+  std::promise<void> entered, release;
+  auto entered_future = entered.get_future();
+  const auto release_future = release.get_future().share();
+  VocabTreePairGenerator generator(
+      options, database, query_ids, [&](image_t id, image_t) {
+        if (id == query_ids[2]) {
+          // Query 2 occupies the one-result queue while query 3 is held.
+          entered.set_value();
+          release_future.wait();
+          throw 17;
+        }
+        return true;
+      });
+  const auto first_pairs = generator.Next();
+  const bool reached_barrier =
+      entered_future.wait_for(std::chrono::seconds(10)) ==
+      std::future_status::ready;
+  release.set_value();
+  EXPECT_FALSE(first_pairs.empty());
+  EXPECT_TRUE(reached_barrier);
+  EXPECT_THROW(generator.Reset(), int);
+  EXPECT_TRUE(generator.HasFinished());
+  EXPECT_TRUE(generator.Next().empty());
+  EXPECT_THROW(generator.Reset(), std::invalid_argument);
 }
 
 TEST(VocabTreePairGenerator, Nominal) {
@@ -478,7 +520,8 @@ TEST(SequentialPairGenerator, LoopDetectionMinIndexDistance) {
         const size_t image_idx_distance = image_idx1 > image_idx2
                                               ? image_idx1 - image_idx2
                                               : image_idx2 - image_idx1;
-        EXPECT_GE(image_idx_distance, options.loop_detection_min_index_distance);
+        EXPECT_GE(image_idx_distance,
+                  options.loop_detection_min_index_distance);
       }
     }
     EXPECT_TRUE(generator.Next().empty());

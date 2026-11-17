@@ -281,7 +281,8 @@ VocabTreePairGenerator::VocabTreePairGenerator(
 VocabTreePairGenerator::~VocabTreePairGenerator() { StopQueries(); }
 
 void VocabTreePairGenerator::StopQueries() {
-  // Wake blocked producers, then join while the queue and query state are alive.
+  // Wake blocked producers, then join while the queue and query state are
+  // alive.
   queue_.Stop();
   stopped_ = true;
   result_idx_ = query_image_ids_.size();
@@ -417,11 +418,12 @@ void VocabTreePairGenerator::Query(const image_t image_id) noexcept {
     Retrieval retrieval;
     retrieval.image_id = image_id;
 
-    // Each query must push exactly one result, because the consuming Next() pops
-    // exactly one result per query. If a query fails (e.g., due to corrupt
+    // Each query must push exactly one result, because the consuming Next()
+    // pops exactly one result per query. If a query fails (e.g., due to corrupt
     // features or an out-of-memory error during spatial verification), we still
     // push an empty result and skip retrieval for this image. Otherwise, the
-    // consumer would block indefinitely waiting for a result that never arrives.
+    // consumer would block indefinitely waiting for a result that never
+    // arrives.
     try {
       auto keypoints = *cache_->GetKeypoints(image_id);
       auto descriptors = *cache_->GetDescriptors(image_id);
@@ -433,7 +435,8 @@ void VocabTreePairGenerator::Query(const image_t image_id) noexcept {
 
       auto query_options = query_options_;
       if (image_pair_filter_) {
-        query_options.image_id_filter = [this, image_id](const int candidate_id) {
+        query_options.image_id_filter = [this,
+                                         image_id](const int candidate_id) {
           return image_pair_filter_(image_id, candidate_id);
         };
       }
@@ -693,7 +696,7 @@ SpatialPairGenerator::SpatialPairGenerator(
   timer.Restart();
   LOG(INFO) << "Building search index...";
 
-  faiss::IndexFlatL2 search_index(/*d=*/3);
+  faiss::IndexFlatL2 search_index(3);
   search_index.add(position_matrix.rows(), position_matrix.data());
 
   LOG(INFO) << StringPrintf(" in %.3fs", timer.ElapsedSeconds());
