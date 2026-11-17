@@ -16,3 +16,21 @@ endif()
 if(MSVC)
     target_compile_options(colmap_poisson_recon PRIVATE /bigobj)
 endif()
+
+COLMAP_ADD_TEST(
+    NAME fem_tree_test
+    SRCS fem_tree_test.cc
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_thirdparty_fem_tree_test PRIVATE RELEASE)
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_thirdparty_fem_tree_test
+            OpenMP::OpenMP_CXX)
+    endif()
+endif()
+
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    # These sibling-directory tests link instrumented COLMAP libraries.
+    target_link_options(colmap_thirdparty_fem_tree_test
+        PRIVATE -coverage)
+endif()
