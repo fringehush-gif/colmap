@@ -233,11 +233,16 @@ class DelaunayMeshingInput {
         continue;
       }
 
-      const Delaunay::Cell_handle cell = triangulation.locate(point_position);
+      Delaunay::Locate_type locate_type;
+      int locate_i = -1;
+      int locate_j = -1;
+      const Delaunay::Cell_handle cell =
+          triangulation.locate(point_position, locate_type, locate_i, locate_j);
 
       // If the point is outside the current hull, then extend the hull.
       if (triangulation.is_infinite(cell)) {
-        triangulation.insert(point_position);
+        triangulation.insert(
+            point_position, locate_type, cell, locate_i, locate_j);
         continue;
       }
 
@@ -294,7 +299,8 @@ class DelaunayMeshingInput {
       }
 
       if (insert_point) {
-        triangulation.insert(point_position);
+        triangulation.insert(
+            point_position, locate_type, cell, locate_i, locate_j);
       }
     }
 
