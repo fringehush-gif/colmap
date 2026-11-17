@@ -275,9 +275,10 @@ namespace PoissonRecon
 
 		Point &operator = ( const Point &p )
 		{
-			if( !_dim || !p._dim ){ _resize( p._dim ) ; memcpy( _coords , p._coords , sizeof(Real)*_dim ); }
-			else if( _dim==p._dim ) memcpy( _coords , p._coords , sizeof(Real)*_dim );
-			else MK_THROW( "Dimensions don't match: " , _dim , " != " , p._dim );
+			if( this==&p ) return *this;
+			if( !_dim || !p._dim ) _resize( p._dim );
+			else if( _dim!=p._dim ) MK_THROW( "Dimensions don't match: " , _dim , " != " , p._dim );
+			if( _dim ) memcpy( _coords , p._coords , sizeof(Real)*_dim );
 			return *this;
 		}
 

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "Geometry.h"
-#include "MAT.h"
 
 #include <algorithm>
 #include <array>
@@ -10,6 +9,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "MAT.h"
 #include <gtest/gtest.h>
 
 namespace {

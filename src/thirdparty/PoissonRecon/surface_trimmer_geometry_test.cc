@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/util/testing.h"
-#include "SurfaceTrimmer.cpp"
 
 #include <algorithm>
 #include <array>
@@ -10,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "SurfaceTrimmer.cpp"
 #include <gtest/gtest.h>
 
 namespace {

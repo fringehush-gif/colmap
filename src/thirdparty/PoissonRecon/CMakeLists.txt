@@ -18,6 +18,19 @@ if(MSVC)
 endif()
 
 COLMAP_ADD_TEST(
+    NAME attribute_state_test
+    SRCS attribute_state_test.cc
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_thirdparty_attribute_state_test
+        PRIVATE RELEASE)
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_thirdparty_attribute_state_test
+            OpenMP::OpenMP_CXX)
+    endif()
+endif()
+
+COLMAP_ADD_TEST(
     NAME geometry_test
     SRCS geometry_test.cc
 )
@@ -29,7 +42,6 @@ endif()
 COLMAP_ADD_TEST(
     NAME surface_trimmer_geometry_test
     SRCS surface_trimmer_geometry_test.cc
-    LINK_LIBS colmap_poisson_recon
 )
 if(TESTS_ENABLED)
     target_compile_definitions(colmap_thirdparty_surface_trimmer_geometry_test
