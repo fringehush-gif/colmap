@@ -78,10 +78,12 @@ TEST(FixedGaugeWithThreePoints, UsesAffineSpan) {
       const Eigen::Vector3d origin = scale * Eigen::Vector3d(1, 2, offset);
       EXPECT_TRUE(gauge.MaybeAddFixedPoint(origin));
       EXPECT_FALSE(gauge.MaybeAddFixedPoint(origin));
+      EXPECT_EQ(gauge.num_fixed_points, 1);
       EXPECT_TRUE(
           gauge.MaybeAddFixedPoint(origin + scale * Eigen::Vector3d::UnitX()));
       EXPECT_FALSE(gauge.MaybeAddFixedPoint(
           origin + 2 * scale * Eigen::Vector3d::UnitX()));
+      EXPECT_EQ(gauge.num_fixed_points, 2);
       EXPECT_TRUE(
           gauge.MaybeAddFixedPoint(origin + scale * Eigen::Vector3d::UnitY()));
       EXPECT_EQ(gauge.num_fixed_points, 3);
@@ -96,22 +98,6 @@ TEST(FixedGaugeWithThreePoints, AcceptsWorldOrigin) {
   EXPECT_TRUE(gauge.MaybeAddFixedPoint(Eigen::Vector3d::Zero()));
   EXPECT_TRUE(gauge.MaybeAddFixedPoint(Eigen::Vector3d::UnitX()));
   EXPECT_TRUE(gauge.MaybeAddFixedPoint(Eigen::Vector3d::UnitY()));
-  EXPECT_EQ(gauge.num_fixed_points, 3);
-}
-
-TEST(FixedGaugeWithThreePoints, RejectsDegeneracyAndStopsAtThreeAnchors) {
-  internal::FixedGaugeWithThreePoints gauge;
-  const Eigen::Vector3d origin(4, -8, 16);
-  EXPECT_TRUE(gauge.MaybeAddFixedPoint(origin));
-  EXPECT_FALSE(gauge.MaybeAddFixedPoint(origin));
-  EXPECT_EQ(gauge.num_fixed_points, 1);
-  EXPECT_TRUE(gauge.MaybeAddFixedPoint(origin + Eigen::Vector3d::UnitX()));
-  EXPECT_FALSE(gauge.MaybeAddFixedPoint(origin));
-  EXPECT_FALSE(gauge.MaybeAddFixedPoint(origin + 2 * Eigen::Vector3d::UnitX()));
-  EXPECT_EQ(gauge.num_fixed_points, 2);
-  EXPECT_TRUE(gauge.MaybeAddFixedPoint(origin + Eigen::Vector3d::UnitY()));
-  EXPECT_FALSE(gauge.MaybeAddFixedPoint(origin + Eigen::Vector3d::UnitZ()));
-  EXPECT_FALSE(gauge.MaybeAddFixedPoint(origin));
   EXPECT_EQ(gauge.num_fixed_points, 3);
 }
 
