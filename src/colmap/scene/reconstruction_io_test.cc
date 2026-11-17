@@ -683,7 +683,7 @@ void AppendWireUnsigned(uint64_t value,
                         const size_t bytes,
                         std::string* output) {
   for (size_t i = 0; i < bytes; ++i) {
-    output->push_back(static_cast<char>((value >> (8 * i)) & 0xff));
+    output->push_back(static_cast<char>((value >> (8 * i)) & 0xffu));
   }
 }
 
