@@ -17,16 +17,19 @@
 
 namespace {
 
+constexpr size_t kAllocatorBlockSize = 4096;
+
 // Complete free-boundary fields give independent partition-of-unity and
 // affine-gradient oracles, including exact knots and their two sides.
 template <unsigned int Dim, unsigned int Degree>
 struct CellKnotField {
   static constexpr unsigned int kSig =
-      PoissonRecon::FEMDegreeAndBType<Degree, PoissonRecon::BOUNDARY_FREE>::Signature;
+      PoissonRecon::FEMDegreeAndBType<Degree,
+                                      PoissonRecon::BOUNDARY_FREE>::Signature;
   using Sigs = PoissonRecon::IsotropicUIntPack<Dim, kSig>;
   using Tree = PoissonRecon::FEMTree<Dim, float>;
   using Vec = PoissonRecon::Point<float, Dim>;
-  Tree tree{MEMORY_ALLOCATOR_BLOCK_SIZE};
+  Tree tree{kAllocatorBlockSize};
   PoissonRecon::DenseNodeData<float, Sigs> coefficients;
   PoissonRecon::SparseNodeData<float, Sigs> sparse;
 
@@ -34,8 +37,10 @@ struct CellKnotField {
 
   explicit CellKnotField(const int grid_depth, const bool cell_labels = false) {
     tree.template finalizeForMultigrid<Degree, Degree>(
-        grid_depth, [=](int d, const int*) { return d <= grid_depth; },
-        [](const auto*) { return true; }, std::tuple<>{});
+        grid_depth,
+        [=](int d, const int*) { return d <= grid_depth; },
+        [](const auto*) { return true; },
+        std::tuple<>{});
     coefficients.resize(tree.nodesSize());
     for (size_t i = 0; i < tree.nodesSize(); ++i) {
       const auto* node = tree.node(i);
@@ -74,10 +79,12 @@ void CheckAffinePointKnots() {
     SCOPED_TRACE(grid_depth);
     Field field(grid_depth);
     ASSERT_EQ(field.invalid_nodes, 0);
-    typename Field::Tree::template MultiThreadedEvaluator<typename Field::Sigs, 1>
+    typename Field::Tree::template MultiThreadedEvaluator<typename Field::Sigs,
+                                                          1>
         evaluator(&field.tree, field.coefficients, 1);
-    typename Field::Tree::template MultiThreadedSparseEvaluator<typename Field::Sigs, float>
-        sparse_evaluator(&field.tree, field.sparse, 1);
+    typename Field::Tree::
+        template MultiThreadedSparseEvaluator<typename Field::Sigs, float>
+            sparse_evaluator(&field.tree, field.sparse, 1);
     for (unsigned int knot_axis = 0; knot_axis <= Dim; ++knot_axis) {
       SCOPED_TRACE(knot_axis);
       for (const float delta : {-1.f / 1024, 0.f, 1.f / 1024}) {
@@ -86,7 +93,8 @@ void CheckAffinePointKnots() {
         float expected = 0;
         for (unsigned int axis = 0; axis < Dim; ++axis) {
           point[axis] = knot_axis == Dim || knot_axis == axis
-                            ? 0.5f + delta : 0.375f + axis / 64.f;
+                            ? 0.5f + delta
+                            : 0.375f + axis / 64.f;
           expected += std::ldexp(1.f, -int(2 * axis)) * point[axis];
         }
         const auto values = evaluator.values(point);
@@ -115,8 +123,8 @@ TEST(PoissonPointEvaluation, ConstantDegreeZeroInteriorKnots) {
     SCOPED_TRACE(grid_depth);
     Field field(grid_depth);
     ASSERT_EQ(field.invalid_nodes, 0);
-    Field::Tree::MultiThreadedEvaluator<Field::Sigs, 0>
-        evaluator(&field.tree, field.coefficients, 1);
+    Field::Tree::MultiThreadedEvaluator<Field::Sigs, 0> evaluator(
+        &field.tree, field.coefficients, 1);
     Field::Tree::MultiThreadedSparseEvaluator<Field::Sigs, float>
         sparse_evaluator(&field.tree, field.sparse, 1);
     for (const float delta : {-1.f / 1024, 0.f, 1.f / 1024}) {
@@ -131,20 +139,23 @@ TEST(PoissonPointEvaluation, ConstantDegreeZeroInteriorKnots) {
   }
 }
 
-
 TEST(PoissonPointEvaluation, QuadraticInteriorKnots) {
   CheckAffinePointKnots<3, 2>();
 }
 
 TEST(PoissonPointEvaluation, UnequalDegreeZeroUsesSelectedSide) {
   using Field = CellKnotField<3, 0>;
-  const std::array<std::pair<float, float>, 5> cases = {{{0.5f - 1.f / 1024, 22},
-      {0.5f, 22}, {0.5f + 1.f / 1024, 23}, {0, 21}, {1, 24}}};
+  const std::array<std::pair<float, float>, 5> cases = {
+      {{0.5f - 1.f / 1024, 22},
+       {0.5f, 22},
+       {0.5f + 1.f / 1024, 23},
+       {0, 21},
+       {1, 24}}};
   for (const int depth : {2, 3}) {
     Field field(depth, true);
     ASSERT_EQ(field.invalid_nodes, 0);
-    Field::Tree::MultiThreadedEvaluator<Field::Sigs, 0>
-        evaluator(&field.tree, field.coefficients, 1);
+    Field::Tree::MultiThreadedEvaluator<Field::Sigs, 0> evaluator(
+        &field.tree, field.coefficients, 1);
     Field::Tree::MultiThreadedSparseEvaluator<Field::Sigs, float>
         sparse_evaluator(&field.tree, field.sparse, 1);
     for (const auto& item : cases) {
@@ -160,17 +171,18 @@ TEST(PoissonPointEvaluation, UnequalDegreeZeroUsesSelectedSide) {
   }
 }
 
-
 template <unsigned int Degree>
 void CheckPointEndpoints() {
   using Field = CellKnotField<3, Degree>;
   for (const int depth : {2, 3}) {
     Field field(depth);
     ASSERT_EQ(field.invalid_nodes, 0);
-    typename Field::Tree::template MultiThreadedEvaluator<typename Field::Sigs, 1>
+    typename Field::Tree::template MultiThreadedEvaluator<typename Field::Sigs,
+                                                          1>
         evaluator(&field.tree, field.coefficients, 1);
-    typename Field::Tree::template MultiThreadedSparseEvaluator<typename Field::Sigs, float>
-        sparse_evaluator(&field.tree, field.sparse, 1);
+    typename Field::Tree::
+        template MultiThreadedSparseEvaluator<typename Field::Sigs, float>
+            sparse_evaluator(&field.tree, field.sparse, 1);
     for (const float end : {0.f, 1.f}) {
       SCOPED_TRACE(Degree);
       SCOPED_TRACE(depth);
@@ -197,19 +209,91 @@ TEST(PoissonPointEvaluation, EndpointsKeepDenseNudgeDistinctFromSparse) {
   CheckPointEndpoints<2>();
 }
 
+#ifdef USE_DEEP_TREE_NODES
+TEST(PoissonPointEvaluation, DeepEndpointsUseNudgedCell) {
+  using Field = CellKnotField<2, 1>;
+  for (const int target_depth : {19, 20, 21}) {
+    for (const float endpoint : {0.f, 1.f}) {
+      SCOPED_TRACE(testing::Message() << target_depth << ":" << endpoint);
+      Field::Tree tree(kAllocatorBlockSize);
+      tree.finalizeForMultigrid<1, 1>(
+          2,
+          [=](int d, const int* off) {
+            if (d <= 2) return true;
+            if (d > target_depth) return false;
+            const int resolution = 1u << static_cast<unsigned int>(d);
+            const int center = 3 * resolution / 8;
+            const int begin = endpoint == 0 ? 0 : resolution - 3;
+            return off[0] >= begin && off[0] < begin + 4 &&
+                   off[1] >= center - 2 && off[1] < center + 2;
+          },
+          [](const auto*) { return true; },
+          std::tuple<>{});
+      ASSERT_EQ(tree.maxDepth(), target_depth);
+      ASSERT_LT(tree.nodesSize(), 4096);
+      const int resolution = 1u << static_cast<unsigned int>(target_depth);
+      PoissonRecon::DenseNodeData<float, Field::Sigs> coefficients;
+      coefficients.resize(tree.nodesSize());
+      size_t nonzero = 0;
+      for (size_t i = 0; i < tree.nodesSize(); ++i) {
+        int depth;
+        Field::Tree::LocalOffset offset;
+        tree.depthAndOffset(tree.node(i), depth, offset);
+        const bool selected = depth == target_depth &&
+                              offset[0] == (endpoint == 0 ? 0 : resolution) &&
+                              offset[1] == 3 * resolution / 8;
+        coefficients[i] = selected ? 1.f : 0.f;
+        if (selected) {
+          ASSERT_TRUE(tree.isValidFEMNode(Field::Sigs(), tree.node(i)));
+          ++nonzero;
+        }
+      }
+      ASSERT_EQ(nonzero, 1);
+      Field::Tree::MultiThreadedEvaluator<Field::Sigs, 1> evaluator(
+          &tree, coefficients, 1);
+      const Field::Vec point(endpoint, 3.f / 8);
+      const auto* node = tree.leaf(point);
+      ASSERT_NE(node, nullptr);
+      int depth;
+      Field::Tree::LocalOffset offset;
+      tree.depthAndOffset(node, depth, offset);
+      ASSERT_EQ(depth, target_depth);
+      const float nudged = endpoint == 0 ? float(1e-6) : float(1. - 1e-6);
+      const double distance = endpoint == 0 ? nudged : 1. - double(nudged);
+      // One linear hat, evaluated after nudging across up to two cells.
+      const double expected = std::max(0., 1. - distance * resolution);
+      const double derivative =
+          expected > 0 ? (endpoint == 0 ? -resolution : resolution) : 0;
+      for (const bool use_hint : {false, true}) {
+        SCOPED_TRACE(use_hint);
+        const auto values =
+            evaluator.values(point, 0, use_hint ? node : nullptr);
+        EXPECT_NEAR(values[0], expected, 1e-6);
+        EXPECT_NEAR(values[1], derivative, 1e-3);
+      }
+    }
+  }
+}
+#endif
 
 TEST(PoissonPointEvaluation, AdaptiveFinerInteriorKnots) {
   using Field = CellKnotField<3, 1>;
-  Field::Tree tree(MEMORY_ALLOCATOR_BLOCK_SIZE);
+  Field::Tree tree(kAllocatorBlockSize);
   tree.finalizeForMultigrid<1, 1>(
-      2, [](int d, const int* off) {
+      2,
+      [](int d, const int* off) {
         return d <= 2 || (d == 3 && (off[0] == 4 || off[0] == 5) &&
                           off[1] == 3 && off[2] == 3);
-      }, [](const auto*) { return true; }, std::tuple<>{});
+      },
+      [](const auto*) { return true; },
+      std::tuple<>{});
   ASSERT_EQ(tree.maxDepth(), 3);
   PoissonRecon::DenseNodeData<float, Field::Sigs> coefficients;
   coefficients.resize(tree.nodesSize());
-  struct Term { std::array<int, 3> offset; double coefficient; };
+  struct Term {
+    std::array<int, 3> offset;
+    double coefficient;
+  };
   std::vector<Term> terms;
   for (size_t i = 0; i < tree.nodesSize(); ++i) {
     const auto* node = tree.node(i);
@@ -223,8 +307,8 @@ TEST(PoissonPointEvaluation, AdaptiveFinerInteriorKnots) {
     }
   }
   ASSERT_FALSE(terms.empty());
-  Field::Tree::MultiThreadedEvaluator<Field::Sigs, 1>
-      evaluator(&tree, coefficients, 1);
+  Field::Tree::MultiThreadedEvaluator<Field::Sigs, 1> evaluator(
+      &tree, coefficients, 1);
   ASSERT_LE(evaluator._coarseCoefficients.size(), tree.nodesSize());
   for (size_t i = 0; i < evaluator._coarseCoefficients.size(); ++i) {
     int depth;
@@ -241,7 +325,8 @@ TEST(PoissonPointEvaluation, AdaptiveFinerInteriorKnots) {
     int depth;
     Field::Tree::LocalOffset off;
     tree.depthAndOffset(node, depth, off);
-    if (delta <= 0) ASSERT_EQ(depth, 2);  // Nonzero output needs finer neighbors.
+    if (delta <= 0)
+      ASSERT_EQ(depth, 2);  // Nonzero output needs finer neighbors.
     std::array<double, 4> expected{};
     for (const auto& term : terms) {
       std::array<double, 3> basis{}, derivative{};
@@ -254,7 +339,7 @@ TEST(PoissonPointEvaluation, AdaptiveFinerInteriorKnots) {
       expected[0] += term.coefficient * basis[0] * basis[1] * basis[2];
       for (int axis = 0; axis < 3; ++axis)
         expected[axis + 1] += term.coefficient * derivative[axis] *
-                             basis[(axis + 1) % 3] * basis[(axis + 2) % 3];
+                              basis[(axis + 1) % 3] * basis[(axis + 2) % 3];
     }
     ASSERT_GT(expected[0], 0);
     const auto values = evaluator.values(point);

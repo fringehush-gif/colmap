@@ -20,11 +20,15 @@ endif()
 COLMAP_ADD_TEST(
     NAME point_evaluation_test
     SRCS point_evaluation_test.cc
-    LINK_LIBS colmap_poisson_recon
 )
 if(TESTS_ENABLED)
+    # Header-instantiated evaluator; deep nodes cover nudges across small cells.
     target_compile_definitions(colmap_thirdparty_point_evaluation_test
-        PRIVATE RELEASE)
+        PRIVATE RELEASE USE_DEEP_TREE_NODES)
+    if(COVERAGE_ENABLED)
+        target_link_options(colmap_thirdparty_point_evaluation_test
+            PRIVATE -coverage)
+    endif()
     if(MSVC)
         target_compile_options(colmap_thirdparty_point_evaluation_test
             PRIVATE /bigobj)
