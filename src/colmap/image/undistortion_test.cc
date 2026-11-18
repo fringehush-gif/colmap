@@ -132,8 +132,11 @@ TEST(UndistortCamera, PinholeRegionOfInterest) {
   options.roi_max_y = 0.8;
   for (const CameraModelId model :
        {CameraModelId::kSimplePinhole, CameraModelId::kPinhole}) {
-    const Camera camera = Camera::CreateFromModelId(1, model, 100, 100, 100);
+    const Camera camera =
+        Camera::CreateFromModelId(1, model, 100, 100, 100, CameraSource::EXIF);
     const Camera cropped = UndistortCamera(options, camera);
+    EXPECT_EQ(cropped.source, camera.source);
+    EXPECT_TRUE(cropped.HasPriorFocalLength());
     EXPECT_EQ(cropped.width, 80);
     EXPECT_EQ(cropped.height, 60);
     EXPECT_EQ(cropped.PrincipalPointX(), 40);
@@ -441,8 +444,8 @@ TEST(UndistortReconstruction, RescalesAlreadyUndistortedCameras) {
 
   // Already-undistorted (PINHOLE) camera at a high resolution. focal=100,
   // width=height=100 => principal point at (50, 50).
-  Camera camera =
-      Camera::CreateFromModelId(1, CameraModelId::kPinhole, 100, 100, 100);
+  Camera camera = Camera::CreateFromModelId(
+      1, CameraModelId::kPinhole, 100, 100, 100, CameraSource::USER);
   ASSERT_TRUE(camera.IsUndistorted());
   reconstruction.AddCamera(camera);
   Rig rig;
@@ -496,6 +499,8 @@ TEST(UndistortReconstruction, RescalesAlreadyUndistortedCameras) {
   EXPECT_EQ(cropped.Camera(1).PrincipalPointX(), 40);
   EXPECT_EQ(cropped.Camera(1).PrincipalPointY(), 30);
   EXPECT_EQ(cropped.Camera(1).camera_id, 1);
+  EXPECT_EQ(cropped.Camera(1).source, camera.source);
+  EXPECT_TRUE(cropped.Camera(1).HasPriorFocalLength());
   EXPECT_NO_THROW({ const Reconstruction copy = cropped; });
   ASSERT_EQ(cropped.NumImages(), kNumImages);
   for (const auto& [image_id, image] : cropped.Images()) {
@@ -515,6 +520,8 @@ TEST(UndistortReconstruction, RescalesAlreadyUndistortedCameras) {
   EXPECT_EQ(undistorted_camera.ModelName(), "PINHOLE");
   EXPECT_EQ(undistorted_camera.width, 50);
   EXPECT_EQ(undistorted_camera.height, 50);
+  EXPECT_EQ(undistorted_camera.source, camera.source);
+  EXPECT_TRUE(undistorted_camera.HasPriorFocalLength());
   EXPECT_NEAR(undistorted_camera.FocalLengthX(), 50, 1e-6);
   EXPECT_NEAR(undistorted_camera.FocalLengthY(), 50, 1e-6);
   EXPECT_NEAR(undistorted_camera.PrincipalPointX(), 25, 1e-6);
