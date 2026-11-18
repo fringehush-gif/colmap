@@ -186,7 +186,7 @@ TEST(CovariantSiftCPUFeatureExtractor, NonExtremaSuppressionMatchesFullScan) {
   uint32_t state = 1;
   for (float& pixel : image) {
     state = 1664525u * state + 1013904223u;
-    pixel = static_cast<float>(state >> 24) / 255.0f;
+    pixel = static_cast<float>(state >> 24u) / 255.0f;
   }
   const std::unique_ptr<VlCovDet, decltype(&vl_covdet_delete)> detector(
       vl_covdet_new(VL_COVDET_METHOD_DOG), &vl_covdet_delete);
