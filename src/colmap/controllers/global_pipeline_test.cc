@@ -430,9 +430,10 @@ TEST(GlobalPipeline, MultiComponentsPreserveObservationsOnReuse) {
         ASSERT_GT(actual.NumPoints3D(), 0u);
         const auto image_ids = actual.RegImageIds();
         const FlatHashSet<image_t> actual_group(image_ids.begin(),
-                                              image_ids.end());
+                                                image_ids.end());
         actual_groups.push_back(actual_group);
-        const auto group = std::find(groups.begin(), groups.end(), actual_group);
+        const auto group =
+            std::find(groups.begin(), groups.end(), actual_group);
         ASSERT_NE(group, groups.end());
         for (const image_t image_id : image_ids) {
           const auto& image = actual.Image(image_id);

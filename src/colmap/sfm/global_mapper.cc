@@ -182,7 +182,8 @@ void GlobalMapper::EstablishTracks(const GlobalMapperOptions& options) {
   // Keep the registered-image roster without duplicating feature coordinates.
   // Reconstruction owns these images throughout this synchronous stage; all
   // coordinate reads finish before AddPoint3D updates observation associations.
-  NodeHashMap<image_t, const Image*> registered_images;
+  FlatHashMap<image_t, const Image*> registered_images;
+  registered_images.reserve(reconstruction_->NumRegImages());
   for (const auto image_id : reconstruction_->RegImageIds()) {
     registered_images.emplace(image_id, &reconstruction_->Image(image_id));
   }

@@ -430,7 +430,8 @@ TEST_F(GlobalTrackEstablishmentTest, PosedButUnregisteredImageRejected) {
       ground_truth_.Frame(frame_id).RigFromWorld());
   ASSERT_TRUE(reconstruction_->Image(image_ids_[2]).HasPose());
   ASSERT_EQ(reconstruction_->NumRegImages(), 2);
-  EXPECT_ANY_THROW(mapper_->EstablishTracks(GlobalMapperOptions()));
+  EXPECT_THROW(mapper_->EstablishTracks(GlobalMapperOptions()),
+               std::invalid_argument);
   EXPECT_EQ(reconstruction_->NumPoints3D(), 0);
 }
 
