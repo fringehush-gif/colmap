@@ -506,6 +506,7 @@ TEST(DefaultBundleAdjuster, SharedCameraWithExternalObservations) {
     ASSERT_TRUE(std::isfinite(error_after));
     if (constant_camera) {
       EXPECT_EQ(camera, before.Camera(camera.camera_id));
+      EXPECT_LT(error_after, error_before);
     } else {
       // Demand a substantial published reprojection improvement and improvement
       // of every enabled calibration component toward the synthetic truth.
