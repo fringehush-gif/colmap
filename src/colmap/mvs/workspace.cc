@@ -3,6 +3,7 @@
 #include "colmap/mvs/workspace.h"
 
 #include "colmap/util/file.h"
+#include "colmap/util/hash_containers.h"
 #include "colmap/util/threading.h"
 
 #include <fstream>
@@ -75,8 +76,13 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
 
   LOG(INFO) << StringPrintf("Loading workspace data with %d threads...",
                             num_threads);
+  FlatHashSet<int> image_idxs;
   for (size_t i = 0; i < image_names.size(); ++i) {
     const int image_idx = model_.GetImageIdx(image_names[i]);
+    // Concurrent loads of the same image would replace the same owners.
+    if (!image_idxs.insert(image_idx).second) {
+      continue;
+    }
     if (HasBitmap(image_idx) && HasDepthMap(image_idx)) {
       thread_pool.AddTask(LoadWorkspaceData, image_idx);
     } else {

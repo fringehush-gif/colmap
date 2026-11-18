@@ -109,6 +109,22 @@ TEST_P(ParameterizedWorkspaceTests, Load) {
   workspace->Load({image_name_});
 }
 
+TEST_P(ParameterizedWorkspaceTests, DuplicateImageNames) {
+  Workspace::Options options = GetOptions();
+  options.num_threads = 2;
+  auto workspace = GetParam()(options);
+  workspace->Load(std::vector<std::string>(8, image_name_));
+  const auto& bitmap = workspace->GetBitmap(0);
+  const auto& depth_map = workspace->GetDepthMap(0);
+  const auto& normal_map = workspace->GetNormalMap(0);
+  ASSERT_EQ(bitmap.RowMajorData().size(), 150);
+  ASSERT_EQ(depth_map.GetData().size(), 50);
+  ASSERT_EQ(normal_map.GetData().size(), 150);
+  EXPECT_THAT(bitmap.RowMajorData(), testing::Each(0));
+  EXPECT_THAT(depth_map.GetData(), testing::Each(1.0f));
+  EXPECT_THAT(normal_map.GetData(), testing::Each(1.0f));
+}
+
 INSTANTIATE_TEST_SUITE_P(WorkspaceTests,
                          ParameterizedWorkspaceTests,
                          ::testing::Values(
