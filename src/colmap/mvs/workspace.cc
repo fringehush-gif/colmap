@@ -183,10 +183,8 @@ std::shared_ptr<const Bitmap> CachedWorkspace::GetBitmapLease(
     }
     cached_image->num_bytes += cached_image->bitmap->NumBytes();
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-    // Handle the case where another thread has already evicted the image.
-    if (cache_.Exists(image_idx)) {
-      cache_.UpdateNumBytes(image_idx);
-    }
+    // The image may have been evicted and replaced while it was loading.
+    cache_.UpdateNumBytes(image_idx, cached_image);
   }
   return {cached_image, cached_image->bitmap.get()};
 }
@@ -213,10 +211,8 @@ std::shared_ptr<const DepthMap> CachedWorkspace::GetDepthMapLease(
     }
     cached_image->num_bytes += cached_image->depth_map->GetNumBytes();
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-    // Handle the case where another thread has already evicted the image.
-    if (cache_.Exists(image_idx)) {
-      cache_.UpdateNumBytes(image_idx);
-    }
+    // The image may have been evicted and replaced while it was loading.
+    cache_.UpdateNumBytes(image_idx, cached_image);
   }
   return {cached_image, cached_image->depth_map.get()};
 }
@@ -243,10 +239,8 @@ std::shared_ptr<const NormalMap> CachedWorkspace::GetNormalMapLease(
     }
     cached_image->num_bytes += cached_image->normal_map->GetNumBytes();
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-    // Handle the case where another thread has already evicted the image.
-    if (cache_.Exists(image_idx)) {
-      cache_.UpdateNumBytes(image_idx);
-    }
+    // The image may have been evicted and replaced while it was loading.
+    cache_.UpdateNumBytes(image_idx, cached_image);
   }
   return {cached_image, cached_image->normal_map.get()};
 }

@@ -8,6 +8,7 @@
 #include "colmap/util/testing.h"
 
 #include <filesystem>
+#include <future>
 #include <thread>
 
 #include <gmock/gmock.h>
@@ -144,7 +145,7 @@ TEST_P(ParameterizedWorkspaceTests, ComponentLeasesPreserveOwnershipPolicy) {
   }
 }
 
-TEST(CachedWorkspaceLease, SurvivesConcurrentEviction) {
+TEST(CachedWorkspaceLease, SurvivesConcurrentEvictionAndClear) {
   const auto temp_dir = CreateTestDir();
   CreateDirIfNotExists(temp_dir / "sparse");
   CreateDirIfNotExists(temp_dir / "images");
@@ -209,13 +210,32 @@ TEST(CachedWorkspaceLease, SurvivesConcurrentEviction) {
 
   const auto replacement = workspace.GetBitmapLease(first);
   ASSERT_NE(bitmap.get(), replacement.get());
+
+  std::promise<void> start;
+  auto started = start.get_future().share();
+  auto clearer = std::async(std::launch::async, [&] {
+    started.wait();
+    for (int i = 0; i < 32; ++i) {
+      workspace.ClearCache();
+    }
+  });
+  start.set_value();
+  for (int i = 0; i < 32; ++i) {
+    const auto current = workspace.GetDepthMapLease(first);
+    EXPECT_FLOAT_EQ(current->Get(0, 0), 2.0f);
+  }
+  clearer.get();
+  workspace.ClearCache();
+
+  // Copies after eviction and clearing must still read the retained owners.
   const Bitmap bitmap_copy = *bitmap;
   const DepthMap depth_copy = *depth;
   const NormalMap normal_copy = *normal;
   EXPECT_EQ(bitmap_copy.Width(), 10);
   EXPECT_EQ(bitmap_copy.Height(), 5);
-  EXPECT_FLOAT_EQ(depth_copy.GetData()[0], 2.0f);
-  EXPECT_FLOAT_EQ(normal_copy.GetData()[0], 2.0f);
+  EXPECT_THAT(bitmap_copy.RowMajorData(), testing::Each(1));
+  EXPECT_THAT(depth_copy.GetData(), testing::Each(2.0f));
+  EXPECT_THAT(normal_copy.GetData(), testing::Each(2.0f));
 }
 
 }  // namespace
