@@ -233,8 +233,11 @@ TEST(CachedWorkspaceLease, SurvivesConcurrentEvictionAndClear) {
   const NormalMap normal_copy = *normal;
   EXPECT_EQ(bitmap_copy.Width(), 10);
   EXPECT_EQ(bitmap_copy.Height(), 5);
+  ASSERT_EQ(bitmap_copy.RowMajorData().size(), 150);
   EXPECT_THAT(bitmap_copy.RowMajorData(), testing::Each(1));
+  ASSERT_EQ(depth_copy.GetData().size(), 50);
   EXPECT_THAT(depth_copy.GetData(), testing::Each(2.0f));
+  ASSERT_EQ(normal_copy.GetData().size(), 150);
   EXPECT_THAT(normal_copy.GetData(), testing::Each(2.0f));
 }
 
