@@ -553,7 +553,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
                     "frame found, gauge left unfixed.";
   }
 
-  // Additional implicit anchors must observe a variable pose. Calibration-only
+  // Gauge anchors must observe a variable pose. Calibration-only
   // factors do not anchor the similarity of variable scene geometry.
   bool HasVariablePoseObservation(const Point3D& point3D) const {
     for (const auto& track_el : point3D.track.Elements()) {
@@ -573,13 +573,11 @@ class CasparBundleAdjuster : public BundleAdjuster {
   void FixGaugeWithThreePoints() {
     internal::FixedGaugeWithThreePoints fixed_gauge;
 
-    // First pass: include effective constants attached to variable poses while
-    // preserving the existing treatment of explicitly constant points.
+    // First pass: include effective constants attached to variable poses.
     for (const auto& [point3D_id, _] : point3D_num_observations_) {
-      const bool explicitly_constant = config_.HasConstantPoint(point3D_id);
-      if (!explicitly_constant && IsPointVariable(point3D_id)) continue;
+      if (IsPointVariable(point3D_id)) continue;
       const Point3D& pt = reconstruction_.Point3D(point3D_id);
-      if (!explicitly_constant && !HasVariablePoseObservation(pt)) continue;
+      if (!HasVariablePoseObservation(pt)) continue;
       if (fixed_gauge.MaybeAddFixedPoint(pt.xyz) &&
           fixed_gauge.num_fixed_points >= 3) {
         VLOG(1) << "Gauge fix: 3 non-collinear constant points found, "
@@ -592,6 +590,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
     for (const auto& [point3D_id, _] : point3D_num_observations_) {
       if (!IsPointVariable(point3D_id)) continue;
       const Point3D& pt = reconstruction_.Point3D(point3D_id);
+      if (!HasVariablePoseObservation(pt)) continue;
       if (fixed_gauge.MaybeAddFixedPoint(pt.xyz)) {
         gauge_fixed_points_.insert(point3D_id);
         if (fixed_gauge.num_fixed_points >= 3) {

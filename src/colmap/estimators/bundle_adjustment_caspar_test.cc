@@ -599,6 +599,7 @@ TEST(DefaultBundleAdjuster,
     int explicit_points;
     bool refine_points;
     bool fixed_pose_only = false;
+    bool calibration_only_candidates = false;
   };
   for (const AnchorCase test : {AnchorCase{0, 1, true},
                                 AnchorCase{0, 0, true},
@@ -606,12 +607,15 @@ TEST(DefaultBundleAdjuster,
                                 AnchorCase{2, 0, true},
                                 AnchorCase{3, 0, true},
                                 AnchorCase{3, 0, false},
-                                AnchorCase{3, 0, true, true}}) {
-    SCOPED_TRACE(::testing::Message()
-                 << "implicit=" << test.implicit_points
-                 << " explicit=" << test.explicit_points
-                 << " refine_points=" << test.refine_points
-                 << " fixed_pose_only=" << test.fixed_pose_only);
+                                AnchorCase{3, 0, true, true},
+                                AnchorCase{0, 3, true, true},
+                                AnchorCase{0, 0, true, false, true}}) {
+    SCOPED_TRACE(
+        ::testing::Message()
+        << "implicit=" << test.implicit_points << " explicit="
+        << test.explicit_points << " refine_points=" << test.refine_points
+        << " fixed_pose_only=" << test.fixed_pose_only
+        << " calibration_only_candidates=" << test.calibration_only_candidates);
     SetPRNGSeed(0);
     Reconstruction reconstruction;
     SyntheticDatasetOptions opts;
@@ -626,33 +630,39 @@ TEST(DefaultBundleAdjuster,
       ASSERT_LE(id, opts.num_points3D);
       ASSERT_EQ(GaugeTrackImageIds(point), (std::vector<image_t>{1, 2, 3}));
     }
-    // Only the selected anchors retain an observation outside the local BA.
-    // Their full tracks therefore exceed the two included observations.
+    // Retain the selected external observations. The calibration-only case
+    // includes image 3 with a fixed pose and leaves three points on image 2.
+    const int external_points =
+        test.calibration_only_candidates
+            ? 97
+            : test.implicit_points +
+                  (test.fixed_pose_only ? test.explicit_points : 0);
     const Image& external_image = reconstruction.Image(3);
     for (point2D_t idx = 0; idx < external_image.NumPoints2D(); ++idx) {
       const Point2D& point = external_image.Point2D(idx);
       if (point.HasPoint3D() &&
-          point.point3D_id > static_cast<point3D_t>(test.implicit_points)) {
+          point.point3D_id > static_cast<point3D_t>(external_points)) {
         reconstruction.DeleteObservation(3, idx);
       }
     }
-    if (test.fixed_pose_only) {
+    if (test.fixed_pose_only || test.calibration_only_candidates) {
       const Image& image = reconstruction.Image(2);
       for (point2D_t idx = 0; idx < image.NumPoints2D(); ++idx) {
         const Point2D& point = image.Point2D(idx);
         if (point.HasPoint3D() &&
-            point.point3D_id <= static_cast<point3D_t>(test.implicit_points)) {
+            point.point3D_id <= static_cast<point3D_t>(external_points)) {
           reconstruction.DeleteObservation(2, idx);
         }
       }
     }
     ASSERT_EQ(reconstruction.NumPoints3D(), opts.num_points3D);
     for (const auto& [id, point] : reconstruction.Points3D()) {
-      const bool implicit = id <= static_cast<point3D_t>(test.implicit_points);
       const std::vector<image_t> expected =
-          !implicit              ? std::vector<image_t>{1, 2}
-          : test.fixed_pose_only ? std::vector<image_t>{1, 3}
-                                 : std::vector<image_t>{1, 2, 3};
+          id > static_cast<point3D_t>(external_points)
+              ? std::vector<image_t>{1, 2}
+          : test.fixed_pose_only || test.calibration_only_candidates
+              ? std::vector<image_t>{1, 3}
+              : std::vector<image_t>{1, 2, 3};
       ASSERT_EQ(GaugeTrackImageIds(point), expected);
     }
     SyntheticNoiseOptions noise_opts;
@@ -673,13 +683,22 @@ TEST(DefaultBundleAdjuster,
       config.AddConstantPoint(idx);
     }
     config.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
-    if (test.fixed_pose_only) {
+    if (test.calibration_only_candidates) {
+      config.AddImage(3);
+      config.SetConstantRigFromWorldPose(reconstruction.Image(3).FrameId());
+      ASSERT_GT((original.Point3D(99).xyz - original.Point3D(98).xyz)
+                    .cross(original.Point3D(100).xyz - original.Point3D(98).xyz)
+                    .norm(),
+                1e-3);
+    }
+    if (test.fixed_pose_only || test.calibration_only_candidates) {
       config.SetConstantRigFromWorldPose(reconstruction.Image(1).FrameId());
       config.SetConstantCamIntrinsics(reconstruction.Image(2).CameraId());
     }
     BundleAdjustmentOptions options;
-    options.refine_focal_length = test.fixed_pose_only;
-    options.refine_extra_params = test.fixed_pose_only;
+    options.refine_focal_length =
+        test.fixed_pose_only || test.calibration_only_candidates;
+    options.refine_extra_params = options.refine_focal_length;
     options.refine_principal_point = false;
     options.refine_points3D = test.refine_points;
     options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
@@ -693,7 +712,7 @@ TEST(DefaultBundleAdjuster,
     ASSERT_NE(summary->termination_type,
               BundleAdjustmentTerminationType::FAILURE);
     EXPECT_EQ(summary->num_residuals,
-              400 - (test.fixed_pose_only ? 2 * test.implicit_points : 0));
+              400 - (test.fixed_pose_only ? 2 * external_points : 0));
     ASSERT_TRUE(std::isfinite(summary->initial_score));
     ASSERT_GT(summary->initial_score, 0);
     EXPECT_TRUE(std::any_of(summary->iterations.begin(),
@@ -714,7 +733,7 @@ TEST(DefaultBundleAdjuster,
     }
     EXPECT_EQ(unchanged,
               test.refine_points
-                  ? 3 + (test.fixed_pose_only ? test.implicit_points : 0)
+                  ? 3 + (test.fixed_pose_only ? external_points : 0)
                   : opts.num_points3D);
     if (test.refine_points) {
       EXPECT_GT(largest_change, 1e-3);
@@ -724,6 +743,11 @@ TEST(DefaultBundleAdjuster,
     }
     for (int idx = 1; idx <= test.explicit_points; ++idx) {
       CheckConstantPoint(reconstruction.Point3D(idx), original.Point3D(idx));
+    }
+    if (test.calibration_only_candidates) {
+      for (const point3D_t id : {98, 99, 100}) {
+        CheckConstantPoint(reconstruction.Point3D(id), original.Point3D(id));
+      }
     }
   }
 }
