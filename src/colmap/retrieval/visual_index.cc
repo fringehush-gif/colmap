@@ -176,7 +176,7 @@ class FaissVisualIndex : public VisualIndex {
     using OrderedMatchListType = std::vector<
         std::pair<float, std::pair<const EntryType*, const EntryType*>>>;
 
-    // Reference our matches (with their lowest distance) for both
+    // Reference our matches (with their highest weighted score) for both
     // {query feature => db feature} and vice versa.
     NodeHashMap<int, NodeHashMap<int, OrderedMatchListType>>
         query_to_db_matches;
@@ -202,8 +202,8 @@ class FaissVisualIndex : public VisualIndex {
       query_entry.geometry.orientation = keypoints[i].ComputeOrientation();
       query_entries.push_back(query_entry);
 
-      // For each db feature, keep track of the lowest distance (if db features
-      // are mapped to more than one visual word).
+      // For each db feature, keep track of the highest weighted score (if
+      // features are mapped to more than one visual word).
       NodeHashMap<int, NodeHashMap<int, std::pair<float, const EntryType*>>>
           image_matches;
 
@@ -225,17 +225,17 @@ class FaissVisualIndex : public VisualIndex {
 
             if (hamming_dist <=
                 hamming_dist_weight_functor.kMaxHammingDistance) {
-              const float dist = hamming_dist_weight_functor(hamming_dist) *
-                                 squared_idf_weight;
+              const float score = hamming_dist_weight_functor(hamming_dist) *
+                                  squared_idf_weight;
 
               auto& feature_matches = image_matches[match->image_id];
               const auto feature_match =
                   feature_matches.find(match->feature_idx);
 
               if (feature_match == feature_matches.end() ||
-                  feature_match->first < dist) {
+                  feature_match->second.first < score) {
                 feature_matches[match->feature_idx] =
-                    std::make_pair(dist, match);
+                    std::make_pair(score, match);
               }
             }
           }
@@ -245,12 +245,12 @@ class FaissVisualIndex : public VisualIndex {
       // Finally, cross-reference the query and db feature matches.
       for (const auto& [image_id, feature_match_map] : image_matches) {
         for (const auto& [feature_idx, match_data] : feature_match_map) {
-          const auto [dist, db_match] = match_data;
+          const auto [score, db_match] = match_data;
 
           const auto entry_pair = std::make_pair(&query_entries[i], db_match);
 
-          query_to_db_matches[image_id][i].emplace_back(dist, entry_pair);
-          db_to_query_matches[image_id][feature_idx].emplace_back(dist,
+          query_to_db_matches[image_id][i].emplace_back(score, entry_pair);
+          db_to_query_matches[image_id][feature_idx].emplace_back(score,
                                                                   entry_pair);
         }
       }
@@ -332,8 +332,8 @@ class FaissVisualIndex : public VisualIndex {
 
           bool match_found = false;
 
-          // The matches have been ordered by Hamming distance, already --
-          // select the lowest available match.
+          // The matches are ordered by decreasing weighted score, so select
+          // the highest-scoring available match.
           for (auto& entry2 : matches1[idx1]) {
             const auto idx2 = (use_query) ? entry2.second.second->feature_idx
                                           : entry2.second.first->feature_idx;
