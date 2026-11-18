@@ -6,6 +6,7 @@
 #include <future>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <utility>
 
 #include <gtest/gtest.h>
@@ -96,7 +97,7 @@ TEST(UniqueInlierSupportMeasurer, SparseIdsAndIndependentEvaluations) {
   const auto none = measurer.Evaluate({2, 2, 2, 2}, 1);
   EXPECT_EQ(none.num_unique_inliers, 0);
   EXPECT_EQ(none.num_inliers, 0);
-  EXPECT_ANY_THROW(measurer.Evaluate({0}, 1));
+  EXPECT_THROW(measurer.Evaluate({0}, 1), std::invalid_argument);
   const auto duplicate = measurer.Evaluate({0, 2, 0, 2}, 1);
   EXPECT_EQ(duplicate.num_unique_inliers, 1);
   EXPECT_EQ(duplicate.num_inliers, 2);
