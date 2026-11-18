@@ -1,0 +1,94 @@
+{
+  "source": "https://github.com/colmap/colmap/releases/download/3.11.1/south-building.zip",
+  "archive_bytes": 419421847,
+  "members": [
+    {
+      "member": "south-building/images/P1180141.JPG",
+      "bytes": 1883220,
+      "zip_crc32_verified": "02f1d1ee",
+      "sha256": "be3e0dff291078c936462a00c5fd9c28c96607654395fbd320769ae0b3732b3f",
+      "deflate_range": {
+        "offset": 177737103,
+        "size": 1829496,
+        "sha256": "ebac2d0026098942db5562309ea9adb33966043f384feaae62f6886e7572e457"
+      }
+    },
+    {
+      "member": "south-building/images/P1180142.JPG",
+      "bytes": 1896949,
+      "zip_crc32_verified": "6637c339",
+      "sha256": "ac400c467eb5240d4bceea84f7291fd1798079aca75cfd76eafcce5656fa6346",
+      "deflate_range": {
+        "offset": 179566691,
+        "size": 1848327,
+        "sha256": "ff710ecff274f8b9ca7b3f5d1fbfb2d99d1ee6ab5ed29d75158acf340a77cb41"
+      }
+    },
+    {
+      "member": "south-building/images/P1180143.JPG",
+      "bytes": 1892188,
+      "zip_crc32_verified": "fac4b999",
+      "sha256": "92d887729eaf159bcc3900e454e089fdfd810b6ca527eefbd9af040decb776d4",
+      "deflate_range": {
+        "offset": 181415110,
+        "size": 1856231,
+        "sha256": "1aa17688fa0e55b86f12ef652ce76b35c1b22fe379d00a9e9d2616ddf6b69a2b"
+      }
+    },
+    {
+      "member": "south-building/images/P1180144.JPG",
+      "bytes": 1811680,
+      "zip_crc32_verified": "f800853e",
+      "sha256": "9b160183250da6bac0c025a3635508c544c9aaa85cecc56da20dbbeef0eb9f63",
+      "deflate_range": {
+        "offset": 183271433,
+        "size": 1786113,
+        "sha256": "cf6b8bc88e048be6e980a274a0451a69bf69785315ae46f96559d27d1269d38a"
+      }
+    },
+    {
+      "member": "south-building/images/P1180145.JPG",
+      "bytes": 1814823,
+      "zip_crc32_verified": "e9d7cc17",
+      "sha256": "8dbe80258e34e7d676cc25c4ae6f14374640456b5197d289663e075a80dd785b",
+      "deflate_range": {
+        "offset": 185057638,
+        "size": 1796678,
+        "sha256": "bc02c196c014f5dc8ffba08774205db81a0f0e705892f7df8b8727393f17d816"
+      }
+    },
+    {
+      "member": "south-building/images/P1180146.JPG",
+      "bytes": 1830629,
+      "zip_crc32_verified": "1946af65",
+      "sha256": "9589a333091bacc27f71499ef0efad3c3e2a8d5eb28067d19367f3c5e368ad3e",
+      "deflate_range": {
+        "offset": 186854408,
+        "size": 1814200,
+        "sha256": "defd58029d2681737b73b1012fe946d60c891976753bc68917a5d2fa4c53bb98"
+      }
+    },
+    {
+      "member": "south-building/images/P1180147.JPG",
+      "bytes": 1808078,
+      "zip_crc32_verified": "64edb58b",
+      "sha256": "afb5b97398083c17434264ecae7641fad27b0e2cb8f173d65b58112de81545bb",
+      "deflate_range": {
+        "offset": 188668700,
+        "size": 1793155,
+        "sha256": "832f0e9b15e6936490e00baec5b69400fe71ced7d2adff4df25340588ab87c01"
+      }
+    },
+    {
+      "member": "south-building/images/P1180148.JPG",
+      "bytes": 1913407,
+      "zip_crc32_verified": "ffcdcd4d",
+      "sha256": "f3912b040d30bbf1e70723c3644df8d712961d5fed9f2c6fa8e57c9bf5660cb6",
+      "deflate_range": {
+        "offset": 190461947,
+        "size": 1889425,
+        "sha256": "56e6d7d76cb58ac0879981efcb776294d480f6f462b00833a89df8afee209704"
+      }
+    }
+  ]
+}

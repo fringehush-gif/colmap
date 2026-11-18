@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "repository": "fringehush-gif/colmap",
+  "baseline_ref": "137f21680c79d3f2fffbb1d11deb367162aa6f83",
+  "baseline_tree": "85242a2c6f9d5f281dbe9b7e99d5377515ce7f7a",
+  "upstream_checked_ref": "c1b5a967736c5d4790a1d5fa5e948b33e1523de4",
+  "source_policy": "Use these exact commits, not the latest PR heads. All work stays on the fork; do not submit, comment on, or modify upstream or fork PRs from the qualification job.",
+  "targets": [
+    {
+      "id": "pr102",
+      "pr": 102,
+      "ref": "7776eb8797c76a2d6deec558ea4929e80f1afa9f",
+      "tree": "ac75d791031a02b61ca3218c38567afa219d6310",
+      "primary": "dsp10",
+      "native_cpu_tests": 36,
+      "scope": "Prepared raw descriptor geometry, retained covariant detector storage with corrected scale-space geometry equality, and omitted unused SVD vectors. No NMS index.",
+      "historical_geometry_only_ref": "9a31d18c37de636ec71ea14724c06020c06511d5",
+      "not_a_dependency": 103
+    },
+    {
+      "id": "pr103",
+      "pr": 103,
+      "ref": "9a0ac99d2e028473692d6b4503b9af0bf3121896",
+      "tree": "a2b604e0e5eada94b4cc6cebae40941ba5055ada",
+      "primary": "covariant",
+      "native_cpu_tests": 18,
+      "scope": "Independent bounded covariant feature suppression. No prepared geometry or retained detector changes.",
+      "not_a_dependency": 102
+    }
+  ],
+  "campaign": {
+    "photo_count": 8,
+    "feature_budget": 8192,
+    "cpu_workers": 1,
+    "primary_pairs": 4,
+    "total_processes": 20,
+    "order": [
+      "AA primary",
+      "ABBABAAB primary",
+      "ABBA related",
+      "BAAB ordinary",
+      "BB primary"
+    ],
+    "campaign_deadline_seconds": 3600,
+    "run_timeout_seconds": 900
+  },
+  "qualification": {
+    "baseline_cpu_tests": 17,
+    "raw_oracle_descriptors": 2592,
+    "raw_oracle_float_count": 331776,
+    "raw_oracle_bytes": 1327104,
+    "raw_oracle_sha256": "0c6c76928c59a50f310764e1a22cfdaec610cebce0d448cfe8b205b46fa68632",
+    "required": [
+      "Complete native and selected-owner sanitizer CPU suites without skipped or missing tests",
+      "Complete raw-float and ordered feature/keypoint/descriptor equality",
+      "Configured static-analysis baseline/candidate comparison, with retained warnings and failures",
+      "All predeclared timing rows, controls, runtime-provider identities and memory observations",
+      "Verified evidence archive plus actual delivery identifiers"
+    ]
+  },
+  "performance_verdict": {
+    "target_minimum_median_wall_seconds_saved": 3,
+    "rule": "Report all four paired primary differences. A positive median alone is insufficient when same-arm drift, ordinary-path changes, CPU-time behavior, or inconsistent pair signs undermine attribution. Return inconclusive rather than forcing a pass. Do not sum component savings or subtract different-cohort controls.",
+    "memory": "Report measured peak RSS and retained-buffer lifetime; storage reuse can increase peak memory."
+  }
+}
