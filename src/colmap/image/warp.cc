@@ -9,6 +9,7 @@
 #include "thirdparty/VLFeat/imopv.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cstdint>
 #include <vector>
 
@@ -109,6 +110,25 @@ void ImgFromCamRow(const Camera& camera,
                    uint8_t* valid,
                    Eigen::Vector2d* img_points) {
   const double* params = camera.params.data();
+#if defined(FLT_EVAL_METHOD) && FLT_EVAL_METHOD == 0
+  if (camera.model_id == FOVCameraModel::model_id) {
+    if (width <= 0 ||
+        std::none_of(valid, valid + width, [](uint8_t v) { return v != 0; })) {
+      return;
+    }
+    const auto img_from_cam = FOVCameraModel::PrepareImgFromCam(params);
+    for (int x = 0; x < width; ++x) {
+      if (valid[x]) {
+        valid[x] = img_from_cam(cam_points[x].x(),
+                                cam_points[x].y(),
+                                1.0,
+                                &img_points[x].x(),
+                                &img_points[x].y());
+      }
+    }
+    return;
+  }
+#endif
   switch (camera.model_id) {
 #define CAMERA_MODEL_CASE(CameraModel)                          \
   case CameraModel::model_id:                                   \
