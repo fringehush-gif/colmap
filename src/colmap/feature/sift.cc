@@ -361,8 +361,12 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
       for (size_t i = 0; i < data_uint8.size(); ++i) {
         data_float[i] = static_cast<float>(data_uint8[i]) / 255.0f;
       }
-      vl_covdet_put_image(
-          covdet_.get(), data_float.data(), bitmap.Width(), bitmap.Height());
+      if (vl_covdet_put_image(covdet_.get(),
+                              data_float.data(),
+                              bitmap.Width(),
+                              bitmap.Height()) != VL_ERR_OK) {
+        return false;
+      }
     }
 
     vl_covdet_detect(covdet_.get(), options_.sift->max_num_features);

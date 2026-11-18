@@ -594,6 +594,71 @@ TEST(SiftCPUFeatureExtractor, InvalidOctaveResolutionKeepsFailing) {
   }
 }
 
+#if GTEST_HAS_DEATH_TEST
+int num_covariant_allocation_refusals = 0;
+void* RefuseCovariantAllocation(size_t, size_t) {
+  ++num_covariant_allocation_refusals;
+  return nullptr;
+}
+
+void RunCovariantAllocationRefusalChild() {
+  vl_set_alloc_func(std::malloc, std::realloc, std::calloc, std::free);
+  FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+  options.use_gpu = false;
+  options.sift->force_covariant_extractor = true;
+  auto reused = CreateSiftFeatureExtractor(options);
+  auto fresh = CreateSiftFeatureExtractor(options);
+  if (!reused || !fresh) std::_Exit(1);
+  FeatureKeypoints initial_keypoints;
+  FeatureDescriptors initial_descriptors;
+  if (!reused->Extract(CreateImageWithSquare(64),
+                       &initial_keypoints,
+                       &initial_descriptors) ||
+      initial_keypoints.empty()) {
+    std::_Exit(2);
+  }
+  const Bitmap resized = CreateImageWithSquare(96);
+  FeatureKeypoints expected_keypoints;
+  FeatureDescriptors expected;
+  if (!fresh->Extract(resized, &expected_keypoints, &expected) ||
+      expected_keypoints.empty()) {
+    std::_Exit(3);
+  }
+
+  // Resizing replaces the retained Gaussian scale space. Refuse its first
+  // allocation in an isolated child, then retry with the normal allocator.
+  vl_set_alloc_func(
+      std::malloc, std::realloc, RefuseCovariantAllocation, std::free);
+  FeatureKeypoints keypoints;
+  FeatureDescriptors descriptors;
+  const bool failed = !reused->Extract(resized, &keypoints, &descriptors);
+  vl_set_alloc_func(std::malloc, std::realloc, std::calloc, std::free);
+  if (!failed || num_covariant_allocation_refusals != 1 || !keypoints.empty()) {
+    std::_Exit(4);
+  }
+  if (!reused->Extract(resized, &keypoints, &descriptors) ||
+      keypoints != expected_keypoints || descriptors.type != expected.type ||
+      descriptors.data.rows() != expected.data.rows() ||
+      descriptors.data.cols() != expected.data.cols() ||
+      descriptors.data != expected.data) {
+    std::_Exit(5);
+  }
+  reused.reset();
+  fresh.reset();
+  std::_Exit(0);
+}
+#endif
+
+TEST(SiftCPUFeatureExtractorDeathTest, AllocationFailureAllowsResizedRetry) {
+#if GTEST_HAS_DEATH_TEST
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      RunCovariantAllocationRefusalChild(), ::testing::ExitedWithCode(0), "");
+#else
+  GTEST_SKIP() << "Allocator injection requires an isolated child process";
+#endif
+}
+
 TEST(SiftCPUFeatureExtractor, ScaleSpaceGeometryComparesEveryField) {
   for (const auto subdivisions : {std::pair<int, int>{-1, 4}, {0, 0}}) {
     auto geometry = vl_scalespace_get_default_geometry(128, 96);
