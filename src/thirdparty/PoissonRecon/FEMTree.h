@@ -2285,7 +2285,7 @@ namespace PoissonRecon
 		// Down samples constraints @(depth) to constraints @(depth-1)
 		template< class C , typename ArrayWrapper , unsigned ... Degrees , unsigned int ... FEMSigs > void _downSample( UIntPack< FEMSigs ... > , typename BaseFEMIntegrator::template RestrictionProlongation< UIntPack< Degrees ... > >& RP , LocalDepth highDepth , ArrayWrapper finerConstraints , Pointer( C ) coarserConstraints ) const;
 		// Up samples coefficients @(depth-1) to coefficients @(depth)
-		template< class C , typename ArrayWrapper , unsigned ... Degrees , unsigned int ... FEMSigs > void   _upSample( UIntPack< FEMSigs ... > , typename BaseFEMIntegrator::template RestrictionProlongation< UIntPack< Degrees ... > >& RP , LocalDepth highDepth , ArrayWrapper coarserCoefficients , Pointer( C ) finerCoefficients ) const;
+		template< class C , bool CoefficientSpace=false , typename ArrayWrapper , unsigned ... Degrees , unsigned int ... FEMSigs > void   _upSample( UIntPack< FEMSigs ... > , typename BaseFEMIntegrator::template RestrictionProlongation< UIntPack< Degrees ... > >& RP , LocalDepth highDepth , ArrayWrapper coarserCoefficients , Pointer( C ) finerCoefficients ) const;
 
 		template< unsigned int ... FEMSigs , typename ValidNodeFunctor >
 		SparseMatrix< Real , matrix_index_type > _downSampleMatrix( UIntPack< FEMSigs ... > , LocalDepth highDepth , ValidNodeFunctor validNodeFunctor ) const;
