@@ -773,6 +773,28 @@ Reconstruction CreateBinaryWireFixture(const int num_points) {
   return reconstruction;
 }
 
+Reconstruction ReadBinaryImagePrerequisites(const Reconstruction& original) {
+  ReaderWriterBinaryStringStream reader_writer;
+  reader_writer.WriteCameras(original);
+  reader_writer.WriteRigs(original);
+  reader_writer.WriteFrames(original);
+  Reconstruction reconstruction;
+  reader_writer.ReadCameras(reconstruction);
+  reader_writer.ReadRigs(reconstruction);
+  reader_writer.ReadFrames(reconstruction);
+  return reconstruction;
+}
+
+constexpr std::ios::iostate kReadExceptionMasks[] = {
+    std::ios::goodbit,
+    std::ios::failbit,
+    std::ios::badbit,
+    std::ios::eofbit,
+    std::ios::failbit | std::ios::badbit,
+    std::ios::failbit | std::ios::eofbit,
+    std::ios::badbit | std::ios::eofbit,
+    std::ios::failbit | std::ios::badbit | std::ios::eofbit};
+
 class LimitedWriteBuffer : public std::streambuf {
  public:
   explicit LimitedWriteBuffer(const size_t capacity) : capacity_(capacity) {}
@@ -807,6 +829,56 @@ TEST(ReconstructionBinary, ExactDocumentedWireAndBufferBoundaries) {
     WritePoints3DBinary(reconstruction, points);
     EXPECT_EQ(images.str(), ExpectedImageWire(reconstruction));
     EXPECT_EQ(points.str(), ExpectedPointWire(reconstruction));
+  }
+}
+
+TEST(ReconstructionBinary, ReadImageNamesPreservesBytesAndExceptionMasks) {
+  Reconstruction original = CreateBinaryWireFixture(3);
+  const auto& ids = original.RegImageIds();
+  original.Image(ids[0]).SetName("");
+  original.Image(ids[1]).SetName("\t sub dir/camera \xc3\xa5\n" +
+                                 std::string(32773, 'x'));
+  const std::string expected = ExpectedImageWire(original);
+  for (const auto mask : kReadExceptionMasks) {
+    SCOPED_TRACE(mask);
+    Reconstruction reconstruction = ReadBinaryImagePrerequisites(original);
+    std::istringstream stream(expected);
+    stream.exceptions(mask);
+    ReadImagesBinary(reconstruction, stream);
+    EXPECT_TRUE(stream.good());
+    EXPECT_EQ(stream.exceptions(), mask);
+    EXPECT_EQ(reconstruction.NumImages(), original.NumImages());
+    for (const image_t id : ids) {
+      EXPECT_EQ(reconstruction.Image(id).Name(), original.Image(id).Name());
+    }
+    EXPECT_EQ(ExpectedImageWire(reconstruction), expected);
+  }
+}
+
+TEST(ReconstructionBinary, ReadImagesRejectsUnterminatedNames) {
+  const Reconstruction original = CreateBinaryWireFixture(3);
+  const std::string expected = ExpectedImageWire(original);
+  // Count, image ID, quaternion, translation, and camera ID precede name.
+  constexpr size_t kNameOffset = 8 + 4 + 7 * 8 + 4;
+  for (const size_t name_size : {size_t{4}, size_t{0}}) {
+    SCOPED_TRACE(name_size);
+    for (const auto mask : kReadExceptionMasks) {
+      SCOPED_TRACE(mask);
+      Reconstruction reconstruction = ReadBinaryImagePrerequisites(original);
+      std::istringstream stream(expected.substr(0, kNameOffset + name_size));
+      stream.exceptions(mask);
+      if (mask & (std::ios::failbit | std::ios::eofbit)) {
+        EXPECT_THROW(ReadImagesBinary(reconstruction, stream),
+                     std::ios_base::failure);
+      } else {
+        EXPECT_THROW(ReadImagesBinary(reconstruction, stream),
+                     std::invalid_argument);
+      }
+      EXPECT_TRUE(stream.eof());
+      EXPECT_TRUE(stream.fail());
+      EXPECT_EQ(stream.exceptions(), mask);
+      EXPECT_EQ(reconstruction.NumImages(), 0);
+    }
   }
 }
 

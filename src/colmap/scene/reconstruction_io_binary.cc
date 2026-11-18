@@ -272,12 +272,10 @@ void ReadImagesBinary(Reconstruction& reconstruction, std::istream& stream) {
     }
 
     char name_char;
-    do {
-      stream.read(&name_char, 1);
-      if (name_char != '\0') {
-        image.Name() += name_char;
-      }
-    } while (name_char != '\0');
+    while (stream.read(&name_char, 1) && name_char != '\0') {
+      image.Name() += name_char;
+    }
+    THROW_CHECK(stream.good()) << "Image name must be null-terminated";
 
     const size_t num_points2D = ReadBinaryLittleEndian<uint64_t>(&stream);
 
