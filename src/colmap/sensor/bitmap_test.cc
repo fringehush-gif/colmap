@@ -184,6 +184,55 @@ TEST(Bitmap, AllocateGrey) {
   EXPECT_FALSE(bitmap.IsEmpty());
 }
 
+TEST(Bitmap, ValidSizeDomain) {
+  constexpr int kMax = std::numeric_limits<int>::max();
+  EXPECT_TRUE(Bitmap::IsValidSize(kMax, 1, 1));
+  EXPECT_TRUE(Bitmap::IsValidSize(1, kMax, 1));
+  EXPECT_TRUE(Bitmap::IsValidSize(kMax / 3, 1, 3));
+  EXPECT_TRUE(Bitmap::IsValidSize(1, kMax / 3, 3));
+  EXPECT_FALSE(Bitmap::IsValidSize(kMax / 3 + 1, 1, 3));
+  EXPECT_FALSE(Bitmap::IsValidSize(1, kMax / 3 + 1, 3));
+  EXPECT_FALSE(Bitmap::IsValidSize(46341, 46341, 1));
+  EXPECT_FALSE(Bitmap::IsValidSize(-1, -1, 1));
+  EXPECT_FALSE(Bitmap::IsValidSize(1, 1, 0));
+  EXPECT_FALSE(Bitmap::IsValidSize(1, 1, 4));
+  EXPECT_TRUE(Bitmap::IsValidSize(0, kMax, 3));
+  EXPECT_TRUE(Bitmap::IsValidSize(kMax / 3, 0, 3));
+}
+
+TEST(Bitmap, RejectUnrepresentableStorageDimensions) {
+  const std::array<std::pair<int, int>, 6> invalid = {
+      std::pair<int, int>{65537, 65537},
+      {46341, 46341},
+      {std::numeric_limits<int>::max(), 2},
+      {-2, -3},
+      {-1, 1},
+      {1, -1}};
+  for (const bool as_rgb : {false, true}) {
+    for (const auto& [width, height] : invalid) {
+      EXPECT_THROW(Bitmap(width, height, as_rgb), std::invalid_argument);
+    }
+  }
+  // Preserve empty allocation semantics without overflowing the pitch.
+  EXPECT_TRUE(Bitmap(0, 3, true).IsEmpty());
+  EXPECT_TRUE(Bitmap(3, 0, true).IsEmpty());
+  EXPECT_THROW(Bitmap(std::numeric_limits<int>::max(), 0, true),
+               std::invalid_argument);
+}
+
+TEST(Bitmap, InvalidRescaleDimensionsPreserveSource) {
+  for (const bool as_rgb : {false, true}) {
+    Bitmap bitmap(7, 9, as_rgb);
+    bitmap.Fill(BitmapColor<uint8_t>(17, 71, 131));
+    const auto expected = bitmap.RowMajorData();
+    EXPECT_THROW(bitmap.Rescale(65537, 65537), std::invalid_argument);
+    EXPECT_THROW(bitmap.Rescale(-2, -3), std::invalid_argument);
+    EXPECT_EQ(bitmap.Width(), 7);
+    EXPECT_EQ(bitmap.Height(), 9);
+    EXPECT_EQ(bitmap.RowMajorData(), expected);
+  }
+}
+
 TEST(Bitmap, MoveConstructEmpty) {
   Bitmap bitmap;
   Bitmap moved_bitmap(std::move(bitmap));
@@ -1406,8 +1455,34 @@ TEST(Bitmap, ReadUnsupportedChannels) {
   const std::vector<uint8_t> data(kWidth * kHeight * kChannels, 128);
   WriteImageOIIO(kWidth, kHeight, kChannels, filename, data.data());
 
+  const auto input = OIIO::ImageInput::open(filename.string());
+  ASSERT_NE(input, nullptr);
+  ASSERT_EQ(input->spec().nchannels, kChannels);
+  ASSERT_TRUE(input->close());
+
   Bitmap bitmap;
   EXPECT_FALSE(bitmap.Read(filename));
+  EXPECT_EQ(bitmap.Width(), 0);
+  EXPECT_EQ(bitmap.Height(), 0);
+  EXPECT_EQ(bitmap.Channels(), 0);
+  EXPECT_TRUE(bitmap.RowMajorData().empty());
+
+  for (const bool source_as_rgb : {false, true}) {
+    for (const bool read_as_rgb : {false, true}) {
+      Bitmap source(3, 1, source_as_rgb, /*linear_colorspace=*/true);
+      source.Fill(BitmapColor<uint8_t>(17, 34, 51));
+      source.SetMetaData("TestSentinel", "preserved");
+      const auto pixels = source.RowMajorData();
+      const auto colorspace = source.GetMetaData("oiio:ColorSpace");
+      EXPECT_FALSE(source.Read(filename, read_as_rgb));
+      EXPECT_EQ(source.Width(), 3);
+      EXPECT_EQ(source.Height(), 1);
+      EXPECT_EQ(source.Channels(), source_as_rgb ? 3 : 1);
+      EXPECT_EQ(source.RowMajorData(), pixels);
+      EXPECT_EQ(source.GetMetaData("TestSentinel"), "preserved");
+      EXPECT_EQ(source.GetMetaData("oiio:ColorSpace"), colorspace);
+    }
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -1433,6 +1508,137 @@ INSTANTIATE_TEST_SUITE_P(
                                       /*supports_native_grey=*/true,
                                       /*supports_rgba=*/false,
                                       /*supports_grey_alpha=*/false)));
+
+TEST(Bitmap, RejectUnrepresentableReadOutputPreservesSource) {
+  static int large_scanlines = 0;
+  large_scanlines = 0;
+  class GrayInput : public OIIO::ImageInput {
+   public:
+    const char* format_name() const override { return "colmap_size_gray"; }
+    bool open(const std::string& name, OIIO::ImageSpec& spec) override {
+      const std::filesystem::path path(name);
+      if (path.extension() != ".colmap_size_gray") return false;
+      const int width =
+          path.stem() == "small" ? 2 : std::numeric_limits<int>::max() / 3 + 1;
+      m_spec = OIIO::ImageSpec(width, 1, 1, OIIO::TypeDesc::UINT8);
+      spec = m_spec;
+      return true;
+    }
+    bool close() override { return true; }
+    bool read_native_scanline(int, int, int, int, void* data) override {
+      if (m_spec.width != 2) {
+        ++large_scanlines;
+        return false;
+      }
+      const std::array<uint8_t, 2> pixels = {17, 34};
+      std::copy(pixels.begin(), pixels.end(), static_cast<uint8_t*>(data));
+      return true;
+    }
+  };
+  static const char* extensions[] = {"colmap_size_gray", nullptr};
+  OIIO::declare_imageio_format(
+      "colmap_size_gray",
+      []() -> OIIO::ImageInput* { return new GrayInput; },
+      extensions,
+      nullptr,
+      nullptr,
+      "test");
+  const auto directory = CreateTestDir();
+  const auto small_path = directory / "small.colmap_size_gray";
+  const auto large_path = directory / "large.colmap_size_gray";
+  std::ofstream(small_path).close();
+  std::ofstream(large_path).close();
+  Bitmap control;
+  ASSERT_TRUE(control.Read(small_path, /*as_rgb=*/true));
+  EXPECT_EQ(control.RowMajorData(),
+            (std::vector<uint8_t>{17, 17, 17, 34, 34, 34}));
+  const auto input = OIIO::ImageInput::open(large_path.string());
+  ASSERT_NE(input, nullptr);
+  ASSERT_EQ(input->spec().nchannels, 1);
+  ASSERT_TRUE(Bitmap::IsValidSize(input->spec().width, 1, 1));
+  ASSERT_FALSE(Bitmap::IsValidSize(input->spec().width, 1, 3));
+  ASSERT_TRUE(input->close());
+  for (const bool as_rgb : {false, true}) {
+    Bitmap bitmap(3, 2, as_rgb);
+    bitmap.Fill(BitmapColor<uint8_t>(71));
+    bitmap.SetMetaData("TestSentinel", "preserved");
+    const auto sentinel = bitmap.RowMajorData();
+    const auto colorspace = bitmap.GetMetaData("oiio:ColorSpace");
+    EXPECT_FALSE(bitmap.Read(large_path, /*as_rgb=*/true));
+    EXPECT_EQ(large_scanlines, 0);
+    EXPECT_EQ(bitmap.Width(), 3);
+    EXPECT_EQ(bitmap.Height(), 2);
+    EXPECT_EQ(bitmap.Channels(), as_rgb ? 3 : 1);
+    EXPECT_EQ(bitmap.RowMajorData(), sentinel);
+    EXPECT_EQ(bitmap.GetMetaData("TestSentinel"), "preserved");
+    EXPECT_EQ(bitmap.GetMetaData("oiio:ColorSpace"), colorspace);
+  }
+}
+
+TEST(Bitmap, RejectVolumePreservesSource) {
+  if (!OIIO::ImageInput::create("dds")) {
+    GTEST_SKIP() << "OpenImageIO DDS input plugin unavailable";
+  }
+  const auto directory = CreateTestDir();
+  for (const uint32_t depth : {1u, 2u}) {
+    const auto path = directory / ("depth" + std::to_string(depth) + ".dds");
+    // Tiny uncompressed RGB DDS; include a valid 2D control so general decoder
+    // refusal cannot satisfy this test. Fields follow Microsoft's DDS_HEADER.
+    std::array<uint32_t, 31> header{};
+    header[0] = 124;
+    header[1] = 0x100fu | (depth > 1 ? 0x800000u : 0u);
+    header[2] = 2;
+    header[3] = 2;
+    header[4] = 6;
+    header[5] = depth > 1 ? depth : 0;
+    header[18] = 32;
+    header[19] = 0x40;  // DDPF_RGB.
+    header[21] = 24;
+    header[22] = 0x0000ff;
+    header[23] = 0x00ff00;
+    header[24] = 0xff0000;
+    header[26] = 0x1000u | (depth > 1 ? 0x8u : 0u);
+    header[27] = depth > 1 ? 0x200000 : 0;  // DDSCAPS2_VOLUME.
+    {
+      std::ofstream output(path, std::ios::binary);
+      ASSERT_TRUE(output);
+      output.write("DDS ", 4);
+      for (const uint32_t value : header) {
+        for (unsigned int shift = 0; shift < 32; shift += 8) {
+          output.put(static_cast<char>((value >> shift) & 0xffu));
+        }
+      }
+      const std::string pixels(2 * 2 * depth * 3, 17);
+      output.write(pixels.data(), pixels.size());
+      ASSERT_TRUE(output);
+    }
+    const auto input = OIIO::ImageInput::open(path.string());
+    ASSERT_NE(input, nullptr);
+    ASSERT_EQ(input->spec().width, 2);
+    ASSERT_EQ(input->spec().height, 2);
+    ASSERT_EQ(input->spec().depth, depth);
+    ASSERT_EQ(input->spec().nchannels, 3);
+    ASSERT_TRUE(input->close());
+    for (const bool as_rgb : {false, true}) {
+      Bitmap bitmap(3, 2, as_rgb);
+      bitmap.Fill(BitmapColor<uint8_t>(71));
+      const auto sentinel = bitmap.RowMajorData();
+      if (depth == 1) {
+        ASSERT_TRUE(bitmap.Read(path, as_rgb));
+        EXPECT_EQ(bitmap.Width(), 2);
+        EXPECT_EQ(bitmap.Height(), 2);
+        EXPECT_EQ(bitmap.RowMajorData(),
+                  std::vector<uint8_t>(4 * (as_rgb ? 3 : 1), 17));
+      } else {
+        EXPECT_FALSE(bitmap.Read(path, as_rgb));
+        EXPECT_EQ(bitmap.Width(), 3);
+        EXPECT_EQ(bitmap.Height(), 2);
+        EXPECT_EQ(bitmap.Channels(), as_rgb ? 3 : 1);
+        EXPECT_EQ(bitmap.RowMajorData(), sentinel);
+      }
+    }
+  }
+}
 
 }  // namespace
 }  // namespace colmap

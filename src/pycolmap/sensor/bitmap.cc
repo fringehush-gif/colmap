@@ -10,19 +10,14 @@
 #include <pybind11/eigen.h>
 #include <pybind11/pybind11.h>
 
-using namespace colmap;
-using namespace pybind11::literals;
+using colmap::Bitmap;
+using pybind11::literals::operator""_a;
 namespace py = pybind11;
 
-#ifdef _MSC_VER  // If compiling with MSVC
-#include <stddef.h>
-typedef ptrdiff_t ssize_t;
-#endif
-
 py::array_t<uint8_t> ArrayFromBitmap(const Bitmap& self) {
-  std::vector<ssize_t> shape = {static_cast<ssize_t>(self.Height()),
-                                static_cast<ssize_t>(self.Width())};
-  const auto channels = static_cast<ssize_t>(self.Channels());
+  std::vector<py::ssize_t> shape = {static_cast<py::ssize_t>(self.Height()),
+                                    static_cast<py::ssize_t>(self.Width())};
+  const auto channels = static_cast<py::ssize_t>(self.Channels());
   if (channels != 1) {
     if (channels != 3) {
       throw std::runtime_error(
@@ -32,39 +27,64 @@ py::array_t<uint8_t> ArrayFromBitmap(const Bitmap& self) {
     shape.push_back(channels);
   }
   py::array_t<uint8_t> output(shape);
-  py::buffer_info output_into = output.request();
-  uint8_t* output_row_ptr = reinterpret_cast<uint8_t*>(output.request().ptr);
-  std::memcpy(output_row_ptr, self.RowMajorData().data(), self.NumBytes());
+  if (!self.IsEmpty()) {
+    std::memcpy(
+        output.mutable_data(), self.RowMajorData().data(), self.NumBytes());
+  }
   return output;
 }
 
-Bitmap BitmapFromArray(py::array_t<uint8_t, py::array::c_style> array,
-                       bool linear_colorspace) {
-  int channels = 1;
+Bitmap BitmapFromArray(py::object input, bool linear_colorspace) {
+  // Retain NumPy's buffer view without requiring uint8 or contiguous storage.
+  // Validate that view before normalization can copy its pixels. Other array-
+  // like objects retain the existing typed conversion before shape inspection.
+  py::array array;
+  if (PyObject_CheckBuffer(input.ptr())) {
+    array = py::array::ensure(input);
+  } else {
+    array = py::array_t<uint8_t, py::array::c_style>::ensure(input);
+  }
+  if (!array) {
+    throw py::type_error("Input must be convertible to a uint8 array!");
+  }
+  py::ssize_t channels = 1;
   if (array.ndim() == 3) {
     channels = array.shape(2);
   } else if (array.ndim() != 2) {
     throw std::runtime_error("Input array must have 2 or 3 dimensions!");
   }
 
-  const int width = array.shape(1);
-  const int height = array.shape(0);
-  if (width == 0 || height == 0) {
+  const py::ssize_t width = array.shape(1);
+  const py::ssize_t height = array.shape(0);
+  if (width <= 0 || height <= 0 || width > std::numeric_limits<int>::max() ||
+      height > std::numeric_limits<int>::max()) {
     throw std::runtime_error(
-        "Input array must have positive width and height!");
+        "Input array dimensions must be positive and fit in int!");
   }
 
   if (channels != 1 && channels != 3) {
     throw std::runtime_error("Input array must have 1 or 3 channels!");
   }
 
-  const bool as_rgb = channels != 1;
-  Bitmap output(width,
-                height,
-                /*as_rgb=*/as_rgb,
+  const int bitmap_width = static_cast<int>(width);
+  const int bitmap_height = static_cast<int>(height);
+  if (!Bitmap::IsValidSize(
+          bitmap_width, bitmap_height, static_cast<int>(channels))) {
+    throw std::runtime_error("Input array exceeds bitmap storage capacity!");
+  }
+
+  // Validate the owner's storage domain before input normalization, then
+  // preserve the legacy dtype conversion before allocating the output raster.
+  auto contiguous = py::array_t<uint8_t, py::array::c_style>::ensure(array);
+  if (!contiguous) {
+    throw py::type_error("Input must be convertible to a uint8 array!");
+  }
+  Bitmap output(bitmap_width,
+                bitmap_height,
+                /*as_rgb=*/channels != 1,
                 /*linear_colorspace=*/linear_colorspace);
 
-  const uint8_t* input_row_ptr = static_cast<uint8_t*>(array.request().ptr);
+  const uint8_t* input_row_ptr = contiguous.data();
   std::memcpy(output.RowMajorData().data(), input_row_ptr, output.NumBytes());
   return output;
 }

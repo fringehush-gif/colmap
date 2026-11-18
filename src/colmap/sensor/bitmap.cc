@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include <OpenImageIO/color.h>
 #include <OpenImageIO/imagebufalgo.h>
@@ -151,6 +152,17 @@ bool IsEquivalentColorSpace(const std::string_view& colorspace1,
 
 }  // namespace
 
+// Pixel access, pitch and interpolation still use signed int offsets. Keep
+// every stored raster in that domain; widening allocation alone is unsafe.
+bool Bitmap::IsValidSize(const int width,
+                         const int height,
+                         const int channels) {
+  return width >= 0 && height >= 0 && (channels == 1 || channels == 3) &&
+         width <= std::numeric_limits<int>::max() / channels &&
+         (width == 0 ||
+          height <= std::numeric_limits<int>::max() / (width * channels));
+}
+
 Bitmap::Bitmap()
     : width_(0), height_(0), channels_(0), linear_colorspace_(false) {
   EnsureOpenImageIOInitialized();
@@ -160,6 +172,7 @@ Bitmap::Bitmap(const int width,
                const int height,
                const bool as_rgb,
                const bool linear_colorspace) {
+  THROW_CHECK(Bitmap::IsValidSize(width, height, as_rgb ? 3 : 1));
   EnsureOpenImageIOInitialized();
   width_ = width;
   height_ = height;
@@ -426,23 +439,33 @@ bool Bitmap::Read(const std::filesystem::path& path,
   }
 
   const OIIO::ImageSpec& image_spec = input->spec();
-  width_ = image_spec.width;
-  height_ = image_spec.height;
   const int file_channels = image_spec.nchannels;
   // Handle images with alpha channel by dropping alpha:
   // - 4 channels (RGBA) -> 3 channels (RGB)
   // - 2 channels (grayscale + alpha) -> 1 channel (grayscale)
+  int channels;
   if (file_channels == 4) {
-    channels_ = 3;
+    channels = 3;
   } else if (file_channels == 2) {
-    channels_ = 1;
+    channels = 1;
   } else if (file_channels == 1 || file_channels == 3) {
-    channels_ = file_channels;
+    channels = file_channels;
   } else {
     VLOG(3) << "Unsupported number of channels: " << file_channels;
     return false;
   }
 
+  if (image_spec.width <= 0 || image_spec.height <= 0 ||
+      image_spec.depth != 1 || image_spec.deep ||
+      !Bitmap::IsValidSize(image_spec.width, image_spec.height, channels) ||
+      !Bitmap::IsValidSize(
+          image_spec.width, image_spec.height, as_rgb ? 3 : 1)) {
+    VLOG(3) << "Unsupported bitmap storage layout or dimensions";
+    return false;
+  }
+  width_ = image_spec.width;
+  height_ = image_spec.height;
+  channels_ = channels;
   data_.resize(width_ * height_ * channels_);
   // Note that OIIO supports reading a subset of channels.
   input->read_image(0, 0, 0, channels_, OIIO::TypeDesc::UINT8, data_.data());
@@ -548,6 +571,7 @@ void Bitmap::SetImageData(int width, int height, std::vector<uint8_t>&& data) {
 void Bitmap::Rescale(const int new_width,
                      const int new_height,
                      RescaleFilter filter) {
+  THROW_CHECK(Bitmap::IsValidSize(new_width, new_height, channels_));
   const OIIO::ImageBuf buf(
       OIIO::ImageSpec(width_, height_, channels_, OIIO::TypeDesc::UINT8),
       data_.data());
@@ -689,6 +713,7 @@ Bitmap Bitmap::CloneAsRGB() const {
     return Clone();
   } else {
     THROW_CHECK_EQ(channels_, 1);
+    THROW_CHECK(Bitmap::IsValidSize(width_, height_, 3));
     Bitmap cloned;
     cloned.width_ = width_;
     cloned.height_ = height_;
