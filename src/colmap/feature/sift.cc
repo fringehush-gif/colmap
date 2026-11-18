@@ -314,9 +314,11 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
 
 class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
  public:
+  using VlCovDetType = std::unique_ptr<VlCovDet, void (*)(VlCovDet*)>;
+
   explicit CovariantSiftCPUFeatureExtractor(
       const FeatureExtractionOptions& options)
-      : options_(options) {
+      : options_(options), covdet_(nullptr, &vl_covdet_delete) {
     THROW_CHECK(options_.Check());
     if (options_.sift->darkness_adaptivity) {
       WarnDarknessAdaptivityNotAvailable();
@@ -334,21 +336,24 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
     THROW_CHECK(bitmap.IsGrey());
     THROW_CHECK_NOTNULL(keypoints);
 
-    // Setup covariant SIFT detector.
-    std::unique_ptr<VlCovDet, void (*)(VlCovDet*)> covdet(
-        vl_covdet_new(VL_COVDET_METHOD_DOG), &vl_covdet_delete);
-    if (!covdet) {
-      return false;
-    }
-
     const int kMaxOctaveResolution = 1000;
     THROW_CHECK_LE(options_.sift->octave_resolution, kMaxOctaveResolution);
 
-    vl_covdet_set_first_octave(covdet.get(), options_.sift->first_octave);
-    vl_covdet_set_octave_resolution(covdet.get(),
-                                    options_.sift->octave_resolution);
-    vl_covdet_set_peak_threshold(covdet.get(), options_.sift->peak_threshold);
-    vl_covdet_set_edge_threshold(covdet.get(), options_.sift->edge_threshold);
+    // The copied options are immutable. Configuring an existing detector would
+    // reset it and discard the scale-space buffers retained for the next image.
+    if (!covdet_) {
+      covdet_.reset(vl_covdet_new(VL_COVDET_METHOD_DOG));
+      if (!covdet_) {
+        return false;
+      }
+      vl_covdet_set_first_octave(covdet_.get(), options_.sift->first_octave);
+      vl_covdet_set_octave_resolution(covdet_.get(),
+                                      options_.sift->octave_resolution);
+      vl_covdet_set_peak_threshold(covdet_.get(),
+                                   options_.sift->peak_threshold);
+      vl_covdet_set_edge_threshold(covdet_.get(),
+                                   options_.sift->edge_threshold);
+    }
 
     {
       const std::vector<uint8_t>& data_uint8 = bitmap.RowMajorData();
@@ -357,21 +362,21 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
         data_float[i] = static_cast<float>(data_uint8[i]) / 255.0f;
       }
       vl_covdet_put_image(
-          covdet.get(), data_float.data(), bitmap.Width(), bitmap.Height());
+          covdet_.get(), data_float.data(), bitmap.Width(), bitmap.Height());
     }
 
-    vl_covdet_detect(covdet.get(), options_.sift->max_num_features);
+    vl_covdet_detect(covdet_.get(), options_.sift->max_num_features);
 
     if (options_.sift->estimate_affine_shape) {
-      vl_covdet_extract_affine_shape(covdet.get());
+      vl_covdet_extract_affine_shape(covdet_.get());
     }
 
     if (!options_.sift->upright) {
-      vl_covdet_extract_orientations(covdet.get());
+      vl_covdet_extract_orientations(covdet_.get());
     }
 
-    const int num_features = vl_covdet_get_num_features(covdet.get());
-    VlCovDetFeature* features = vl_covdet_get_features(covdet.get());
+    const int num_features = vl_covdet_get_num_features(covdet_.get());
+    VlCovDetFeature* features = vl_covdet_get_features(covdet_.get());
 
     // Sort features according to detected octave and scale.
     std::sort(
@@ -461,7 +466,7 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
           scaled_frame.a21 *= dsp_scale;
           scaled_frame.a22 *= dsp_scale;
 
-          vl_covdet_extract_patch_for_frame(covdet.get(),
+          vl_covdet_extract_patch_for_frame(covdet_.get(),
                                             patch.data(),
                                             kPatchResolution,
                                             kPatchRelativeExtent,
@@ -519,6 +524,7 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
 
  private:
   const FeatureExtractionOptions options_;
+  VlCovDetType covdet_;
 };
 
 #if defined(COLMAP_GPU_ENABLED)

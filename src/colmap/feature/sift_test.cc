@@ -18,6 +18,10 @@
 #include "colmap/util/cuda.h"
 #endif
 
+#include "thirdparty/VLFeat/scalespace.h"
+
+#include <array>
+#include <cstring>
 #include <functional>
 #include <set>
 #include <utility>
@@ -156,6 +160,101 @@ TEST_P(SiftCpuExtractionTest, Nominal) {
   ValidateKeypoints(keypoints, bitmap);
   EXPECT_EQ(descriptors.data.rows(), p.expected_keypoints);
   ValidateDescriptorNorms(descriptors);
+}
+
+TEST_P(SiftCpuExtractionTest, ReusedExtractorMatchesFreshImages) {
+  const auto& p = GetParam();
+  FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+  options.use_gpu = false;
+  options.sift->estimate_affine_shape = p.estimate_affine_shape;
+  options.sift->domain_size_pooling = p.domain_size_pooling;
+  options.sift->force_covariant_extractor = p.force_covariant_extractor;
+  options.sift->upright = p.upright;
+  const FeatureExtractionOptions reference_options = options;
+  auto reused = CreateSiftFeatureExtractor(options);
+  ASSERT_NE(reused, nullptr);
+
+  // Extractors own a deep copy. Mutating the caller's settings must not change
+  // either initialization or subsequent calls on the retained detector.
+  options.sift->first_octave = 1;
+  options.sift->octave_resolution = 5;
+  options.sift->peak_threshold = 1000;
+  options.sift->max_num_features = 1;
+
+  const std::array<int, 5> sizes = {256, 256, 128, 64, 256};
+  for (size_t index = 0; index < sizes.size(); ++index) {
+    SCOPED_TRACE(index);
+    Bitmap bitmap = CreateImageWithSquare(sizes[index]);
+    if (index == 1) {
+      for (int y = 12; y < 44; ++y) {
+        for (int x = 10; x < 42; ++x) {
+          bitmap.SetPixel(x, y, BitmapColor<uint8_t>(255));
+        }
+      }
+    } else if (index == 3) {
+      bitmap.Fill(BitmapColor<uint8_t>(0));
+    }
+    auto fresh = CreateSiftFeatureExtractor(reference_options);
+    ASSERT_NE(fresh, nullptr);
+    FeatureKeypoints expected_keypoints, actual_keypoints;
+    FeatureDescriptors expected, actual;
+    ASSERT_TRUE(fresh->Extract(bitmap, &expected_keypoints, &expected));
+    ASSERT_TRUE(reused->Extract(bitmap, &actual_keypoints, &actual));
+    EXPECT_EQ(actual_keypoints, expected_keypoints);
+    ASSERT_EQ(actual.data.rows(), expected.data.rows());
+    ASSERT_EQ(actual.data.cols(), expected.data.cols());
+    EXPECT_EQ(actual.type, expected.type);
+    if (expected.data.size() > 0) {
+      EXPECT_EQ(
+          std::memcmp(
+              actual.data.data(), expected.data.data(), expected.data.size()),
+          0);
+    }
+    if (index == 1) {
+      Bitmap invalid(32, 32, true);
+      invalid.Fill(BitmapColor<uint8_t>(0));
+      FeatureKeypoints invalid_keypoints;
+      EXPECT_ANY_THROW(reused->Extract(invalid, &invalid_keypoints, nullptr));
+    }
+  }
+}
+
+TEST(SiftCPUFeatureExtractor, InvalidOctaveResolutionKeepsFailing) {
+  FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+  options.use_gpu = false;
+  options.sift->force_covariant_extractor = true;
+  options.sift->octave_resolution = 1001;
+  auto extractor = CreateSiftFeatureExtractor(options);
+  ASSERT_NE(extractor, nullptr);
+  const Bitmap bitmap = CreateImageWithSquare(64);
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    FeatureKeypoints keypoints;
+    EXPECT_ANY_THROW(extractor->Extract(bitmap, &keypoints, nullptr));
+  }
+}
+
+TEST(SiftCPUFeatureExtractor, ScaleSpaceGeometryComparesEveryField) {
+  for (const auto subdivisions : {std::pair<int, int>{-1, 4}, {0, 0}}) {
+    auto geometry = vl_scalespace_get_default_geometry(128, 96);
+    geometry.octaveFirstSubdivision = subdivisions.first;
+    geometry.octaveLastSubdivision = subdivisions.second;
+    EXPECT_TRUE(vl_scalespacegeometry_is_equal(geometry, geometry));
+    std::array<VlScaleSpaceGeometry, 9> changed;
+    changed.fill(geometry);
+    ++changed[0].width;
+    ++changed[1].height;
+    ++changed[2].firstOctave;
+    ++changed[3].lastOctave;
+    ++changed[4].octaveResolution;
+    ++changed[5].octaveFirstSubdivision;
+    ++changed[6].octaveLastSubdivision;
+    ++changed[7].baseScale;
+    ++changed[8].nominalScale;
+    for (const auto& other : changed) {
+      EXPECT_FALSE(vl_scalespacegeometry_is_equal(geometry, other));
+      EXPECT_FALSE(vl_scalespacegeometry_is_equal(other, geometry));
+    }
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(
