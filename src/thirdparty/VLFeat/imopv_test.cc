@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -31,8 +32,8 @@ void Convolve(T* dst,
               int height,
               int src_stride,
               const T* filter,
-              int begin,
-              int end,
+              vl_index begin,
+              vl_index end,
               int step,
               unsigned int flags) {
   if constexpr (std::is_same_v<T, float>) {
@@ -273,43 +274,54 @@ TEST_F(VLFeatPadding, AlignedVectorsAndScalarTails) {
 }
 
 template <typename T>
-void CheckWhollyLowerPadding() {
-  constexpr int width = 9, height = 2, src_stride = 12;
+void CheckWhollyOutsidePadding() {
+  constexpr int width = 9, height = 3, src_stride = 16;
   alignas(16) std::array<T, height * src_stride> source{};
   for (int x = 0; x < width; ++x) {
     source[x] = T(-3);
-    source[src_stride + x] = T(x + 1);
+    source[(height - 1) * src_stride + x] = T(x + 1);
   }
   const T filter[] = {T(0.25), T(0.75)};
   for (const int simd : {0, 1}) {
     vl_set_simd_enabled(simd);
-    SCOPED_TRACE(testing::Message()
-                 << "element bytes=" << sizeof(T) << " simd=" << simd);
-    std::vector<T> actual(width * height, T(-999));
-    Convolve(actual.data(),
-             width,
-             source.data(),
-             width,
-             height,
-             src_stride,
-             filter,
-             -4,
-             -3,
-             1,
-             VL_PAD_BY_CONTINUITY);
-    // Every tap is below the image, so their unit sum must reproduce its
-    // last row. This regression needs no invalid read to expose the defect.
-    for (int y = 0; y < height; ++y) {
-      for (int x = 0; x < width; ++x) {
-        EXPECT_EQ(actual[y * width + x], source[src_stride + x]);
+    for (const vl_index begin : {vl_index(-4),
+                                 std::numeric_limits<vl_index>::min(),
+                                 std::numeric_limits<vl_index>::max() - 1}) {
+      for (const unsigned int mode : {VL_PAD_BY_ZERO, VL_PAD_BY_CONTINUITY}) {
+        SCOPED_TRACE(testing::Message()
+                     << "element bytes=" << sizeof(T) << " simd=" << simd
+                     << " begin=" << begin << " padding=" << mode);
+        std::vector<T> actual(width * height, T(-999));
+        Convolve(actual.data(),
+                 width,
+                 source.data(),
+                 width,
+                 height,
+                 src_stride,
+                 filter,
+                 begin,
+                 begin + 1,
+                 1,
+                 mode);
+        // All taps are outside. Their unit sum reproduces the edge row,
+        // without subtracting extreme indices in the reference itself.
+        for (int y = 0; y < height; ++y) {
+          for (int x = 0; x < width; ++x) {
+            const T expected =
+                mode == VL_PAD_BY_ZERO
+                    ? T(0)
+                    : source[(begin < 0 ? (height - 1) * src_stride : 0) + x];
+            EXPECT_EQ(actual[y * width + x], expected);
+          }
+        }
       }
     }
   }
 }
 
-TEST_F(VLFeatPadding, WhollyLowerPaddingUsesLastRow) {
-  CheckWhollyLowerPadding<float>();
-  CheckWhollyLowerPadding<double>();
+TEST_F(VLFeatPadding, WhollyOutsidePaddingUsesEdgeRows) {
+  CheckWhollyOutsidePadding<float>();
+  CheckWhollyOutsidePadding<double>();
 }
 
 TEST_F(VLFeatPadding, InPlaceContinuityRetainsColumnOrder) {

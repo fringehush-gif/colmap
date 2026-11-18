@@ -161,8 +161,7 @@ VL_XCAT(vl_imconvcol_v, SFX)
       vl_index source_y ;
 
       tap = 0 ;
-      stop = VL_MIN(filt_end - y, filt_end - filt_begin + 1) ;
-      source_y = VL_MAX(0, y - filt_end) ;
+      stop = filt_end > y ? VL_MIN(filt_end - y, filt_end - filt_begin + 1) : 0 ;
 
       if (stop > 0) {
         if (zeropad) {
@@ -177,6 +176,7 @@ VL_XCAT(vl_imconvcol_v, SFX)
       }
 
       stop = filt_end - VL_MAX(filt_begin, y - (signed)src_height + 1) + 1 ;
+      source_y = tap < stop ? VL_MAX(0, y - filt_end) : 0 ;
       while (tap < stop) {
         v = *(src + x + source_y * src_stride) ;
         c = filt[-tap++] ;
