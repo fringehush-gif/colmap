@@ -75,8 +75,9 @@ class InvertedIndex {
       std::bitset<kEmbeddingDim>* binary_descriptor) const;
 
   // The projection is independent of the visual word; thresholds are not.
-  ProjDescType ProjectDescriptor(
-      const Eigen::Ref<const DescType>& descriptor) const;
+  // Input and output must not overlap. Reuse the output storage across calls.
+  void ProjectDescriptor(const Eigen::Ref<const DescType>& descriptor,
+                         ProjDescType* projected_descriptor) const;
   void ConvertProjectedToBinaryDescriptor(
       int64_t word_id,
       const ProjDescType& projected_descriptor,
@@ -284,15 +285,18 @@ void InvertedIndex<kDescType, kDescDim, kEmbeddingDim>::
         const int64_t word_id,
         const DescType& descriptor,
         std::bitset<kEmbeddingDim>* binary_descriptor) const {
+  ProjDescType projected_descriptor;
+  ProjectDescriptor(descriptor, &projected_descriptor);
   ConvertProjectedToBinaryDescriptor(
-      word_id, ProjectDescriptor(descriptor), binary_descriptor);
+      word_id, projected_descriptor, binary_descriptor);
 }
 
 template <typename kDescType, int kDescDim, int kEmbeddingDim>
-typename InvertedIndex<kDescType, kDescDim, kEmbeddingDim>::ProjDescType
-InvertedIndex<kDescType, kDescDim, kEmbeddingDim>::ProjectDescriptor(
-    const Eigen::Ref<const DescType>& descriptor) const {
-  return proj_matrix_ * descriptor.transpose().template cast<float>();
+void InvertedIndex<kDescType, kDescDim, kEmbeddingDim>::ProjectDescriptor(
+    const Eigen::Ref<const DescType>& descriptor,
+    ProjDescType* projected_descriptor) const {
+  projected_descriptor->noalias() =
+      proj_matrix_ * descriptor.transpose().template cast<float>();
 }
 
 template <typename kDescType, int kDescDim, int kEmbeddingDim>

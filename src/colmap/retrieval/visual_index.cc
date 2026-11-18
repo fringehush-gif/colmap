@@ -194,10 +194,10 @@ class FaissVisualIndex : public VisualIndex {
 
     // NOTE: Currently, we are redundantly computing the feature weighting.
     const HammingDistWeightFunctor<kEmbeddingDim> hamming_dist_weight_functor;
+    typename InvertedIndexType::ProjDescType projected_descriptor;
 
     for (Eigen::Index i = 0; i < descriptors.data.rows(); ++i) {
       const auto& descriptor = descriptors.data.row(i);
-      typename InvertedIndexType::ProjDescType projected_descriptor;
       bool has_projection = false;
 
       EntryType query_entry;
@@ -218,8 +218,8 @@ class FaissVisualIndex : public VisualIndex {
 
         if (word_id != InvertedIndexType::kInvalidWordId) {
           if (!has_projection) {
-            projected_descriptor =
-                inverted_index_.ProjectDescriptor(descriptor);
+            inverted_index_.ProjectDescriptor(descriptor,
+                                              &projected_descriptor);
             has_projection = true;
           }
           inverted_index_.ConvertProjectedToBinaryDescriptor(

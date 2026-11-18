@@ -35,9 +35,10 @@ void CheckProjectionAndWordThresholds() {
     }
   }
 
+  typename Index::ProjDescType projected;
   for (int row = 0; row < descriptors.rows(); ++row) {
     SCOPED_TRACE(row);
-    const auto projected = index.ProjectDescriptor(descriptors.row(row));
+    index.ProjectDescriptor(descriptors.row(row), &projected);
     ASSERT_EQ(projected.size(), kEmbeddingDim);
     for (int col = 0; col < kEmbeddingDim; ++col) {
       EXPECT_EQ(projected[col], descriptors(row, col));
