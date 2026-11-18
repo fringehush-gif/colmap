@@ -304,24 +304,38 @@ TEST(VocabTreePairGenerator, DoesNotDeadlockOnFailedQuery) {
   options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
   CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
   options.num_images = 3;
+  options.num_threads = 1;
 
-  // Query a set of images that includes an invalid image identifier. Querying
-  // the invalid image fails inside the worker thread. Even so, the generator
-  // must not deadlock and must produce one result per query image. Regression
-  // test for a hang where a failing query never pushed a result and the
-  // consumer blocked indefinitely on the result queue (GH #4456).
+  // A failed query must publish an empty result without stopping later queries.
+  // Put the invalid image first and use one worker to exercise recovery before
+  // any valid result. This also guards the missing-result deadlock in GH #4456.
   std::vector<image_t> query_image_ids;
   query_image_ids.reserve(images.size() + 1);
   for (const auto& image : images) {
     query_image_ids.push_back(image.ImageId());
   }
   const image_t kInvalidQueryImageId = 1000;
-  query_image_ids.push_back(kInvalidQueryImageId);
+  query_image_ids.insert(query_image_ids.begin(), kInvalidQueryImageId);
 
   VocabTreePairGenerator generator(options, database, query_image_ids);
+  std::vector<image_t> completed_query_ids;
+  size_t failed_queries = 0;
   for (size_t i = 0; i < query_image_ids.size(); ++i) {
-    generator.Next();
+    const auto pairs = generator.Next();
+    if (pairs.empty()) {
+      ++failed_queries;
+      continue;
+    }
+    ASSERT_EQ(pairs.size(), options.num_images);
+    completed_query_ids.push_back(pairs.front().first);
+    for (const auto& pair : pairs) {
+      EXPECT_EQ(pair.first, pairs.front().first);
+    }
   }
+  EXPECT_EQ(failed_queries, 1);
+  EXPECT_THAT(completed_query_ids,
+              ::testing::UnorderedElementsAreArray(query_image_ids.begin() + 1,
+                                                   query_image_ids.end()));
   EXPECT_TRUE(generator.Next().empty());
   EXPECT_TRUE(generator.HasFinished());
 }
