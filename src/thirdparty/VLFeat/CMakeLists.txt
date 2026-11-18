@@ -114,3 +114,13 @@ COLMAP_ADD_LIBRARY(
 if(OPENMP_FOUND)
     target_link_libraries(colmap_vlfeat PRIVATE OpenMP::OpenMP_C)
 endif()
+
+set(FOLDER_NAME "vlfeat")
+COLMAP_ADD_TEST(
+    NAME imopv_test
+    SRCS imopv_test.cc
+    LINK_LIBS colmap_vlfeat
+)
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    target_link_options(colmap_vlfeat_imopv_test PRIVATE -coverage)
+endif()
