@@ -3,6 +3,7 @@
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 
 #include "colmap/estimators/alignment.h"
+#include "colmap/estimators/bundle_adjustment_internal.h"
 #include "colmap/estimators/ceres_loss_function.h"
 #include "colmap/estimators/cost_functions/manifold.h"
 #include "colmap/estimators/cost_functions/pose_prior.h"
@@ -202,36 +203,40 @@ bool CeresPosePriorBundleAdjustmentOptions::Check() const {
 
 namespace {
 
-struct FixedGaugeWithThreePoints {
-  // The number of fixed points for the Gauge.
-  Eigen::Index num_fixed_points = 0;
-  // The coordinates of the fixed points as columns.
-  Eigen::Matrix3d fixed_points = Eigen::Matrix3d::Zero();
-  bool MaybeAddFixedPoint(const Eigen::Vector3d& point) {
-    if (num_fixed_points >= 3) {
-      return false;
-    }
-    fixed_points.col(num_fixed_points) = point;
-    if (fixed_points.colPivHouseholderQr().rank() > num_fixed_points) {
-      ++num_fixed_points;
+bool HasVariablePoseObservation(const Point3D& point3D,
+                                const BundleAdjustmentConfig& config,
+                                const Reconstruction& reconstruction,
+                                const ceres::Problem& problem) {
+  const auto is_variable = [&problem](const Rigid3d& pose) {
+    return problem.HasParameterBlock(pose.params.data()) &&
+           !problem.IsParameterBlockConstant(pose.params.data());
+  };
+  for (const auto& track_el : point3D.track.Elements()) {
+    // External observations use a fixed pose embedded in their cost functor.
+    if (!config.HasImage(track_el.image_id)) continue;
+    const Image& image = reconstruction.Image(track_el.image_id);
+    const Frame& frame = *image.FramePtr();
+    if (is_variable(frame.RigFromWorld()) ||
+        (!image.IsRefInFrame() && is_variable(frame.RigPtr()->SensorFromRig(
+                                      image.CameraPtr()->SensorId())))) {
       return true;
-    } else {
-      fixed_points.col(num_fixed_points).setZero();
-      return false;
     }
   }
-};
+  return false;
+}
 
 void FixGaugeWithThreePoints(
+    const BundleAdjustmentConfig& config,
     const FlatHashMap<point3D_t, size_t>& point3D_num_observations,
     Reconstruction& reconstruction,
     ceres::Problem& problem) {
-  FixedGaugeWithThreePoints fixed_gauge;
+  internal::FixedGaugeWithThreePoints fixed_gauge;
 
   // First check if we already fixed enough points in the problem.
   for (const auto& [point3D_id, num_observations] : point3D_num_observations) {
     const Point3D& point3D = reconstruction.Point3D(point3D_id);
     if (problem.IsParameterBlockConstant(point3D.xyz.data()) &&
+        HasVariablePoseObservation(point3D, config, reconstruction, problem) &&
         fixed_gauge.MaybeAddFixedPoint(point3D.xyz) &&
         fixed_gauge.num_fixed_points >= 3) {
       return;
@@ -242,6 +247,7 @@ void FixGaugeWithThreePoints(
   for (const auto& [point3D_id, num_observations] : point3D_num_observations) {
     Point3D& point3D = reconstruction.Point3D(point3D_id);
     if (!problem.IsParameterBlockConstant(point3D.xyz.data()) &&
+        HasVariablePoseObservation(point3D, config, reconstruction, problem) &&
         fixed_gauge.MaybeAddFixedPoint(point3D.xyz)) {
       problem.SetParameterBlockConstant(point3D.xyz.data());
       if (fixed_gauge.num_fixed_points >= 3) {
@@ -345,7 +351,8 @@ void FixGaugeWithTwoCamsFromWorld(
   if (image1 == nullptr || image2 == nullptr) {
     LOG(WARNING) << "Failed to fix Gauge with two cameras. "
                     "Falling back to fixing Gauge with three points.";
-    FixGaugeWithThreePoints(point3D_num_observations, reconstruction, problem);
+    FixGaugeWithThreePoints(
+        config, point3D_num_observations, reconstruction, problem);
     return;
   }
 
@@ -637,7 +644,7 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
         break;
       case BundleAdjustmentGauge::THREE_POINTS:
         FixGaugeWithThreePoints(
-            point3D_num_observations_, reconstruction, *problem_);
+            config_, point3D_num_observations_, reconstruction, *problem_);
         break;
       default:
         LOG(FATAL_THROW) << "Unknown BundleAdjustmentGauge";
