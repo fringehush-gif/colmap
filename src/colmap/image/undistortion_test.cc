@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -584,9 +585,12 @@ TEST(RectifyAndUndistortStereoImages, PreservesMetadataAcrossWarpModes) {
       Camera::CreateFromModelId(1, CameraModelId::kPinhole, 100, 64, 64);
   const Rigid3d cam2_from_cam1(Eigen::Quaterniond::Identity(),
                                Eigen::Vector3d(1, 0, 0));
-  for (const bool as_rgb : {false, true}) {
-    Bitmap left(64, 64, as_rgb);
-    Bitmap right(64, 64, as_rgb);
+  for (const auto& as_rgb : {std::pair<bool, bool>{false, false},
+                             {false, true},
+                             {true, false},
+                             {true, true}}) {
+    Bitmap left(64, 64, as_rgb.first);
+    Bitmap right(64, 64, as_rgb.second);
     left.Fill(BitmapColor<uint8_t>(73, 91, 115));
     right.Fill(BitmapColor<uint8_t>(167, 153, 129));
     left.SetMetaData("stereo-source", "left");
@@ -599,8 +603,10 @@ TEST(RectifyAndUndistortStereoImages, PreservesMetadataAcrossWarpModes) {
         options.max_image_size = 32;
         options.warp_options.interpolation = interpolation;
         options.warp_options.direct_warp_min_scale = direct_warp_min_scale;
-        Bitmap rectified_left;
-        Bitmap rectified_right;
+        Bitmap rectified_left(7, 9, !as_rgb.first);
+        Bitmap rectified_right(11, 13, !as_rgb.second);
+        rectified_left.SetMetaData("stale-left", "old");
+        rectified_right.SetMetaData("stale-right", "old");
         Camera rectified_camera;
         Eigen::Matrix4d Q;
         RectifyAndUndistortStereoImages(options,
@@ -615,12 +621,16 @@ TEST(RectifyAndUndistortStereoImages, PreservesMetadataAcrossWarpModes) {
                                         &Q);
         EXPECT_EQ(rectified_left.GetMetaData("stereo-source"), "left");
         EXPECT_EQ(rectified_right.GetMetaData("stereo-source"), "right");
+        EXPECT_FALSE(rectified_left.GetMetaData("stale-left").has_value());
+        EXPECT_FALSE(rectified_right.GetMetaData("stale-right").has_value());
+        EXPECT_EQ(rectified_left.GetPixel(16, 16), left.GetPixel(32, 32));
+        EXPECT_EQ(rectified_right.GetPixel(16, 16), right.GetPixel(32, 32));
         EXPECT_EQ(rectified_left.Width(), 32);
         EXPECT_EQ(rectified_left.Height(), 32);
         EXPECT_EQ(rectified_right.Width(), 32);
         EXPECT_EQ(rectified_right.Height(), 32);
-        EXPECT_EQ(rectified_left.IsRGB(), as_rgb);
-        EXPECT_EQ(rectified_right.IsRGB(), as_rgb);
+        EXPECT_EQ(rectified_left.IsRGB(), as_rgb.first);
+        EXPECT_EQ(rectified_right.IsRGB(), as_rgb.second);
       }
     }
   }
