@@ -2437,9 +2437,9 @@ vl_covdet_extract_patch_for_frame (VlCovDet * self,
 {
   double A[2*2] = {frame.a11, frame.a21, frame.a12, frame.a22} ;
   double T[2] = {frame.x, frame.y} ;
-  double D[4], U[4], V[4] ;
+  double D[4] ;
 
-  vl_svd2(D, U, V, A) ;
+  vl_svd2(D, NULL, NULL, A) ;
 
   return vl_covdet_extract_patch_helper
   (self, NULL, NULL, patch, resolution, extent, sigma, A, T, D[0], D[3]) ;
