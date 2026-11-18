@@ -25,6 +25,7 @@
 #include "thirdparty/VLFeat/sift.h"
 
 #include <array>
+#include <cfenv>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -339,6 +340,13 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
     const int kMaxOctaveResolution = 1000;
     THROW_CHECK_LE(options_.sift->octave_resolution, kMaxOctaveResolution);
 
+    // Detector coefficients depend on the rounding mode at construction.
+    const int rounding_mode = std::fegetround();
+    if (rounding_mode == -1 || rounding_mode != covdet_rounding_mode_) {
+      covdet_.reset();
+      covdet_rounding_mode_ = rounding_mode;
+    }
+
     // The copied options are immutable. Configuring an existing detector would
     // reset it and discard the scale-space buffers retained for the next image.
     if (!covdet_) {
@@ -550,6 +558,7 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
  private:
   const FeatureExtractionOptions options_;
   VlCovDetType covdet_;
+  int covdet_rounding_mode_ = -1;
 };
 
 #if defined(COLMAP_GPU_ENABLED)

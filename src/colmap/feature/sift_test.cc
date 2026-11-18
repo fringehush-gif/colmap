@@ -594,6 +594,57 @@ TEST(SiftCPUFeatureExtractor, InvalidOctaveResolutionKeepsFailing) {
   }
 }
 
+TEST(SiftCPUFeatureExtractor, ReusedDetectorMatchesChangedRoundingMode) {
+  const ScopedSiftRoundingMode restore_rounding;
+  Bitmap bitmap(64, 64, false);
+  uint32_t state = 1;
+  for (int row = 0; row < bitmap.Height(); ++row) {
+    for (int col = 0; col < bitmap.Width(); ++col) {
+      state = 1664525u * state + 1013904223u;
+      bitmap.SetPixel(col, row, BitmapColor<uint8_t>(state >> 24u));
+    }
+  }
+
+  for (const auto& settings :
+       std::array<std::array<bool, 3>, 5>{{{false, false, false},
+                                           {false, true, false},
+                                           {true, false, false},
+                                           {true, false, true},
+                                           {true, true, false}}}) {
+    SCOPED_TRACE(::testing::Message()
+                 << "affine=" << settings[0] << " dsp=" << settings[1]
+                 << " upright=" << settings[2]);
+    FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+    options.use_gpu = false;
+    options.sift->force_covariant_extractor = true;
+    options.sift->estimate_affine_shape = settings[0];
+    options.sift->domain_size_pooling = settings[1];
+    options.sift->upright = settings[2];
+    auto reused = CreateSiftFeatureExtractor(options);
+    ASSERT_NE(reused, nullptr);
+    for (const int mode :
+         {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO, FE_TONEAREST}) {
+      SCOPED_TRACE(mode);
+      ASSERT_EQ(std::fesetround(mode), 0);
+      auto fresh = CreateSiftFeatureExtractor(options);
+      ASSERT_NE(fresh, nullptr);
+      FeatureKeypoints expected_keypoints, actual_keypoints;
+      FeatureDescriptors expected, actual;
+      ASSERT_TRUE(fresh->Extract(bitmap, &expected_keypoints, &expected));
+      ASSERT_TRUE(reused->Extract(bitmap, &actual_keypoints, &actual));
+      ASSERT_FALSE(expected_keypoints.empty());
+      EXPECT_EQ(actual_keypoints, expected_keypoints);
+      EXPECT_EQ(actual.type, expected.type);
+      ASSERT_EQ(actual.data.rows(), expected.data.rows());
+      ASSERT_EQ(actual.data.cols(), expected.data.cols());
+      EXPECT_EQ(
+          std::memcmp(
+              actual.data.data(), expected.data.data(), expected.data.size()),
+          0);
+    }
+  }
+}
+
 #if GTEST_HAS_DEATH_TEST
 int num_covariant_allocation_refusals = 0;
 void* RefuseCovariantAllocation(size_t, size_t) {
