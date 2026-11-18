@@ -309,7 +309,10 @@ void BindGeneralizedAbsolutePoseEstimator(py::module& m) {
         "camera_idxs"_a,
         "cams_from_rig"_a,
         "cameras"_a,
-        py::arg_v("estimation_options", RANSACOptions(), "RANSACOptions()"));
+        py::arg_v("estimation_options", RANSACOptions(), "RANSACOptions()"),
+        "Repeated observations of a landmark must have exactly equal 3D "
+        "coordinates. num_inliers counts unique 3D points; inlier_mask is per "
+        "correspondence.");
 
   m.def("refine_generalized_absolute_pose",
         &PyRefineGeneralizedAbsolutePose,
@@ -343,7 +346,9 @@ void BindGeneralizedAbsolutePoseEstimator(py::module& m) {
         "Robustly estimate generalized absolute pose using LO-RANSAC followed "
         "by non-linear refinement. Returns the refined rig_from_world, "
         "inliers, and cameras (and optionally the 6x6 covariance), or None on "
-        "failure.");
+        "failure. Repeated observations of a landmark must have exactly equal "
+        "3D coordinates. num_inliers counts unique 3D points; inlier_mask is "
+        "per correspondence.");
 
   m.def("estimate_scaled_generalized_absolute_pose",
         &PyEstimateScaledGeneralizedAbsolutePose,
@@ -354,7 +359,9 @@ void BindGeneralizedAbsolutePoseEstimator(py::module& m) {
         "cameras"_a,
         py::arg_v("estimation_options", RANSACOptions(), "RANSACOptions()"),
         "Robustly estimate generalized absolute pose and the scale of the "
-        "rig geometry using LO-RANSAC.");
+        "rig geometry using LO-RANSAC. Repeated observations of a landmark "
+        "must have exactly equal 3D coordinates. num_inliers counts unique "
+        "3D points; inlier_mask is per correspondence.");
 
   m.def("refine_scaled_generalized_absolute_pose",
         &PyRefineScaledGeneralizedAbsolutePose,
@@ -388,7 +395,9 @@ void BindGeneralizedAbsolutePoseEstimator(py::module& m) {
         "Robustly estimate generalized absolute pose and scale using "
         "LO-RANSAC followed by non-linear refinement. Returns the refined "
         "rig_from_world, inliers, and cameras (and optionally the 7x7 "
-        "covariance), or None on failure.");
+        "covariance), or None on failure. Repeated observations of a landmark "
+        "must have exactly equal 3D coordinates. num_inliers counts unique "
+        "3D points; inlier_mask is per correspondence.");
 
   m.def("estimate_generalized_relative_pose",
         &PyEstimateGeneralizedRelativePose,
