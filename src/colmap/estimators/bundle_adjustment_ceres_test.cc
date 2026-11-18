@@ -9,6 +9,8 @@
 #include "colmap/util/cuda.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
+
 #include <gtest/gtest.h>
 
 // Due to pose normalization operations, constant variables may not be perfectly
@@ -734,6 +736,132 @@ TEST(DefaultBundleAdjuster, ConstantExtraParam) {
 
   for (const auto& [point3D_id, point3D] : reconstruction.Points3D()) {
     CheckVariablePoint(point3D, orig_reconstruction.Point3D(point3D_id));
+  }
+}
+
+TEST(DefaultBundleAdjuster, ThreePointGaugeRequiresVariablePoseObservations) {
+  enum class Case {
+    kImplicitFixedPose,
+    kExplicitFixedPose,
+    kConnected,
+    kCalibrationOnlyCandidates,
+    kVariableSensor
+  };
+  for (const Case test : {Case::kImplicitFixedPose,
+                          Case::kExplicitFixedPose,
+                          Case::kConnected,
+                          Case::kCalibrationOnlyCandidates,
+                          Case::kVariableSensor}) {
+    SCOPED_TRACE(static_cast<int>(test));
+    const bool fixed_pose_only =
+        test == Case::kImplicitFixedPose || test == Case::kExplicitFixedPose;
+    const bool calibration_only = test == Case::kCalibrationOnlyCandidates;
+    const bool variable_sensor = test == Case::kVariableSensor;
+    SetPRNGSeed(0);
+    Reconstruction reconstruction;
+    SyntheticDatasetOptions dataset;
+    dataset.num_rigs = variable_sensor ? 1 : 3;
+    dataset.num_cameras_per_rig = variable_sensor ? 3 : 1;
+    dataset.num_frames_per_rig = 1;
+    dataset.num_points3D = 100;
+    dataset.num_points2D_without_point3D = 0;
+    SynthesizeDataset(dataset, &reconstruction);
+    ASSERT_EQ(reconstruction.NumPoints3D(), 100);
+    for (const auto& [id, point] : reconstruction.Points3D()) {
+      ASSERT_EQ(point.track.Length(), 3);
+    }
+    for (const image_t image_id : {image_t{3}, image_t{2}}) {
+      const Image& image = reconstruction.Image(image_id);
+      for (point2D_t idx = 0; idx < image.NumPoints2D(); ++idx) {
+        const Point2D& point = image.Point2D(idx);
+        if (!point.HasPoint3D()) continue;
+        const bool remove =
+            calibration_only
+                ? (image_id == 3 ? point.point3D_id > 97
+                                 : point.point3D_id <= 97)
+                : (image_id == 3 ? point.point3D_id > 3
+                                 : fixed_pose_only && point.point3D_id <= 3);
+        if (remove) reconstruction.DeleteObservation(image_id, idx);
+      }
+    }
+    BundleAdjustmentConfig config;
+    config.AddImage(1);
+    config.AddImage(2);
+    config.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
+    config.SetConstantRigFromWorldPose(reconstruction.Image(1).FrameId());
+    config.SetConstantCamIntrinsics(reconstruction.Image(2).CameraId());
+    if (calibration_only) {
+      config.AddImage(3);
+      config.SetConstantRigFromWorldPose(reconstruction.Image(3).FrameId());
+    }
+    if (test == Case::kExplicitFixedPose) {
+      for (const point3D_t id : {1, 2, 3}) config.AddConstantPoint(id);
+    }
+    BundleAdjustmentOptions options;
+    options.refine_principal_point = false;
+    auto adjuster =
+        CreateDefaultCeresBundleAdjuster(options, config, reconstruction);
+    ceres::Problem& problem = *adjuster->Problem();
+    Rigid3d& pose =
+        variable_sensor
+            ? reconstruction.Image(2).FramePtr()->RigPtr()->SensorFromRig(
+                  reconstruction.Camera(2).SensorId())
+            : reconstruction.Image(2).FramePtr()->RigFromWorld();
+    ASSERT_TRUE(problem.HasParameterBlock(pose.params.data()));
+    ASSERT_FALSE(problem.IsParameterBlockConstant(pose.params.data()));
+    EXPECT_EQ(problem.NumResiduals(),
+              test == Case::kImplicitFixedPose ? 394 : 400);
+    int num_fixed = 0;
+    int connected_fixed = 0;
+    std::vector<point3D_t> connected_points;
+    for (const auto& [id, point] : reconstruction.Points3D()) {
+      ASSERT_TRUE(problem.HasParameterBlock(point.xyz.data()));
+      const bool fixed = problem.IsParameterBlockConstant(point.xyz.data());
+      num_fixed += fixed;
+      std::vector<ceres::ResidualBlockId> residuals;
+      problem.GetResidualBlocksForParameterBlock(point.xyz.data(), &residuals);
+      bool connected = false;
+      for (const auto residual : residuals) {
+        std::vector<double*> blocks;
+        problem.GetParameterBlocksForResidualBlock(residual, &blocks);
+        connected |=
+            std::find(blocks.begin(), blocks.end(), pose.params.data()) !=
+            blocks.end();
+      }
+      if (connected) connected_points.push_back(id);
+      connected_fixed += connected && fixed;
+      if (fixed_pose_only && id <= 3) {
+        EXPECT_TRUE(fixed);
+      }
+    }
+    ASSERT_EQ(connected_points.size(),
+              calibration_only  ? 3
+              : fixed_pose_only ? 97
+                                : 100);
+    EXPECT_EQ(num_fixed, fixed_pose_only ? 6 : 3);
+    EXPECT_EQ(connected_fixed, 3);
+
+    // Scaling the variable-pose component about the fixed reference camera
+    // must change the residuals once its three anchors are actually fixed.
+    double before, after;
+    ASSERT_TRUE(problem.Evaluate(
+        ceres::Problem::EvaluateOptions(), &before, nullptr, nullptr, nullptr));
+    const Eigen::Vector3d center = reconstruction.Image(1).ProjectionCenter();
+    constexpr double scale = 1.2;
+    for (const point3D_t id : connected_points) {
+      Point3D& point = reconstruction.Point3D(id);
+      if (!problem.IsParameterBlockConstant(point.xyz.data())) {
+        point.xyz = center + scale * (point.xyz - center);
+      }
+    }
+    pose.translation() =
+        scale * pose.translation() +
+        (scale - 1) *
+            (pose.rotation() *
+             (variable_sensor ? Eigen::Vector3d::Zero().eval() : center));
+    ASSERT_TRUE(problem.Evaluate(
+        ceres::Problem::EvaluateOptions(), &after, nullptr, nullptr, nullptr));
+    EXPECT_GT(after - before, 1e-6);
   }
 }
 
