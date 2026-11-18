@@ -11,6 +11,7 @@
 #include "colmap/util/testing.h"
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -161,7 +162,7 @@ TEST(DefaultBundleAdjuster, PreservesWeightedAndRobustLosses) {
   Reconstruction original;
   SyntheticDatasetOptions dataset_options;
   dataset_options.num_rigs = 1;
-  dataset_options.num_cameras_per_rig = 1;
+  dataset_options.num_cameras_per_rig = 2;
   dataset_options.num_frames_per_rig = 3;
   dataset_options.num_points3D = 20;
   SynthesizeDataset(dataset_options, &original);
@@ -193,6 +194,27 @@ TEST(DefaultBundleAdjuster, PreservesWeightedAndRobustLosses) {
       problem.GetResidualBlocks(&blocks);
       ASSERT_FALSE(blocks.empty());
       const auto expected_loss = CreateCeresLossFunction(type, 1.0, weight);
+      // Borrow the same residuals and manifolds so only loss selection differs.
+      ceres::Problem::Options reference_options;
+      reference_options.cost_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+      reference_options.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+      reference_options.manifold_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+      ceres::Problem reference(reference_options);
+      ceres::Problem::EvaluateOptions evaluate_options,
+          reference_evaluate_options;
+      problem.GetParameterBlocks(&evaluate_options.parameter_blocks);
+      reference_evaluate_options.parameter_blocks =
+          evaluate_options.parameter_blocks;
+      for (double* parameters : evaluate_options.parameter_blocks) {
+        reference.AddParameterBlock(
+            parameters,
+            problem.ParameterBlockSize(parameters),
+            const_cast<ceres::Manifold*>(problem.GetManifold(parameters)));
+        if (problem.IsParameterBlockConstant(parameters)) {
+          reference.SetParameterBlockConstant(parameters);
+        }
+      }
+      evaluate_options.residual_blocks = blocks;
       double expected_cost = 0.0;
       for (const auto block : blocks) {
         const auto* loss = problem.GetLossFunctionForResidualBlock(block);
@@ -201,6 +223,14 @@ TEST(DefaultBundleAdjuster, PreservesWeightedAndRobustLosses) {
         } else {
           ASSERT_NE(loss, nullptr);
         }
+        std::vector<double*> parameters;
+        problem.GetParameterBlocksForResidualBlock(block, &parameters);
+        reference_evaluate_options.residual_blocks.push_back(
+            reference.AddResidualBlock(
+                const_cast<ceres::CostFunction*>(
+                    problem.GetCostFunctionForResidualBlock(block)),
+                expected_loss.get(),
+                parameters));
         double cost;
         ASSERT_TRUE(problem.EvaluateResidualBlock(
             block, false, &cost, nullptr, nullptr));
@@ -208,14 +238,43 @@ TEST(DefaultBundleAdjuster, PreservesWeightedAndRobustLosses) {
         expected_loss->Evaluate(2.0 * cost, rho);
         expected_cost += 0.5 * rho[0];
       }
-      double actual_cost;
-      ASSERT_TRUE(problem.Evaluate(ceres::Problem::EvaluateOptions(),
+      double actual_cost, reference_cost;
+      std::vector<double> actual_residuals, reference_residuals;
+      std::vector<double> actual_gradient, reference_gradient;
+      ceres::CRSMatrix actual_jacobian, reference_jacobian;
+      ASSERT_TRUE(problem.Evaluate(evaluate_options,
                                    &actual_cost,
-                                   nullptr,
-                                   nullptr,
-                                   nullptr));
+                                   &actual_residuals,
+                                   &actual_gradient,
+                                   &actual_jacobian));
+      ASSERT_TRUE(reference.Evaluate(reference_evaluate_options,
+                                     &reference_cost,
+                                     &reference_residuals,
+                                     &reference_gradient,
+                                     &reference_jacobian));
+      for (const auto* values :
+           {&actual_residuals, &actual_gradient, &actual_jacobian.values}) {
+        EXPECT_TRUE(
+            std::all_of(values->begin(), values->end(), [](double value) {
+              return std::isfinite(value);
+            }));
+      }
+      EXPECT_GT(actual_cost, 0);
+      ASSERT_FALSE(actual_residuals.empty());
+      ASSERT_FALSE(actual_gradient.empty());
+      ASSERT_TRUE(std::any_of(actual_jacobian.values.begin(),
+                              actual_jacobian.values.end(),
+                              [](double value) { return value != 0; }));
       EXPECT_NEAR(
           actual_cost, expected_cost, 1e-12 * std::max(1.0, expected_cost));
+      EXPECT_EQ(actual_cost, reference_cost);
+      EXPECT_EQ(actual_residuals, reference_residuals);
+      EXPECT_EQ(actual_gradient, reference_gradient);
+      EXPECT_EQ(actual_jacobian.num_rows, reference_jacobian.num_rows);
+      EXPECT_EQ(actual_jacobian.num_cols, reference_jacobian.num_cols);
+      EXPECT_EQ(actual_jacobian.rows, reference_jacobian.rows);
+      EXPECT_EQ(actual_jacobian.cols, reference_jacobian.cols);
+      EXPECT_EQ(actual_jacobian.values, reference_jacobian.values);
     }
   }
 }
