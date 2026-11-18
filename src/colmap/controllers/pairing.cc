@@ -316,9 +316,8 @@ void VocabTreePairGenerator::Reset() {
       ++result_idx_;
     }
   } catch (...) {
-    const std::exception_ptr error = std::current_exception();
     StopQueries();
-    std::rethrow_exception(error);
+    throw;
   }
   query_idx_ = 0;
   result_idx_ = 0;
@@ -369,9 +368,8 @@ std::vector<std::pair<image_t, image_t>> VocabTreePairGenerator::Next() {
     ++result_idx_;
     return image_pairs_;
   } catch (...) {
-    const std::exception_ptr error = std::current_exception();
     StopQueries();
-    std::rethrow_exception(error);
+    throw;
   }
 }
 
@@ -696,7 +694,7 @@ SpatialPairGenerator::SpatialPairGenerator(
   timer.Restart();
   LOG(INFO) << "Building search index...";
 
-  faiss::IndexFlatL2 search_index(3);
+  faiss::IndexFlatL2 search_index(/*d=*/3);
   search_index.add(position_matrix.rows(), position_matrix.data());
 
   LOG(INFO) << StringPrintf(" in %.3fs", timer.ElapsedSeconds());

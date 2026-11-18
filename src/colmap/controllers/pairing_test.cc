@@ -109,30 +109,33 @@ TEST(VocabTreePairGenerator, FullConsumptionWithBoundedQueue) {
 
 TEST(VocabTreePairGenerator, ResetAfterPartialConsumptionDiscardsOldResults) {
   auto database = Database::Open(kInMemorySqliteDatabasePath);
-  CreateSyntheticDatabase(3, *database);
+  CreateSyntheticDatabase(12, *database);
   std::vector<image_t> query_ids;
   for (const auto& image : database->ReadAllImages()) {
     query_ids.push_back(image.ImageId());
   }
   VocabTreePairingOptions options;
-  options.num_threads = 1;
   options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
   CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
-  VocabTreePairGenerator generator(options, database, query_ids);
-  ASSERT_FALSE(generator.Next().empty());
-  generator.Reset();
-  std::vector<image_t> seen;
-  for (size_t i = 0; i < query_ids.size(); ++i) {
-    const auto pairs = generator.Next();
-    ASSERT_FALSE(pairs.empty());
-    seen.push_back(pairs.front().first);
-    for (const auto& pair : pairs) {
-      EXPECT_EQ(pair.first, pairs.front().first);
+  for (const int num_threads : {1, 2}) {
+    SCOPED_TRACE(num_threads);
+    options.num_threads = num_threads;
+    VocabTreePairGenerator generator(options, database, query_ids);
+    ASSERT_FALSE(generator.Next().empty());
+    generator.Reset();
+    std::vector<image_t> seen;
+    for (size_t i = 0; i < query_ids.size(); ++i) {
+      const auto pairs = generator.Next();
+      ASSERT_FALSE(pairs.empty());
+      seen.push_back(pairs.front().first);
+      for (const auto& pair : pairs) {
+        EXPECT_EQ(pair.first, pairs.front().first);
+      }
     }
+    EXPECT_THAT(seen, ::testing::UnorderedElementsAreArray(query_ids));
+    EXPECT_TRUE(generator.Next().empty());
+    EXPECT_TRUE(generator.HasFinished());
   }
-  EXPECT_THAT(seen, ::testing::UnorderedElementsAreArray(query_ids));
-  EXPECT_TRUE(generator.Next().empty());
-  EXPECT_TRUE(generator.HasFinished());
 }
 
 TEST(VocabTreePairGenerator, DestructionWithFullQueueAndActiveCallback) {
@@ -200,7 +203,11 @@ TEST(VocabTreePairGenerator, UnexpectedQueryErrorStopsWorkers) {
   options.vocab_tree_path = CreateTestDir() / "vocab_tree.txt";
   CreateSyntheticVisualIndex()->Write(options.vocab_tree_path);
   VocabTreePairGenerator generator(
-      options, database, {}, [](image_t, image_t) -> bool { throw 17; });
+      options, database, {}, [](image_t, image_t) -> bool {
+        // Bypass the empty-result policy for ordinary query exceptions.
+        // NOLINTNEXTLINE(bugprone-std-exception-baseclass)
+        throw 17;
+      });
   EXPECT_THROW(generator.Next(), int);
   EXPECT_TRUE(generator.HasFinished());
   EXPECT_THROW(generator.Reset(), std::invalid_argument);
@@ -227,6 +234,8 @@ TEST(VocabTreePairGenerator, ResetPropagatesUnexpectedQueryError) {
           // Query 2 occupies the one-result queue while query 3 is held.
           entered.set_value();
           release_future.wait();
+          // Exercise the unexpected-error path during reset.
+          // NOLINTNEXTLINE(bugprone-std-exception-baseclass)
           throw 17;
         }
         return true;
