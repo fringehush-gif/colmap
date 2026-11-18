@@ -943,6 +943,7 @@ $\ell_{(\kappa\sigma)^2}$ and $\ell_{\sigma^2}$.
 **/
 
 #include "covdet.h"
+#include <limits.h>
 #include <string.h>
 
 /** @brief Reallocate buffer
@@ -1910,6 +1911,63 @@ _vl_dog_response (float * dog,
 /*                                                  Detect features */
 /* ---------------------------------------------------------------- */
 
+typedef struct _VlCovDetFeatureIndex {
+  float x ;
+  vl_index index ;
+} VlCovDetFeatureIndex ;
+
+static int
+_vl_covdet_compare_feature_x (void const *a, void const *b)
+{
+  float x = ((VlCovDetFeatureIndex const*)a)->x ;
+  float y = ((VlCovDetFeatureIndex const*)b)->x ;
+  return (x > y) - (x < y) ;
+}
+
+static VlCovDetFeatureIndex *
+_vl_covdet_index_features (VlCovDet const *self)
+{
+  VlCovDetFeatureIndex *index ;
+  vl_size k ;
+  /* Inputs without a pair and unsupported coordinates keep the original scan. */
+  if (self->numFeatures < 2 || self->numFeatures > INT_MAX ||
+      self->numFeatures > (vl_size)-1 / sizeof(*index) ||
+      !(self->nonExtremaSuppression > 0 &&
+        self->nonExtremaSuppression < VL_INFINITY_D)) return NULL ;
+  index = vl_malloc(self->numFeatures * sizeof(*index)) ;
+  if (!index) return NULL ;
+  for (k = 0 ; k < self->numFeatures ; ++k) {
+    if (!(vl_abs_f(self->features[k].frame.x) < VL_INFINITY_F)) {
+      vl_free(index) ;
+      return NULL ;
+    }
+    index[k].x = self->features[k].frame.x ;
+    index[k].index = k ;
+  }
+  qsort(index, self->numFeatures, sizeof(*index), _vl_covdet_compare_feature_x) ;
+  return index ;
+}
+
+VL_INLINE vl_size
+_vl_covdet_find_x_bound (VlCovDetFeatureIndex const *index, vl_size size,
+                         double x, double tol, double sigma, vl_bool upper)
+{
+  vl_size first = 0 ;
+  while (first < size) {
+    vl_size middle = first + (size - first) / 2 ;
+    /* Evaluate the original predicate without rounding coordinate bounds or
+       storing its product, which may be evaluated with excess precision. */
+    double delta = index[middle].x - x ;
+    vl_bool within = vl_abs_d(delta) < tol * sigma ;
+    if (upper ? delta < 0 || within : delta < 0 && !within) {
+      first = middle + 1 ;
+    } else {
+      size = middle ;
+    }
+  }
+  return first ;
+}
+
 /** @brief Detect scale-space features
  ** @param self object.
  **
@@ -2104,15 +2162,28 @@ vl_covdet_detect (VlCovDet * self, vl_size max_num_features)
   if (self->nonExtremaSuppression) {
     vl_index i, j ;
     double tol = self->nonExtremaSuppression ;
+    VlCovDetFeatureIndex *index = _vl_covdet_index_features(self) ;
     self->numNonExtremaSuppressed = 0 ;
     for (i = 0 ; i < (signed)self->numFeatures ; ++i) {
       double x = self->features[i].frame.x ;
       double y = self->features[i].frame.y ;
       double sigma = self->features[i].frame.a11 ;
       double score = self->features[i].peakScore ;
+      vl_size k, first = 0, last = (signed)self->numFeatures ;
+      vl_bool indexed ;
       if (score == 0) continue ;
 
-      for (j = 0 ; j < (signed)self->numFeatures ; ++j) {
+      indexed = index && sigma > 0 && sigma < VL_INFINITY_D ;
+      if (indexed) {
+        first = _vl_covdet_find_x_bound(index, self->numFeatures,
+                                        x, tol, sigma, VL_FALSE) ;
+        last = _vl_covdet_find_x_bound(index, self->numFeatures,
+                                       x, tol, sigma, VL_TRUE) ;
+      }
+      /* Outer order stays unchanged. For a fixed i, each j only clears its
+         own score, so visiting nearby candidates in x order is equivalent. */
+      for (k = first ; k < last ; ++k) {
+        j = indexed ? index[k].index : (vl_index)k ;
         double dx_ = self->features[j].frame.x - x ;
         double dy_ = self->features[j].frame.y - y ;
         double sigma_ = self->features[j].frame.a11 ;
@@ -2128,6 +2199,7 @@ vl_covdet_detect (VlCovDet * self, vl_size max_num_features)
         }
       }
     }
+    if (index) vl_free(index) ;
     j = 0 ;
     for (i = 0 ; i < (signed)self->numFeatures ; ++i) {
       VlCovDetFeature feature = self->features[i] ;

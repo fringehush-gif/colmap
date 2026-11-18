@@ -18,7 +18,13 @@
 #include "colmap/util/cuda.h"
 #endif
 
+#include "thirdparty/VLFeat/covdet.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <functional>
+#include <memory>
 #include <set>
 #include <utility>
 
@@ -173,6 +179,75 @@ INSTANTIATE_TEST_SUITE_P(
         SiftCpuExtractionParams{
             "CovariantAffineDSPSift", true, true, false, false, 22}),
     [](const auto& info) { return info.param.name; });
+
+TEST(CovariantSiftCPUFeatureExtractor, NonExtremaSuppressionMatchesFullScan) {
+  constexpr int kSize = 256;
+  std::vector<float> image(kSize * kSize);
+  uint32_t state = 1;
+  for (float& pixel : image) {
+    state = 1664525u * state + 1013904223u;
+    pixel = static_cast<float>(state >> 24) / 255.0f;
+  }
+  const std::unique_ptr<VlCovDet, decltype(&vl_covdet_delete)> detector(
+      vl_covdet_new(VL_COVDET_METHOD_DOG), &vl_covdet_delete);
+  ASSERT_NE(detector, nullptr);
+  ASSERT_EQ(vl_covdet_put_image(detector.get(), image.data(), kSize, kSize),
+            VL_ERR_OK);
+  vl_covdet_set_non_extrema_suppression_threshold(detector.get(), 0.0);
+  vl_covdet_detect(detector.get(), 8192);
+  const size_t num_features = vl_covdet_get_num_features(detector.get());
+  ASSERT_GT(num_features, 64);
+  const auto* features = vl_covdet_get_features(detector.get());
+  const std::vector<VlCovDetFeature> unsuppressed(features,
+                                                  features + num_features);
+
+  size_t total_suppressed = 0;
+  for (const double tolerance : {0.5, 1.0, 2.0}) {
+    SCOPED_TRACE(tolerance);
+    auto expected = unsuppressed;
+    size_t num_suppressed = 0;
+    // Retain the original order-dependent full scan as an independent oracle.
+    for (size_t i = 0; i < expected.size(); ++i) {
+      const double x = expected[i].frame.x;
+      const double y = expected[i].frame.y;
+      const double sigma = expected[i].frame.a11;
+      const double score = expected[i].peakScore;
+      if (score == 0) continue;
+      for (auto& candidate : expected) {
+        const double dx = candidate.frame.x - x;
+        const double dy = candidate.frame.y - y;
+        const double candidate_sigma = candidate.frame.a11;
+        const double candidate_score = candidate.peakScore;
+        if (candidate_score == 0) continue;
+        if (sigma < (1 + tolerance) * candidate_sigma &&
+            candidate_sigma < (1 + tolerance) * sigma &&
+            std::abs(dx) < tolerance * sigma &&
+            std::abs(dy) < tolerance * sigma &&
+            std::abs(score) > std::abs(candidate_score)) {
+          candidate.peakScore = 0;
+          ++num_suppressed;
+        }
+      }
+    }
+    expected.erase(std::remove_if(expected.begin(),
+                                  expected.end(),
+                                  [](const auto& feature) {
+                                    return feature.peakScore == 0;
+                                  }),
+                   expected.end());
+    vl_covdet_set_non_extrema_suppression_threshold(detector.get(), tolerance);
+    vl_covdet_detect(detector.get(), 8192);
+    ASSERT_EQ(vl_covdet_get_num_features(detector.get()), expected.size());
+    EXPECT_EQ(vl_covdet_get_num_non_extrema_suppressed(detector.get()),
+              num_suppressed);
+    EXPECT_EQ(std::memcmp(vl_covdet_get_features(detector.get()),
+                          expected.data(),
+                          expected.size() * sizeof(VlCovDetFeature)),
+              0);
+    total_suppressed += num_suppressed;
+  }
+  EXPECT_GT(total_suppressed, 0);
+}
 
 TEST(ExtractSiftFeaturesGPU, Nominal) {
   RunGpuTest([] {
