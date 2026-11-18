@@ -4,6 +4,8 @@
 
 #include "colmap/sensor/models/base.h"
 
+#include <cfloat>
+
 namespace colmap {
 
 // FOV camera model.
@@ -39,23 +41,40 @@ struct FOVCameraModel
                                 T* x,
                                 T* y,
                                 const bool check_cheirality = true) {
-    if (!HasProjectableDepth(w, check_cheirality)) {
-      return false;
-    }
+    return ImgFromCamImpl(params,
+                          u,
+                          v,
+                          w,
+                          x,
+                          y,
+                          check_cheirality,
+                          static_cast<const T*>(nullptr));
+  }
 
-    const T f1 = params[0];
-    const T f2 = params[1];
-    const T c1 = params[2];
-    const T c2 = params[3];
-
-    // Distortion
-    Distortion(&params[4], u / w, v / w, x, y);
-
-    // Transform to image coordinates
-    *x = f1 * *x + c1;
-    *y = f2 * *y + c2;
-
-    return true;
+  // Prepare repeated scalar projections without changing the camera model.
+  // The parameters must remain alive and unchanged, and the rounding mode must
+  // remain unchanged, until the returned callable is no longer used.
+  static inline auto PrepareImgFromCam(const double* params) {
+#if defined(FLT_EVAL_METHOD) && FLT_EVAL_METHOD == 0
+    const double omega = params[4];
+    const double tan_half_omega =
+        omega * omega < 1e-4 ? 0.0 : std::tan(omega / 2.0);
+    return [params, tan_half_omega](const double u,
+                                    const double v,
+                                    const double w,
+                                    double* x,
+                                    double* y) {
+      return ImgFromCamImpl(params, u, v, w, x, y, true, &tan_half_omega);
+    };
+#else
+    // Removing the tangent call can change intermediate rounding when the
+    // evaluation format is wider than double. Keep the original computation.
+    return [params](const double u,
+                    const double v,
+                    const double w,
+                    double* x,
+                    double* y) { return ImgFromCam(params, u, v, w, x, y); };
+#endif
   }
 
   template <typename T>
@@ -79,40 +98,7 @@ struct FOVCameraModel
   template <typename T>
   static inline void Distortion(
       const T* extra_params, const T& u, const T& v, T* du, T* dv) {
-    const T omega = extra_params[0];
-
-    // Chosen arbitrarily.
-    const T kEpsilon = T(1e-4);
-
-    const T radius2 = u * u + v * v;
-    const T omega2 = omega * omega;
-
-    T factor;
-    if (omega2 < kEpsilon) {
-      // Derivation of this case with Matlab:
-      // syms radius omega;
-      // factor(radius) = atan(radius * 2 * tan(omega / 2)) / ...
-      //                  (radius * omega);
-      // simplify(taylor(factor, omega, 'order', 3))
-      factor = omega2 / T(12) - (omega2 * radius2) / T(3) + T(1);
-    } else if (radius2 < kEpsilon) {
-      // Derivation of this case with Matlab:
-      // syms radius omega;
-      // factor(radius) = atan(radius * 2 * tan(omega / 2)) / ...
-      //                  (radius * omega);
-      // simplify(taylor(factor, radius, 'order', 3))
-      const T tan_half_omega = ceres::tan(omega / T(2));
-      factor = (T(-2) * tan_half_omega *
-                (T(4) * radius2 * tan_half_omega * tan_half_omega - T(3))) /
-               (T(3) * omega);
-    } else {
-      const T radius = ceres::sqrt(radius2);
-      const T numerator = ceres::atan(radius * T(2) * ceres::tan(omega / T(2)));
-      factor = numerator / (radius * omega);
-    }
-
-    *du = u * factor;
-    *dv = v * factor;
+    DistortionImpl(extra_params, u, v, du, dv, static_cast<const T*>(nullptr));
   }
 
   template <typename T>
@@ -146,6 +132,83 @@ struct FOVCameraModel
       const T radius = ceres::sqrt(radius2);
       const T numerator = ceres::tan(radius * omega);
       factor = numerator / (radius * T(2) * ceres::tan(omega / T(2)));
+    }
+
+    *du = u * factor;
+    *dv = v * factor;
+  }
+
+ private:
+  template <typename T>
+  static inline bool ImgFromCamImpl(const T* params,
+                                    const T& u,
+                                    const T& v,
+                                    const T& w,
+                                    T* x,
+                                    T* y,
+                                    const bool check_cheirality,
+                                    const T* tan_half_omega) {
+    if (!HasProjectableDepth(w, check_cheirality)) {
+      return false;
+    }
+
+    const T f1 = params[0];
+    const T f2 = params[1];
+    const T c1 = params[2];
+    const T c2 = params[3];
+
+    // Distortion
+    DistortionImpl(&params[4], u / w, v / w, x, y, tan_half_omega);
+
+    // Transform to image coordinates
+    *x = f1 * *x + c1;
+    *y = f2 * *y + c2;
+
+    return true;
+  }
+
+  template <typename T>
+  static inline void DistortionImpl(const T* extra_params,
+                                    const T& u,
+                                    const T& v,
+                                    T* du,
+                                    T* dv,
+                                    const T* prepared_tan_half_omega) {
+    const T omega = extra_params[0];
+
+    // Chosen arbitrarily.
+    const T kEpsilon = T(1e-4);
+
+    const T radius2 = u * u + v * v;
+    const T omega2 = omega * omega;
+
+    T factor;
+    if (omega2 < kEpsilon) {
+      // Derivation of this case with Matlab:
+      // syms radius omega;
+      // factor(radius) = atan(radius * 2 * tan(omega / 2)) / ...
+      //                  (radius * omega);
+      // simplify(taylor(factor, omega, 'order', 3))
+      factor = omega2 / T(12) - (omega2 * radius2) / T(3) + T(1);
+    } else if (radius2 < kEpsilon) {
+      // Derivation of this case with Matlab:
+      // syms radius omega;
+      // factor(radius) = atan(radius * 2 * tan(omega / 2)) / ...
+      //                  (radius * omega);
+      // simplify(taylor(factor, radius, 'order', 3))
+      const T tan_half_omega = prepared_tan_half_omega
+                                   ? *prepared_tan_half_omega
+                                   : ceres::tan(omega / T(2));
+      factor = (T(-2) * tan_half_omega *
+                (T(4) * radius2 * tan_half_omega * tan_half_omega - T(3))) /
+               (T(3) * omega);
+    } else {
+      const T radius = ceres::sqrt(radius2);
+      const T tan_half_omega = prepared_tan_half_omega
+                                   ? *prepared_tan_half_omega
+                                   : ceres::tan(omega / T(2));
+      const T numerator = ceres::atan(radius * T(2) * tan_half_omega);
+      factor = numerator / (radius * omega);
     }
 
     *du = u * factor;

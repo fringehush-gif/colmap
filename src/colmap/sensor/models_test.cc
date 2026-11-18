@@ -4,7 +4,11 @@
 
 #include "colmap/math/random.h"
 
+#include <array>
+#include <cfenv>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 
 #include <ceres/ceres.h>
@@ -470,6 +474,61 @@ TEST(FOV, Nominal) {
   EXPECT_EQ(CameraModelInitializeParams(FOVCameraModel::model_id, 100, 100, 100)
                 .back(),
             1e-2);
+}
+
+TEST(FOV, PreparedProjection) {
+  const int initial_rounding = std::fegetround();
+  ASSERT_NE(initial_rounding, -1);
+  struct RestoreRounding {
+    int mode;
+    ~RestoreRounding() { std::fesetround(mode); }
+  } restore_rounding{initial_rounding};
+
+  const double below = std::nextafter(0.01, 0.0);
+  const double above = std::nextafter(0.01, 1.0);
+  const std::array<double, 7> coordinates = {
+      -0.1, 0.0, below, 0.01, above, 0.1, 2.0};
+  for (const int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    ASSERT_EQ(std::fesetround(mode), 0);
+    for (const double omega : {0.0,
+                               -0.0,
+                               0.001,
+                               -0.001,
+                               below,
+                               -below,
+                               0.01,
+                               -0.01,
+                               above,
+                               -above,
+                               0.9,
+                               -0.9,
+                               2.4,
+                               -2.4}) {
+      const std::array<double, 5> params = {500, 510, 640.25, 512.5, omega};
+      const auto project = FOVCameraModel::PrepareImgFromCam(params.data());
+      for (const double u : coordinates) {
+        for (const double v : coordinates) {
+          for (const double w : {0.0, -1.0, 0.5, 1.0, 2.0}) {
+            SCOPED_TRACE(::testing::Message() << mode << ' ' << omega << ' '
+                                              << u << ' ' << v << ' ' << w);
+            std::array<double, 2> expected = {-12345.5, 67890.25};
+            std::array<double, 2> actual = expected;
+            const bool expected_valid = FOVCameraModel::ImgFromCam(
+                params.data(), u, v, w, &expected[0], &expected[1]);
+            const bool actual_valid = project(u, v, w, &actual[0], &actual[1]);
+            EXPECT_EQ(actual_valid, expected_valid);
+            // Compare representations, including rejected-depth sentinels.
+            static_assert(sizeof(double) == sizeof(uint64_t));
+            std::array<uint64_t, 2> actual_bits, expected_bits;
+            std::memcpy(actual_bits.data(), actual.data(), sizeof(actual_bits));
+            std::memcpy(
+                expected_bits.data(), expected.data(), sizeof(expected_bits));
+            EXPECT_EQ(actual_bits, expected_bits);
+          }
+        }
+      }
+    }
+  }
 }
 
 TEST(FOV, SmallOmegaProjection) {
