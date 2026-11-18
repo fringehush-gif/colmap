@@ -450,6 +450,19 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
       }
 
       vl_sift_set_magnif(sift.get(), 3.0);
+      std::unique_ptr<VlSiftRawDescriptorGeometry,
+                      decltype(&vl_sift_delete_raw_descriptor_geometry)>
+          geometry(!keypoints->empty() &&
+                           (keypoints->size() > 1 || dsp_num_scales > 1)
+                       ? vl_sift_prepare_raw_descriptor(sift.get(),
+                                                        kPatchSide,
+                                                        kPatchSide,
+                                                        kPatchResolution,
+                                                        kPatchResolution,
+                                                        kSigma,
+                                                        0)
+                       : nullptr,
+                   vl_sift_delete_raw_descriptor_geometry);
 
       for (size_t i = 0; i < keypoints->size(); ++i) {
         for (int s = 0; s < dsp_num_scales; ++s) {
@@ -477,15 +490,23 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
                                 kPatchSide,
                                 kPatchSide);
 
-          vl_sift_calc_raw_descriptor(sift.get(),
-                                      patchXY.data(),
-                                      scaled_descriptors.row(s).data(),
-                                      kPatchSide,
-                                      kPatchSide,
-                                      kPatchResolution,
-                                      kPatchResolution,
-                                      kSigma,
-                                      0);
+          if (geometry) {
+            vl_sift_calc_raw_descriptor_prepared(
+                sift.get(),
+                geometry.get(),
+                patchXY.data(),
+                scaled_descriptors.row(s).data());
+          } else {
+            vl_sift_calc_raw_descriptor(sift.get(),
+                                        patchXY.data(),
+                                        scaled_descriptors.row(s).data(),
+                                        kPatchSide,
+                                        kPatchSide,
+                                        kPatchResolution,
+                                        kPatchResolution,
+                                        kSigma,
+                                        0);
+          }
         }
 
         if (options_.sift->domain_size_pooling) {
