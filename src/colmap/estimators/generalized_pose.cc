@@ -103,7 +103,9 @@ std::vector<size_t> ComputeUniquePointIds(
   std::vector<size_t>::iterator current_it = point3D_ids.begin();
   std::vector<size_t> unique_point3D_ids(points3D.size());
   while (current_it != point3D_ids.end()) {
-    if (!points3D[*unique_it].isApprox(points3D[*current_it], 1e-5)) {
+    // Repeated observations copy the same point coordinates. A relative
+    // geometric tolerance would merge distinct points far from the origin.
+    if (points3D[*unique_it] != points3D[*current_it]) {
       unique_it = current_it;
     }
     unique_point3D_ids[*current_it] = unique_it - point3D_ids.begin();
