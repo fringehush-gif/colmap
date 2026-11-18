@@ -1114,10 +1114,20 @@ TEST(DefaultBundleAdjuster, LowParallaxScaleCollapse) {
                                 .norm() /
                             3.0;
     double mean_depth = 0.0;
+    size_t num_observations = 0;
     const Rigid3d cam_from_world = reconstruction.Image(1).CamFromWorld();
     for (const auto& [_, point3D] : reconstruction.Points3D()) {
+      ASSERT_TRUE(point3D.xyz.allFinite());
+      for (const auto& track_el : point3D.track.Elements()) {
+        const Eigen::Vector3d point3D_in_cam =
+            reconstruction.Image(track_el.image_id).CamFromWorld() *
+            point3D.xyz;
+        ASSERT_TRUE(point3D_in_cam.allFinite());
+        ++num_observations;
+      }
       mean_depth += std::abs((cam_from_world * point3D.xyz).z());
     }
+    ASSERT_EQ(num_observations, 400);
     mean_depth /= reconstruction.NumPoints3D();
     baseline_to_depth = baseline / mean_depth;
   };
