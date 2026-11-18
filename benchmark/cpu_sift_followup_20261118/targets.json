@@ -20,12 +20,14 @@
     {
       "id": "pr103",
       "pr": 103,
-      "ref": "9a0ac99d2e028473692d6b4503b9af0bf3121896",
-      "tree": "a2b604e0e5eada94b4cc6cebae40941ba5055ada",
+      "ref": "33ef51ceae4fe032c9a609a3bdd483a8fe4d3846",
+      "tree": "72e3379a097daf8b9082a65b0be7eef84380f281",
       "primary": "covariant",
       "native_cpu_tests": 18,
       "scope": "Independent bounded covariant feature suppression. No prepared geometry or retained detector changes.",
-      "not_a_dependency": 102
+      "not_a_dependency": 102,
+      "historical_phase_measurement_ref": "9a0ac99d2e028473692d6b4503b9af0bf3121896",
+      "test_only_followup": "Use the unsigned shift-count literal 24u; all production source is unchanged from the historical phase measurement."
     }
   ],
   "campaign": {
