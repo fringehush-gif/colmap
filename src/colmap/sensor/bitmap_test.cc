@@ -4,6 +4,7 @@
 
 #include "colmap/util/testing.h"
 
+#include <cmath>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -920,25 +921,20 @@ TEST(Bitmap, ExifFocalLengthIn35mm) {
   EXPECT_NEAR(focal_length.value(), 207.17, 0.1);
 }
 
-TEST(Bitmap, ExifFocalLengthIn35mmLargeDimensions) {
-  // Thin images cover both dimension squares without allocating huge rasters.
-  for (const auto& [width, height] : {std::pair{50000, 1},
-                                      std::pair{1, 50000},
-                                      std::pair{65536, 1},
-                                      std::pair{1, 65536}}) {
-    Bitmap bitmap(width, height, /*as_rgb=*/false);
-    const float focal_length_in_35mm_film = 50.f;
-    bitmap.SetMetaData(
-        "Exif:FocalLengthIn35mmFilm", "float", &focal_length_in_35mm_film);
-
-    const auto focal_length = bitmap.ExifFocalLength();
-    ASSERT_TRUE(focal_length.has_value());
-    EXPECT_TRUE(std::isfinite(*focal_length));
-    const double width_double = width;
-    const double height_double = height;
-    const double expected =
-        50.0 / 43.27 * std::hypot(width_double, height_double);
-    EXPECT_NEAR(*focal_length, expected, expected * 1e-12);
+TEST(Bitmap, ExifFocalLengthIn35mmLargeDimension) {
+  for (const int long_side : {50000, 65536}) {
+    for (const bool portrait : {false, true}) {
+      Bitmap bitmap(portrait ? 2 : long_side,
+                    portrait ? long_side : 2,
+                    /*as_rgb=*/false);
+      const float focal_length_in_35mm_film = 70.f;
+      bitmap.SetMetaData(
+          "Exif:FocalLengthIn35mmFilm", "float", &focal_length_in_35mm_film);
+      const auto focal_length = bitmap.ExifFocalLength();
+      ASSERT_TRUE(focal_length.has_value());
+      const double diagonal = std::sqrt(1.0 * long_side * long_side + 4.0);
+      EXPECT_NEAR(focal_length.value(), 70.0 / 43.27 * diagonal, 1e-8);
+    }
   }
 }
 
@@ -1590,7 +1586,7 @@ TEST(Bitmap, RejectVolumePreservesSource) {
     // refusal cannot satisfy this test. Fields follow Microsoft's DDS_HEADER.
     std::array<uint32_t, 31> header{};
     header[0] = 124;
-    header[1] = 0x100f | (depth > 1 ? 0x800000 : 0);
+    header[1] = 0x100fu | (depth > 1 ? 0x800000u : 0u);
     header[2] = 2;
     header[3] = 2;
     header[4] = 6;
@@ -1601,15 +1597,15 @@ TEST(Bitmap, RejectVolumePreservesSource) {
     header[22] = 0x0000ff;
     header[23] = 0x00ff00;
     header[24] = 0xff0000;
-    header[26] = 0x1000 | (depth > 1 ? 0x8 : 0);
+    header[26] = 0x1000u | (depth > 1 ? 0x8u : 0u);
     header[27] = depth > 1 ? 0x200000 : 0;  // DDSCAPS2_VOLUME.
     {
       std::ofstream output(path, std::ios::binary);
       ASSERT_TRUE(output);
       output.write("DDS ", 4);
       for (const uint32_t value : header) {
-        for (int shift = 0; shift < 32; shift += 8) {
-          output.put(static_cast<char>((value >> shift) & 0xff));
+        for (unsigned int shift = 0; shift < 32; shift += 8) {
+          output.put(static_cast<char>((value >> shift) & 0xffu));
         }
       }
       const std::string pixels(2 * 2 * depth * 3, 17);
