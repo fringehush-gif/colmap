@@ -211,17 +211,33 @@ std::vector<std::pair<float, float>> Model::ComputeDepthRanges() const {
 }
 
 std::vector<std::map<int, int>> Model::ComputeSharedPoints() const {
-  std::vector<std::map<int, int>> shared_points(images.size());
+  std::vector<FlatHashMap<int, int>> shared_point_counts(images.size());
   for (const auto& point : points) {
     for (size_t i = 0; i < point.track.size(); ++i) {
       const int image_idx1 = point.track[i];
       for (size_t j = 0; j < i; ++j) {
         const int image_idx2 = point.track[j];
         if (image_idx1 != image_idx2) {
-          shared_points.at(image_idx1)[image_idx2] += 1;
-          shared_points.at(image_idx2)[image_idx1] += 1;
+          auto& counts1 = shared_point_counts.at(image_idx1);
+          auto& counts2 = shared_point_counts.at(image_idx2);
+          if (image_idx1 < image_idx2) {
+            counts1[image_idx2] += 1;
+          } else {
+            counts2[image_idx1] += 1;
+          }
         }
       }
+    }
+  }
+
+  std::vector<std::map<int, int>> shared_points(images.size());
+  for (size_t image_idx = 0; image_idx < shared_point_counts.size();
+       ++image_idx) {
+    for (const auto& [other_image_idx, count] :
+         shared_point_counts[image_idx]) {
+      shared_points[image_idx].emplace(other_image_idx, count);
+      shared_points.at(other_image_idx)
+          .emplace(static_cast<int>(image_idx), count);
     }
   }
   return shared_points;
@@ -237,7 +253,7 @@ std::vector<std::map<int, float>> Model::ComputeTriangulationAngles(
     proj_centers[image_idx] = C.cast<double>();
   }
 
-  std::vector<std::map<int, std::vector<float>>> all_triangulation_angles(
+  std::vector<FlatHashMap<int, std::vector<float>>> all_triangulation_angles(
       images.size());
   for (const auto& point : points) {
     for (size_t i = 0; i < point.track.size(); ++i) {

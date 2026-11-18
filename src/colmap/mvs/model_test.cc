@@ -370,6 +370,29 @@ TEST(Model, ComputeSharedPoints) {
   EXPECT_EQ(shared[2].at(0), 1);
   EXPECT_EQ(shared[1].at(2), 1);  // images 1,2 share 1 point
   EXPECT_EQ(shared[2].at(1), 1);
+
+  // Repeated observations contribute for each unequal pair; self-pairs do not.
+  model.images.emplace_back("isolated.jpg", 100, 100, K, R, T3);
+  model.points.emplace_back(Model::Point{5.0f, 0.0f, 10.0f, {2, 0, 2, 1, 0}});
+  model.points.emplace_back(Model::Point{5.0f, 0.0f, 10.0f, {3, 3}});
+  model.points.emplace_back(Model::Point{5.0f, 0.0f, 10.0f, {}});
+  const std::vector<std::map<int, int>> expected = {
+      {{1, 4}, {2, 5}}, {{0, 4}, {2, 3}}, {{0, 5}, {1, 3}}, {}};
+  EXPECT_EQ(model.ComputeSharedPoints(), expected);
+  for (auto& point : model.points) {
+    std::reverse(point.track.begin(), point.track.end());
+  }
+  EXPECT_EQ(model.ComputeSharedPoints(), expected);
+
+  for (const std::vector<int>& track :
+       {std::vector<int>{-1, 0}, {0, -1}, {0, 4}, {4, 0}}) {
+    model.points.back().track = track;
+    EXPECT_THROW(model.ComputeSharedPoints(), std::out_of_range);
+  }
+  for (const std::vector<int>& track : {std::vector<int>{-1, -1}, {4, 4}}) {
+    model.points.back().track = track;
+    EXPECT_EQ(model.ComputeSharedPoints(), expected);
+  }
 }
 
 TEST(Model, ComputeDepthRanges) {
