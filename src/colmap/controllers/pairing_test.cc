@@ -98,6 +98,23 @@ void CheckFullConsumption(const int num_threads) {
   EXPECT_TRUE(generator.HasFinished());
 }
 
+TEST(VocabTreePairGenerator, EmptyDatabase) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  VocabTreePairingOptions options;
+  options.num_threads = 1;
+  options.vocab_tree_path = CreateTestDir() / "missing.bin";
+  for (const auto& query_ids :
+       {std::vector<image_t>{}, std::vector<image_t>{1000}}) {
+    SCOPED_TRACE(query_ids.size());
+    VocabTreePairGenerator generator(options, database, query_ids);
+    EXPECT_TRUE(generator.HasFinished());
+    EXPECT_TRUE(generator.Next().empty());
+    generator.Reset();
+    EXPECT_TRUE(generator.HasFinished());
+    EXPECT_TRUE(generator.Next().empty());
+  }
+}
+
 TEST(VocabTreePairGenerator, ZeroThreadsFirstPass) { CheckFullConsumption(0); }
 
 TEST(VocabTreePairGenerator, FullConsumptionWithBoundedQueue) {
@@ -338,6 +355,20 @@ TEST(VocabTreePairGenerator, DoesNotDeadlockOnFailedQuery) {
                                                    query_image_ids.end()));
   EXPECT_TRUE(generator.Next().empty());
   EXPECT_TRUE(generator.HasFinished());
+}
+
+TEST(SequentialPairGenerator, EmptyDatabaseWithLoopDetection) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  SequentialPairingOptions options;
+  options.num_threads = 1;
+  options.loop_detection = true;
+  options.vocab_tree_path = CreateTestDir() / "missing.bin";
+  SequentialPairGenerator generator(options, database);
+  EXPECT_TRUE(generator.HasFinished());
+  EXPECT_TRUE(generator.Next().empty());
+  generator.Reset();
+  EXPECT_TRUE(generator.HasFinished());
+  EXPECT_TRUE(generator.Next().empty());
 }
 
 TEST(SequentialPairGenerator, Linear) {

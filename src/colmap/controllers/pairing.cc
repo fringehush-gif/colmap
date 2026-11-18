@@ -222,6 +222,9 @@ VocabTreePairGenerator::VocabTreePairGenerator(
   LOG(INFO) << "Generating image pairs with vocabulary tree...";
 
   const std::vector<image_t> all_image_ids = cache_->GetImageIds();
+  if (all_image_ids.empty()) {
+    return;
+  }
   if (query_image_ids.size() > 0) {
     query_image_ids_ = query_image_ids;
   } else if (options_.match_list_path == "") {
