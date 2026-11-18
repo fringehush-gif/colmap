@@ -40,6 +40,10 @@ constexpr float kMetadataTolerance = 32 * std::numeric_limits<float>::epsilon();
 // Retain the vendor fast-math context instead of requiring exact division.
 constexpr float kCoefficientTolerance =
     2048 * std::numeric_limits<float>::epsilon();
+// At a support knot B2 is quadratic in the coordinate error. Depth 4 scales
+// the normalization bound by 16 and coefficient magnitudes by at most 64.
+constexpr float kZeroCoefficientTolerance =
+    64 * (16 * kNormalizationTolerance) * (16 * kNormalizationTolerance);
 
 struct SerialThreadPool {
   const unsigned int threads = ThreadPool::NumThreads();
@@ -74,12 +78,13 @@ double QuadraticBasis(double x) {
 
 Coefficients ExpectedCoefficients(const Point3& position,
                                   const Point3& value,
-                                  bool fractional) {
+                                  const std::array<float, 2>& level_weights) {
   Coefficients expected;
-  for (int depth = 3; depth <= (fractional ? 4 : 3); ++depth) {
+  for (int depth = 3; depth <= 4; ++depth) {
+    if (level_weights[depth - 3] == 0) continue;
     const double width = std::ldexp(1.0, -depth);
     const double scale =
-        (fractional ? 0.5 : 1.0) / (64 * width * width * width);
+        level_weights[depth - 3] / (64 * width * width * width);
     const std::array<int, 3> cell = {
         static_cast<int>(std::floor(position[0] / width)),
         static_cast<int>(std::floor(position[1] / width)),
@@ -130,18 +135,7 @@ TEST(PoissonWeightedSamples, SplatsFractionalDepthIntoBothLevels) {
       [](int, int*) { return true; },
       tree.nodeAllocators.front(),
       tree.initializer());
-  const Point3 position(15.f / 32, 17.f / 32, 19.f / 32);
   const Point3 value(1.f, 0.25f, -0.5f);
-  std::vector<Tree::PointSample> samples;
-  FEMTreeInitializer<3, float>::Initialize(
-      tree.spaceRoot(),
-      {ProjectiveData<Point3, float>(position, 1.f)},
-      4,
-      samples,
-      tree.nodeAllocators,
-      tree.initializer());
-  ASSERT_EQ(samples.size(), 1);
-
   // Uniform B2 coefficients sum to one. Target density 1/2 gives raw depth
   // 3.5 and weight 1/64, safely above the coarser-density search threshold.
   Tree::DensityEstimator<2> density(3, 1, 0.5f);
@@ -152,14 +146,49 @@ TEST(PoissonWeightedSamples, SplatsFractionalDepthIntoBothLevels) {
     const char* name;
     float bias;
     int max_depth;
+    std::array<float, 2> level_weights;
+    Point3 position = Point3(15.f / 32, 17.f / 32, 19.f / 32);
   };
-  for (const Case test : {Case{"integer", -0.5f, 3},
-                          Case{"fractional", 0.f, 4},
-                          Case{"clamped", 0.f, 3}}) {
+  constexpr float kSmallFraction = 0x1p-19f;
+  constexpr float kPrunedFraction = 0x1p-20f;
+  // Independent level weights distinguish the two shares and both clamps.
+  // The final two depth cases straddle the existing 1e-6 parent-splat cutoff.
+  for (const Case test :
+       {Case{"integer", -0.5f, 3, {1.f, 0.f}},
+        Case{"fractional", 0.f, 4, {0.5f, 0.5f}},
+        Case{"asymmetric", -0.25f, 4, {0.75f, 0.25f}},
+        Case{"clamped", 0.f, 3, {1.f, 0.f}},
+        Case{"lower_clamp", -1.f, 4, {1.f, 0.f}},
+        Case{"upper_clamp", 1.f, 4, {0.f, 1.f}},
+        Case{"near_integer",
+             -0.5f + kSmallFraction,
+             4,
+             {1.f - kSmallFraction, kSmallFraction}},
+        Case{"retained_parent",
+             0.5f - kSmallFraction,
+             4,
+             {kSmallFraction, 1.f - kSmallFraction}},
+        Case{"pruned_parent",
+             0.5f - kPrunedFraction,
+             4,
+             {0.f, 1.f - kPrunedFraction}},
+        Case{"knots", -0.25f, 4, {0.75f, 0.25f}, Point3(0.5f, 0.5f, 0.5f)}}) {
     SCOPED_TRACE(test.name);
-    const bool fractional = test.max_depth == 4;
-    const auto expected = ExpectedCoefficients(position, value, fractional);
-    ASSERT_EQ(expected.size(), fractional ? 54 : 27);
+    const Point3 position = test.position;
+    std::vector<Tree::PointSample> samples;
+    FEMTreeInitializer<3, float>::Initialize(
+        tree.spaceRoot(),
+        {ProjectiveData<Point3, float>(position, 1.f)},
+        4,
+        samples,
+        tree.nodeAllocators,
+        tree.initializer());
+    ASSERT_EQ(samples.size(), 1);
+    const auto expected =
+        ExpectedCoefficients(position, value, test.level_weights);
+    ASSERT_EQ(
+        expected.size(),
+        27 * ((test.level_weights[0] != 0) + (test.level_weights[1] != 0)));
     for (const bool use_functor : {false, true}) {
       SCOPED_TRACE(use_functor);
       int conversion_calls = 0, depth_calls = 0;
@@ -223,14 +252,32 @@ TEST(PoissonWeightedSamples, SplatsFractionalDepthIntoBothLevels) {
       EXPECT_EQ(actual.size(), expected.size());
       for (const auto& item : expected) {
         const auto found = actual.find(item.first);
-        EXPECT_NE(found, actual.end());
-        if (found != actual.end()) {
+        if (found == actual.end()) {
+          // At a knot, adjacent cells may own different zero stencil entries.
+          for (const float coefficient : item.second) EXPECT_EQ(coefficient, 0);
+        } else {
           for (int component = 0; component < 3; ++component) {
             const float actual_value = found->second[component];
             const float expected_value = item.second[component];
-            EXPECT_NEAR(actual_value,
-                        expected_value,
-                        kCoefficientTolerance * std::abs(expected_value));
+            if (expected_value == 0) {
+              EXPECT_NEAR(
+                  actual_value,
+                  0,
+                  kZeroCoefficientTolerance * std::abs(value[component]));
+            } else {
+              EXPECT_NEAR(actual_value,
+                          expected_value,
+                          kCoefficientTolerance * std::abs(expected_value));
+            }
+          }
+        }
+      }
+      for (const auto& item : actual) {
+        if (expected.find(item.first) == expected.end()) {
+          for (int component = 0; component < 3; ++component) {
+            EXPECT_NEAR(item.second[component],
+                        0,
+                        kZeroCoefficientTolerance * std::abs(value[component]));
           }
         }
       }
