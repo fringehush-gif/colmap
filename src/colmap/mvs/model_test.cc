@@ -2,16 +2,287 @@
 
 #include "colmap/mvs/model.h"
 
+#include "colmap/geometry/pose.h"
+#include "colmap/geometry/triangulation.h"
+#include "colmap/math/math.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <limits>
+#include <map>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace mvs {
 namespace {
+
+std::vector<std::map<int, float>> LegacyTriangulationAngles(
+    const Model& model, const float percentile) {
+  const auto& images = model.images;
+  const auto& points = model.points;
+  std::vector<Eigen::Vector3d> proj_centers(images.size());
+  for (size_t image_idx = 0; image_idx < images.size(); ++image_idx) {
+    const auto& image = images[image_idx];
+    Eigen::Vector3f C;
+    ComputeProjectionCenter(image.GetR(), image.GetT(), C.data());
+    proj_centers[image_idx] = C.cast<double>();
+  }
+
+  std::vector<std::map<int, std::vector<float>>> all_triangulation_angles(
+      images.size());
+  for (const auto& point : points) {
+    for (size_t i = 0; i < point.track.size(); ++i) {
+      const int image_idx1 = point.track[i];
+      for (size_t j = 0; j < i; ++j) {
+        const int image_idx2 = point.track[j];
+        if (image_idx1 != image_idx2) {
+          const float angle = CalculateTriangulationAngle(
+              proj_centers.at(image_idx1),
+              proj_centers.at(image_idx2),
+              Eigen::Vector3d(point.x, point.y, point.z));
+          all_triangulation_angles.at(image_idx1)[image_idx2].push_back(angle);
+          all_triangulation_angles.at(image_idx2)[image_idx1].push_back(angle);
+        }
+      }
+    }
+  }
+
+  std::vector<std::map<int, float>> triangulation_angles(images.size());
+  for (size_t image_idx = 0; image_idx < all_triangulation_angles.size();
+       ++image_idx) {
+    auto& overlapping_images = all_triangulation_angles[image_idx];
+    for (auto& [other_image_idx, angles] : overlapping_images) {
+      triangulation_angles[image_idx].emplace(other_image_idx,
+                                              Percentile(angles, percentile));
+    }
+  }
+
+  return triangulation_angles;
+}
+
+std::vector<std::vector<int>> ReferenceOverlappingImages(
+    const Model& model,
+    const size_t num_images,
+    const double min_triangulation_angle) {
+  std::vector<std::vector<int>> overlapping_images(model.images.size());
+
+  const float min_triangulation_angle_rad = DegToRad(min_triangulation_angle);
+
+  const auto shared_num_points = model.ComputeSharedPoints();
+
+  const float kTriangulationAnglePercentile = 75;
+  const auto triangulation_angles =
+      LegacyTriangulationAngles(model, kTriangulationAnglePercentile);
+
+  for (size_t image_idx = 0; image_idx < model.images.size(); ++image_idx) {
+    const auto& shared_images = shared_num_points.at(image_idx);
+    const auto& overlapping_triangulation_angles =
+        triangulation_angles.at(image_idx);
+
+    std::vector<std::pair<int, int>> ordered_images;
+    ordered_images.reserve(shared_images.size());
+    for (const auto& [image_idx, count] : shared_images) {
+      if (overlapping_triangulation_angles.at(image_idx) >=
+          min_triangulation_angle_rad) {
+        ordered_images.emplace_back(image_idx, count);
+      }
+    }
+
+    const size_t eff_num_images = std::min(ordered_images.size(), num_images);
+    if (eff_num_images < shared_images.size()) {
+      std::partial_sort(ordered_images.begin(),
+                        ordered_images.begin() + eff_num_images,
+                        ordered_images.end(),
+                        [](const std::pair<int, int> image1,
+                           const std::pair<int, int> image2) {
+                          return image1.second > image2.second;
+                        });
+    } else {
+      std::sort(ordered_images.begin(),
+                ordered_images.end(),
+                [](const std::pair<int, int> image1,
+                   const std::pair<int, int> image2) {
+                  return image1.second > image2.second;
+                });
+    }
+
+    overlapping_images[image_idx].reserve(eff_num_images);
+    for (size_t i = 0; i < eff_num_images; ++i) {
+      overlapping_images[image_idx].push_back(ordered_images[i].first);
+    }
+  }
+
+  return overlapping_images;
+}
+
+Model MakeOverlapModel() {
+  Model model;
+  const float K[9] = {100, 0, 50, 0, 100, 50, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  for (int i = 0; i < 7; ++i) {
+    const float T[3] = {-static_cast<float>(i), 0, 0};
+    model.images.emplace_back("img.jpg", 100, 100, K, R, T);
+  }
+  model.points = {{0, 0, 0, {0, 1, 2, 2}},
+                  {1, 0, 2, {4, 3, 2, 1, 0}},
+                  {-1, 2, 8, {0, 2, 4}},
+                  {3, 0, 0, {3, 1}},
+                  {2, 1, 4, {5, 5, 5}}};
+  return model;
+}
+
+void ExpectReferenceOverlap(const Model& model) {
+  for (const size_t limit : {size_t(0), size_t(1), size_t(3), size_t(100)}) {
+    for (const double threshold : {0.0,
+                                   -0.0,
+                                   std::numeric_limits<double>::denorm_min(),
+                                   -std::numeric_limits<double>::denorm_min(),
+                                   0.01,
+                                   -1.0,
+                                   180.0,
+                                   std::numeric_limits<double>::quiet_NaN()}) {
+      EXPECT_EQ(model.GetMaxOverlappingImages(limit, threshold),
+                ReferenceOverlappingImages(model, limit, threshold))
+          << "limit=" << limit << " threshold=" << threshold;
+    }
+  }
+}
+
+TEST(Model, OverlapThresholdRetainsOrderedNeighbors) {
+  ExpectReferenceOverlap(Model());
+  auto model = MakeOverlapModel();
+  ExpectReferenceOverlap(model);
+  for (auto& point : model.points) {
+    std::reverse(point.track.begin(), point.track.end());
+  }
+  ExpectReferenceOverlap(model);
+  model.points.push_back({std::numeric_limits<float>::max(),
+                          -std::numeric_limits<float>::max(),
+                          std::numeric_limits<float>::denorm_min(),
+                          {0, 1, 4}});
+  ExpectReferenceOverlap(model);
+}
+
+TEST(Model, PositiveSubnormalOverlapThresholdRejectsZeroAngle) {
+  auto model = MakeOverlapModel();
+  // Nonzero parallel rays produce an exactly zero triangulation angle.
+  model.points = {{3, 0, 0, {0, 1}}};
+  ASSERT_EQ(model.ComputeTriangulationAngles().at(0).at(1), 0.0f);
+
+  const double degrees =
+      RadToDeg(static_cast<double>(std::numeric_limits<float>::denorm_min()));
+  const float radians = DegToRad(degrees);
+  ASSERT_GT(radians, 0.0f);
+  ASSERT_EQ(std::fpclassify(radians), FP_SUBNORMAL);
+
+  std::vector<std::vector<int>> expected(model.images.size());
+  expected[0] = {1};
+  expected[1] = {0};
+  EXPECT_EQ(model.GetMaxOverlappingImages(model.images.size(), 0.0), expected);
+  EXPECT_EQ(model.GetMaxOverlappingImages(model.images.size(), degrees),
+            std::vector<std::vector<int>>(model.images.size()));
+}
+
+TEST(Model, OverlapMalformedGeometryRetainsFallback) {
+  for (const float value : {std::numeric_limits<float>::quiet_NaN(),
+                            std::numeric_limits<float>::infinity(),
+                            -std::numeric_limits<float>::infinity()}) {
+    auto model = MakeOverlapModel();
+    model.points = {{value, value, value, {0, 1}}};
+    ExpectReferenceOverlap(model);
+    const float K[9] = {100, 0, 50, 0, 100, 50, 0, 0, 1};
+    const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const float T[3] = {value, 0, 0};
+    model.images[0] = Image("nonfinite.jpg", 100, 100, K, R, T);
+    model.points = {{0, 1, 3, {0, 1}}};
+    ExpectReferenceOverlap(model);
+  }
+  auto model = MakeOverlapModel();
+  const float K[9] = {100, 0, 50, 0, 100, 50, 0, 0, 1};
+  const float R[9] = {2, 0, 0, 0, 2, 0, 0, 0, 2};
+  const float T[3] = {std::numeric_limits<float>::max(), 0, 0};
+  model.images[0] = Image("overflow.jpg", 100, 100, K, R, T);
+  float center[3];
+  ComputeProjectionCenter(R, T, center);
+  ASSERT_FALSE(std::isfinite(center[0]));
+  model.points = {{0, 1, 3, {0, 1}}};
+  ExpectReferenceOverlap(model);
+}
+
+TEST(Model, OverlapInvalidIndicesRetainExistingContract) {
+  for (const int invalid : {-1, 7}) {
+    auto model = MakeOverlapModel();
+    model.points = {{0, 0, 1, {0, invalid}}};
+    EXPECT_THROW(model.GetMaxOverlappingImages(3, 0), std::out_of_range);
+    EXPECT_THROW(ReferenceOverlappingImages(model, 3, 0), std::out_of_range);
+    model.points[0].track = {invalid, invalid};
+    ExpectReferenceOverlap(model);
+  }
+}
+
+TEST(Model, TriangulationAnglesRetainLegacyBitsAndDirectedMembership) {
+  static_assert(sizeof(float) == sizeof(uint32_t));
+  Model model;
+  const float K[9] = {100, 0, 50, 0, 100, 50, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  for (int i = 0; i < 12; ++i) {
+    const float T[3] = {
+        -static_cast<float>(i) * 0.375f, static_cast<float>(i % 3) * 0.125f, 0};
+    model.images.emplace_back("img.jpg", 100, 100, K, R, T);
+  }
+  for (int i = 0; i < 96; ++i) {
+    Model::Point point{static_cast<float>(i % 7) * 0.125f,
+                       static_cast<float>(i % 5) * 0.25f,
+                       2.0f + static_cast<float>(i % 11),
+                       {}};
+    // Repeated observations and opposite pair orientations must retain every
+    // original sample and its ordering; equal indices remain excluded.
+    for (int j = 0; j < 2 + i % 10; ++j)
+      point.track.push_back((i * 7 + j * 5) % 12);
+    if (i % 3 == 0) std::reverse(point.track.begin(), point.track.end());
+    if (i % 7 == 0) point.track.push_back(point.track.front());
+    model.points.push_back(std::move(point));
+  }
+  for (const float percentile : {0.f, 1.f, 25.f, 50.f, 75.f, 99.f, 100.f}) {
+    const auto expected = LegacyTriangulationAngles(model, percentile);
+    const auto actual = model.ComputeTriangulationAngles(percentile);
+    ASSERT_EQ(actual.size(), expected.size());
+    for (size_t i = 0; i < actual.size(); ++i) {
+      ASSERT_EQ(actual[i].size(), expected[i].size());
+      for (const auto& [other, value] : expected[i]) {
+        const float observed = actual[i].at(other);
+        uint32_t expected_bits = 0;
+        uint32_t observed_bits = 0;
+        std::memcpy(&expected_bits, &value, sizeof(value));
+        std::memcpy(&observed_bits, &observed, sizeof(observed));
+        EXPECT_EQ(observed_bits, expected_bits)
+            << i << " " << other << " percentile " << percentile;
+      }
+    }
+  }
+}
+
+TEST(Model, TriangulationAnglesKeepIsolatedAndDuplicateOnlyTracksEmpty) {
+  Model empty;
+  EXPECT_TRUE(empty.ComputeTriangulationAngles().empty());
+  const float K[9] = {100, 0, 50, 0, 100, 50, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const float T[3] = {0, 0, 0};
+  empty.images.emplace_back("img.jpg", 100, 100, K, R, T);
+  empty.points.push_back(Model::Point{0, 0, 1, {0, 0, 0}});
+  const auto result = empty.ComputeTriangulationAngles();
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_TRUE(result.front().empty());
+}
 
 TEST(Model, ReadCOLMAP) {
   Reconstruction reconstruction;
@@ -31,6 +302,29 @@ TEST(Model, ReadCOLMAP) {
   model.ReadFromCOLMAP(test_dir);
   EXPECT_EQ(model.images.size(), reconstruction.NumRegImages());
   EXPECT_EQ(model.points.size(), reconstruction.NumPoints3D());
+
+  // Check every coordinate and the complete ordered image-index track,
+  // rather than only the point count. Track ownership must survive insertion.
+  for (const auto& [point_id, expected] : reconstruction.Points3D()) {
+    const auto matches = [&expected_point =
+                              expected](const Model::Point& actual) {
+      return actual.x == static_cast<float>(expected_point.xyz(0)) &&
+             actual.y == static_cast<float>(expected_point.xyz(1)) &&
+             actual.z == static_cast<float>(expected_point.xyz(2));
+    };
+    ASSERT_EQ(std::count_if(model.points.begin(), model.points.end(), matches),
+              1)
+        << point_id;
+    const auto point =
+        std::find_if(model.points.begin(), model.points.end(), matches);
+    ASSERT_NE(point, model.points.end());
+    std::vector<int> expected_track;
+    for (const auto& element : expected.track.Elements()) {
+      expected_track.push_back(
+          model.GetImageIdx(reconstruction.Image(element.image_id).Name()));
+    }
+    EXPECT_EQ(point->track, expected_track) << point_id;
+  }
 
   Model model_lower;
   model_lower.Read(test_dir, "colmap");
@@ -76,6 +370,29 @@ TEST(Model, ComputeSharedPoints) {
   EXPECT_EQ(shared[2].at(0), 1);
   EXPECT_EQ(shared[1].at(2), 1);  // images 1,2 share 1 point
   EXPECT_EQ(shared[2].at(1), 1);
+
+  // Repeated observations contribute for each unequal pair; self-pairs do not.
+  model.images.emplace_back("isolated.jpg", 100, 100, K, R, T3);
+  model.points.emplace_back(Model::Point{5.0f, 0.0f, 10.0f, {2, 0, 2, 1, 0}});
+  model.points.emplace_back(Model::Point{5.0f, 0.0f, 10.0f, {3, 3}});
+  model.points.emplace_back(Model::Point{5.0f, 0.0f, 10.0f, {}});
+  const std::vector<std::map<int, int>> expected = {
+      {{1, 4}, {2, 5}}, {{0, 4}, {2, 3}}, {{0, 5}, {1, 3}}, {}};
+  EXPECT_EQ(model.ComputeSharedPoints(), expected);
+  for (auto& point : model.points) {
+    std::reverse(point.track.begin(), point.track.end());
+  }
+  EXPECT_EQ(model.ComputeSharedPoints(), expected);
+
+  for (const std::vector<int>& track :
+       {std::vector<int>{-1, 0}, {0, -1}, {0, 4}, {4, 0}}) {
+    model.points.back().track = track;
+    EXPECT_THROW(model.ComputeSharedPoints(), std::out_of_range);
+  }
+  for (const std::vector<int>& track : {std::vector<int>{-1, -1}, {4, 4}}) {
+    model.points.back().track = track;
+    EXPECT_EQ(model.ComputeSharedPoints(), expected);
+  }
 }
 
 TEST(Model, ComputeDepthRanges) {

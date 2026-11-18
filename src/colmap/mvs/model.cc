@@ -10,7 +10,10 @@
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/string.h"
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
+#include <utility>
 
 namespace colmap {
 namespace mvs {
@@ -66,7 +69,7 @@ void Model::ReadFromCOLMAP(const std::filesystem::path& path,
     for (const auto& track_el : point3D.track.Elements()) {
       point.track.push_back(image_id_to_idx.at(track_el.image_id));
     }
-    points.push_back(point);
+    points.push_back(std::move(point));
   }
 }
 
@@ -98,21 +101,38 @@ std::vector<std::vector<int>> Model::GetMaxOverlappingImages(
 
   const auto shared_num_points = ComputeSharedPoints();
 
+  // Finite float coordinates and computed centers produce finite,
+  // nonnegative double-precision angles, so zero cannot reject any pair.
+  const bool skip_triangulation_angles =
+      min_triangulation_angle_rad == 0.0f &&
+      std::all_of(points.begin(),
+                  points.end(),
+                  [](const Point& point) {
+                    return std::isfinite(point.x) && std::isfinite(point.y) &&
+                           std::isfinite(point.z);
+                  }) &&
+      std::all_of(images.begin(), images.end(), [](const Image& image) {
+        Eigen::Vector3f center;
+        ComputeProjectionCenter(image.GetR(), image.GetT(), center.data());
+        return center.allFinite();
+      });
+
   const float kTriangulationAnglePercentile = 75;
   const auto triangulation_angles =
-      ComputeTriangulationAngles(kTriangulationAnglePercentile);
+      skip_triangulation_angles
+          ? std::vector<std::map<int, float>>()
+          : ComputeTriangulationAngles(kTriangulationAnglePercentile);
 
   for (size_t image_idx = 0; image_idx < images.size(); ++image_idx) {
     const auto& shared_images = shared_num_points.at(image_idx);
-    const auto& overlapping_triangulation_angles =
-        triangulation_angles.at(image_idx);
 
     std::vector<std::pair<int, int>> ordered_images;
     ordered_images.reserve(shared_images.size());
-    for (const auto& [image_idx, count] : shared_images) {
-      if (overlapping_triangulation_angles.at(image_idx) >=
-          min_triangulation_angle_rad) {
-        ordered_images.emplace_back(image_idx, count);
+    for (const auto& [other_image_idx, count] : shared_images) {
+      if (skip_triangulation_angles ||
+          triangulation_angles.at(image_idx).at(other_image_idx) >=
+              min_triangulation_angle_rad) {
+        ordered_images.emplace_back(other_image_idx, count);
       }
     }
 
@@ -191,17 +211,33 @@ std::vector<std::pair<float, float>> Model::ComputeDepthRanges() const {
 }
 
 std::vector<std::map<int, int>> Model::ComputeSharedPoints() const {
-  std::vector<std::map<int, int>> shared_points(images.size());
+  std::vector<FlatHashMap<int, int>> shared_point_counts(images.size());
   for (const auto& point : points) {
     for (size_t i = 0; i < point.track.size(); ++i) {
       const int image_idx1 = point.track[i];
       for (size_t j = 0; j < i; ++j) {
         const int image_idx2 = point.track[j];
         if (image_idx1 != image_idx2) {
-          shared_points.at(image_idx1)[image_idx2] += 1;
-          shared_points.at(image_idx2)[image_idx1] += 1;
+          auto& counts1 = shared_point_counts.at(image_idx1);
+          auto& counts2 = shared_point_counts.at(image_idx2);
+          if (image_idx1 < image_idx2) {
+            counts1[image_idx2] += 1;
+          } else {
+            counts2[image_idx1] += 1;
+          }
         }
       }
+    }
+  }
+
+  std::vector<std::map<int, int>> shared_points(images.size());
+  for (size_t image_idx = 0; image_idx < shared_point_counts.size();
+       ++image_idx) {
+    for (const auto& [other_image_idx, count] :
+         shared_point_counts[image_idx]) {
+      shared_points[image_idx].emplace(other_image_idx, count);
+      shared_points.at(other_image_idx)
+          .emplace(static_cast<int>(image_idx), count);
     }
   }
   return shared_points;
@@ -217,7 +253,7 @@ std::vector<std::map<int, float>> Model::ComputeTriangulationAngles(
     proj_centers[image_idx] = C.cast<double>();
   }
 
-  std::vector<std::map<int, std::vector<float>>> all_triangulation_angles(
+  std::vector<FlatHashMap<int, std::vector<float>>> all_triangulation_angles(
       images.size());
   for (const auto& point : points) {
     for (size_t i = 0; i < point.track.size(); ++i) {
@@ -229,8 +265,11 @@ std::vector<std::map<int, float>> Model::ComputeTriangulationAngles(
               proj_centers.at(image_idx1),
               proj_centers.at(image_idx2),
               Eigen::Vector3d(point.x, point.y, point.z));
-          all_triangulation_angles.at(image_idx1)[image_idx2].push_back(angle);
-          all_triangulation_angles.at(image_idx2)[image_idx1].push_back(angle);
+          // Both directed lists receive exactly this same sample. Retain one
+          // ordered list per unordered pair without changing the calculation.
+          const int first = std::min(image_idx1, image_idx2);
+          const int second = std::max(image_idx1, image_idx2);
+          all_triangulation_angles.at(first)[second].push_back(angle);
         }
       }
     }
@@ -241,8 +280,9 @@ std::vector<std::map<int, float>> Model::ComputeTriangulationAngles(
        ++image_idx) {
     auto& overlapping_images = all_triangulation_angles[image_idx];
     for (auto& [other_image_idx, angles] : overlapping_images) {
-      triangulation_angles[image_idx].emplace(other_image_idx,
-                                              Percentile(angles, percentile));
+      const float angle = Percentile(angles, percentile);
+      triangulation_angles[image_idx].emplace(other_image_idx, angle);
+      triangulation_angles[other_image_idx].emplace(image_idx, angle);
     }
   }
 
