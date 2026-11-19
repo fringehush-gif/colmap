@@ -1924,9 +1924,8 @@ public:
 					}
 			if( isCoplanar )
 			{
-				Vertex c;
-				c *= 0;
-				for( unsigned int i=0 ; i<polygon.size() ; i++ ) c += polygon[i].second;
+				Vertex c = polygon[0].second;
+				for( unsigned int i=1 ; i<polygon.size() ; i++ ) c += polygon[i].second;
 				c /= ( typename Vertex::Real )polygon.size();
 
 				node_index_type cIdx = (node_index_type)vertexStream.write( thread , c );
