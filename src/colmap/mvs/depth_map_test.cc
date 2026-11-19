@@ -72,6 +72,8 @@ TEST(DepthMap, RejectedMatRemainsReusable) {
   const float* const data = mat.GetPtr();
   EXPECT_THROW((DepthMap{mat, 0.5f, 14.5f}), std::invalid_argument);
   EXPECT_THROW((DepthMap{std::move(mat), 0.5f, 14.5f}), std::invalid_argument);
+  // An invalid channel count is rejected before storage is moved.
+  // NOLINTNEXTLINE(bugprone-use-after-move)
   EXPECT_EQ(mat.GetPtr(), data);
   EXPECT_EQ(mat.GetWidth(), 5);
   EXPECT_EQ(mat.GetHeight(), 3);

@@ -68,6 +68,8 @@ TEST(NormalMap, RejectedMatRemainsReusable) {
   const float* const data = mat.GetPtr();
   EXPECT_THROW((NormalMap{mat}), std::invalid_argument);
   EXPECT_THROW((NormalMap{std::move(mat)}), std::invalid_argument);
+  // An invalid channel count is rejected before storage is moved.
+  // NOLINTNEXTLINE(bugprone-use-after-move)
   EXPECT_EQ(mat.GetPtr(), data);
   EXPECT_EQ(mat.GetWidth(), 5);
   EXPECT_EQ(mat.GetHeight(), 3);
