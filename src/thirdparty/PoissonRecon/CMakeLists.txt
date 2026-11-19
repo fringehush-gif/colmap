@@ -16,3 +16,28 @@ endif()
 if(MSVC)
     target_compile_options(colmap_poisson_recon PRIVATE /bigobj)
 endif()
+
+COLMAP_ADD_TEST(
+    NAME level_set_barycenter_test
+    SRCS level_set_barycenter_test.cc
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_thirdparty_level_set_barycenter_test
+        PRIVATE RELEASE)
+    if(MSVC)
+        target_compile_options(colmap_thirdparty_level_set_barycenter_test
+            PRIVATE /bigobj /fp:precise)
+    else()
+        # The scalar regression deliberately uses a defined NaN default value.
+        target_compile_options(colmap_thirdparty_level_set_barycenter_test
+            PRIVATE -fno-fast-math)
+    endif()
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_thirdparty_level_set_barycenter_test
+            OpenMP::OpenMP_CXX)
+    endif()
+    if(COVERAGE_ENABLED)
+        target_link_options(colmap_thirdparty_level_set_barycenter_test
+            PRIVATE -coverage)
+    endif()
+endif()
