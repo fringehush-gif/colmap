@@ -228,7 +228,6 @@ void ComputeSquaredTangentSampsonErrorWithCheirality(
     std::vector<double>* residuals) {
   const size_t num_rays = cam_rays1_with_jac.size();
   THROW_CHECK_EQ(num_rays, cam_rays2_with_jac.size());
-  residuals->resize(num_rays);
 
   // Recover the relative pose from E (resolving the four-fold decomposition
   // ambiguity by cheirality voting) and flag which correspondences triangulate
@@ -244,18 +243,13 @@ void ComputeSquaredTangentSampsonErrorWithCheirality(
   Rigid3d cam2_from_cam1;
   std::vector<int> valid_indices;
   PoseFromEssentialMatrix(E, rays1, rays2, &cam2_from_cam1, &valid_indices);
-  std::vector<bool> is_cheiral(num_rays, false);
-  for (const int idx : valid_indices) {
-    is_cheiral[idx] = true;
-  }
 
   // Correspondences behind either camera are not valid inliers for the relative
   // pose regardless of their residual, so they get an infinite residual.
-  for (size_t i = 0; i < num_rays; ++i) {
-    (*residuals)[i] = is_cheiral[i]
-                          ? ComputeSquaredTangentSampsonError(
-                                cam_rays1_with_jac[i], cam_rays2_with_jac[i], E)
-                          : std::numeric_limits<double>::max();
+  residuals->assign(num_rays, std::numeric_limits<double>::max());
+  for (const int i : valid_indices) {
+    (*residuals)[i] = ComputeSquaredTangentSampsonError(
+        cam_rays1_with_jac[i], cam_rays2_with_jac[i], E);
   }
 }
 
