@@ -25,6 +25,8 @@ class ConsistencyGraph {
  public:
   ConsistencyGraph();
   ConsistencyGraph(size_t width, size_t height, const std::vector<int>& data);
+  // Consume a temporary payload. Input storage may be consumed on failure.
+  ConsistencyGraph(size_t width, size_t height, std::vector<int>&& data);
 
   size_t GetNumBytes() const;
 

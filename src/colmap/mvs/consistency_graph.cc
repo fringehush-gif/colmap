@@ -8,6 +8,7 @@
 #include "colmap/util/string.h"
 
 #include <fstream>
+#include <utility>
 
 namespace colmap {
 namespace mvs {
@@ -20,6 +21,13 @@ ConsistencyGraph::ConsistencyGraph(const size_t width,
                                    const size_t height,
                                    const std::vector<int>& data)
     : data_(data) {
+  InitializeMap(width, height);
+}
+
+ConsistencyGraph::ConsistencyGraph(const size_t width,
+                                   const size_t height,
+                                   std::vector<int>&& data)
+    : data_(std::move(data)) {
   InitializeMap(width, height);
 }
 
