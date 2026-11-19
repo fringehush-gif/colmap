@@ -383,6 +383,17 @@ TEST(ComputeSquaredTangentSampsonError, VectorOverloadAndCheirality) {
   EXPECT_EQ(cheiral_residuals[0], plain_residuals[0]);
   EXPECT_EQ(cheiral_residuals[2], plain_residuals[2]);
   EXPECT_EQ(cheiral_residuals[3], plain_residuals[3]);
+
+  // RANSAC reuses this output vector. Previously valid entries must be
+  // rejected when the next call's cheirality changes, and vice versa.
+  for (const size_t i : {1, 2}) {
+    cam_rays1_with_jac[i].ray = -cam_rays1_with_jac[i].ray;
+    cam_rays2_with_jac[i].ray = -cam_rays2_with_jac[i].ray;
+  }
+  ComputeSquaredTangentSampsonErrorWithCheirality(
+      cam_rays1_with_jac, cam_rays2_with_jac, E, &cheiral_residuals);
+  EXPECT_EQ(cheiral_residuals[1], residuals[1]);
+  EXPECT_EQ(cheiral_residuals[2], std::numeric_limits<double>::max());
 }
 
 }  // namespace
