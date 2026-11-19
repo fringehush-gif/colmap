@@ -403,21 +403,51 @@ std::shared_ptr<DatabaseCache> DatabaseCache::CreateFromCache(
     cache->correspondence_graph_->AddImage(image_id, image.NumPoints2D());
   }
 
-  // Copy correspondences between all image pairs in the cache.
+  // Visit each source image's correspondences once, keeping both match order
+  // within pairs and the order in which pairs are added to the new graph.
+  std::vector<std::pair<image_pair_t, FeatureMatches>> pair_matches;
+  FlatHashMap<image_t, FlatHashMap<image_t, size_t>> match_indices_by_image;
   for (const image_pair_t pair_id : source_graph->ImagePairs()) {
     const auto [image_id1, image_id2] = PairIdToImagePair(pair_id);
-    if (cache->images_.count(image_id1) > 0 &&
-        cache->images_.count(image_id2) > 0) {
-      TwoViewGeometry two_view_geometry = source_graph->ExtractTwoViewGeometry(
-          image_id1, image_id2, /*extract_inlier_matches=*/true);
-      if (!UseInlierMatchesCheck(options,
-                                 two_view_geometry.config,
-                                 two_view_geometry.inlier_matches.size())) {
-        continue;
-      }
-      cache->correspondence_graph_->AddTwoViewGeometry(
-          image_id1, image_id2, std::move(two_view_geometry));
+    if (cache->images_.count(image_id1) == 0 ||
+        cache->images_.count(image_id2) == 0) {
+      continue;
     }
+    const auto geometry = source_graph->ExtractTwoViewGeometry(
+        image_id1, image_id2, /*extract_inlier_matches=*/false);
+    const size_t num_matches =
+        source_graph->NumMatchesBetweenImages(image_id1, image_id2);
+    if (!UseInlierMatchesCheck(options, geometry.config, num_matches)) {
+      continue;
+    }
+    if (num_matches != 0) {
+      match_indices_by_image[image_id1].emplace(image_id2, pair_matches.size());
+    }
+    pair_matches.emplace_back(pair_id, FeatureMatches{});
+    pair_matches.back().second.reserve(num_matches);
+  }
+
+  for (const auto& [image_id1, indices] : match_indices_by_image) {
+    const point2D_t num_points2D = source_graph->NumPoints2DForImage(image_id1);
+    for (point2D_t point2D_idx = 0; point2D_idx < num_points2D; ++point2D_idx) {
+      const auto range =
+          source_graph->FindCorrespondences(image_id1, point2D_idx);
+      for (const auto* corr = range.beg; corr < range.end; ++corr) {
+        const auto it = indices.find(corr->image_id);
+        if (it != indices.end()) {
+          pair_matches[it->second].second.emplace_back(point2D_idx,
+                                                       corr->point2D_idx);
+        }
+      }
+    }
+  }
+  for (auto& [pair_id, matches] : pair_matches) {
+    const auto [image_id1, image_id2] = PairIdToImagePair(pair_id);
+    auto geometry = source_graph->ExtractTwoViewGeometry(
+        image_id1, image_id2, /*extract_inlier_matches=*/false);
+    geometry.inlier_matches = std::move(matches);
+    cache->correspondence_graph_->AddTwoViewGeometry(
+        image_id1, image_id2, std::move(geometry));
   }
 
   cache->correspondence_graph_->Finalize();
