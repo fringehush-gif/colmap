@@ -18,6 +18,11 @@ CorrespondenceGraph::NumMatchesBetweenAllImages() const {
   return num_matches_between_images;
 }
 
+size_t CorrespondenceGraph::NumPoints2DForImage(const image_t image_id) const {
+  const Image& image = images_.at(image_id);
+  return finalized_ ? image.flat_corr_begs.size() - 1 : image.corrs.size();
+}
+
 std::vector<image_pair_t> CorrespondenceGraph::ImagePairs() const {
   std::vector<image_pair_t> image_pairs;
   image_pairs.reserve(image_pairs_.size());
@@ -277,9 +282,7 @@ void CorrespondenceGraph::ExtractMatchesBetweenImages(
 
   matches.reserve(num_correspondences);
 
-  const Image& image1 = images_.at(image_id1);
-  const point2D_t num_points2D1 =
-      finalized_ ? image1.flat_corr_begs.size() - 1 : image1.corrs.size();
+  const point2D_t num_points2D1 = NumPoints2DForImage(image_id1);
   for (point2D_t point2D_idx1 = 0; point2D_idx1 < num_points2D1;
        ++point2D_idx1) {
     const CorrespondenceRange range =

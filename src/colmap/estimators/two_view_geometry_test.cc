@@ -16,6 +16,8 @@
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/eigen_alignment.h"
 
+#include <tuple>
+
 #include <Eigen/Core>
 #include <gtest/gtest.h>
 
@@ -1720,6 +1722,68 @@ TEST(MaybeDecomposeRelativePoses, Nominal) {
             geometry_second.cam2_from_cam1->rotation().coeffs());
   EXPECT_EQ(geometry_after.cam2_from_cam1->translation(),
             geometry_second.cam2_from_cam1->translation());
+}
+
+TEST(MaybeDecomposeRelativePoses, MixedPairStatesKeepCorrespondences) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  Reconstruction reconstruction;
+  SyntheticDatasetOptions options;
+  options.num_rigs = 4;
+  options.num_cameras_per_rig = 1;
+  options.num_frames_per_rig = 1;
+  options.num_points3D = 50;
+  options.camera_has_prior_focal_length = true;
+  SynthesizeDataset(options, &reconstruction, database.get());
+
+  auto posed = database->ReadTwoViewGeometry(1, 2);
+  posed.cam2_from_cam1 = reconstruction.Image(2).CamFromWorld() *
+                         Inverse(reconstruction.Image(1).CamFromWorld());
+  database->UpdateTwoViewGeometry(1, 2, posed);
+  auto empty = database->ReadTwoViewGeometry(1, 4);
+  empty.inlier_matches.clear();
+  database->UpdateTwoViewGeometry(1, 4, empty);
+
+  auto cache = DatabaseCache::Create(*database, DatabaseCache::Options());
+  const auto graph = cache->CorrespondenceGraph();
+  ASSERT_EQ(graph->NumImagePairs(), 6);
+  // Change metadata after loading so rejected configurations remain in the
+  // graph and coexist with posed, unposed and empty pairs.
+  for (const auto& [first, second, config] :
+       {std::tuple{2, 3, TwoViewGeometry::DEGENERATE},
+        std::tuple{2, 4, TwoViewGeometry::WATERMARK},
+        std::tuple{3, 4, TwoViewGeometry::MULTIPLE}}) {
+    auto geometry = graph->ExtractTwoViewGeometry(first, second, false);
+    geometry.config = config;
+    graph->UpdateTwoViewGeometry(first, second, geometry);
+  }
+
+  const auto pairs = graph->ImagePairs();
+  for (int pass = 0; pass < 2; ++pass) {
+    std::vector<TwoViewGeometry> before;
+    for (const auto pair : pairs) {
+      const auto [first, second] = PairIdToImagePair(pair);
+      before.push_back(graph->ExtractTwoViewGeometry(first, second, true));
+    }
+    MaybeDecomposeRelativePoses(cache.get());
+    EXPECT_EQ(graph->ImagePairs(), pairs);
+    for (size_t i = 0; i < pairs.size(); ++i) {
+      const auto [first, second] = PairIdToImagePair(pairs[i]);
+      const auto after = graph->ExtractTwoViewGeometry(first, second, true);
+      EXPECT_EQ(after.config, before[i].config);
+      EXPECT_EQ(after.inlier_matches, before[i].inlier_matches);
+      if (before[i].cam2_from_cam1.has_value()) {
+        ASSERT_TRUE(after.cam2_from_cam1.has_value());
+        EXPECT_EQ(after.cam2_from_cam1->params,
+                  before[i].cam2_from_cam1->params);
+        EXPECT_EQ(after.tri_angle, before[i].tri_angle);
+      } else {
+        EXPECT_EQ(after.cam2_from_cam1.has_value(), first == 1 && second == 3);
+      }
+    }
+    auto undefined = graph->ExtractTwoViewGeometry(2, 3, false);
+    undefined.config = TwoViewGeometry::UNDEFINED;
+    graph->UpdateTwoViewGeometry(2, 3, undefined);
+  }
 }
 
 // A pair whose focal a two-view solver recovered is UNCALIBRATED but carries

@@ -52,6 +52,9 @@ class CorrespondenceGraph {
   // Number of added images.
   inline size_t NumImagePairs() const;
 
+  // Get the number of 2D points in an image, including unmatched points.
+  size_t NumPoints2DForImage(image_t image_id) const;
+
   // Get the number of observations in an image. An observation is an image
   // point that has at least one correspondence.
   inline point2D_t NumObservationsForImage(image_t image_id) const;
