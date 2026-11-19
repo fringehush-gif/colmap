@@ -203,6 +203,64 @@ TEST(VisualIndex, VerificationWithNoAssignedWords) {
   EXPECT_TRUE(scores.empty());
 }
 
+TEST(VisualIndex, VerificationSkipsWordsOutsideSelectedImages) {
+  const auto path = CreateTestDir() / "selected_words.bin";
+  ASSERT_NO_FATAL_FAILURE(WriteExactVocabulary(path));
+  auto index = VisualIndex::Read(path);
+  const FeatureKeypoints target_keypoints = {
+      FeatureKeypoint(120, 100, 1.1f, 0.4f),
+      FeatureKeypoint(1000, 180, 2.0f, 1.2f),
+      FeatureKeypoint(180, 1100, 0.7f, -0.3f)};
+  std::vector<FeatureGeometryMatch> identity_matches;
+  for (const auto& keypoint : target_keypoints) {
+    FeatureGeometry geometry;
+    geometry.x = keypoint.x;
+    geometry.y = keypoint.y;
+    geometry.scale = keypoint.ComputeScale();
+    geometry.orientation = keypoint.ComputeOrientation();
+    identity_matches.push_back({geometry, geometry});
+  }
+  const int expected = VoteAndVerify(VoteAndVerifyOptions(), identity_matches);
+  ASSERT_EQ(expected, 3);
+
+  VisualIndex::IndexOptions indexing;
+  indexing.num_threads = 1;
+  indexing.num_neighbors = 2;
+  index->Add(indexing,
+             0,
+             target_keypoints,
+             CreateScalarDescriptors({1003, 2003, 3003}));
+  indexing.num_neighbors = 1;
+  index->Add(indexing,
+             1,
+             FeatureKeypoints(3, FeatureKeypoint(0, 0, 1, 0)),
+             CreateScalarDescriptors({100, 200, 300}));
+  index->Prepare();
+
+  // Alternating rows have no word containing the selected image. Each anchor
+  // first visits an empty word, then reaches its match in a later word.
+  const auto descriptors =
+      CreateScalarDescriptors({175, 1020, 175, 2020, 175, 3020, 175});
+  FeatureKeypoints keypoints(7, FeatureKeypoint(0, 0, 1, 0));
+  for (size_t i = 0; i < target_keypoints.size(); ++i) {
+    keypoints[2 * i + 1] = target_keypoints[i];
+  }
+  VisualIndex::QueryOptions query;
+  query.num_threads = 1;
+  query.num_neighbors = 3;
+  query.image_id_filter = [](const int image) { return image == 0; };
+  std::vector<ImageScore> plain, verified;
+  index->Query(query, keypoints, descriptors, &plain);
+  query.num_images_after_verification = 1;
+  index->Query(query, keypoints, descriptors, &verified);
+  ASSERT_EQ(plain.size(), 1);
+  ASSERT_EQ(verified.size(), 1);
+  EXPECT_EQ(plain[0].image_id, 0);
+  EXPECT_EQ(verified[0].image_id, 0);
+  EXPECT_GT(plain[0].score, 0);
+  EXPECT_NEAR(verified[0].score - plain[0].score, expected, 1e-5);
+}
+
 TEST(VisualIndex, MultiwordMatchesRetainMaximumScore) {
   const auto path = CreateTestDir() / "multiword.bin";
   ASSERT_NO_FATAL_FAILURE(WriteExactVocabulary(path));
