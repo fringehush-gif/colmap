@@ -198,7 +198,13 @@ TEST(DefaultBundleAdjuster, PreservesWeightedAndRobustLosses) {
       ceres::Problem::Options reference_options;
       reference_options.cost_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
       reference_options.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+#if CERES_VERSION_MAJOR >= 3 || \
+    (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 1)
       reference_options.manifold_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+#else
+      reference_options.local_parameterization_ownership =
+          ceres::DO_NOT_TAKE_OWNERSHIP;
+#endif
       ceres::Problem reference(reference_options);
       ceres::Problem::EvaluateOptions evaluate_options,
           reference_evaluate_options;
@@ -206,15 +212,23 @@ TEST(DefaultBundleAdjuster, PreservesWeightedAndRobustLosses) {
       reference_evaluate_options.parameter_blocks =
           evaluate_options.parameter_blocks;
       for (double* parameters : evaluate_options.parameter_blocks) {
+#if CERES_VERSION_MAJOR >= 3 || \
+    (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 1)
+        auto* manifold =
+            const_cast<ceres::Manifold*>(problem.GetManifold(parameters));
+#else
+        auto* manifold = const_cast<ceres::LocalParameterization*>(
+            problem.GetParameterization(parameters));
+#endif
         reference.AddParameterBlock(
-            parameters,
-            problem.ParameterBlockSize(parameters),
-            const_cast<ceres::Manifold*>(problem.GetManifold(parameters)));
+            parameters, problem.ParameterBlockSize(parameters), manifold);
         if (problem.IsParameterBlockConstant(parameters)) {
           reference.SetParameterBlockConstant(parameters);
         }
       }
       evaluate_options.residual_blocks = blocks;
+      ceres::Problem::EvaluateOptions unweighted_options;
+      unweighted_options.apply_loss_function = false;
       double expected_cost = 0.0;
       for (const auto block : blocks) {
         const auto* loss = problem.GetLossFunctionForResidualBlock(block);
@@ -232,8 +246,9 @@ TEST(DefaultBundleAdjuster, PreservesWeightedAndRobustLosses) {
                 expected_loss.get(),
                 parameters));
         double cost;
-        ASSERT_TRUE(problem.EvaluateResidualBlock(
-            block, false, &cost, nullptr, nullptr));
+        unweighted_options.residual_blocks.assign(1, block);
+        ASSERT_TRUE(problem.Evaluate(
+            unweighted_options, &cost, nullptr, nullptr, nullptr));
         double rho[3];
         expected_loss->Evaluate(2.0 * cost, rho);
         expected_cost += 0.5 * rho[0];
