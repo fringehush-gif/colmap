@@ -701,6 +701,8 @@ fast_expn (double x)
 
   x *= EXPN_SZ / EXPN_MAX ;
   i = (int)vl_floor_d (x) ;
+  /* The final table entry has no following interpolation sample. */
+  if (i == EXPN_SZ) return expn_tab [EXPN_SZ] ;
   r = x - i ;
   a = expn_tab [i    ] ;
   b = expn_tab [i + 1] ;

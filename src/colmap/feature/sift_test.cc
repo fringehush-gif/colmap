@@ -340,6 +340,34 @@ TEST(SiftCPUPreparedRawDescriptor,
   EXPECT_EQ(ordinary, sentinel);
 }
 
+TEST(SiftCPUPreparedRawDescriptor, ExponentialTableEndpointMatchesOrdinary) {
+  const ScopedSiftRoundingMode restore_rounding;
+  for (const int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    if (std::fesetround(mode) != 0) continue;
+    SCOPED_TRACE(mode);
+    std::unique_ptr<VlSiftFilt, decltype(&vl_sift_delete)> filter(
+        vl_sift_new(16, 16, 1, 3, 0), &vl_sift_delete);
+    ASSERT_NE(filter, nullptr);
+    vl_sift_set_magnif(filter.get(), 3);
+    vl_sift_set_window_size(filter.get(), 0.5);
+    // This interior geometry reaches the last exponential-table entry. Both
+    // raw paths must use that entry without reading a nonexistent next one.
+    const RawSiftGeometryCase geometry{
+        31,
+        31,
+        15.5,
+        15.5,
+        (1.0 - std::numeric_limits<double>::epsilon()) / 3,
+        0};
+    const auto prepared = PrepareRawSiftGeometry(filter.get(), geometry);
+    ASSERT_NE(prepared, nullptr);
+    const auto descriptor = ExpectPreparedRawSiftMatchesOrdinary(
+        filter.get(), geometry, prepared.get(), CreateRawSiftGradient(31, 31));
+    EXPECT_GT(*std::max_element(descriptor.begin(), descriptor.end()), 0);
+    for (const float value : descriptor) EXPECT_TRUE(std::isfinite(value));
+  }
+}
+
 #if GTEST_HAS_DEATH_TEST
 int num_raw_sift_allocation_refusals = 0;
 void* RefuseRawSiftAllocation(size_t) {
@@ -711,7 +739,7 @@ TEST(SiftCPUFeatureExtractorDeathTest, AllocationFailureAllowsResizedRetry) {
 }
 
 TEST(SiftCPUFeatureExtractor, ScaleSpaceGeometryComparesEveryField) {
-  for (const auto subdivisions : {std::pair<int, int>{-1, 4}, {0, 0}}) {
+  for (const auto& subdivisions : {std::pair<int, int>{-1, 4}, {0, 0}}) {
     auto geometry = vl_scalespace_get_default_geometry(128, 96);
     geometry.octaveFirstSubdivision = subdivisions.first;
     geometry.octaveLastSubdivision = subdivisions.second;
@@ -778,7 +806,9 @@ TEST(SiftCPUPreparedExtraction,
           FeatureDescriptors descriptors;
           ASSERT_TRUE(extractor->Extract(bitmap, &keypoints, &descriptors));
           ASSERT_GT(keypoints.size(), 0);
-          if (max_features == 1) EXPECT_EQ(keypoints.size(), 1);
+          if (max_features == 1) {
+            EXPECT_EQ(keypoints.size(), 1);
+          }
           ValidateKeypoints(keypoints, bitmap);
           ASSERT_EQ(descriptors.data.rows(), keypoints.size());
           ASSERT_EQ(descriptors.data.cols(), 128);
