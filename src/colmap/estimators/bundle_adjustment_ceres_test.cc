@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -156,6 +158,27 @@ TEST(DefaultBundleAdjuster, NominalMultiCameraRig) {
                                  /*max_proj_center_error=*/0.1,
                                  /*max_scale_error=*/std::nullopt,
                                  /*num_obs_tolerance=*/0.0));
+}
+
+TEST(DefaultBundleAdjuster, TrivialLossScaleValidation) {
+  Reconstruction reconstruction;
+  const BundleAdjustmentConfig config;
+  BundleAdjustmentOptions options;
+  options.ceres->loss_function_type = CeresLossFunctionType::TRIVIAL;
+  options.ceres->loss_function_weight = 1.0;
+  for (const double scale : {0.0, std::numeric_limits<double>::infinity()}) {
+    SCOPED_TRACE(scale);
+    options.ceres->loss_function_scale = scale;
+    EXPECT_NO_THROW(
+        CreateDefaultCeresBundleAdjuster(options, config, reconstruction));
+  }
+  for (const double scale : {-1.0, std::numeric_limits<double>::quiet_NaN()}) {
+    SCOPED_TRACE(scale);
+    options.ceres->loss_function_scale = scale;
+    EXPECT_THROW(
+        CreateDefaultCeresBundleAdjuster(options, config, reconstruction),
+        std::invalid_argument);
+  }
 }
 
 TEST(DefaultBundleAdjuster, PreservesWeightedAndRobustLosses) {
