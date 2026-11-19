@@ -386,6 +386,9 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
     }
   }
 
+  // The edge list is no longer needed once all candidates are computed.
+  std::vector<Edge>().swap(unique_edges);
+
   // Step 4: Initialize priority queue from the computed candidates in O(n).
   using MinHeap = std::priority_queue<CollapseCandidate,
                                       std::vector<CollapseCandidate>,
@@ -516,6 +519,9 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
                 << " faces remaining, error=" << candidate.cost << ")";
     }
   }
+
+  // Release queued candidates before allocating the compacted output.
+  pq = MinHeap();
 
   // Compaction — build output mesh with only surviving geometry.
   LOG(INFO) << "Compacting mesh...";
