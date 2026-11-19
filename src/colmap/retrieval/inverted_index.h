@@ -74,6 +74,15 @@ class InvertedIndex {
       const DescType& descriptor,
       std::bitset<kEmbeddingDim>* binary_descriptor) const;
 
+  // The projection is independent of the visual word; thresholds are not.
+  // Input and output must not overlap. Reuse the output storage across calls.
+  void ProjectDescriptor(const Eigen::Ref<const DescType>& descriptor,
+                         ProjDescType* projected_descriptor) const;
+  void ConvertProjectedToBinaryDescriptor(
+      int64_t word_id,
+      const ProjDescType& projected_descriptor,
+      std::bitset<kEmbeddingDim>* binary_descriptor) const;
+
   float SquaredIDFWeight(int64_t word_id) const;
 
   void FindMatches(int64_t word_id,
@@ -276,9 +285,27 @@ void InvertedIndex<kDescType, kDescDim, kEmbeddingDim>::
         const int64_t word_id,
         const DescType& descriptor,
         std::bitset<kEmbeddingDim>* binary_descriptor) const {
-  const ProjDescType proj_desc =
+  ProjDescType projected_descriptor;
+  ProjectDescriptor(descriptor, &projected_descriptor);
+  ConvertProjectedToBinaryDescriptor(
+      word_id, projected_descriptor, binary_descriptor);
+}
+
+template <typename kDescType, int kDescDim, int kEmbeddingDim>
+void InvertedIndex<kDescType, kDescDim, kEmbeddingDim>::ProjectDescriptor(
+    const Eigen::Ref<const DescType>& descriptor,
+    ProjDescType* projected_descriptor) const {
+  projected_descriptor->noalias() =
       proj_matrix_ * descriptor.transpose().template cast<float>();
-  inverted_files_.at(word_id).ConvertToBinaryDescriptor(proj_desc,
+}
+
+template <typename kDescType, int kDescDim, int kEmbeddingDim>
+void InvertedIndex<kDescType, kDescDim, kEmbeddingDim>::
+    ConvertProjectedToBinaryDescriptor(
+        const int64_t word_id,
+        const ProjDescType& projected_descriptor,
+        std::bitset<kEmbeddingDim>* binary_descriptor) const {
+  inverted_files_.at(word_id).ConvertToBinaryDescriptor(projected_descriptor,
                                                         binary_descriptor);
 }
 
