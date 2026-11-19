@@ -1794,7 +1794,7 @@ void MaybeDecomposeRelativePoses(DatabaseCache* database_cache) {
 
     TwoViewGeometry two_view_geometry =
         correspondence_graph->ExtractTwoViewGeometry(
-            image_id1, image_id2, /*extract_inlier_matches=*/true);
+            image_id1, image_id2, /*extract_inlier_matches=*/false);
 
     if (two_view_geometry.cam2_from_cam1.has_value()) {
       continue;
@@ -1810,6 +1810,8 @@ void MaybeDecomposeRelativePoses(DatabaseCache* database_cache) {
       continue;
     }
 
+    correspondence_graph->ExtractMatchesBetweenImages(
+        image_id1, image_id2, two_view_geometry.inlier_matches);
     if (two_view_geometry.inlier_matches.empty()) {
       decompose_count++;
       decompose_failed_count++;
