@@ -1021,6 +1021,31 @@ public:
 		std::vector< ConstPointSupportKey< IsotropicUIntPack< Dim , WeightDegree > > > weightKeys( ThreadPool::NumThreads() );
 		std::vector< ConstPointSupportKey< IsotropicUIntPack< Dim , DataDegree > > > dataKeys( ThreadPool::NumThreads() );
 		for( size_t i=0 ; i<neighborKeys.size() ; i++ ) neighborKeys[i].set( tree._localToGlobal( depth ) ) , weightKeys[i].set( tree._localToGlobal( depth ) ) , dataKeys[i].set( tree._localToGlobal( depth ) );
+		// Degree-zero auxiliary values belong to cells. Preserve the first
+		// eligible cell in serial traversal order when extracting in parallel.
+		// Edges inherited from an earlier phase keep their existing owner.
+		std::vector< node_index_type > vertexOwners;
+		if constexpr( HasData && DataDegree==0 )
+		if( data && ThreadPool::NumThreads()>1 && ThreadPool::ParallelizationType!=ThreadPool::NONE )
+		{
+			vertexOwners.resize( sValues.cellIndices.counts[1] , -1 );
+			for( size_t i=tree._sNodesBegin(depth,slice-(zDir==HyperCube::BACK ? 0 : 1)) ; i<tree._sNodesEnd(depth,slice-(zDir==HyperCube::BACK ? 0 : 1)) ; i++ )
+			{
+				TreeNode *leaf = tree._sNodes.treeNodes[i];
+				if( tree._isValidSpaceNode(leaf) && !IsActiveNode<Dim>(leaf->children) )
+				{
+					const auto &indices = sValues.cellIndices.template indices<1>(leaf);
+					const auto mcIndex = sValues.mcIndices[i-sValues.cellIndices.nodeOffset];
+					if( HyperCube::Cube<Dim-1>::HasMCRoots(mcIndex) )
+						for( typename HyperCube::Cube<Dim-1>::template Element<1> e ; e<HyperCube::Cube<Dim-1>::template ElementNum<1>() ; e++ )
+							if( HyperCube::Cube<1>::HasMCRoots( HyperCube::Cube<Dim-1>::ElementMCIndex(e,mcIndex) ) )
+							{
+								node_index_type vIndex = indices[e.index];
+								if( !sScratch.eSet[vIndex] && vertexOwners[vIndex]==-1 ) vertexOwners[vIndex] = (node_index_type)i;
+							}
+				}
+			}
+		}
 		ThreadPool::ParallelFor( tree._sNodesBegin(depth,slice-(zDir==HyperCube::BACK ? 0 : 1)) , tree._sNodesEnd(depth,slice-(zDir==HyperCube::BACK ? 0 : 1)) , [&]( unsigned int thread , size_t i )
 		{
 			if( tree._isValidSpaceNode( tree._sNodes.treeNodes[i] ) )
@@ -1049,7 +1074,7 @@ public:
 #else // !SANITIZED_PR
 								volatile char &edgeSet = sScratch.eSet[vIndex];
 #endif // SANITIZED_PR
-								if( !edgeSet )
+								if( !edgeSet && ( vertexOwners.empty() || vertexOwners[vIndex]==(node_index_type)i ) )
 								{
 									Vertex vertex;
 									Key key = _EdgeIndex( leaf , e );
@@ -1161,6 +1186,32 @@ public:
 		std::vector< ConstPointSupportKey< IsotropicUIntPack< Dim , WeightDegree > > > weightKeys( ThreadPool::NumThreads() );
 		std::vector< ConstPointSupportKey< IsotropicUIntPack< Dim , DataDegree > > > dataKeys( ThreadPool::NumThreads() );
 		for( size_t i=0 ; i<neighborKeys.size() ; i++ ) neighborKeys[i].set( tree._localToGlobal( depth ) ) , weightKeys[i].set( tree._localToGlobal( depth ) ) , dataKeys[i].set( tree._localToGlobal( depth ) );
+		// Preserve serial cell ownership for degree-zero auxiliary data.
+		std::vector< node_index_type > vertexOwners;
+		if constexpr( HasData && DataDegree==0 )
+		if( data && ThreadPool::NumThreads()>1 && ThreadPool::ParallelizationType!=ThreadPool::NONE )
+		{
+			vertexOwners.resize( xValues.cellIndices.counts[0] , -1 );
+			for( size_t i=tree._sNodesBegin(depth,slab) ; i<tree._sNodesEnd(depth,slab) ; i++ )
+			{
+				TreeNode *leaf = tree._sNodes.treeNodes[i];
+				if( tree._isValidSpaceNode(leaf) && !IsActiveNode<Dim>(leaf->children) )
+				{
+					unsigned int mcIndex = static_cast< unsigned int >( bValues.mcIndices[ i - bValues.cellIndices.nodeOffset ] ) | ( static_cast< unsigned int >( fValues.mcIndices[ i - fValues.cellIndices.nodeOffset ] ) << 4u );
+					const auto &indices = xValues.cellIndices.template indices<0>(leaf);
+					if( HyperCube::Cube<Dim>::HasMCRoots(mcIndex) )
+						for( typename HyperCube::Cube<Dim-1>::template Element<0> c ; c<HyperCube::Cube<Dim-1>::template ElementNum<0>() ; c++ )
+						{
+							typename HyperCube::Cube<Dim>::template Element<1> e( HyperCube::CROSS , c.index );
+							if( HyperCube::Cube<1>::HasMCRoots( HyperCube::Cube<Dim>::ElementMCIndex(e,mcIndex) ) )
+							{
+								node_index_type vIndex = indices[c.index];
+								if( !xScratch.eSet[vIndex] && vertexOwners[vIndex]==-1 ) vertexOwners[vIndex] = (node_index_type)i;
+							}
+						}
+				}
+			}
+		}
 		ThreadPool::ParallelFor( tree._sNodesBegin(depth,slab) , tree._sNodesEnd(depth,slab) , [&]( unsigned int thread , size_t i )
 		{
 			if( tree._isValidSpaceNode( tree._sNodes.treeNodes[i] ) )
@@ -1190,7 +1241,7 @@ public:
 #else // !SANITIZED_PR
 								volatile char &edgeSet = xScratch.eSet[vIndex];
 #endif // SANITIZED_PR
-								if( !edgeSet )
+								if( !edgeSet && ( vertexOwners.empty() || vertexOwners[vIndex]==(node_index_type)i ) )
 								{
 									Vertex vertex;
 									Key key = _EdgeIndex( leaf , e.index );
