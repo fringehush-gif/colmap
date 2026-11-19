@@ -901,14 +901,24 @@ TEST(Ply, FailedOutputIsReported) {
 #ifdef __linux__
 TEST(Ply, BinaryPayloadFailureIsReported) {
   const auto path = CreateTestDir() / "limited.ply";
-  const std::vector<PlyPoint> points(64);
   auto mesh = CreateTestTexturedMesh();
   mesh.face_uvs.clear();
   mesh.mesh.faces.resize(128, mesh.mesh.faces.front());
-  for (const bool write_mesh : {false, true}) {
-    SCOPED_TRACE(write_mesh);
+  struct TestCase {
+    bool write_mesh;
+    size_t num_points;
+    rlim_t file_limit;
+  };
+  for (const TestCase test : {TestCase{true, 0, 1024},
+                              {false, 64, 1024},
+                              {false, 40001, 1024},
+                              {false, 40001, 1024 * 1024}}) {
+    SCOPED_TRACE(::testing::Message()
+                 << test.write_mesh << ", points=" << test.num_points
+                 << ", limit=" << test.file_limit);
+    const std::vector<PlyPoint> points(test.num_points);
     const auto Write = [&] {
-      if (write_mesh) {
+      if (test.write_mesh) {
         WriteBinaryPlyMesh(path, mesh);
       } else {
         WriteBinaryPlyPoints(path, points);
@@ -920,12 +930,12 @@ TEST(Ply, BinaryPayloadFailureIsReported) {
     input.close();
     const size_t header_end = bytes.find("end_header\n");
     ASSERT_NE(header_end, std::string::npos);
-    ASSERT_LT(header_end + std::string("end_header\n").size(), 1024);
-    ASSERT_GT(bytes.size(), 1024);
-    ASSERT_LT(bytes.size(), 4096);
+    ASSERT_LT(header_end + std::string("end_header\n").size(), test.file_limit);
+    ASSERT_GT(bytes.size(), test.file_limit);
     ASSERT_TRUE(std::filesystem::remove(path));
     // Restrict only the isolated child. The header fits; the buffered binary
-    // payload reaches the file-size limit and must be reported on completion.
+    // payload reaches the file-size limit and must be reported on completion,
+    // including early and late flushes of the multi-chunk point writer.
     EXPECT_EXIT(
         {
           struct rlimit limit;
@@ -933,7 +943,7 @@ TEST(Ply, BinaryPayloadFailureIsReported) {
               std::signal(SIGXFSZ, SIG_IGN) == SIG_ERR) {
             std::_Exit(2);
           }
-          limit.rlim_cur = 1024;
+          limit.rlim_cur = test.file_limit;
           if (setrlimit(RLIMIT_FSIZE, &limit) != 0) std::_Exit(2);
           try {
             Write();
@@ -948,7 +958,7 @@ TEST(Ply, BinaryPayloadFailureIsReported) {
         },
         testing::ExitedWithCode(0),
         "");
-    EXPECT_EQ(std::filesystem::file_size(path), 1024);
+    EXPECT_EQ(std::filesystem::file_size(path), test.file_limit);
   }
 }
 #endif
@@ -1043,12 +1053,6 @@ TEST(Ply, MeshWriterPayloadAndColorOmission) {
   }
 }
 
-}  // namespace
-}  // namespace colmap
-
-namespace colmap {
-namespace {
-
 TEST(Ply, BinaryPointWireBytes) {
   const auto test_dir = CreateTestDir();
   const auto test_file = test_dir / "wire.ply";
@@ -1059,23 +1063,31 @@ TEST(Ply, BinaryPointWireBytes) {
                                        std::numeric_limits<float>::lowest(),
                                        std::numeric_limits<float>::infinity(),
                                        std::numeric_limits<float>::quiet_NaN()};
-  for (const size_t count :
-       {size_t{0}, size_t{1}, size_t{1024}, size_t{1025}, size_t{4097}}) {
-    std::vector<PlyPoint> points(count);
-    for (size_t i = 0; i < count; ++i) {
-      auto& point = points[i];
-      point.x = values[i % values.size()];
-      point.y = values[(i + 1) % values.size()];
-      point.z = values[(i + 2) % values.size()];
-      point.nx = values[(i + 3) % values.size()];
-      point.ny = values[(i + 4) % values.size()];
-      point.nz = values[(i + 5) % values.size()];
-      point.r = static_cast<uint8_t>(i);
-      point.g = static_cast<uint8_t>(17 * i + 3);
-      point.b = static_cast<uint8_t>(31 * i + 7);
-    }
-    for (const bool write_normal : {false, true}) {
-      for (const bool write_rgb : {false, true}) {
+  for (const bool write_normal : {false, true}) {
+    for (const bool write_rgb : {false, true}) {
+      // Bracket the 27 KiB chunk capacity for this record layout.
+      const size_t record_bytes =
+          12 + (write_normal ? 12 : 0) + (write_rgb ? 3 : 0);
+      const size_t capacity = 27 * 1024 / record_bytes;
+      for (const size_t count : {size_t{0},
+                                 size_t{1},
+                                 capacity - 1,
+                                 capacity,
+                                 capacity + 1,
+                                 size_t{4097}}) {
+        std::vector<PlyPoint> points(count);
+        for (size_t i = 0; i < count; ++i) {
+          auto& point = points[i];
+          point.x = values[i % values.size()];
+          point.y = values[(i + 1) % values.size()];
+          point.z = values[(i + 2) % values.size()];
+          point.nx = values[(i + 3) % values.size()];
+          point.ny = values[(i + 4) % values.size()];
+          point.nz = values[(i + 5) % values.size()];
+          point.r = static_cast<uint8_t>(i);
+          point.g = static_cast<uint8_t>(17 * i + 3);
+          point.b = static_cast<uint8_t>(31 * i + 7);
+        }
         SCOPED_TRACE(::testing::Message()
                      << count << " points, normal=" << write_normal
                      << ", rgb=" << write_rgb);
@@ -1163,15 +1175,9 @@ TEST(Ply, RoundTripLargeBinaryPlyPointsFullData) {
   for (size_t i = 0; i < original_points.size(); ++i) {
     const auto& expected = original_points[i];
     const auto& actual = loaded_points[i];
-    EXPECT_EQ(actual.x, expected.x);
-    EXPECT_EQ(actual.y, expected.y);
-    EXPECT_EQ(actual.z, expected.z);
-    EXPECT_EQ(actual.nx, expected.nx);
-    EXPECT_EQ(actual.ny, expected.ny);
-    EXPECT_EQ(actual.nz, expected.nz);
-    EXPECT_EQ(actual.r, expected.r);
-    EXPECT_EQ(actual.g, expected.g);
-    EXPECT_EQ(actual.b, expected.b);
+    ExpectPositionEq(actual, expected.x, expected.y, expected.z);
+    ExpectNormalEq(actual, expected.nx, expected.ny, expected.nz);
+    ExpectColorEq(actual, expected.r, expected.g, expected.b);
   }
 }
 
