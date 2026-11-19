@@ -219,6 +219,30 @@ TEST(SimplifyMesh, BoundaryPreservation) {
   EXPECT_GE(result_high.faces.size() + 5, result_none.faces.size());
 }
 
+TEST(SimplifyMesh, RepeatedEdgesAreNotBoundaries) {
+  auto mesh = CreateTetrahedronMesh();
+  // Three faces now meet at each edge of the duplicated triangle.
+  mesh.faces.push_back(mesh.faces.front());
+
+  MeshSimplificationOptions options;
+  options.target_face_ratio = 0.6;
+  options.num_threads = 1;
+  options.boundary_weight = 0;
+  const auto reference = SimplifyMesh(mesh, options);
+  ASSERT_EQ(reference.vertices.size(), 3);
+
+  options.boundary_weight = 1e6;
+  const auto result = SimplifyMesh(mesh, options);
+
+  EXPECT_EQ(result.faces.size(), reference.faces.size());
+  ASSERT_EQ(result.vertices.size(), reference.vertices.size());
+  for (size_t i = 0; i < reference.vertices.size(); ++i) {
+    EXPECT_EQ(result.vertices[i].x, reference.vertices[i].x);
+    EXPECT_EQ(result.vertices[i].y, reference.vertices[i].y);
+    EXPECT_EQ(result.vertices[i].z, reference.vertices[i].z);
+  }
+}
+
 TEST(SimplifyMesh, SingleTriangle) {
   PlyMesh mesh;
   mesh.vertices.emplace_back(0.0f, 0.0f, 0.0f, 255, 0, 0);

@@ -48,6 +48,7 @@ struct CollapseCandidate {
   size_t v1 = 0;
   size_t v2 = 0;
   Eigen::Vector3d optimal_position = Eigen::Vector3d::Zero();
+  Eigen::Vector3f optimal_color = Eigen::Vector3f::Zero();
   uint32_t timestamp_v1 = 0;
   uint32_t timestamp_v2 = 0;
 };
@@ -97,7 +98,8 @@ double ComputeQuadricError(const Eigen::Matrix4d& Q,
 
 CollapseCandidate ComputeEdgeCollapse(const std::vector<VertexData>& vertices,
                                       const size_t v1,
-                                      const size_t v2) {
+                                      const size_t v2,
+                                      const bool interpolate_colors) {
   CollapseCandidate candidate;
   candidate.v1 = v1;
   candidate.v2 = v2;
@@ -105,6 +107,11 @@ CollapseCandidate ComputeEdgeCollapse(const std::vector<VertexData>& vertices,
   candidate.timestamp_v2 = vertices[v2].timestamp;
 
   const Eigen::Matrix4d Q_bar = vertices[v1].quadric + vertices[v2].quadric;
+
+  // Precompute per-vertex errors (used by fallback position solve and
+  // non-interpolated color selection).
+  const double err_v1 = ComputeQuadricError(Q_bar, vertices[v1].position);
+  const double err_v2 = ComputeQuadricError(Q_bar, vertices[v2].position);
 
   // Try to solve the 4x4 system for optimal position (Garland & Heckbert).
   Eigen::Matrix4d A = Q_bar;
@@ -122,8 +129,6 @@ CollapseCandidate ComputeEdgeCollapse(const std::vector<VertexData>& vertices,
         std::max(0.0, ComputeQuadricError(Q_bar, candidate.optimal_position));
   } else {
     // Fallback: evaluate at v1, v2, and midpoint; pick minimum.
-    const double err_v1 = ComputeQuadricError(Q_bar, vertices[v1].position);
-    const double err_v2 = ComputeQuadricError(Q_bar, vertices[v2].position);
     const Eigen::Vector3d mid =
         0.5 * (vertices[v1].position + vertices[v2].position);
     const double err_mid = ComputeQuadricError(Q_bar, mid);
@@ -140,28 +145,26 @@ CollapseCandidate ComputeEdgeCollapse(const std::vector<VertexData>& vertices,
     }
   }
 
-  return candidate;
-}
-
-Eigen::Vector3f ComputeCollapsedColor(const VertexData& v1,
-                                      const VertexData& v2,
-                                      const Eigen::Vector3d& position,
-                                      const bool interpolate_colors) {
+  // Compute optimal color.
   if (interpolate_colors) {
-    const Eigen::Vector3d edge_dir = v2.position - v1.position;
+    const Eigen::Vector3d edge_dir =
+        vertices[v2].position - vertices[v1].position;
     const double edge_len_sq = edge_dir.squaredNorm();
     float t = 0.5f;
     if (edge_len_sq > 0) {
-      t = static_cast<float>((position - v1.position).dot(edge_dir) /
-                             edge_len_sq);
+      t = static_cast<float>(
+          (candidate.optimal_position - vertices[v1].position).dot(edge_dir) /
+          edge_len_sq);
       t = std::clamp(t, 0.0f, 1.0f);
     }
-    return (1.0f - t) * v1.color + t * v2.color;
+    candidate.optimal_color =
+        (1.0f - t) * vertices[v1].color + t * vertices[v2].color;
+  } else {
+    candidate.optimal_color =
+        (err_v1 <= err_v2) ? vertices[v1].color : vertices[v2].color;
   }
-  const Eigen::Matrix4d Q_bar = v1.quadric + v2.quadric;
-  const double err_v1 = ComputeQuadricError(Q_bar, v1.position);
-  const double err_v2 = ComputeQuadricError(Q_bar, v2.position);
-  return err_v1 <= err_v2 ? v1.color : v2.color;
+
+  return candidate;
 }
 
 bool WouldCauseFlip(const std::vector<VertexData>& vertices,
@@ -381,8 +384,10 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
     const int64_t num_edges_signed = static_cast<int64_t>(unique_edges.size());
 #pragma omp parallel for schedule(static) num_threads(eff_num_threads)
     for (int64_t i = 0; i < num_edges_signed; ++i) {
-      initial_candidates[i] = ComputeEdgeCollapse(
-          vertex_data, unique_edges[i].first, unique_edges[i].second);
+      initial_candidates[i] = ComputeEdgeCollapse(vertex_data,
+                                                  unique_edges[i].first,
+                                                  unique_edges[i].second,
+                                                  options.interpolate_colors);
     }
   }
 
@@ -439,13 +444,8 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
     const size_t v1 = candidate.v1;
     const size_t v2 = candidate.v2;
 
-    // Only accepted candidates need color. The timestamp checks above ensure
-    // both vertices still have the data used to compute the candidate.
-    vertex_data[v1].color = ComputeCollapsedColor(vertex_data[v1],
-                                                  vertex_data[v2],
-                                                  candidate.optimal_position,
-                                                  options.interpolate_colors);
     vertex_data[v1].position = candidate.optimal_position;
+    vertex_data[v1].color = candidate.optimal_color;
     vertex_data[v1].quadric += vertex_data[v2].quadric;
 
     // Process faces adjacent to v2.
@@ -506,7 +506,8 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
     // Recompute candidates for all edges incident to v1.
     for (const size_t u : vertex_data[v1].adjacent_vertices) {
       if (vertex_data[u].removed) continue;
-      pq.push(ComputeEdgeCollapse(vertex_data, v1, u));
+      pq.push(
+          ComputeEdgeCollapse(vertex_data, v1, u, options.interpolate_colors));
     }
 
     // Log progress at 10% intervals.
