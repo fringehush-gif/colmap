@@ -837,6 +837,75 @@ void RegularTreeNode< Dim , NodeData , DepthAndOffsetType >::NeighborKey< Parame
 	);
 }
 
+// Fill a 3x3x3 child window one parent brood at a time. Corner, brood, and
+// output slot are template indices, so every selected child/output offset is
+// constant; only the parent pointer and the existence of its brood vary.
+namespace StaticOneRingBroods
+{
+	template< unsigned int Corner , unsigned int Group , unsigned int Slot , typename Node , typename ChildSlice >
+	void FillSlot( const Node* brood , ChildSlice& children )
+	{
+		static constexpr unsigned int cx = Corner&1u , cy = (Corner>>1u)&1u , cz = (Corner>>2u)&1u;
+		static constexpr unsigned int gx = Group&1u , gy = (Group>>1u)&1u , gz = (Group>>2u)&1u;
+		static constexpr unsigned int x = Slot&1u , y = (Slot>>1u)&1u , z = (Slot>>2u)&1u;
+		static constexpr unsigned int nx = gx==cx ? 1u : 2u , ny = gy==cy ? 1u : 2u , nz = gz==cz ? 1u : 2u;
+		if constexpr( x<nx && y<ny && z<nz )
+		{
+			static constexpr unsigned int sx = gx ? 1u+cx : 0u , sy = gy ? 1u+cy : 0u , sz = gz ? 1u+cz : 0u;
+			static constexpr unsigned int bx = gx ? 0u : 1u-cx , by = gy ? 0u : 1u-cy , bz = gz ? 0u : 1u-cz;
+			static constexpr unsigned int childIndex = (bx+x) | ( (by+y)<<1u ) | ( (bz+z)<<2u );
+			children[sx+x][sy+y][sz+z] = brood ? brood+childIndex : NULL;
+		}
+	}
+
+	template< unsigned int Corner , unsigned int Group , typename ParentSlice , typename ChildSlice >
+	void FillGroup( ParentSlice& parents , ChildSlice& children )
+	{
+		static constexpr unsigned int cx = Corner&1u , cy = (Corner>>1u)&1u , cz = (Corner>>2u)&1u;
+		static constexpr unsigned int gx = Group&1u , gy = (Group>>1u)&1u , gz = (Group>>2u)&1u;
+		const auto* parent = parents[gx+cx][gy+cy][gz+cz];
+		const auto* brood = parent ? parent->children : NULL;
+		FillSlot< Corner , Group , 0 >( brood , children );
+		FillSlot< Corner , Group , 1 >( brood , children );
+		FillSlot< Corner , Group , 2 >( brood , children );
+		FillSlot< Corner , Group , 3 >( brood , children );
+		FillSlot< Corner , Group , 4 >( brood , children );
+		FillSlot< Corner , Group , 5 >( brood , children );
+		FillSlot< Corner , Group , 6 >( brood , children );
+		FillSlot< Corner , Group , 7 >( brood , children );
+	}
+
+	template< unsigned int Corner , typename ParentSlice , typename ChildSlice >
+	void FillCorner( ParentSlice& parents , ChildSlice& children )
+	{
+		FillGroup< Corner , 0 >( parents , children );
+		FillGroup< Corner , 1 >( parents , children );
+		FillGroup< Corner , 2 >( parents , children );
+		FillGroup< Corner , 3 >( parents , children );
+		FillGroup< Corner , 4 >( parents , children );
+		FillGroup< Corner , 5 >( parents , children );
+		FillGroup< Corner , 6 >( parents , children );
+		FillGroup< Corner , 7 >( parents , children );
+	}
+
+	template< typename ParentSlice , typename ChildSlice >
+	void Fill( int corner , ParentSlice& parents , ChildSlice& children )
+	{
+		switch( corner )
+		{
+			case 0: FillCorner< 0 >( parents , children ); break;
+			case 1: FillCorner< 1 >( parents , children ); break;
+			case 2: FillCorner< 2 >( parents , children ); break;
+			case 3: FillCorner< 3 >( parents , children ); break;
+			case 4: FillCorner< 4 >( parents , children ); break;
+			case 5: FillCorner< 5 >( parents , children ); break;
+			case 6: FillCorner< 6 >( parents , children ); break;
+			case 7: FillCorner< 7 >( parents , children ); break;
+			default: MK_THROW( "Invalid child corner: " , corner );
+		}
+	}
+}
+
 ///////////////////////////////////////
 // RegularTreeNode::ConstNeighborKey //
 ///////////////////////////////////////
@@ -945,8 +1014,14 @@ typename RegularTreeNode< Dim , NodeData , DepthAndOffsetType >::template ConstN
 	if( node!=neighbors.neighbors.data[ CenterIndex ] )
 	{
 		for( int d=node->depth()+1 ; d<=_depth && this->neighbors[d].neighbors.data[ CenterIndex ] ; d++ ) this->neighbors[d].neighbors.data[ CenterIndex ] = NULL;
-		neighbors.clear();
-		if( !node->parent ) neighbors.neighbors.data[ CenterIndex ] = node;
+		// Child windows are fully assigned by _NeighborsLoop, including nulls.
+		if( !node->parent ) neighbors.clear() , neighbors.neighbors.data[ CenterIndex ] = node;
+		else if constexpr( Dim==3 && ( ( LeftRadii==1 ) && ... ) && ( ( RightRadii==1 ) && ... ) )
+		{
+			auto parents = getNeighbors( node->parent ).neighbors();
+			auto children = neighbors.neighbors();
+			StaticOneRingBroods::Fill( (int)( node - node->parent->children ) , parents , children );
+		}
 		else _NeighborsLoop( ParameterPack::UIntPack< LeftRadii ... >() , ParameterPack::UIntPack< RightRadii ... >() , ParameterPack::UIntPack< LeftRadii ... >() , ParameterPack::UIntPack< RightRadii ... >() , getNeighbors( node->parent ).neighbors() , neighbors.neighbors() , (int)( node - node->parent->children ) );
 	}
 	return neighbors;
