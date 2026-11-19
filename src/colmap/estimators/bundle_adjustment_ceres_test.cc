@@ -2,12 +2,19 @@
 
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 
+#include "colmap/estimators/ceres_loss_function.h"
 #include "colmap/geometry/rigid3_matchers.h"
 #include "colmap/scene/reconstruction_matchers.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/models.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/testing.h"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -151,6 +158,163 @@ TEST(DefaultBundleAdjuster, NominalMultiCameraRig) {
                                  /*max_proj_center_error=*/0.1,
                                  /*max_scale_error=*/std::nullopt,
                                  /*num_obs_tolerance=*/0.0));
+}
+
+TEST(DefaultBundleAdjuster, TrivialLossScaleValidation) {
+  Reconstruction reconstruction;
+  const BundleAdjustmentConfig config;
+  BundleAdjustmentOptions options;
+  options.ceres->loss_function_type = CeresLossFunctionType::TRIVIAL;
+  options.ceres->loss_function_weight = 1.0;
+  for (const double scale : {0.0, std::numeric_limits<double>::infinity()}) {
+    SCOPED_TRACE(scale);
+    options.ceres->loss_function_scale = scale;
+    EXPECT_NO_THROW(
+        CreateDefaultCeresBundleAdjuster(options, config, reconstruction));
+  }
+  for (const double scale : {-1.0, std::numeric_limits<double>::quiet_NaN()}) {
+    SCOPED_TRACE(scale);
+    options.ceres->loss_function_scale = scale;
+    EXPECT_THROW(
+        CreateDefaultCeresBundleAdjuster(options, config, reconstruction),
+        std::invalid_argument);
+  }
+}
+
+TEST(DefaultBundleAdjuster, PreservesWeightedAndRobustLosses) {
+  Reconstruction original;
+  SyntheticDatasetOptions dataset_options;
+  dataset_options.num_rigs = 1;
+  dataset_options.num_cameras_per_rig = 2;
+  dataset_options.num_frames_per_rig = 3;
+  dataset_options.num_points3D = 20;
+  SynthesizeDataset(dataset_options, &original);
+  SyntheticNoiseOptions noise_options;
+  noise_options.point2D_stddev = 1.0;
+  SynthesizeNoise(noise_options, &original);
+
+  for (const auto type : {CeresLossFunctionType::TRIVIAL,
+                          CeresLossFunctionType::SOFT_L1,
+                          CeresLossFunctionType::HUBER,
+                          CeresLossFunctionType::CAUCHY}) {
+    for (const double weight : {1.0, 2.0}) {
+      SCOPED_TRACE(static_cast<int>(type));
+      SCOPED_TRACE(weight);
+      Reconstruction reconstruction = original;
+      BundleAdjustmentConfig config;
+      for (const image_t image_id : reconstruction.RegImageIds()) {
+        config.AddImage(image_id);
+      }
+      config.FixGauge(BundleAdjustmentGauge::TWO_CAMS_FROM_WORLD);
+      BundleAdjustmentOptions options;
+      options.ceres->loss_function_type = type;
+      options.ceres->loss_function_weight = weight;
+      options.ceres->loss_function_scale = 1.0;
+      auto adjuster =
+          CreateDefaultCeresBundleAdjuster(options, config, reconstruction);
+      ceres::Problem& problem = GetCeresProblem(*adjuster);
+      std::vector<ceres::ResidualBlockId> blocks;
+      problem.GetResidualBlocks(&blocks);
+      ASSERT_FALSE(blocks.empty());
+      const auto expected_loss = CreateCeresLossFunction(type, 1.0, weight);
+      // Borrow the same residuals and manifolds so only loss selection differs.
+      ceres::Problem::Options reference_options;
+      reference_options.cost_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+      reference_options.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+#if CERES_VERSION_MAJOR >= 3 || \
+    (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 1)
+      reference_options.manifold_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+#else
+      reference_options.local_parameterization_ownership =
+          ceres::DO_NOT_TAKE_OWNERSHIP;
+#endif
+      ceres::Problem reference(reference_options);
+      ceres::Problem::EvaluateOptions evaluate_options,
+          reference_evaluate_options;
+      problem.GetParameterBlocks(&evaluate_options.parameter_blocks);
+      reference_evaluate_options.parameter_blocks =
+          evaluate_options.parameter_blocks;
+      for (double* parameters : evaluate_options.parameter_blocks) {
+#if CERES_VERSION_MAJOR >= 3 || \
+    (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 1)
+        auto* manifold =
+            const_cast<ceres::Manifold*>(problem.GetManifold(parameters));
+#else
+        auto* manifold = const_cast<ceres::LocalParameterization*>(
+            problem.GetParameterization(parameters));
+#endif
+        reference.AddParameterBlock(
+            parameters, problem.ParameterBlockSize(parameters), manifold);
+        if (problem.IsParameterBlockConstant(parameters)) {
+          reference.SetParameterBlockConstant(parameters);
+        }
+      }
+      evaluate_options.residual_blocks = blocks;
+      ceres::Problem::EvaluateOptions unweighted_options;
+      unweighted_options.apply_loss_function = false;
+      double expected_cost = 0.0;
+      for (const auto block : blocks) {
+        const auto* loss = problem.GetLossFunctionForResidualBlock(block);
+        if (type == CeresLossFunctionType::TRIVIAL && weight == 1.0) {
+          EXPECT_EQ(loss, nullptr);
+        } else {
+          ASSERT_NE(loss, nullptr);
+        }
+        std::vector<double*> parameters;
+        problem.GetParameterBlocksForResidualBlock(block, &parameters);
+        reference_evaluate_options.residual_blocks.push_back(
+            reference.AddResidualBlock(
+                const_cast<ceres::CostFunction*>(
+                    problem.GetCostFunctionForResidualBlock(block)),
+                expected_loss.get(),
+                parameters));
+        double cost;
+        unweighted_options.residual_blocks.assign(1, block);
+        ASSERT_TRUE(problem.Evaluate(
+            unweighted_options, &cost, nullptr, nullptr, nullptr));
+        double rho[3];
+        expected_loss->Evaluate(2.0 * cost, rho);
+        expected_cost += 0.5 * rho[0];
+      }
+      double actual_cost, reference_cost;
+      std::vector<double> actual_residuals, reference_residuals;
+      std::vector<double> actual_gradient, reference_gradient;
+      ceres::CRSMatrix actual_jacobian, reference_jacobian;
+      ASSERT_TRUE(problem.Evaluate(evaluate_options,
+                                   &actual_cost,
+                                   &actual_residuals,
+                                   &actual_gradient,
+                                   &actual_jacobian));
+      ASSERT_TRUE(reference.Evaluate(reference_evaluate_options,
+                                     &reference_cost,
+                                     &reference_residuals,
+                                     &reference_gradient,
+                                     &reference_jacobian));
+      for (const auto* values :
+           {&actual_residuals, &actual_gradient, &actual_jacobian.values}) {
+        EXPECT_TRUE(
+            std::all_of(values->begin(), values->end(), [](double value) {
+              return std::isfinite(value);
+            }));
+      }
+      EXPECT_GT(actual_cost, 0);
+      ASSERT_FALSE(actual_residuals.empty());
+      ASSERT_FALSE(actual_gradient.empty());
+      ASSERT_TRUE(std::any_of(actual_jacobian.values.begin(),
+                              actual_jacobian.values.end(),
+                              [](double value) { return value != 0; }));
+      EXPECT_NEAR(
+          actual_cost, expected_cost, 1e-12 * std::max(1.0, expected_cost));
+      EXPECT_EQ(actual_cost, reference_cost);
+      EXPECT_EQ(actual_residuals, reference_residuals);
+      EXPECT_EQ(actual_gradient, reference_gradient);
+      EXPECT_EQ(actual_jacobian.num_rows, reference_jacobian.num_rows);
+      EXPECT_EQ(actual_jacobian.num_cols, reference_jacobian.num_cols);
+      EXPECT_EQ(actual_jacobian.rows, reference_jacobian.rows);
+      EXPECT_EQ(actual_jacobian.cols, reference_jacobian.cols);
+      EXPECT_EQ(actual_jacobian.values, reference_jacobian.values);
+    }
+  }
 }
 
 TEST(DefaultBundleAdjuster, Cancellation) {
