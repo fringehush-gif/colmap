@@ -99,16 +99,14 @@ TYPED_TEST(LevelSetBarycenterTest, AveragesInitializedVertexAttributes) {
   using Vertex = typename Extractor::Vertex;
   using Index = PoissonRecon::node_index_type;
 
-  const std::vector<Vertex> input{
+  const std::array<Vertex, 4> input{
       Vertex(Point(0, 0, 0), Point(1, 0, 0), Real(2), Point(12, 24, 36)),
       Vertex(Point(2, 0, 0), Point(0, 2, 0), Real(4), Point(36, 48, 60)),
       Vertex(Point(2, 4, 0), Point(0, 0, 3), Real(6), Point(60, 72, 84)),
       Vertex(Point(0, 4, 0), Point(3, 2, 1), Real(8), Point(84, 96, 108))};
-  std::vector<std::pair<Index, Vertex>> polygon;
-  for (Index i = 0; i < static_cast<Index>(input.size()); ++i) {
-    polygon.emplace_back(i, input[i]);
-  }
-  std::vector<Vertex> vertices = input;
+  std::vector<std::pair<Index, Vertex>> polygon{
+      {0, input[0]}, {1, input[1]}, {2, input[2]}, {3, input[3]}};
+  std::vector<Vertex> vertices(input.begin(), input.end());
   std::vector<std::vector<Index>> faces;
   PoissonRecon::VectorBackedOutputDataStream<Vertex> vertex_stream(vertices);
   PoissonRecon::OutputDataStream<Vertex>& vertex_output = vertex_stream;
