@@ -845,15 +845,15 @@ namespace StaticOneRingBroods
 	template< unsigned int Corner , unsigned int Group , unsigned int Slot , typename Node , typename ChildSlice >
 	void FillSlot( const Node* brood , ChildSlice& children )
 	{
-		static constexpr int cx = Corner&1 , cy = (Corner>>1)&1 , cz = (Corner>>2)&1;
-		static constexpr int gx = Group&1 , gy = (Group>>1)&1 , gz = (Group>>2)&1;
-		static constexpr int x = Slot&1 , y = (Slot>>1)&1 , z = (Slot>>2)&1;
-		static constexpr int nx = gx==cx ? 1 : 2 , ny = gy==cy ? 1 : 2 , nz = gz==cz ? 1 : 2;
+		static constexpr unsigned int cx = Corner&1u , cy = (Corner>>1u)&1u , cz = (Corner>>2u)&1u;
+		static constexpr unsigned int gx = Group&1u , gy = (Group>>1u)&1u , gz = (Group>>2u)&1u;
+		static constexpr unsigned int x = Slot&1u , y = (Slot>>1u)&1u , z = (Slot>>2u)&1u;
+		static constexpr unsigned int nx = gx==cx ? 1u : 2u , ny = gy==cy ? 1u : 2u , nz = gz==cz ? 1u : 2u;
 		if constexpr( x<nx && y<ny && z<nz )
 		{
-			static constexpr int sx = gx ? 1+cx : 0 , sy = gy ? 1+cy : 0 , sz = gz ? 1+cz : 0;
-			static constexpr int bx = gx ? 0 : 1-cx , by = gy ? 0 : 1-cy , bz = gz ? 0 : 1-cz;
-			static constexpr int childIndex = (bx+x) | ( (by+y)<<1 ) | ( (bz+z)<<2 );
+			static constexpr unsigned int sx = gx ? 1u+cx : 0u , sy = gy ? 1u+cy : 0u , sz = gz ? 1u+cz : 0u;
+			static constexpr unsigned int bx = gx ? 0u : 1u-cx , by = gy ? 0u : 1u-cy , bz = gz ? 0u : 1u-cz;
+			static constexpr unsigned int childIndex = (bx+x) | ( (by+y)<<1u ) | ( (bz+z)<<2u );
 			children[sx+x][sy+y][sz+z] = brood ? brood+childIndex : NULL;
 		}
 	}
@@ -861,8 +861,8 @@ namespace StaticOneRingBroods
 	template< unsigned int Corner , unsigned int Group , typename ParentSlice , typename ChildSlice >
 	void FillGroup( ParentSlice& parents , ChildSlice& children )
 	{
-		static constexpr int cx = Corner&1 , cy = (Corner>>1)&1 , cz = (Corner>>2)&1;
-		static constexpr int gx = Group&1 , gy = (Group>>1)&1 , gz = (Group>>2)&1;
+		static constexpr unsigned int cx = Corner&1u , cy = (Corner>>1u)&1u , cz = (Corner>>2u)&1u;
+		static constexpr unsigned int gx = Group&1u , gy = (Group>>1u)&1u , gz = (Group>>2u)&1u;
 		const auto* parent = parents[gx+cx][gy+cy][gz+cz];
 		const auto* brood = parent ? parent->children : NULL;
 		FillSlot< Corner , Group , 0 >( brood , children );

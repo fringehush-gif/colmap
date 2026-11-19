@@ -39,10 +39,11 @@ void CheckNeighborWindows() {
       continue;
     }
     ASSERT_TRUE(entry.node->template initChildren<false>(&allocator));
-    for (int corner = 0; corner < (1 << Dim); ++corner) {
+    for (unsigned int corner = 0; corner < (1u << Dim); ++corner) {
       Entry child{entry.node->children + corner, entry.depth + 1, {}};
       for (unsigned int axis = 0; axis < Dim; ++axis) {
-        child.offset[axis] = 2 * entry.offset[axis] + ((corner >> axis) & 1);
+        child.offset[axis] =
+            2 * entry.offset[axis] + static_cast<int>((corner >> axis) & 1u);
       }
       entries.push_back(child);
     }
