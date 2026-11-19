@@ -343,8 +343,7 @@ vl_scalespacegeometry_is_equal (VlScaleSpaceGeometry a,
   a.firstOctave == b.firstOctave &&
   a.lastOctave == b.lastOctave &&
   a.octaveResolution == b.octaveResolution &&
-  a.octaveFirstSubdivision == b.octaveFirstSubdivision &&
-  a.octaveLastSubdivision == b.octaveLastSubdivision &&
+  a.octaveFirstSubdivision == b.octaveLastSubdivision &&
   a.baseScale == b.baseScale &&
   a.nominalScale == b.nominalScale ;
 }

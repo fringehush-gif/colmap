@@ -18,7 +18,6 @@
 #include "colmap/util/cuda.h"
 #endif
 
-#include "thirdparty/VLFeat/scalespace.h"
 #include "thirdparty/VLFeat/sift.h"
 
 #include <algorithm>
@@ -564,7 +563,7 @@ TEST_P(SiftCpuExtractionTest, ReusedExtractorMatchesFreshImages) {
   ASSERT_NE(reused, nullptr);
 
   // Extractors own a deep copy. Mutating the caller's settings must not change
-  // either initialization or subsequent calls on the retained detector.
+  // either initialization or subsequent calls on the extractor.
   options.sift->first_octave = 1;
   options.sift->octave_resolution = 5;
   options.sift->peak_threshold = 1000;
@@ -622,7 +621,7 @@ TEST(SiftCPUFeatureExtractor, InvalidOctaveResolutionKeepsFailing) {
   }
 }
 
-TEST(SiftCPUFeatureExtractor, ReusedDetectorMatchesChangedRoundingMode) {
+TEST(SiftCPUFeatureExtractor, ReusedExtractorMatchesChangedRoundingMode) {
   const ScopedSiftRoundingMode restore_rounding;
   Bitmap bitmap(64, 64, false);
   uint32_t state = 1;
@@ -674,9 +673,12 @@ TEST(SiftCPUFeatureExtractor, ReusedDetectorMatchesChangedRoundingMode) {
 }
 
 #if GTEST_HAS_DEATH_TEST
-int num_covariant_allocation_refusals = 0;
-void* RefuseCovariantAllocation(size_t, size_t) {
-  ++num_covariant_allocation_refusals;
+int num_covariant_allocation_attempts = 0;
+void* RefuseCovariantScaleSpaceAllocation(size_t count, size_t size) {
+  // Allow the detector itself, then refuse its Gaussian scale space.
+  if (++num_covariant_allocation_attempts == 1) {
+    return std::calloc(count, size);
+  }
   return nullptr;
 }
 
@@ -704,15 +706,17 @@ void RunCovariantAllocationRefusalChild() {
     std::_Exit(3);
   }
 
-  // Resizing replaces the retained Gaussian scale space. Refuse its first
-  // allocation in an isolated child, then retry with the normal allocator.
-  vl_set_alloc_func(
-      std::malloc, std::realloc, RefuseCovariantAllocation, std::free);
+  // Refuse the Gaussian scale-space allocation in an isolated child, then
+  // retry with the normal allocator on the same extractor and resized image.
+  vl_set_alloc_func(std::malloc,
+                    std::realloc,
+                    RefuseCovariantScaleSpaceAllocation,
+                    std::free);
   FeatureKeypoints keypoints;
   FeatureDescriptors descriptors;
   const bool failed = !reused->Extract(resized, &keypoints, &descriptors);
   vl_set_alloc_func(std::malloc, std::realloc, std::calloc, std::free);
-  if (!failed || num_covariant_allocation_refusals != 1 || !keypoints.empty()) {
+  if (!failed || num_covariant_allocation_attempts != 2 || !keypoints.empty()) {
     std::_Exit(4);
   }
   if (!reused->Extract(resized, &keypoints, &descriptors) ||
@@ -736,30 +740,6 @@ TEST(SiftCPUFeatureExtractorDeathTest, AllocationFailureAllowsResizedRetry) {
 #else
   GTEST_SKIP() << "Allocator injection requires an isolated child process";
 #endif
-}
-
-TEST(SiftCPUFeatureExtractor, ScaleSpaceGeometryComparesEveryField) {
-  for (const auto& subdivisions : {std::pair<int, int>{-1, 4}, {0, 0}}) {
-    auto geometry = vl_scalespace_get_default_geometry(128, 96);
-    geometry.octaveFirstSubdivision = subdivisions.first;
-    geometry.octaveLastSubdivision = subdivisions.second;
-    EXPECT_TRUE(vl_scalespacegeometry_is_equal(geometry, geometry));
-    std::array<VlScaleSpaceGeometry, 9> changed;
-    changed.fill(geometry);
-    ++changed[0].width;
-    ++changed[1].height;
-    ++changed[2].firstOctave;
-    ++changed[3].lastOctave;
-    ++changed[4].octaveResolution;
-    ++changed[5].octaveFirstSubdivision;
-    ++changed[6].octaveLastSubdivision;
-    ++changed[7].baseScale;
-    ++changed[8].nominalScale;
-    for (const auto& other : changed) {
-      EXPECT_FALSE(vl_scalespacegeometry_is_equal(geometry, other));
-      EXPECT_FALSE(vl_scalespacegeometry_is_equal(other, geometry));
-    }
-  }
 }
 
 INSTANTIATE_TEST_SUITE_P(

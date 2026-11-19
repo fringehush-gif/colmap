@@ -25,7 +25,6 @@
 #include "thirdparty/VLFeat/sift.h"
 
 #include <array>
-#include <cfenv>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -315,11 +314,9 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
 
 class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
  public:
-  using VlCovDetType = std::unique_ptr<VlCovDet, void (*)(VlCovDet*)>;
-
   explicit CovariantSiftCPUFeatureExtractor(
       const FeatureExtractionOptions& options)
-      : options_(options), covdet_(nullptr, &vl_covdet_delete) {
+      : options_(options) {
     THROW_CHECK(options_.Check());
     if (options_.sift->darkness_adaptivity) {
       WarnDarknessAdaptivityNotAvailable();
@@ -340,28 +337,16 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
     const int kMaxOctaveResolution = 1000;
     THROW_CHECK_LE(options_.sift->octave_resolution, kMaxOctaveResolution);
 
-    // Detector coefficients depend on the rounding mode at construction.
-    const int rounding_mode = std::fegetround();
-    if (rounding_mode == -1 || rounding_mode != covdet_rounding_mode_) {
-      covdet_.reset();
-      covdet_rounding_mode_ = rounding_mode;
+    std::unique_ptr<VlCovDet, void (*)(VlCovDet*)> covdet(
+        vl_covdet_new(VL_COVDET_METHOD_DOG), &vl_covdet_delete);
+    if (!covdet) {
+      return false;
     }
-
-    // The copied options are immutable. Configuring an existing detector would
-    // reset it and discard the scale-space buffers retained for the next image.
-    if (!covdet_) {
-      covdet_.reset(vl_covdet_new(VL_COVDET_METHOD_DOG));
-      if (!covdet_) {
-        return false;
-      }
-      vl_covdet_set_first_octave(covdet_.get(), options_.sift->first_octave);
-      vl_covdet_set_octave_resolution(covdet_.get(),
-                                      options_.sift->octave_resolution);
-      vl_covdet_set_peak_threshold(covdet_.get(),
-                                   options_.sift->peak_threshold);
-      vl_covdet_set_edge_threshold(covdet_.get(),
-                                   options_.sift->edge_threshold);
-    }
+    vl_covdet_set_first_octave(covdet.get(), options_.sift->first_octave);
+    vl_covdet_set_octave_resolution(covdet.get(),
+                                    options_.sift->octave_resolution);
+    vl_covdet_set_peak_threshold(covdet.get(), options_.sift->peak_threshold);
+    vl_covdet_set_edge_threshold(covdet.get(), options_.sift->edge_threshold);
 
     {
       const std::vector<uint8_t>& data_uint8 = bitmap.RowMajorData();
@@ -369,7 +354,7 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
       for (size_t i = 0; i < data_uint8.size(); ++i) {
         data_float[i] = static_cast<float>(data_uint8[i]) / 255.0f;
       }
-      if (vl_covdet_put_image(covdet_.get(),
+      if (vl_covdet_put_image(covdet.get(),
                               data_float.data(),
                               bitmap.Width(),
                               bitmap.Height()) != VL_ERR_OK) {
@@ -377,18 +362,18 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
       }
     }
 
-    vl_covdet_detect(covdet_.get(), options_.sift->max_num_features);
+    vl_covdet_detect(covdet.get(), options_.sift->max_num_features);
 
     if (options_.sift->estimate_affine_shape) {
-      vl_covdet_extract_affine_shape(covdet_.get());
+      vl_covdet_extract_affine_shape(covdet.get());
     }
 
     if (!options_.sift->upright) {
-      vl_covdet_extract_orientations(covdet_.get());
+      vl_covdet_extract_orientations(covdet.get());
     }
 
-    const int num_features = vl_covdet_get_num_features(covdet_.get());
-    VlCovDetFeature* features = vl_covdet_get_features(covdet_.get());
+    const int num_features = vl_covdet_get_num_features(covdet.get());
+    VlCovDetFeature* features = vl_covdet_get_features(covdet.get());
 
     // Sort features according to detected octave and scale.
     std::sort(
@@ -491,7 +476,7 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
           scaled_frame.a21 *= dsp_scale;
           scaled_frame.a22 *= dsp_scale;
 
-          vl_covdet_extract_patch_for_frame(covdet_.get(),
+          vl_covdet_extract_patch_for_frame(covdet.get(),
                                             patch.data(),
                                             kPatchResolution,
                                             kPatchRelativeExtent,
@@ -557,8 +542,6 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
 
  private:
   const FeatureExtractionOptions options_;
-  VlCovDetType covdet_;
-  int covdet_rounding_mode_ = -1;
 };
 
 #if defined(COLMAP_GPU_ENABLED)
