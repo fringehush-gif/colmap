@@ -334,16 +334,14 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
     THROW_CHECK(bitmap.IsGrey());
     THROW_CHECK_NOTNULL(keypoints);
 
-    // Setup covariant SIFT detector.
+    const int kMaxOctaveResolution = 1000;
+    THROW_CHECK_LE(options_.sift->octave_resolution, kMaxOctaveResolution);
+
     std::unique_ptr<VlCovDet, void (*)(VlCovDet*)> covdet(
         vl_covdet_new(VL_COVDET_METHOD_DOG), &vl_covdet_delete);
     if (!covdet) {
       return false;
     }
-
-    const int kMaxOctaveResolution = 1000;
-    THROW_CHECK_LE(options_.sift->octave_resolution, kMaxOctaveResolution);
-
     vl_covdet_set_first_octave(covdet.get(), options_.sift->first_octave);
     vl_covdet_set_octave_resolution(covdet.get(),
                                     options_.sift->octave_resolution);
@@ -356,8 +354,12 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
       for (size_t i = 0; i < data_uint8.size(); ++i) {
         data_float[i] = static_cast<float>(data_uint8[i]) / 255.0f;
       }
-      vl_covdet_put_image(
-          covdet.get(), data_float.data(), bitmap.Width(), bitmap.Height());
+      if (vl_covdet_put_image(covdet.get(),
+                              data_float.data(),
+                              bitmap.Width(),
+                              bitmap.Height()) != VL_ERR_OK) {
+        return false;
+      }
     }
 
     vl_covdet_detect(covdet.get(), options_.sift->max_num_features);
@@ -450,6 +452,19 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
       }
 
       vl_sift_set_magnif(sift.get(), 3.0);
+      std::unique_ptr<VlSiftRawDescriptorGeometry,
+                      decltype(&vl_sift_delete_raw_descriptor_geometry)>
+          geometry(!keypoints->empty() &&
+                           (keypoints->size() > 1 || dsp_num_scales > 1)
+                       ? vl_sift_prepare_raw_descriptor(sift.get(),
+                                                        kPatchSide,
+                                                        kPatchSide,
+                                                        kPatchResolution,
+                                                        kPatchResolution,
+                                                        kSigma,
+                                                        0)
+                       : nullptr,
+                   vl_sift_delete_raw_descriptor_geometry);
 
       for (size_t i = 0; i < keypoints->size(); ++i) {
         for (int s = 0; s < dsp_num_scales; ++s) {
@@ -477,15 +492,23 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
                                 kPatchSide,
                                 kPatchSide);
 
-          vl_sift_calc_raw_descriptor(sift.get(),
-                                      patchXY.data(),
-                                      scaled_descriptors.row(s).data(),
-                                      kPatchSide,
-                                      kPatchSide,
-                                      kPatchResolution,
-                                      kPatchResolution,
-                                      kSigma,
-                                      0);
+          if (geometry) {
+            vl_sift_calc_raw_descriptor_prepared(
+                sift.get(),
+                geometry.get(),
+                patchXY.data(),
+                scaled_descriptors.row(s).data());
+          } else {
+            vl_sift_calc_raw_descriptor(sift.get(),
+                                        patchXY.data(),
+                                        scaled_descriptors.row(s).data(),
+                                        kPatchSide,
+                                        kPatchSide,
+                                        kPatchResolution,
+                                        kPatchResolution,
+                                        kSigma,
+                                        0);
+          }
         }
 
         if (options_.sift->domain_size_pooling) {
