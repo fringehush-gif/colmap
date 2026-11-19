@@ -18,12 +18,39 @@
 #include "colmap/util/cuda.h"
 #endif
 
+#include "thirdparty/VLFeat/scalespace.h"
+
+#include <array>
 #include <functional>
 #include <set>
 #include <utility>
 
 namespace colmap {
 namespace {
+
+TEST(SiftCPUFeatureExtractor, ScaleSpaceGeometryComparesEveryField) {
+  for (const auto& subdivisions : {std::pair<int, int>{-1, 4}, {0, 0}}) {
+    auto geometry = vl_scalespace_get_default_geometry(128, 96);
+    geometry.octaveFirstSubdivision = subdivisions.first;
+    geometry.octaveLastSubdivision = subdivisions.second;
+    EXPECT_TRUE(vl_scalespacegeometry_is_equal(geometry, geometry));
+    std::array<VlScaleSpaceGeometry, 9> changed;
+    changed.fill(geometry);
+    ++changed[0].width;
+    ++changed[1].height;
+    ++changed[2].firstOctave;
+    ++changed[3].lastOctave;
+    ++changed[4].octaveResolution;
+    ++changed[5].octaveFirstSubdivision;
+    ++changed[6].octaveLastSubdivision;
+    ++changed[7].baseScale;
+    ++changed[8].nominalScale;
+    for (const auto& other : changed) {
+      EXPECT_FALSE(vl_scalespacegeometry_is_equal(geometry, other));
+      EXPECT_FALSE(vl_scalespacegeometry_is_equal(other, geometry));
+    }
+  }
+}
 
 Bitmap CreateImageWithSquare(const int size) {
   Bitmap bitmap(size, size, false);
