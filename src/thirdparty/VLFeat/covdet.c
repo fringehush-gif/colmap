@@ -1913,7 +1913,7 @@ _vl_dog_response (float * dog,
 
 typedef struct _VlCovDetFeatureIndex {
   float x ;
-  vl_index index ;
+  int index ;
 } VlCovDetFeatureIndex ;
 
 static int
@@ -1942,7 +1942,7 @@ _vl_covdet_index_features (VlCovDet const *self)
       return NULL ;
     }
     index[k].x = self->features[k].frame.x ;
-    index[k].index = k ;
+    index[k].index = (int)k ;
   }
   qsort(index, self->numFeatures, sizeof(*index), _vl_covdet_compare_feature_x) ;
   return index ;
