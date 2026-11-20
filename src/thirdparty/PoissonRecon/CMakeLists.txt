@@ -66,8 +66,8 @@ if(TESTS_ENABLED)
 endif()
 
 COLMAP_ADD_TEST(
-    NAME ply_floating_properties_test
-    SRCS ply_floating_properties_test.cc
+    NAME ply_scalar_test
+    SRCS ply_scalar_test.cc
 )
 COLMAP_ADD_TEST(
     NAME output_position_precision_test
@@ -75,7 +75,7 @@ COLMAP_ADD_TEST(
     LINK_LIBS colmap_poisson_recon
 )
 if(TESTS_ENABLED)
-    foreach(test_name ply_floating_properties_test output_position_precision_test)
+    foreach(test_name ply_scalar_test output_position_precision_test)
         target_compile_definitions(colmap_thirdparty_${test_name} PRIVATE RELEASE)
         if(MSVC)
             target_compile_options(colmap_thirdparty_${test_name} PRIVATE /bigobj)
@@ -88,4 +88,82 @@ if(TESTS_ENABLED)
             target_link_options(colmap_thirdparty_${test_name} PRIVATE -coverage)
         endif()
     endforeach()
+endif()
+
+
+COLMAP_ADD_TEST(
+    NAME attribute_state_test
+    SRCS attribute_state_test.cc
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_thirdparty_attribute_state_test
+        PRIVATE RELEASE)
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_thirdparty_attribute_state_test
+            OpenMP::OpenMP_CXX)
+    endif()
+endif()
+
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    # These sibling-directory tests link instrumented COLMAP libraries.
+    target_link_options(colmap_thirdparty_attribute_state_test
+        PRIVATE -coverage)
+endif()
+
+
+COLMAP_ADD_TEST(
+    NAME geometry_test
+    SRCS geometry_test.cc
+)
+if(TESTS_ENABLED AND OPENMP_FOUND)
+    target_link_libraries(colmap_thirdparty_geometry_test
+        OpenMP::OpenMP_CXX)
+endif()
+
+COLMAP_ADD_TEST(
+    NAME surface_trimmer_geometry_test
+    SRCS surface_trimmer_geometry_test.cc
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_thirdparty_surface_trimmer_geometry_test
+        PRIVATE RELEASE)
+    if(MSVC)
+        target_compile_options(colmap_thirdparty_surface_trimmer_geometry_test
+            PRIVATE /bigobj)
+    endif()
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_thirdparty_surface_trimmer_geometry_test
+            OpenMP::OpenMP_CXX)
+    endif()
+endif()
+
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    # These sibling-directory tests link instrumented COLMAP libraries.
+    target_link_options(colmap_thirdparty_geometry_test PRIVATE -coverage)
+    target_link_options(colmap_thirdparty_surface_trimmer_geometry_test
+        PRIVATE -coverage)
+endif()
+
+
+COLMAP_ADD_TEST(
+    NAME surface_trimmer_clipping_test
+    SRCS
+        SurfaceTrimmer.cpp
+        surface_trimmer_clipping_test.cc
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_thirdparty_surface_trimmer_clipping_test
+        PRIVATE RELEASE)
+    if(MSVC)
+        target_compile_options(colmap_thirdparty_surface_trimmer_clipping_test
+            PRIVATE /bigobj)
+    endif()
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_thirdparty_surface_trimmer_clipping_test
+            OpenMP::OpenMP_CXX)
+    endif()
+    if(COVERAGE_ENABLED)
+        target_link_options(colmap_thirdparty_surface_trimmer_clipping_test
+            PRIVATE -coverage)
+    endif()
 endif()

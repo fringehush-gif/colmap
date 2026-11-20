@@ -243,6 +243,29 @@ void SplitPolygon
 	else if( gtCount==0  ){ if( ltPolygons ) ltPolygons->push_back( polygon ) ; if( ltFlags ) ltFlags->push_back( false ); }
 	else
 	{
+		auto IntersectionIndex = [&]( Index v1 , Index v2 )
+		{
+			// An exact trim endpoint keeps its identity and all its attributes.
+			if( vertices[v1].template get<1>()==trimValue ) return v1;
+			if( vertices[v2].template get<1>()==trimValue ) return v2;
+			EdgeKey< Index > key( v1 , v2 );
+			auto iter = vertexTable.find( key );
+			if( iter!=vertexTable.end() ) return iter->second;
+			Index vIdx = (Index)vertices.size();
+			vertexTable[key] = vIdx;
+			vertices.push_back( InterpolateVertices( vertices[v1] , vertices[v2] , trimValue ) );
+			return vIdx;
+		};
+		auto AddPolygon = [&]( std::vector< Index > &poly , bool gtFlag )
+		{
+			// Endpoint reuse can repeat consecutive or closing indices. Normalize
+			// both sides before their loops enter component and island processing.
+			poly.erase( std::unique( poly.begin() , poly.end() ) , poly.end() );
+			if( poly.size()>1 && poly.front()==poly.back() ) poly.pop_back();
+			if( poly.size()<3 ) return;
+			if( gtFlag ){ if( gtPolygons ) gtPolygons->push_back( poly ) ; if( gtFlags ) gtFlags->push_back( true ); }
+			else        { if( ltPolygons ) ltPolygons->push_back( poly ) ; if( ltFlags ) ltFlags->push_back( true ); }
+		};
 		int start;
 		for( start=0 ; start<sz ; start++ ) if( gt[start] && !gt[(start+sz-1)%sz] ) break;
 
@@ -252,15 +275,7 @@ void SplitPolygon
 		// Add the initial vertex
 		{
 			int j1 = (start+int(sz)-1)%sz , j2 = start;
-			Index v1 = polygon[j1] , v2 = polygon[j2] , vIdx;
-			typename std::unordered_map< EdgeKey< Index > , Index , typename EdgeKey< Index >::Hasher >::iterator iter = vertexTable.find( EdgeKey< Index >(v1,v2) );
-			if( iter==vertexTable.end() )
-			{
-				vertexTable[ EdgeKey< Index >(v1,v2) ] = vIdx = (Index)vertices.size();
-				vertices.push_back( InterpolateVertices( vertices[v1] , vertices[v2] , trimValue ) );
-			}
-			else vIdx = iter->second;
-			poly.push_back( vIdx );
+			poly.push_back( IntersectionIndex( polygon[j1] , polygon[j2] ) );
 		}
 
 		for( int _j=0  ; _j<=sz ; _j++ )
@@ -270,17 +285,9 @@ void SplitPolygon
 			if( gt[j2]==gtFlag ) poly.push_back( v2 );
 			else
 			{
-				Index vIdx;
-				typename std::unordered_map< EdgeKey< Index > , Index , typename EdgeKey< Index >::Hasher >::iterator iter = vertexTable.find( EdgeKey< Index >(v1,v2) );
-				if( iter==vertexTable.end() )
-				{
-					vertexTable[ EdgeKey< Index >(v1,v2) ] = vIdx = (Index)vertices.size();
-					vertices.push_back( InterpolateVertices( vertices[v1] , vertices[v2] , trimValue ) );
-				}
-				else vIdx = iter->second;
+				Index vIdx = IntersectionIndex( v1 , v2 );
 				poly.push_back( vIdx );
-				if( gtFlag ){ if( gtPolygons ) gtPolygons->push_back( poly ) ; if( ltFlags ) ltFlags->push_back( true ); }
-				else        { if( ltPolygons ) ltPolygons->push_back( poly ) ; if( gtFlags ) gtFlags->push_back( true ); }
+				AddPolygon( poly , gtFlag );
 				poly.clear() , poly.push_back( vIdx ) , poly.push_back( v2 );
 				gtFlag = !gtFlag;
 			}
@@ -314,25 +321,15 @@ void Triangulate( const std::vector< Vertex >& vertices , const std::vector< std
 template< class Real , unsigned int Dim , typename Index , class Vertex >
 double PolygonArea( const std::vector< Vertex >& vertices , const std::vector< Index >& polygon )
 {
-	auto Area =[]( Point< Real , Dim > v1 , Point< Real , Dim > v2 , Point< Real , Dim > v3 )
-	{
-		Point< Real , Dim > v[] = { v2-v1 , v3-v1 };
-		XForm< Real , 2 > Mass;
-		for( int i=0 ; i<2 ; i++ ) for( int j=0 ; j<2 ; j++ ) Mass(i,j) = Point< Real , Dim >::Dot( v[i] , v[j] );
-		double det = Mass.determinant();
-		if( det<0 ) return (Real)0;
-		else return (Real)( sqrt( Mass.determinant() ) / 2. );
-	};
-
 	if( polygon.size()<3 ) return 0.;
-	else if( polygon.size()==3 ) return Area( vertices[polygon[0]].template get<0>() , vertices[polygon[1]].template get<0>() , vertices[polygon[2]].template get<0>() );
+	else if( polygon.size()==3 ) return PoissonRecon::Area< double , Dim >( vertices[polygon[0]].template get<0>() , vertices[polygon[1]].template get<0>() , vertices[polygon[2]].template get<0>() );
 	else
 	{
-		Point< Real , DEFAULT_DIMENSION > center;
+		Point< double , Dim > center;
 		for( size_t i=0 ; i<polygon.size() ; i++ ) center += vertices[ polygon[i] ].template get<0>();
-		center /= Real( polygon.size() );
+		center /= double( polygon.size() );
 		double area = 0;
-		for( size_t i=0 ; i<polygon.size() ; i++ ) area += Area( center , vertices[ polygon[i] ].template get<0>() , vertices[ polygon[ (i+1)%polygon.size() ] ].template get<0>() );
+		for( size_t i=0 ; i<polygon.size() ; i++ ) area += PoissonRecon::Area< double , Dim >( center , vertices[ polygon[i] ].template get<0>() , vertices[ polygon[ (i+1)%polygon.size() ] ].template get<0>() );
 		return area;
 	}
 }

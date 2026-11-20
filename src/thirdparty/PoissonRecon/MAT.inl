@@ -57,6 +57,7 @@ std::vector< TriangleIndex< Index > > _MinimalAreaTriangulation< Index , Real , 
 	{
 		TriangleIndex< Index > tIndex[2][2];
 		Real area[] = { 0 , 0 };
+		unsigned int zeroAreaCount[] = { 0 , 0 };
 
 		triangles.resize(2);
 
@@ -74,9 +75,14 @@ std::vector< TriangleIndex< Index > > _MinimalAreaTriangulation< Index , Real , 
 		tIndex[1][1].idx[1]=1;
 		tIndex[1][1].idx[2]=2;
 
-		Point< Real , Dim > p1 , p2;
-		for( int i=0 ; i<2 ; i++ ) for( int j=0 ; j<2 ; j++ ) area[i] = SquareArea( _vertices[ tIndex[i][j].idx[0] ] , _vertices[ tIndex[i][j].idx[1] ] , _vertices[ tIndex[i][j].idx[2] ] );
-		if( area[0]>area[1] ) triangles[0] = tIndex[1][0] , triangles[1] = tIndex[1][1];
+		for( int i=0 ; i<2 ; i++ ) for( int j=0 ; j<2 ; j++ )
+		{
+			const Real squareArea = SquareArea( _vertices[ tIndex[i][j].idx[0] ] , _vertices[ tIndex[i][j].idx[1] ] , _vertices[ tIndex[i][j].idx[2] ] );
+			area[i] += squareArea<0 ? 0 : (Real)sqrt( squareArea );
+			if( squareArea==0 ) zeroAreaCount[i]++;
+		}
+		// Equal-area splits can differ in degeneracy at a collinear boundary vertex.
+		if( area[0]>area[1] || ( area[0]==area[1] && zeroAreaCount[0]>zeroAreaCount[1] ) ) triangles[0] = tIndex[1][0] , triangles[1] = tIndex[1][1];
 		else                  triangles[0] = tIndex[0][0] , triangles[1] = tIndex[0][1];
 		return triangles;
 	}
