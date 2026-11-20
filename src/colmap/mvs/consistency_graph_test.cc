@@ -6,6 +6,12 @@
 
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
 #ifdef __linux__
 #include <csignal>
@@ -14,6 +20,7 @@
 #include <unistd.h>
 #endif
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -73,7 +80,7 @@ TEST(ConsistencyGraph, Empty) {
     for (size_t j = 0; j < 2; ++j) {
       int num_images;
       const int* image_idxs;
-      consistency_graph.GetImageIdxs(0, 0, &num_images, &image_idxs);
+      consistency_graph.GetImageIdxs(i, j, &num_images, &image_idxs);
       EXPECT_EQ(num_images, 0);
       EXPECT_TRUE(image_idxs == nullptr);
     }
@@ -109,6 +116,136 @@ TEST(ConsistencyGraph, Zero) {
   EXPECT_EQ(num_images, 0);
   EXPECT_TRUE(image_idxs == nullptr);
   EXPECT_EQ(consistency_graph.GetNumBytes(), 20);
+}
+
+TEST(ConsistencyGraph, LvaluePayloadRemainsIndependent) {
+  std::vector<int> data = {2, 1, 2, 5, 33};
+  ConsistencyGraph graph(3, 2, data);
+  int num_images;
+  const int* image_idxs;
+  graph.GetImageIdxs(1, 2, &num_images, &image_idxs);
+  ASSERT_EQ(num_images, 2);
+  EXPECT_NE(image_idxs, data.data() + 3);
+  data[3] = 99;
+  data.clear();
+  data.shrink_to_fit();
+  EXPECT_EQ(image_idxs[0], 5);
+  EXPECT_EQ(image_idxs[1], 33);
+}
+
+TEST(ConsistencyGraph, ConsumesRvaluePayload) {
+  std::vector<int> data = {2, 1, 2, 5, 33};
+  const int* original_indices = data.data() + 3;
+  ConsistencyGraph graph(3, 2, std::move(data));
+  // A moved-from vector is valid but its size/capacity are unspecified.
+  int num_images;
+  const int* image_idxs;
+  graph.GetImageIdxs(1, 2, &num_images, &image_idxs);
+  ASSERT_EQ(num_images, 2);
+  EXPECT_EQ(image_idxs, original_indices);
+  EXPECT_EQ(image_idxs[0], 5);
+  EXPECT_EQ(image_idxs[1], 33);
+  EXPECT_EQ(graph.GetNumBytes(), 11 * sizeof(int));
+}
+
+TEST(ConsistencyGraph, ConsumesReturnedPayload) {
+  // The actual PatchMatch callers construct directly from a returned vector.
+  // This probes that expression's ownership, without emulating GPU readback.
+  const int* original_indices = nullptr;
+  const auto make_payload = [&original_indices]() {
+    std::vector<int> data = {2, 1, 2, 5, 33};
+    original_indices = data.data() + 3;
+    return data;
+  };
+  ConsistencyGraph graph(3, 2, make_payload());
+  int num_images;
+  const int* image_idxs;
+  graph.GetImageIdxs(1, 2, &num_images, &image_idxs);
+  ASSERT_EQ(num_images, 2);
+  EXPECT_EQ(image_idxs, original_indices);
+  EXPECT_EQ(image_idxs[0], 5);
+  EXPECT_EQ(image_idxs[1], 33);
+}
+
+TEST(ConsistencyGraph, EmptyRvaluePayload) {
+  ConsistencyGraph graph(3, 2, std::vector<int>{});
+  for (int row = 0; row < 2; ++row) {
+    for (int col = 0; col < 3; ++col) {
+      int num_images;
+      const int* image_idxs;
+      graph.GetImageIdxs(row, col, &num_images, &image_idxs);
+      EXPECT_EQ(num_images, 0);
+      EXPECT_EQ(image_idxs, nullptr);
+    }
+  }
+  EXPECT_EQ(graph.GetNumBytes(), 6 * sizeof(int));
+}
+
+TEST(ConsistencyGraph, RvalueDuplicateAndZeroRecords) {
+  // Preserve the current last-positive-record behavior. A zero record does
+  // not erase an earlier positive record at the same coordinate.
+  ConsistencyGraph graph(
+      3, 2, std::vector<int>{2, 1, 1, 7, 2, 1, 2, 11, 13, 2, 1, 0, 1, 0, 0});
+  int num_images;
+  const int* image_idxs;
+  graph.GetImageIdxs(1, 2, &num_images, &image_idxs);
+  ASSERT_EQ(num_images, 2);
+  EXPECT_EQ(image_idxs[0], 11);
+  EXPECT_EQ(image_idxs[1], 13);
+  graph.GetImageIdxs(0, 1, &num_images, &image_idxs);
+  EXPECT_EQ(num_images, 0);
+  EXPECT_EQ(image_idxs, nullptr);
+}
+
+TEST(ConsistencyGraph, RejectsInvalidMetadataForBothOwnershipPaths) {
+  // Only existing checked rejects belong here. Complete record-size and
+  // reader-format validation are separate changes, not supplied by moving.
+  const std::vector<std::vector<int>> invalid_payloads = {
+      {0, 0}, {0, 0, -1}, {-1, 0, 0}, {3, 0, 0}, {0, -1, 0}, {0, 2, 0}};
+  for (const auto& invalid : invalid_payloads) {
+    SCOPED_TRACE(::testing::PrintToString(invalid));
+    std::vector<int> lvalue(invalid.begin(), invalid.end());
+    EXPECT_THROW(ConsistencyGraph(3, 2, lvalue), std::exception);
+    EXPECT_EQ(lvalue, invalid);
+    std::vector<int> rvalue = invalid;
+    EXPECT_THROW(ConsistencyGraph(3, 2, std::move(rvalue)), std::exception);
+    // The rvalue overload permits consumption before a validation error.
+  }
+}
+
+TEST(ConsistencyGraph, RvalueNonsquareWriteReadRoundtrip) {
+  ConsistencyGraph original(3, 2, std::vector<int>{2, 1, 2, 5, 33});
+  const auto test_dir = CreateTestDir();
+  const auto path = test_dir / "moved_consistency_graph.bin";
+  original.Write(path);
+
+  // Check dimensions without using the graph reader as their sole oracle.
+  std::ifstream file(path, std::ios::binary);
+  std::string header;
+  for (int i = 0; i < 6; ++i) {
+    header.push_back(static_cast<char>(file.get()));
+  }
+  EXPECT_EQ(header, "3&2&1&");
+  file.close();
+
+  ConsistencyGraph loaded;
+  loaded.Read(path);
+  EXPECT_EQ(loaded.GetNumBytes(), original.GetNumBytes());
+  for (int row = 0; row < 2; ++row) {
+    for (int col = 0; col < 3; ++col) {
+      int num_images;
+      const int* image_idxs;
+      loaded.GetImageIdxs(row, col, &num_images, &image_idxs);
+      if (row == 1 && col == 2) {
+        ASSERT_EQ(num_images, 2);
+        EXPECT_EQ(image_idxs[0], 5);
+        EXPECT_EQ(image_idxs[1], 33);
+      } else {
+        EXPECT_EQ(num_images, 0);
+        EXPECT_EQ(image_idxs, nullptr);
+      }
+    }
+  }
 }
 
 TEST(ConsistencyGraph, Full) {
@@ -156,6 +293,134 @@ TEST(ConsistencyGraph, WriteReadRoundtrip) {
   loaded.GetImageIdxs(1, 0, &num_images, &image_idxs);
   EXPECT_EQ(num_images, 1);
   EXPECT_EQ(image_idxs[0], 100);
+}
+
+TEST(ConsistencyGraph, RejectsTruncatedRecordPayload) {
+  for (const std::vector<int>& payload : {std::vector<int>{0, 0, 1},
+                                          std::vector<int>{0, 0, 2, 7},
+                                          std::vector<int>{0, 0, 2147483647}}) {
+    EXPECT_THAT([&] { ConsistencyGraph(3, 2, payload); },
+                testing::ThrowsMessage<std::invalid_argument>(
+                    testing::HasSubstr("insufficient image indices")));
+  }
+}
+
+TEST(ConsistencyGraph, RejectsUnrepresentableDimensions) {
+  const size_t too_large =
+      static_cast<size_t>(std::numeric_limits<int>::max()) + 1;
+  const std::vector<int> data;
+  EXPECT_THAT([&] { ConsistencyGraph(too_large, 1, data); },
+              testing::ThrowsMessage<std::invalid_argument>(
+                  testing::HasSubstr("width <=")));
+  EXPECT_THAT([&] { ConsistencyGraph(1, too_large, data); },
+              testing::ThrowsMessage<std::invalid_argument>(
+                  testing::HasSubstr("height <=")));
+}
+
+TEST(ConsistencyGraph, RejectsPartialIntegerTail) {
+  const auto path = CreateTestDir() / "partial.bin";
+  for (int tail = 1; tail < 4; ++tail) {
+    std::ofstream file(path, std::ios::binary);
+    file.exceptions(std::ios::failbit | std::ios::badbit);
+    file << "3&2&1&";
+    file.write("\0\0\0", tail);
+    file.close();
+    ConsistencyGraph graph;
+    EXPECT_THROW(graph.Read(path), std::invalid_argument);
+  }
+}
+
+TEST(ConsistencyGraph, IndependentWireOrderAndWhitespacePayload) {
+  const auto path = CreateTestDir() / "wire.bin";
+  const std::string expected =
+      std::string("33&2&1&") +
+      std::string("\x20\0\0\0\x01\0\0\0\x02\0\0\0\x0a\0\0\0\x20\0\0\0", 20);
+  {
+    std::ofstream fixture(path, std::ios::binary);
+    fixture.write(expected.data(), expected.size());
+  }
+  std::ifstream file(path, std::ios::binary);
+  const std::string actual((std::istreambuf_iterator<char>(file)),
+                           std::istreambuf_iterator<char>());
+  EXPECT_EQ(actual, expected);
+  file.close();
+  ConsistencyGraph loaded;
+  loaded.Read(path);
+  int count;
+  const int* ids;
+  loaded.GetImageIdxs(1, 32, &count, &ids);
+  ASSERT_EQ(count, 2);
+  EXPECT_EQ(ids[0], 10);
+  EXPECT_EQ(ids[1], 32);
+  ConsistencyGraph graph(33, 2, std::vector<int>{32, 1, 2, 10, 32});
+  graph.Write(path);
+  std::ifstream written(path, std::ios::binary);
+  const std::string actual_written((std::istreambuf_iterator<char>(written)),
+                                   std::istreambuf_iterator<char>());
+  EXPECT_EQ(actual_written, expected);
+}
+
+TEST(ConsistencyGraph, ReadsEmptyPayload) {
+  const auto path = CreateTestDir() / "empty.bin";
+  {
+    std::ofstream file(path, std::ios::binary);
+    file << "3&2&1&";
+  }
+  ConsistencyGraph graph;
+  graph.Read(path);
+  int count = -1;
+  const int* ids = nullptr;
+  graph.GetImageIdxs(1, 2, &count, &ids);
+  EXPECT_EQ(count, 0);
+  EXPECT_EQ(ids, nullptr);
+}
+
+TEST(ConsistencyGraph, PreservesGraphAfterFailedRead) {
+  const auto path = CreateTestDir() / "failed-read.bin";
+  ConsistencyGraph graph(3, 2, std::vector<int>{2, 1, 2, 7, 8});
+  const std::vector<std::string> bad_inputs = {
+      std::string("2147483648&2&1&") +
+          std::string("\0\0\0\0\0\0\0\0\x64\0\0\0\x01\0\0\0", 16),
+      std::string("3&2&1&") + std::string("\0\0\0\0\0\0\0\0\x02\0\0\0", 12),
+      std::string("3&2&1&") + std::string("\0", 1),
+      "3&2&-1&"};
+  for (const auto& input : bad_inputs) {
+    {
+      std::ofstream file(path, std::ios::binary);
+      file.write(input.data(), input.size());
+    }
+    EXPECT_THROW(graph.Read(path), std::invalid_argument);
+    int count = -1;
+    const int* ids = nullptr;
+    graph.GetImageIdxs(1, 2, &count, &ids);
+    ASSERT_EQ(count, 2);
+    ASSERT_NE(ids, nullptr);
+    EXPECT_EQ(ids[0], 7);
+    EXPECT_EQ(ids[1], 8);
+  }
+  {
+    std::ofstream file(path, std::ios::binary);
+    file << "3&2&1&";
+  }
+  graph.Read(path);
+  int count = -1;
+  const int* ids = nullptr;
+  graph.GetImageIdxs(1, 2, &count, &ids);
+  EXPECT_EQ(count, 0);
+  EXPECT_EQ(ids, nullptr);
+}
+
+TEST(ConsistencyGraph, RejectsMalformedHeader) {
+  const auto path = CreateTestDir() / "header.bin";
+  for (const char* header :
+       {"3:2&1&", "3&2&", "0&2&1&", "-3&2&1&", "3&-2&1&", "3&2&-1&"}) {
+    std::ofstream file(path, std::ios::binary);
+    file.exceptions(std::ios::failbit | std::ios::badbit);
+    file << header;
+    file.close();
+    ConsistencyGraph graph;
+    EXPECT_THROW(graph.Read(path), std::exception);
+  }
 }
 
 }  // namespace

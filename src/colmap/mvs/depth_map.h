@@ -15,11 +15,16 @@ class DepthMap : public Mat<float> {
   DepthMap();
   DepthMap(size_t width, size_t height, float depth_min, float depth_max);
   DepthMap(const Mat<float>& mat, float depth_min, float depth_max);
+  DepthMap(Mat<float>&& mat, float depth_min, float depth_max);
 
   inline float GetDepthMin() const;
   inline float GetDepthMax() const;
 
   inline float Get(size_t row, size_t col) const;
+
+  // Intentionally hide Mat::Read to validate channels before replacing data.
+  // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
+  void Read(const std::filesystem::path& path);
 
   void Rescale(float factor);
   void Downsize(size_t max_width, size_t max_height);

@@ -143,6 +143,7 @@ void PatchMatch::Check() const {
       const DepthMap& depth_map = problem_.depth_maps->at(image_idx);
       THROW_CHECK_EQ(image.GetWidth(), depth_map.GetWidth()) << image_idx;
       THROW_CHECK_EQ(image.GetHeight(), depth_map.GetHeight()) << image_idx;
+      THROW_CHECK_EQ(depth_map.GetDepth(), 1) << image_idx;
     }
   }
 
@@ -152,6 +153,7 @@ void PatchMatch::Check() const {
         problem_.normal_maps->at(problem_.ref_image_idx);
     THROW_CHECK_EQ(ref_image.GetWidth(), ref_normal_map.GetWidth());
     THROW_CHECK_EQ(ref_image.GetHeight(), ref_normal_map.GetHeight());
+    THROW_CHECK_EQ(ref_normal_map.GetDepth(), 3);
   }
 }
 

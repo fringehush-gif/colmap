@@ -2,6 +2,12 @@
 
 #include "colmap/mvs/depth_map.h"
 
+#include "colmap/util/testing.h"
+
+#include <stdexcept>
+#include <utility>
+
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -24,6 +30,132 @@ TEST(DepthMap, NonEmpty) {
   EXPECT_EQ(depth_map.GetDepth(), 1);
   EXPECT_EQ(depth_map.GetDepthMin(), 0);
   EXPECT_EQ(depth_map.GetDepthMax(), 1);
+}
+
+TEST(DepthMap, ReadWrite) {
+  const auto path = CreateTestDir() / "depth.bin";
+  DepthMap expected(2, 3, 1, 8);
+  for (size_t i = 0; i < expected.GetData().size(); ++i) {
+    expected.GetPtr()[i] = static_cast<float>(i + 1);
+  }
+  expected.Write(path);
+
+  DepthMap actual(1, 1, 0.25f, 100.0f);
+  actual.Fill(-1.0f);
+  ASSERT_NO_THROW(actual.Read(path));
+  EXPECT_EQ(actual.GetWidth(), expected.GetWidth());
+  EXPECT_EQ(actual.GetHeight(), expected.GetHeight());
+  EXPECT_EQ(actual.GetDepth(), 1);
+  EXPECT_EQ(actual.GetData(), expected.GetData());
+  EXPECT_EQ(actual.GetDepthMin(), 0.25f);
+  EXPECT_EQ(actual.GetDepthMax(), 100.0f);
+}
+
+TEST(DepthMap, ReadRejectsWrongChannels) {
+  const auto path = CreateTestDir() / "depth.bin";
+  for (const size_t depth : {2, 3, 4}) {
+    SCOPED_TRACE(depth);
+    Mat<float> input(4, 6, depth);
+    input.Fill(0.5f);
+    input.Write(path);
+
+    Mat<float> generic;
+    ASSERT_NO_THROW(generic.Read(path));
+    EXPECT_EQ(generic.GetDepth(), depth);
+    EXPECT_EQ(generic.GetData(), input.GetData());
+
+    DepthMap actual(2, 3, 0.25f, 100.0f);
+    actual.Fill(7.0f);
+    const DepthMap previous = actual;
+    EXPECT_THAT([&] { actual.Read(path); },
+                testing::ThrowsMessage<std::invalid_argument>(
+                    testing::HasSubstr("mat.GetDepth() == 1")));
+    EXPECT_EQ(actual.GetWidth(), previous.GetWidth());
+    EXPECT_EQ(actual.GetHeight(), previous.GetHeight());
+    EXPECT_EQ(actual.GetDepth(), previous.GetDepth());
+    EXPECT_EQ(actual.GetData(), previous.GetData());
+    EXPECT_EQ(actual.GetDepthMin(), previous.GetDepthMin());
+    EXPECT_EQ(actual.GetDepthMax(), previous.GetDepthMax());
+
+    DepthMap replacement(4, 6, 1, 3);
+    replacement.Fill(2.0f);
+    replacement.Write(path);
+    ASSERT_NO_THROW(actual.Read(path));
+    EXPECT_EQ(actual.GetWidth(), replacement.GetWidth());
+    EXPECT_EQ(actual.GetHeight(), replacement.GetHeight());
+    EXPECT_EQ(actual.GetDepth(), 1);
+    EXPECT_EQ(actual.GetData(), replacement.GetData());
+    EXPECT_EQ(actual.GetDepthMin(), previous.GetDepthMin());
+    EXPECT_EQ(actual.GetDepthMax(), previous.GetDepthMax());
+  }
+}
+
+TEST(DepthMap, ReadFailurePreservesState) {
+  DepthMap actual(2, 3, 0.25f, 100.0f);
+  actual.Fill(7.0f);
+  const DepthMap previous = actual;
+  EXPECT_THROW(actual.Read(CreateTestDir() / "missing.bin"),
+               std::invalid_argument);
+  EXPECT_EQ(actual.GetWidth(), previous.GetWidth());
+  EXPECT_EQ(actual.GetHeight(), previous.GetHeight());
+  EXPECT_EQ(actual.GetDepth(), previous.GetDepth());
+  EXPECT_EQ(actual.GetData(), previous.GetData());
+  EXPECT_EQ(actual.GetDepthMin(), previous.GetDepthMin());
+  EXPECT_EQ(actual.GetDepthMax(), previous.GetDepthMax());
+}
+
+TEST(DepthMap, MatOwnershipAndConsumers) {
+  Mat<float> mat(5, 3, 1);
+  for (size_t row = 0; row < mat.GetHeight(); ++row) {
+    for (size_t col = 0; col < mat.GetWidth(); ++col) {
+      mat.Set(row, col, 0.5f + row * mat.GetWidth() + col);
+    }
+  }
+  const auto expected = mat.GetData();
+  const float* const data = mat.GetPtr();
+  const DepthMap copied(mat, 0.5f, 14.5f);
+  EXPECT_NE(copied.GetPtr(), data);
+  EXPECT_EQ(copied.GetData(), expected);
+  const DepthMap moved(std::move(mat), 0.5f, 14.5f);
+  EXPECT_EQ(moved.GetPtr(), data);
+  // Do not depend on the moved-from dimensions when reusing the source.
+  mat = Mat<float>(1, 1, 1);
+  mat.Fill(99.0f);
+  EXPECT_EQ(copied.GetData(), expected);
+  EXPECT_EQ(moved.GetData(), expected);
+  EXPECT_EQ(moved.GetDepthMin(), 0.5f);
+  EXPECT_EQ(moved.GetDepthMax(), 14.5f);
+  const auto path = CreateTestDir() / "map.bin";
+  moved.Write(path);
+  DepthMap loaded;
+  loaded.Read(path);
+  EXPECT_EQ(loaded.GetWidth(), 5);
+  EXPECT_EQ(loaded.GetHeight(), 3);
+  EXPECT_EQ(loaded.GetDepth(), 1);
+  EXPECT_EQ(loaded.GetData(), expected);
+  const Bitmap bitmap = loaded.ToBitmap(0, 100);
+  EXPECT_EQ(bitmap.Width(), 5);
+  EXPECT_EQ(bitmap.Height(), 3);
+  EXPECT_EQ(bitmap.GetPixel(0, 0).value(), BitmapColor<uint8_t>(0, 0, 128));
+}
+
+TEST(DepthMap, RejectedMatRemainsReusable) {
+  Mat<float> mat(5, 3, 3);
+  mat.Fill(0.5f);
+  const float* const data = mat.GetPtr();
+  EXPECT_THROW((DepthMap{mat, 0.5f, 14.5f}), std::invalid_argument);
+  EXPECT_THROW((DepthMap{std::move(mat), 0.5f, 14.5f}), std::invalid_argument);
+  // An invalid channel count is rejected before storage is moved.
+  // NOLINTNEXTLINE(bugprone-use-after-move)
+  EXPECT_EQ(mat.GetPtr(), data);
+  EXPECT_EQ(mat.GetWidth(), 5);
+  EXPECT_EQ(mat.GetHeight(), 3);
+  EXPECT_EQ(mat.GetDepth(), 3);
+  EXPECT_EQ(mat.GetData(), std::vector<float>(15 * 3, 0.5f));
+  mat = Mat<float>(5, 3, 1);
+  mat.Fill(0.75f);
+  const DepthMap accepted(std::move(mat), 0.5f, 14.5f);
+  EXPECT_EQ(accepted.GetData(), std::vector<float>(15 * 1, 0.75f));
 }
 
 TEST(DepthMap, Rescale) {
