@@ -33,12 +33,14 @@ template< typename Index , class Real , unsigned int Dim >
 _MinimalAreaTriangulation< Index , Real , Dim >::_MinimalAreaTriangulation( ConstPointer( Point< Real , Dim > ) vertices , size_t vCount ) : _vertices( vertices ) , _vCount( vCount )
 {
 	_bestTriangulation = NullPointer( Real );
+	_zeroAreaCount = NullPointer( size_t );
 	_midpoint = NullPointer( Index );
 }
 template< typename Index , class Real , unsigned int Dim >
 _MinimalAreaTriangulation< Index , Real , Dim >::~_MinimalAreaTriangulation( void )
 {
 	FreePointer( _bestTriangulation );
+	FreePointer( _zeroAreaCount );
 	FreePointer( _midpoint );
 }
 template< typename Index , class Real , unsigned int Dim >
@@ -94,10 +96,12 @@ template< typename Index , class Real , unsigned int Dim >
 void _MinimalAreaTriangulation< Index , Real , Dim >::_set( void )
 {
 	FreePointer( _bestTriangulation );
+	FreePointer( _zeroAreaCount );
 	FreePointer( _midpoint );
 	_bestTriangulation = AllocPointer< Real >( _vCount * _vCount );
+	_zeroAreaCount = AllocPointer< size_t >( _vCount * _vCount );
 	_midpoint = AllocPointer< Index >( _vCount * _vCount );
-	for( int i=0 ; i<_vCount*_vCount ; i++ ) _bestTriangulation[i] = -1 , _midpoint[i] = -1;
+	for( int i=0 ; i<_vCount*_vCount ; i++ ) _bestTriangulation[i] = -1 , _zeroAreaCount[i] = 0 , _midpoint[i] = -1;
 	_subPolygonArea( 1 , 0 );
 }
 
@@ -129,6 +133,7 @@ Real _MinimalAreaTriangulation< Index , Real , Dim >::_subPolygonArea( Index i ,
 	Index idx = _subPolygonIndex( i , j );
 	if( _midpoint[idx]!=-1 ) return _bestTriangulation[idx];
 	Real a = FLT_MAX , temp;
+	size_t zeroAreaCount = 0;
 	if( j<i ) j += (Index)_vCount;
 	// If either i==j or i+1=j, the polygon has trivial area
 	if( i==j || i+1==j )
@@ -149,6 +154,7 @@ Real _MinimalAreaTriangulation< Index , Real , Dim >::_subPolygonArea( Index i ,
 		Index idx2 = _subPolygonIndex( r%_vCount , j%_vCount ); // SubPolygon( j , ... , r );
 
 		temp = SquareArea( _vertices[i] , _vertices[r%_vCount] , _vertices[j%_vCount] );
+		size_t candidateZeroAreaCount = temp==0 ? 1 : 0;
 		temp = temp<0 ? 0 : (Real)sqrt(temp);
 		// If we have already computed Area( r , ... , i ), use that.
 		if( _bestTriangulation[idx1]>=0 )
@@ -169,9 +175,14 @@ Real _MinimalAreaTriangulation< Index , Real , Dim >::_subPolygonArea( Index i ,
 			temp += _subPolygonArea( i , r%_vCount );
 		}
 
-		if( temp<a ) a=temp , mid=r%_vCount;
+		candidateZeroAreaCount += _zeroAreaCount[idx1] + _zeroAreaCount[idx2];
+		// Retain area as the primary objective, preferring fewer degenerate
+		// triangles only when complete subpolygon costs compare equal.
+		if( temp<a || ( temp==a && candidateZeroAreaCount<zeroAreaCount ) )
+			a=temp , zeroAreaCount=candidateZeroAreaCount , mid=r%_vCount;
 	}
 	_bestTriangulation[idx] = a;
+	_zeroAreaCount[idx] = zeroAreaCount;
 	_midpoint[idx] = mid;
 	return a;
 }

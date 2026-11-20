@@ -194,4 +194,36 @@ TEST(SurfaceTrimmerClipping, KeepsTinyValidInteriorTriangle) {
   EXPECT_EQ(cross / 2, double(edge) * edge / 8);  // Area 2^-43.
 }
 
+TEST(SurfaceTrimmerClipping, RetainsBoundaryValuesWhenTrimmingAgain) {
+  const std::vector<Vertex> vertices{
+      Vertex(Point(0, 0, 0), 15, Point(20, 40, 60)),
+      Vertex(Point(1, 0, 0), 0, Point(60, 80, 100)),
+      Vertex(Point(0, 1, 0), 0, Point(100, 120, 140))};
+  for (const char* area_ratio : {"0", "0.001"}) {
+    std::vector<int> face{0, 1, 2};
+    do {
+      SCOPED_TRACE(testing::Message()
+                   << area_ratio << ":" << face[0] << face[1] << face[2]);
+      Mesh first;
+      ASSERT_NO_FATAL_FAILURE(TrimMesh({vertices, {face}}, area_ratio, &first));
+      ASSERT_EQ(first.vertices.size(), 3);
+      ASSERT_EQ(first.faces.size(), 1);
+      for (const auto& vertex : first.vertices) {
+        // Every new crossing is on the requested trim level, even when its
+        // rounded interpolation weights do not reproduce that scalar value.
+        EXPECT_TRUE(vertex.template get<1>() == 15 ||
+                    vertex.template get<1>() == 5);
+      }
+      Mesh previous = first;
+      for (int pass = 0; pass < 2; ++pass) {
+        SCOPED_TRACE(pass);
+        Mesh next;
+        ASSERT_NO_FATAL_FAILURE(TrimMesh(previous, area_ratio, &next));
+        ASSERT_NO_FATAL_FAILURE(ExpectMesh(next, first));
+        previous = next;
+      }
+    } while (std::next_permutation(face.begin(), face.end()));
+  }
+}
+
 }  // namespace
