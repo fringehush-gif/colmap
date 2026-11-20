@@ -124,6 +124,31 @@ TEST(VoteAndVerify, EffectiveInliersWithZeroCoordinateSpan) {
   }
 }
 
+TEST(VoteAndVerify, EffectiveInlierCountIsTranslationInvariant) {
+  for (const float offset_x : {-100.0f, 0.0f}) {
+    for (const float offset_y : {-100.0f, 0.0f}) {
+      SCOPED_TRACE(::testing::Message() << offset_x << ", " << offset_y);
+      std::vector<FeatureGeometryMatch> matches(4);
+      size_t i = 0;
+      for (const float y : {0.0f, 1.0f}) {
+        for (const float x : {0.0f, 1.0f}) {
+          auto& match = matches[i++];
+          match.geometry1.x = offset_x + x;
+          match.geometry1.y = offset_y + y;
+          match.geometry1.scale = 1;
+          match.geometry1.orientation = 0;
+          match.geometry2 = match.geometry1;
+        }
+      }
+
+      VoteAndVerifyOptions options;
+      EXPECT_EQ(VoteAndVerify(options, matches), 4);
+      options.eff_inlier_count = false;
+      EXPECT_EQ(VoteAndVerify(options, matches), 4);
+    }
+  }
+}
+
 }  // namespace
 }  // namespace retrieval
 }  // namespace colmap

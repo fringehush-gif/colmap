@@ -148,8 +148,8 @@ size_t ComputeEffectiveInlierCount(
 
   float min_x = std::numeric_limits<float>::max();
   float min_y = std::numeric_limits<float>::max();
-  float max_x = 0;
-  float max_y = 0;
+  float max_x = std::numeric_limits<float>::lowest();
+  float max_y = std::numeric_limits<float>::lowest();
 
   for (const auto& match : matches) {
     if (ComputeScaleError(match.geometry1, match.geometry2, tform) <=
