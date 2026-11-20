@@ -1561,9 +1561,11 @@ void write_ascii_item( FILE *fp , int int_val , unsigned int uint_val , long lon
 		break;
 	case PLY_FLOAT:
 	case PLY_FLOAT_32:
+		if( fprintf( fp , "%g " , double_val )<=0 ) MK_THROW( "fprintf() failed -- aborting" );
+		break;
 	case PLY_DOUBLE:
 	case PLY_FLOAT_64:
-		if( fprintf( fp , "%g " , double_val )<=0 ) MK_THROW( "fprintf() failed -- aborting" );
+		if( fprintf( fp , "%.*g " , std::numeric_limits< double >::max_digits10 , double_val )<=0 ) MK_THROW( "fprintf() failed -- aborting" );
 		break;
 	default: MK_THROW( "Bad type: " , type );
 	}
@@ -1841,7 +1843,7 @@ void get_ascii_item( const std::string &word , int type , int &int_val , unsigne
 
 	case PLY_UINT:
 	case PLY_UINT_32:
-		uint_val = strtol( word.c_str() , (char **)NULL , 10 );
+		uint_val = strtoul( word.c_str() , (char **)NULL , 10 );
 		int_val = (int)uint_val;
 		double_val = (double)uint_val;
 		longlong_val = (long long)uint_val;
@@ -1868,6 +1870,8 @@ void get_ascii_item( const std::string &word , int type , int &int_val , unsigne
 	case PLY_DOUBLE:
 	case PLY_FLOAT_64:
 		double_val = atof( word.c_str() );
+		// Honor the source width before conversion to a wider destination.
+		if( !convert_to_integer && ( type==PLY_FLOAT || type==PLY_FLOAT_32 ) ) double_val = (float)double_val;
 		if( !convert_to_integer ) break;
 		int_val = (int)double_val;
 		uint_val = (unsigned int)double_val;

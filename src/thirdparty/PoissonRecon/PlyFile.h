@@ -48,6 +48,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef PLY_FILE_INCLUDED
 #define PLY_FILE_INCLUDED
 
+#include <limits>
 #include <string>
 #include <vector>
 
