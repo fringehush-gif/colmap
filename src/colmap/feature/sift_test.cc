@@ -588,6 +588,32 @@ TEST(SiftCPUFeatureMatcher, GuidedForwardGeometryCrossCheck) {
   }
 }
 
+TEST(SiftCPUFeatureMatcher, GuidedProjectiveHomography) {
+  const Camera camera = Camera::CreateFromModelId(
+      1, CameraModelId::kSimplePinhole, 100.0, 256, 256);
+  const auto image1 =
+      CreateGuidedMatchingTestImage(1, &camera, {{8, 0}, {24, 128}, {56, 200}});
+  const auto image2 = CreateGuidedMatchingTestImage(
+      2, &camera, {{48.25f, 130}, {64, 0}, {32.25f, 10}, {56.25f, 210}});
+  for (const bool cross_check : {false, true}) {
+    SCOPED_TRACE(cross_check);
+    FeatureMatchingOptions options;
+    options.use_gpu = false;
+    options.sift->cross_check = cross_check;
+    auto matcher = CreateSiftFeatureMatcher(options);
+    auto geometry = CreatePlanarTwoViewGeometry();
+    (*geometry.H)(0, 0) = 8;
+    (*geometry.H)(1, 1) = 8;
+    (*geometry.H)(2, 0) = 1.0 / 8;
+    // The divisors 2, 4, 8 project x = 8, 24, 56 to x = 32, 48, 56.
+    // Correct partners are 0.25 pixels away. The descriptor-identical feature
+    // at x = 64 is the unnormalized first projection and must be rejected.
+    matcher->MatchGuided(1, image1, image2, &geometry);
+    CheckEqualMatches(geometry.inlier_matches,
+                      FeatureMatches{{0, 2}, {1, 0}, {2, 3}});
+  }
+}
+
 TEST(SiftCPUFeatureMatcher, Nominal) {
   const Camera camera = Camera::CreateFromModelId(
       1, CameraModelId::kSimplePinhole, 100.0, 100, 200);
