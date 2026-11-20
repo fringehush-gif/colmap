@@ -197,7 +197,11 @@ bool WouldCauseFlip(const std::vector<VertexData>& vertices,
       }
       const Eigen::Vector3d new_normal = (np1 - np0).cross(np2 - np0);
 
-      if (old_normal.dot(new_normal) < 0) return true;
+      // A surviving face must not collapse to a line or point.
+      if (new_normal == Eigen::Vector3d::Zero() ||
+          old_normal.dot(new_normal) < 0) {
+        return true;
+      }
     }
     return false;
   };
