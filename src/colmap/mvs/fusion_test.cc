@@ -83,6 +83,7 @@ TEST(StereoFusion, Integration) {
   options.max_traversal_depth = 10;
   options.check_num_images = 10;
   options.use_cache = false;
+  options.num_threads = 1;
 
   StereoFusion fusion(options, temp_dir, "COLMAP", "", "geometric");
   fusion.Run();
@@ -111,6 +112,28 @@ TEST(StereoFusion, Integration) {
   for (const auto& vis : visibility) {
     EXPECT_GT(vis.size(), 0);
   }
+
+  // Cached fusion is deliberately sequential. Exercise a budget that holds
+  // one fixture image's maps but not both, and compare to preloaded fusion.
+  options.use_cache = true;
+  options.cache_size = 16.0 / (1024.0 * 1024.0);
+  StereoFusion cached_fusion(options, temp_dir, "COLMAP", "", "geometric");
+  cached_fusion.Run();
+  const auto& cached_points = cached_fusion.GetFusedPoints();
+  ASSERT_EQ(cached_points.size(), fused_points.size());
+  EXPECT_EQ(cached_fusion.GetFusedPointsVisibility(), visibility);
+  for (size_t i = 0; i < fused_points.size(); ++i) {
+    EXPECT_FLOAT_EQ(cached_points[i].x, fused_points[i].x);
+    EXPECT_FLOAT_EQ(cached_points[i].y, fused_points[i].y);
+    EXPECT_FLOAT_EQ(cached_points[i].z, fused_points[i].z);
+    EXPECT_FLOAT_EQ(cached_points[i].nx, fused_points[i].nx);
+    EXPECT_FLOAT_EQ(cached_points[i].ny, fused_points[i].ny);
+    EXPECT_FLOAT_EQ(cached_points[i].nz, fused_points[i].nz);
+    EXPECT_EQ(cached_points[i].r, fused_points[i].r);
+    EXPECT_EQ(cached_points[i].g, fused_points[i].g);
+    EXPECT_EQ(cached_points[i].b, fused_points[i].b);
+  }
+  options.use_cache = false;
 
   bool stop_checked = false;
   StereoFusion cancelled_fusion(options, temp_dir, "COLMAP", "", "geometric");

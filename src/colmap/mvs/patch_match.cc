@@ -5,6 +5,7 @@
 #include "colmap/math/math.h"
 #include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/patch_match_cuda.h"
+#include "colmap/mvs/patch_match_input.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/file.h"
@@ -418,10 +419,6 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
     normal_maps.resize(model.images.size());
   }
 
-  problem.images = &images;
-  problem.depth_maps = &depth_maps;
-  problem.normal_maps = &normal_maps;
-
   {
     // Collect all used images in current problem.
     FlatHashSet<int> used_image_idxs(problem.src_image_idxs.begin(),
@@ -470,29 +467,28 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
       }
     }
 
-    // Read images in parallel using the shared I/O thread pool.
-    std::vector<std::shared_future<void>> futures;
-    futures.reserve(valid_image_idxs.size());
-    for (const auto image_idx : valid_image_idxs) {
-      futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
-        images.at(image_idx).SetBitmap(workspace_->GetBitmap(image_idx));
-        if (options.geom_consistency) {
-          depth_maps.at(image_idx) = workspace_->GetDepthMap(image_idx);
-          normal_maps.at(image_idx) = workspace_->GetNormalMap(image_idx);
-        }
-      }));
-    }
-    for (auto& future : futures) {
-      future.get();
-    }
+    // The helper drains all accepted reads before this lock or the local
+    // input vectors can be released, including on submission/read errors.
+    internal::StagePatchMatchInputs(*workspace_,
+                                    *io_thread_pool_,
+                                    valid_image_idxs,
+                                    options.geom_consistency,
+                                    problem.ref_image_idx,
+                                    images,
+                                    depth_maps,
+                                    normal_maps);
 
     problem.src_image_idxs = src_image_idxs;
   }
 
-  problem.Print();
+  PatchMatch::Problem input_problem = problem;
+  input_problem.images = &images;
+  input_problem.depth_maps = &depth_maps;
+  input_problem.normal_maps = &normal_maps;
+  input_problem.Print();
   patch_match_options.Print();
 
-  PatchMatch patch_match(patch_match_options, problem);
+  PatchMatch patch_match(patch_match_options, input_problem);
   patch_match.Run();
 
   LOG(INFO) << std::endl

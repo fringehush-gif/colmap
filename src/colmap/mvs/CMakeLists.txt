@@ -17,6 +17,7 @@ COLMAP_ADD_LIBRARY(
         poisson_meshing.h poisson_meshing.cc
         normal_map.h normal_map.cc
         patch_match_options.h patch_match_options.cc
+        patch_match_input.h patch_match_input.cc
         texture_mapping.h texture_mapping.cc
         workspace.h workspace.cc
     PUBLIC_LINK_LIBS
@@ -29,6 +30,9 @@ COLMAP_ADD_LIBRARY(
         colmap_poisson_recon
         Eigen3::Eigen
 )
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_mvs PRIVATE COLMAP_MVS_INPUT_TESTING)
+endif()
 if(CGAL_ENABLED)
     target_link_libraries(colmap_mvs PRIVATE CGAL)
 endif()
@@ -67,6 +71,23 @@ COLMAP_ADD_TEST(
     LINK_LIBS colmap_mvs
 )
 COLMAP_ADD_TEST(
+    NAME patch_match_input_test
+    SRCS patch_match_input_test.cc
+    LINK_LIBS colmap_mvs
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_mvs_patch_match_input_test PRIVATE COLMAP_MVS_INPUT_TESTING)
+endif()
+COLMAP_ADD_TEST(
+    NAME patch_match_options_test
+    SRCS patch_match_options_test.cc
+    LINK_LIBS colmap_mvs
+)
+COLMAP_ADD_TEST(
+    NAME patch_match_sampling_test
+    SRCS patch_match_sampling_test.cc
+)
+COLMAP_ADD_TEST(
     NAME poisson_meshing_test
     SRCS poisson_meshing_test.cc
     LINK_LIBS colmap_mvs
@@ -101,6 +122,9 @@ COLMAP_ADD_TEST(
     SRCS workspace_test.cc
     LINK_LIBS colmap_mvs
 )
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_mvs_workspace_test PRIVATE COLMAP_MVS_INPUT_TESTING)
+endif()
 
 if(CUDA_ENABLED)
     COLMAP_ADD_LIBRARY(
@@ -110,6 +134,7 @@ if(CUDA_ENABLED)
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu patch_match_geometry.cuh
+            patch_match_sampling.cuh
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
@@ -247,9 +272,13 @@ if(CUDA_ENABLED)
         )
     endif()
 
+    if(TESTS_ENABLED)
+        target_compile_definitions(colmap_mvs_cuda PRIVATE COLMAP_PATCH_MATCH_TESTING)
+    endif()
+
     COLMAP_ADD_TEST(
         NAME patch_match_cuda_test
-        SRCS patch_match_cuda_test.cc patch_match_cuda_test.cu
+        SRCS patch_match_cuda_test.cc patch_match_cuda_test.cu patch_match_cuda_test.h
         LINK_LIBS colmap_mvs_cuda
     )
 
@@ -275,6 +304,7 @@ if(HIP_ENABLED)
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu patch_match_geometry.cuh
+            patch_match_sampling.cuh
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
