@@ -16,6 +16,7 @@ namespace internal {
 void StagePatchMatchInputs(Workspace& workspace,
                            ThreadPool& io_thread_pool,
                            const std::vector<int>& image_idxs,
+                           const int ref_image_idx,
                            const bool geom_consistency,
                            std::vector<Image>& images,
                            std::vector<DepthMap>& depth_maps,
@@ -30,7 +31,11 @@ void StagePatchMatchInputs(Workspace& workspace,
         images.at(image_idx).SetBitmap(*workspace.GetBitmapLease(image_idx));
         if (geom_consistency) {
           depth_maps.at(image_idx) = *workspace.GetDepthMapLease(image_idx);
-          normal_maps.at(image_idx) = *workspace.GetNormalMapLease(image_idx);
+          // Read every normal map and retain the lease through its copy.
+          const auto normal_map = workspace.GetNormalMapLease(image_idx);
+          if (image_idx == ref_image_idx) {
+            normal_maps.at(image_idx) = *normal_map;
+          }
         }
       }));
     }

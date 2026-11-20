@@ -91,7 +91,7 @@ class PatchMatchInputTest : public ::testing::Test {
   std::unique_ptr<InputWorkspace> workspace;
 };
 
-TEST_F(PatchMatchInputTest, CopiesEveryRequestedPayloadAndReusesPool) {
+TEST_F(PatchMatchInputTest, CopiesReferenceNormalAndEveryImageAndDepth) {
   ThreadPool pool(2);
   for (const bool geometry : {false, true}) {
     SCOPED_TRACE(geometry);
@@ -100,7 +100,7 @@ TEST_F(PatchMatchInputTest, CopiesEveryRequestedPayloadAndReusesPool) {
     std::vector<DepthMap> depths(geometry ? images.size() : 0);
     std::vector<NormalMap> normals(geometry ? images.size() : 0);
     internal::StagePatchMatchInputs(
-        *workspace, pool, {1, 0}, geometry, images, depths, normals);
+        *workspace, pool, {1, 0}, 1, geometry, images, depths, normals);
     for (int index = 0; index < 2; ++index) {
       EXPECT_EQ(workspace->reads[index],
                 (std::array<int, 3>{1, geometry ? 1 : 0, geometry ? 1 : 0}));
@@ -108,13 +108,17 @@ TEST_F(PatchMatchInputTest, CopiesEveryRequestedPayloadAndReusesPool) {
                 workspace->bitmaps[index]->RowMajorData());
       if (geometry) {
         EXPECT_EQ(depths[index].GetData(), workspace->depths[index]->GetData());
-        EXPECT_EQ(normals[index].GetData(),
-                  workspace->normals[index]->GetData());
+        if (index == 1) {
+          EXPECT_EQ(normals[index].GetData(),
+                    workspace->normals[index]->GetData());
+        } else {
+          EXPECT_EQ(normals[index].GetNumBytes(), 0);
+        }
       }
     }
     const auto reads = workspace->reads;
     internal::StagePatchMatchInputs(
-        *workspace, pool, {}, geometry, images, depths, normals);
+        *workspace, pool, {}, 1, geometry, images, depths, normals);
     EXPECT_EQ(workspace->reads, reads);
     EXPECT_NO_THROW(pool.Wait());
   }
@@ -130,7 +134,7 @@ struct ReadGate {
   bool caller_returned = false;
   bool completed_before_return = false;
 
-  void Signal(bool ReadGate::*field) {
+  void Signal(bool ReadGate::* field) {
     {
       std::lock_guard<std::mutex> lock(mutex);
       this->*field = true;
@@ -138,7 +142,7 @@ struct ReadGate {
     condition.notify_all();
   }
 
-  bool WaitFor(bool ReadGate::*field,
+  bool WaitFor(bool ReadGate::* field,
                std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
     std::unique_lock<std::mutex> lock(mutex);
     return condition.wait_for(lock, timeout, [&] { return this->*field; });
@@ -165,6 +169,7 @@ struct ReadCleanup {
 };
 
 TEST_F(PatchMatchInputTest, ReadFailureDrainsAcceptedReadsBeforeReturning) {
+  // Image 0 is a source; its normal must still be read despite not being copied.
   for (const Payload payload :
        {Payload::Bitmap, Payload::Depth, Payload::Normal}) {
     for (const bool secondary_failure : {false, true}) {
@@ -200,7 +205,7 @@ TEST_F(PatchMatchInputTest, ReadFailureDrainsAcceptedReadsBeforeReturning) {
       cleanup.caller = std::thread([&] {
         try {
           internal::StagePatchMatchInputs(
-              *workspace, pool, {0, 1}, true, images, depths, normals);
+              *workspace, pool, {0, 1}, 1, true, images, depths, normals);
         } catch (...) {
           observed = std::current_exception();
         }
@@ -232,13 +237,17 @@ TEST_F(PatchMatchInputTest, ReadFailureDrainsAcceptedReadsBeforeReturning) {
       // A consumed task error must not poison the shared pool's next problem.
       workspace->before_read = {};
       EXPECT_NO_THROW(internal::StagePatchMatchInputs(
-          *workspace, pool, {0, 1}, true, images, depths, normals));
+          *workspace, pool, {0, 1}, 1, true, images, depths, normals));
       for (int index = 0; index < 2; ++index) {
         EXPECT_EQ(images[index].GetBitmap().RowMajorData(),
                   workspace->bitmaps[index]->RowMajorData());
         EXPECT_EQ(depths[index].GetData(), workspace->depths[index]->GetData());
-        EXPECT_EQ(normals[index].GetData(),
-                  workspace->normals[index]->GetData());
+        if (index == 1) {
+          EXPECT_EQ(normals[index].GetData(),
+                    workspace->normals[index]->GetData());
+        } else {
+          EXPECT_EQ(normals[index].GetNumBytes(), 0);
+        }
       }
       EXPECT_NO_THROW(pool.Wait());
     }
@@ -253,7 +262,7 @@ TEST_F(PatchMatchInputTest, SubmissionFailurePreservesPoolDiagnostic) {
   std::vector<NormalMap> normals;
   try {
     internal::StagePatchMatchInputs(
-        *workspace, pool, {0, 1}, false, images, depths, normals);
+        *workspace, pool, {0, 1}, 1, false, images, depths, normals);
     FAIL() << "Expected submission to a stopped pool to fail";
   } catch (const std::runtime_error& error) {
     EXPECT_EQ(std::string(error.what()),
@@ -307,7 +316,7 @@ TEST_F(PatchMatchInputTest, SubmissionFailureDrainsPreviouslyAcceptedWork) {
   cleanup.caller = std::thread([&] {
     try {
       internal::StagePatchMatchInputs(
-          *workspace, pool, {1}, false, images, depths, normals);
+          *workspace, pool, {1}, 1, false, images, depths, normals);
     } catch (...) {
       observed = std::current_exception();
     }
