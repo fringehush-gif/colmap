@@ -64,3 +64,23 @@ if(TESTS_ENABLED)
             PRIVATE -coverage)
     endif()
 endif()
+
+COLMAP_ADD_TEST(
+    NAME ply_floating_properties_test
+    SRCS ply_floating_properties_test.cc
+)
+if(TESTS_ENABLED)
+    foreach(test_name ply_floating_properties_test)
+        target_compile_definitions(colmap_thirdparty_${test_name} PRIVATE RELEASE)
+        if(MSVC)
+            target_compile_options(colmap_thirdparty_${test_name} PRIVATE /bigobj)
+        endif()
+        if(OPENMP_FOUND)
+            target_link_libraries(colmap_thirdparty_${test_name}
+                OpenMP::OpenMP_CXX)
+        endif()
+        if(COVERAGE_ENABLED)
+            target_link_options(colmap_thirdparty_${test_name} PRIVATE -coverage)
+        endif()
+    endforeach()
+endif()
