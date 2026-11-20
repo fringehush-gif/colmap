@@ -293,8 +293,8 @@ endif()
 
 if(CUDA_ENABLED OR HIP_ENABLED)
     COLMAP_ADD_TEST(
-        NAME patch_match_test
-        SRCS patch_match_test.cc
+        NAME patch_match_check_test
+        SRCS patch_match_check_test.cc
         LINK_LIBS colmap_mvs_cuda
     )
 endif()
