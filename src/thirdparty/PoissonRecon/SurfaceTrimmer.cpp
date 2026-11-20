@@ -411,7 +411,6 @@ int Execute( AuxDataFactories ... auxDataFactories )
 	typename VertexFactory::PositionFactory< Real , Dim > pFactory;
 	typename VertexFactory::ValueFactory< Real > vFactory;
 	Factory factory( pFactory , vFactory , auxDataFactories ... );
-	Real min , max;
 
 	std::vector< Vertex > vertices;
 	std::vector< std::vector< Index > > polygons;
@@ -419,9 +418,6 @@ int Execute( AuxDataFactories ... auxDataFactories )
 	int ft;
 	std::vector< std::string > comments;
 	PLY::ReadPolygons< Factory , Index >( In.value , factory , vertices , polygons , ft , comments );
-
-	min = max = vertices[0].template get<1>();
-	for( size_t i=0 ; i<vertices.size() ; i++ ) min = std::min< Real >( min , vertices[i].template get<1>() ) , max = std::max< Real >( max , vertices[i].template get<1>() );
 
 	std::unordered_map< EdgeKey< Index > , Index , typename EdgeKey< Index >::Hasher > vertexTable;
 	std::vector< std::vector< Index > > ltPolygons , gtPolygons;
@@ -446,7 +442,12 @@ int Execute( AuxDataFactories ... auxDataFactories )
 				else                std::cout << "\t--" << params[i]->name << std::endl;
 			}
 		}
-	if( Verbose.set ) printf( "Value Range: [%f,%f]\n" , min , max );
+	if( Verbose.set && vertices.size() )
+	{
+		Real min = vertices[0].template get<1>() , max = min;
+		for( size_t i=0 ; i<vertices.size() ; i++ ) min = std::min< Real >( min , vertices[i].template get<1>() ) , max = std::max< Real >( max , vertices[i].template get<1>() );
+		printf( "Value Range: [%f,%f]\n" , min , max );
+	}
 
 	double t=Time();
 	for( size_t i=0 ; i<polygons.size() ; i++ ) SplitPolygon( polygons[i] , vertices , &ltPolygons , &gtPolygons , &ltFlags , &gtFlags , vertexTable , Trim.value );

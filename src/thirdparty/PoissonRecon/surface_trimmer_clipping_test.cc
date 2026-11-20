@@ -153,6 +153,9 @@ TEST(SurfaceTrimmerClipping, PreservesStrictClassificationOfWholeFaces) {
     Mesh output;
     ASSERT_NO_FATAL_FAILURE(TrimMesh(input, "0", &output));
     ExpectMesh(output, value > 5 ? input : Mesh{});
+    Mesh repeated;
+    ASSERT_NO_FATAL_FAILURE(TrimMesh(output, "0", &repeated));
+    ExpectMesh(repeated, output);
   }
 }
 
