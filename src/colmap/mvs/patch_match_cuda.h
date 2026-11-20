@@ -98,8 +98,10 @@ class PatchMatchCuda {
   std::unique_ptr<GpuMat<float>> sel_prob_map_;
   std::unique_ptr<GpuMat<float>> prev_sel_prob_map_;
   std::unique_ptr<GpuMat<float>> cost_map_;
-  std::unique_ptr<GpuMatPRNG> rand_state_map_;
+  // Adjacent sweep orientations share one canonical corner state.
+  std::unique_ptr<GpuMat<curandState>> rand_state_map_;
   std::unique_ptr<GpuMat<uint8_t>> consistency_mask_;
+  bool consistency_mask_valid_ = false;
 
   // Shared memory is too small to hold local state for each thread,
   // so this is workspace memory in global memory.

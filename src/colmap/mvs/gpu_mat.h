@@ -18,6 +18,11 @@
 
 namespace colmap {
 namespace mvs {
+namespace internal {
+// Shared GpuMat launch geometry and block-major PRNG seeding.
+constexpr size_t kGpuMatBlockDimX = 32;
+constexpr size_t kGpuMatBlockDimY = 16;
+}  // namespace internal
 
 // Lightweight, trivially-copyable view of GPU device memory suitable for
 // passing to CUDA/HIP kernels. GpuMat<T> is non-trivially copyable; passing it
@@ -130,8 +135,8 @@ class GpuMat {
  protected:
   void ComputeCudaConfig();
 
-  const static size_t kBlockDimX = 32;
-  const static size_t kBlockDimY = 16;
+  const static size_t kBlockDimX = internal::kGpuMatBlockDimX;
+  const static size_t kBlockDimY = internal::kGpuMatBlockDimY;
 
   T* array_ptr_;
 
@@ -206,24 +211,30 @@ GpuMatView<T> GpuMat<T>::View() const {
 
 template <typename T>
 void GpuMat<T>::CopyToDevice(const T* data, const size_t pitch) {
-  CUDA_SAFE_CALL(cudaMemcpy2D((void*)array_ptr_,
-                              (size_t)pitch_,
-                              (void*)data,
-                              pitch,
-                              width_ * sizeof(T),
-                              height_ * depth_,
-                              cudaMemcpyHostToDevice));
+  ::colmap::internal::CudaSafeCallWithLocation(
+      cudaMemcpy2D((void*)array_ptr_,
+                   (size_t)pitch_,
+                   (void*)data,
+                   pitch,
+                   width_ * sizeof(T),
+                   height_ * depth_,
+                   cudaMemcpyHostToDevice),
+      __FILE__,
+      __LINE__);
 }
 
 template <typename T>
 void GpuMat<T>::CopyToHost(T* data, const size_t pitch) const {
-  CUDA_SAFE_CALL(cudaMemcpy2D((void*)data,
-                              pitch,
-                              (void*)array_ptr_,
-                              (size_t)pitch_,
-                              width_ * sizeof(T),
-                              height_ * depth_,
-                              cudaMemcpyDeviceToHost));
+  ::colmap::internal::CudaSafeCallWithLocation(
+      cudaMemcpy2D((void*)data,
+                   pitch,
+                   (void*)array_ptr_,
+                   (size_t)pitch_,
+                   width_ * sizeof(T),
+                   height_ * depth_,
+                   cudaMemcpyDeviceToHost),
+      __FILE__,
+      __LINE__);
 }
 
 template <typename T>
@@ -322,6 +333,14 @@ void GpuMat<T>::ComputeCudaConfig() {
 
 namespace internal {
 
+// Share the original templated arithmetic, including integer/double conversion.
+template <typename T>
+__device__ inline T DrawUniformInterval(T min_value,
+                                        T max_value,
+                                        curandState* state) {
+  return curand_uniform(state) * (max_value - min_value) + min_value;
+}
+
 template <typename T>
 __global__ void FillWithScalarKernel(GpuMatView<T> output, const T value) {
   const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -356,7 +375,7 @@ __global__ void FillWithRandomNumbersKernel(
     curandState local_state = random_state.Get(row, col);
     for (size_t slice = 0; slice < output.GetDepth(); ++slice) {
       const T random_value =
-          curand_uniform(&local_state) * (max_value - min_value) + min_value;
+          DrawUniformInterval(min_value, max_value, &local_state);
       output.Set(row, col, slice, random_value);
     }
     random_state.Set(row, col, local_state);
