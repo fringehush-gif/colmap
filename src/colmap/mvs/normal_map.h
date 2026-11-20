@@ -15,6 +15,10 @@ class NormalMap : public Mat<float> {
   NormalMap(size_t width, size_t height);
   explicit NormalMap(const Mat<float>& mat);
 
+  // Intentionally hide Mat::Read to validate channels before replacing data.
+  // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
+  void Read(const std::filesystem::path& path);
+
   void Rescale(float factor);
   void Downsize(size_t max_width, size_t max_height);
 
