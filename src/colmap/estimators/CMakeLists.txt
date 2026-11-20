@@ -48,6 +48,13 @@ COLMAP_ADD_LIBRARY(
 
 if(CASPAR_ENABLED)
     target_link_libraries(colmap_estimators PUBLIC caspar_lib_core)
+    # Keep installed consumers consistent with the selected generated solver.
+    target_compile_definitions(colmap_estimators PUBLIC CASPAR_ENABLED)
+    if(CASPAR_USE_DOUBLE)
+        target_compile_definitions(colmap_estimators PUBLIC CASPAR_USE_DOUBLE)
+    endif()
+    target_include_directories(colmap_estimators INTERFACE
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/colmap>)
 endif()
 
 if(CUDA_ENABLED)
