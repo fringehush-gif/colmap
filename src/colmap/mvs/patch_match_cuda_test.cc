@@ -338,7 +338,9 @@ TEST(PatchMatchCuda, SourceSamplingPreservesSupportAndStrides) {
     EXPECT_EQ(SampleSource(probs.data(), 3, stride, 0.5f), 2);
     EXPECT_EQ(SampleSource(probs.data(), 3, stride, 1.0f), 2);
     for (size_t i = 0; i < probs.size(); ++i) {
-      if (i % stride != 0) EXPECT_EQ(probs[i], -7.0f);
+      if (i % stride != 0) {
+        EXPECT_EQ(probs[i], -7.0f);
+      }
     }
   }
   // Invalid distributions keep the old normalization/selection policy; they
@@ -393,7 +395,9 @@ TEST(PatchMatchCuda, SourceSamplingDirectedBoundaries) {
       EXPECT_EQ(SampleSource(probs.data(), 5, stride, u), old_source);
     }
     for (size_t i = 0; i < probs.size(); ++i) {
-      if (i % stride != 0) EXPECT_EQ(probs[i], -7.0f);
+      if (i % stride != 0) {
+        EXPECT_EQ(probs[i], -7.0f);
+      }
     }
   }
   // Retain legacy classification and selection; these are not valid CDFs.
@@ -1993,8 +1997,8 @@ std::filesystem::path MakePublicationGpuWorkspace() {
   for (const auto& [id, image] : model.Images()) {
     const double camera_x = 0.1 * image.FrameId();
     Bitmap bitmap(width, height, false);
-    for (int row = 0; row < height; ++row) {
-      for (int col = 0; col < width; ++col) {
+    for (size_t row = 0; row < height; ++row) {
+      for (size_t col = 0; col < width; ++col) {
         const double x = camera_x + 4.0 * (col + 0.5 - 48.0) / 80.0;
         const double y = 4.0 * (row + 0.5 - 32.0) / 80.0;
         const double value = 128.0 + 42.0 * std::sin(8.0 * x + 3.0 * y) +
@@ -2116,8 +2120,9 @@ TEST(PatchMatchController, PublicationCompletesBeforeResumeSkips) {
     normal.Read(prepared->normal_path);
     EXPECT_EQ(normal.Get(7, 7, 2), -1.0f);
     EXPECT_EQ(ExistsFile(prepared->consistency_path), graph);
-    if (!graph)
+    if (!graph) {
       EXPECT_TRUE(std::filesystem::is_directory(prepared->consistency_path));
+    }
   }
 }
 
@@ -2511,7 +2516,7 @@ void RunControllerWorkStreamRefusals(bool sparse) {
     EXPECT_EQ(ControllerWorkspaceFixture::Outputs(root), expected_pair);
     ResetStreamFault(StreamFault::kNone, 0);
   }
-  for (const auto failures :
+  for (const auto& failures :
        {std::pair<size_t, size_t>{1, 0}, {3, 0}, {5, 0}, {1, 2}}) {
     SCOPED_TRACE(failures.first);
     SCOPED_TRACE(failures.second);
@@ -2531,7 +2536,9 @@ void RunControllerWorkStreamRefusals(bool sparse) {
     };
     EXPECT_TRUE(has_phase("after-batch-stream-refusal"));
     EXPECT_EQ(hooks.sparse_bank_at_work_stream_refusal, sparse);
-    if (failures.second) EXPECT_TRUE(has_phase("after-pair-stream-refusal"));
+    if (failures.second) {
+      EXPECT_TRUE(has_phase("after-pair-stream-refusal"));
+    }
     ExpectStreamCleanupBeforeQueries(
         failures.second ? std::vector<size_t>{failures.first, failures.second}
                         : std::vector<size_t>{failures.first});
@@ -3555,6 +3562,180 @@ TEST_F(CudaTest, DuplicatedSourcesPreservePhotoGeometryAcrossCacheBoundary) {
   EXPECT_EQ(thirty_three.selection.GetDepth(), 33);
   ExpectExactlyEqual(nine.depths, thirty_three.depths);
   ExpectExactlyEqual(nine.normals, thirty_three.normals);
+}
+
+// Compute the declared cost density independently in host double precision.
+double HmmNccEmission(const double cost, const float sigma) {
+  const double s = sigma;
+  const double integral =
+      s * std::sqrt(std::acos(-1.0) / 2) * std::erf(std::sqrt(2.0) / s);
+  return std::exp(-cost * cost / (2 * s * s)) / integral;
+}
+
+// Enumerate every binary state assignment, independently of message passing.
+// These fixtures contain at most five nodes, hence at most 32 assignments.
+std::vector<double> EnumeratedHmmMarginals(
+    const std::vector<double>& emissions) {
+  const double stay = 0.99999f;
+  const double change = 1.0f - 0.99999f;
+  const unsigned length = static_cast<unsigned>(emissions.size());
+  std::vector<double> selected(length, 0);
+  double total = 0;
+  for (unsigned assignment = 0; assignment < (1u << length); ++assignment) {
+    double mass = 0.5;
+    for (unsigned node = 0; node < length; ++node) {
+      const bool state = (assignment & (1u << node)) != 0;
+      if (node > 0) {
+        const bool previous = (assignment & (1u << (node - 1u))) != 0;
+        mass *= state == previous ? stay : change;
+      }
+      mass *= state ? emissions[node] : 0.5;
+    }
+    total += mass;
+    for (unsigned node = 0; node < length; ++node) {
+      if ((assignment & (1u << node)) != 0) selected[node] += mass;
+    }
+  }
+  for (double& marginal : selected) marginal /= total;
+  return selected;
+}
+
+Mat<float> HmmIdentitySelection(const int side,
+                                const bool impulse,
+                                const int radius,
+                                const int num_sources,
+                                const float sigma,
+                                const bool checkpoint) {
+  // Coincident views keep the ideal warp independent of plane hypotheses.
+  const float K[9] = {1, 0, 0.5f, 0, 1, 0.5f, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const float T[3] = {0, 0, 0};
+  Inputs inputs;
+  for (int index = 0; index <= num_sources; ++index) {
+    Image image("hmm-identity-" + std::to_string(index), side, side, K, R, T);
+    Bitmap bitmap(side, side, false);
+    bitmap.Fill(BitmapColor<uint8_t>(0));
+    if (impulse) {
+      bitmap.SetPixel(side - 1, side - 1, BitmapColor<uint8_t>(255));
+    }
+    image.SetBitmap(std::move(bitmap));
+    inputs.images.push_back(std::move(image));
+    inputs.depths.emplace_back(side, side, kDepthMin, kDepthMax);
+    inputs.normals.emplace_back(side, side);
+    for (int row = 0; row < side; ++row) {
+      for (int col = 0; col < side; ++col) {
+        inputs.depths.back().Set(row, col, kPlaneZ);
+        inputs.normals.back().Set(row, col, 0, 0);
+        inputs.normals.back().Set(row, col, 1, 0);
+        inputs.normals.back().Set(row, col, 2, -1);
+      }
+    }
+  }
+  PatchMatchOptions options = MakeOptions(true, false, false);
+  options.window_radius = radius;
+  options.sigma_spatial = 3;
+  options.sigma_color = 1;
+  options.ncc_sigma = sigma;
+  options.min_triangulation_angle = 0;
+  options.num_iterations = 1;
+  options.num_samples = 1;
+  options.geom_consistency_regularizer = 0;
+  options.checkpoint_hmm = checkpoint;
+  return RunPatchMatch(&inputs, options).selection;
+}
+
+TEST_F(CudaTest, HmmShortChainsMatchEnumeratedPosteriors) {
+  constexpr double kTolerance = 2e-5;
+  for (const int side : {1, 2}) {
+    for (const bool impulse : {false, true}) {
+      for (const int radius : {2, 5}) {
+        for (const float sigma : {0.6f, 1.2f}) {
+          const auto expected = EnumeratedHmmMarginals(std::vector<double>(
+              side, HmmNccEmission(impulse ? 0 : 2, sigma)));
+          // Both members of these constant two-node chains have one marginal.
+          for (const double marginal : expected) {
+            ASSERT_GT(marginal, kTolerance);
+            ASSERT_NEAR(marginal, expected.front(), 1e-12);
+          }
+          for (const bool checkpoint : {false, true}) {
+            SCOPED_TRACE(::testing::Message()
+                         << "side=" << side << " impulse=" << impulse
+                         << " radius=" << radius << " sigma=" << sigma
+                         << " checkpoint=" << checkpoint);
+            const auto selection = HmmIdentitySelection(
+                side, impulse, radius, 1, sigma, checkpoint);
+            ASSERT_EQ(selection.GetWidth(), side);
+            ASSERT_EQ(selection.GetHeight(), side);
+            ASSERT_EQ(selection.GetDepth(), 1);
+            ASSERT_EQ(selection.GetData().size(), side * side);
+            for (const float probability : selection.GetData()) {
+              ASSERT_TRUE(std::isfinite(probability));
+              EXPECT_NEAR(probability, expected.front(), kTolerance);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST_F(CudaTest, HmmStripesMatchEnumeratedPosteriors) {
+  constexpr double kTolerance = 2e-5;
+  // Four rows cross an exact stripe boundary; five have a three-row stripe
+  // and a two-row tail. The corner impulse makes the emissions nonuniform.
+  for (const unsigned side : {4u, 5u}) {
+    for (const float sigma : {0.6f, 1.2f}) {
+      const double dark = HmmNccEmission(2, sigma);
+      const double bright = HmmNccEmission(0, sigma);
+      const auto dark_chain =
+          EnumeratedHmmMarginals(std::vector<double>(side, dark));
+      std::vector<double> emissions(side, bright);
+      const unsigned first_bright = side - 3;
+      std::fill_n(emissions.begin(), first_bright, dark);
+      const auto mixed_chain = EnumeratedHmmMarginals(emissions);
+      // A radius-two patch includes the impulse precisely in the final three
+      // rows/columns. Symmetric transitions make reversal preserve marginals.
+      // The four blends give vertical/horizontal weights 15/32 and 17/32.
+      const auto expected_at = [&](const unsigned row, const unsigned col) {
+        const double vertical =
+            (col < first_bright ? dark_chain : mixed_chain)[row];
+        const double horizontal =
+            (row < first_bright ? dark_chain : mixed_chain)[col];
+        return (15 * vertical + 17 * horizontal) / 32;
+      };
+      ASSERT_GT(std::abs(expected_at(0, side - 1) - expected_at(side - 1, 0)),
+                2 * kTolerance);
+      ASSERT_GT(expected_at(side - 1, side - 1), kTolerance);
+      ASSERT_GT(
+          std::abs(expected_at(side - 1, side - 1) - bright / (bright + 0.5)),
+          kTolerance);
+      for (const int num_sources : {1, 17}) {
+        for (const bool checkpoint : {false, true}) {
+          SCOPED_TRACE(::testing::Message()
+                       << "side=" << side << " sigma=" << sigma << " sources="
+                       << num_sources << " checkpoint=" << checkpoint);
+          const auto selection = HmmIdentitySelection(
+              side, true, 2, num_sources, sigma, checkpoint);
+          ASSERT_EQ(selection.GetWidth(), side);
+          ASSERT_EQ(selection.GetHeight(), side);
+          ASSERT_EQ(selection.GetDepth(), num_sources);
+          ASSERT_EQ(selection.GetData().size(), side * side * num_sources);
+          for (int source = 0; source < num_sources; ++source) {
+            for (unsigned row = 0; row < side; ++row) {
+              for (unsigned col = 0; col < side; ++col) {
+                SCOPED_TRACE(::testing::Message()
+                             << "source=" << source << " row=" << row
+                             << " col=" << col);
+                const float probability = selection.Get(row, col, source);
+                ASSERT_TRUE(std::isfinite(probability));
+                EXPECT_NEAR(probability, expected_at(row, col), kTolerance);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 TEST_P(PatchMatchCudaTest, CheckpointHmmPreservesAlgorithmOutputs) {
