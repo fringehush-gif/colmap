@@ -181,6 +181,13 @@ TEST(SimplifyMesh, OutputMeshIsValid) {
     EXPECT_NE(face.vertex_idx1, face.vertex_idx2);
     EXPECT_NE(face.vertex_idx1, face.vertex_idx3);
     EXPECT_NE(face.vertex_idx2, face.vertex_idx3);
+
+    // The planar input has positive winding; distinct indices alone do not
+    // exclude a surviving face whose vertices have collapsed onto one line.
+    const auto& a = result.vertices[face.vertex_idx1];
+    const auto& b = result.vertices[face.vertex_idx2];
+    const auto& c = result.vertices[face.vertex_idx3];
+    EXPECT_GT((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x), 0);
   }
 }
 
