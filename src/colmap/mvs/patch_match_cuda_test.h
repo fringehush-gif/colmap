@@ -3,12 +3,57 @@
 
 #include "colmap/mvs/mat.h"
 
+#include <array>
 #include <cstdint>
+#include <vector>
 
 namespace colmap {
 namespace mvs {
 class PatchMatchCuda;
 namespace internal {
+
+struct NccCostComparison {
+  Mat<float> candidate;
+  Mat<float> reference;
+};
+
+// Uses the literal retained PR59 NCC body as an independent arithmetic arm.
+// Both arms share reference statistics, whose owner has separate qualification.
+NccCostComparison ProbeNccCosts(PatchMatchCuda& patch_match);
+
+struct FreshProposalAliasComparison {
+  Mat<float> candidate;
+  Mat<float> reference;
+  Mat<float> candidate_geometry;
+  Mat<float> reference_geometry;
+  // Bit0: staged depth equality; bit1: staged normal equality.
+  Mat<int> aliases;
+  float incoming_cost;
+};
+
+// Inject controlled finite proposals into the actual band producer, without
+// running a sweep or relying on a random draw to hit an alias.
+FreshProposalAliasComparison ProbeFreshProposalAliases(
+    PatchMatchCuda& patch_match);
+
+struct PhotoInitializationResult {
+  Mat<float> depth;
+  Mat<float> normal;
+  Mat<uint32_t> continuation;
+  Mat<int> normal_pairs;
+};
+
+// Independent retained 020c three-stage initialization, implemented in the test
+// CUDA translation unit. It does not call the new fused production helpers.
+PhotoInitializationResult ProbeLegacyPhotoInitialization(
+    int width,
+    int height,
+    const std::array<float, 4>& inv_K,
+    float depth_min,
+    float depth_max);
+
+// Read-only state-copy draws in canonical perimeter order, before any reseed.
+Mat<uint32_t> ProbeConstructorContinuation(PatchMatchCuda& patch_match);
 
 struct SweepTraceResult {
   Mat<int> draws;
@@ -24,11 +69,27 @@ struct SweepTraceResult {
   Mat<float> normal;
   Mat<float> selection;
   Mat<uint32_t> continuation;
+  // Raw draws from a state copy before this sweep, for shared-corner checks.
+  Mat<uint32_t> continuation_before;
+  // Direct raw moment observations from the production reader, before sweep.
+  Mat<uint32_t> reference_statistics;
+  bool immutable_reference_statistics = false;
 };
 
 SweepTraceResult ProbeSweep(PatchMatchCuda& patch_match,
                             bool cooperative,
                             unsigned long long seed);
+
+// Four real sweeps and rotations, with one seed operation at sequence start.
+// Uses the existing GEO trace contract and requires filtering to be disabled.
+std::vector<SweepTraceResult> ProbeSweepSequence(PatchMatchCuda& patch_match,
+                                                 bool cooperative,
+                                                 unsigned long long seed);
+
+// Constructor-stage test control: filter the original bitmap once and retain
+// its two float planes for the legacy physical-rotation path. Never re-filter
+// a rotated image or derive the oracle from the immutable texture reader.
+void UseLegacyReferenceStatistics(PatchMatchCuda& patch_match);
 
 }  // namespace internal
 }  // namespace mvs
