@@ -1836,12 +1836,15 @@ __global__ void SweepFromTopToBottom(
       // of the normal of the previous ray. This helps to better estimate
       // the depth of very oblique structures, i.e. pixels whose normal
       // direction is significantly different from their viewing direction.
-      prev_param_state.depth = internal::PropagateDepth(camera.inv_K,
-                                                        prev_param_state.depth,
-                                                        prev_param_state.normal,
-                                                        row - 1,
-                                                        row,
-                                                        col);
+      if (row > 0) {
+        prev_param_state.depth =
+            internal::PropagateDepth(camera.inv_K,
+                                     prev_param_state.depth,
+                                     prev_param_state.normal,
+                                     row - 1,
+                                     row,
+                                     col);
+      }
 
       // Read parameters for current pixel from previous sweep.
       curr_param_state.depth = depth_map.Get(row, col);
@@ -2321,28 +2324,25 @@ __global__ void SweepFromTopToBottom(
         if (winner == 0) {
           cost = cost_map.Get(row, col, image_idx);
         } else {
-          bool cached = false;
           if constexpr (kLookAhead) {
             if (winner >= 2) {
-              cost = look_ahead.costs.Get(row - first_row,
-                                          col,
-                                          (winner - 2) * cost_map.GetDepth() +
-                                              image_idx);
-              cached = true;
-            } else if (winner == 1) {
+              cost = look_ahead.costs.Get(
+                  row - first_row,
+                  col,
+                  (winner - 2) * cost_map.GetDepth() + image_idx);
+            } else if (winner == 1 && (row_source_mask[threadIdx.x] &
+                                       (uint32_t{1} << image_idx)) != 0) {
               // Every selected source remains live through refresh, not just
               // those in the last sixteen draws. Rank needs no list search.
-              const uint32_t mask =
-                  row_source_mask[threadIdx.x];
+              const uint32_t mask = row_source_mask[threadIdx.x];
               const uint32_t bit = uint32_t{1} << image_idx;
-              if ((mask & bit) != 0) {
-                const int slot = __popc(mask & (bit - 1));
-                cost = cooperative_job.Result(slot, 0, threadIdx.x);
-                cached = true;
-              }
+              const int slot = __popc(mask & (bit - 1));
+              cost = cooperative_job.Result(slot, 0, threadIdx.x);
+            } else {
+              pcc_computer.src_image_idx = image_idx;
+              cost = pcc_computer.Compute();
             }
-          }
-          if (!cached) {
+          } else {
             pcc_computer.src_image_idx = image_idx;
             cost = pcc_computer.Compute();
           }

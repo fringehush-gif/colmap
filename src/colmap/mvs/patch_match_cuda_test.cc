@@ -131,8 +131,8 @@ void MakeSourceTexturesDistinct(Inputs* inputs) {
 void AddDistinctSourceDepthErrors(Inputs* inputs) {
   for (int source = 1; source < static_cast<int>(inputs->depths.size()); ++source) {
     auto& depth = inputs->depths[source];
-    for (int row = 0; row < depth.GetHeight(); ++row) {
-      for (int col = 0; col < depth.GetWidth(); ++col) {
+    for (int row = 0; row < static_cast<int>(depth.GetHeight()); ++row) {
+      for (int col = 0; col < static_cast<int>(depth.GetWidth()); ++col) {
         const float scale = 1.0f + 0.003f * source +
                             0.0004f * ((row + 3 * col) % 7 - 3);
         depth.Set(row, col, depth.Get(row, col) * scale);
@@ -229,8 +229,8 @@ void ExpectNonVacuousGeometry(const internal::SweepTraceResult& control,
   ExpectExactlyEqual(control.initial_cost, changed.initial_cost);
   int source_sensitive_pixels = 0;
   int distinct_depth_geometry_pixels = 0;
-  for (int row = 0; row < changed.draws.GetHeight(); ++row) {
-    for (int col = 0; col < changed.draws.GetWidth(); ++col) {
+  for (size_t row = 0; row < changed.draws.GetHeight(); ++row) {
+    for (size_t col = 0; col < changed.draws.GetWidth(); ++col) {
       bool same_inputs = true;
       for (int component = 0; component < 20; ++component) {
         const float a = control.hypotheses.Get(row, col, component);
@@ -241,7 +241,7 @@ void ExpectNonVacuousGeometry(const internal::SweepTraceResult& control,
       bool distinct_sources = false;
       double incumbent_photo_sum = 0.0;
       double winner_photo_sum = 0.0;
-      for (int sample = 0; sample < changed.draws.GetDepth(); ++sample) {
+      for (size_t sample = 0; sample < changed.draws.GetDepth(); ++sample) {
         const int source = changed.draws.Get(row, col, sample);
         same_inputs = same_inputs && source == control.draws.Get(row, col, sample);
         if (source < 0) continue;
@@ -739,7 +739,7 @@ TEST_F(CudaTest, ImmutableReferenceStatisticsMatchRotatedPlanesAcrossBands) {
     if (a.draws.GetHeight() > 128) {
       for (int row : {128, 256}) {
         int supported = 0, row_sensitive = 0;
-        for (int col = 0; col < a.draws.GetWidth(); ++col) {
+        for (size_t col = 0; col < a.draws.GetWidth(); ++col) {
           supported += a.support.Get(row, col) != 0;
           row_sensitive += a.reference_statistics.Get(row, col) !=
                            a.reference_statistics.Get(0, col);
@@ -753,6 +753,142 @@ TEST_F(CudaTest, ImmutableReferenceStatisticsMatchRotatedPlanesAcrossBands) {
   ExpectExactlyEqual(rotated_planes.GetDepthMap(), immutable.GetDepthMap());
   ExpectExactlyEqual(rotated_planes.GetNormalMap(), immutable.GetNormalMap());
   ExpectExactlyEqual(rotated_planes.GetSelProbMap(), immutable.GetSelProbMap());
+}
+
+// Compute the ray by undoing the image rotation, then rotating the camera ray.
+// This does not reuse the device's rotated calibration or propagation helper.
+std::array<double, 3> ReferenceRay(const Image& image,
+                                   const int orientation,
+                                   const int row,
+                                   const int col) {
+  double x = col;
+  double y = row;
+  switch (orientation) {
+    case 1:
+      x = image.GetWidth() - 1 - row;
+      y = col;
+      break;
+    case 2:
+      x = image.GetWidth() - 1 - col;
+      y = image.GetHeight() - 1 - row;
+      break;
+    case 3:
+      x = row;
+      y = image.GetHeight() - 1 - col;
+      break;
+  }
+  const float* K = image.GetK();
+  x = (x + 0.5 - K[2]) / K[0];
+  y = (y + 0.5 - K[5]) / K[4];
+  switch (orientation) {
+    case 1:
+      return {y, -x, 1};
+    case 2:
+      return {-x, -y, 1};
+    case 3:
+      return {-y, x, 1};
+    default:
+      return {x, y, 1};
+  }
+}
+
+void ExpectPropagationAnchors(const internal::SweepTraceResult& trace,
+                              const Image& image,
+                              const int orientation) {
+  const int width = static_cast<int>(trace.hypotheses.GetWidth());
+  const int height = static_cast<int>(trace.hypotheses.GetHeight());
+  ASSERT_GT(width, 0);
+  ASSERT_GT(height, 1);
+  for (int row = 0; row < height; ++row) {
+    int changed_depths = 0;
+    for (int col = 0; col < width; ++col) {
+      SCOPED_TRACE(::testing::Message() << "row=" << row << " col=" << col);
+      // Zero NCC emissions keep the deliberately oblique incumbent selected.
+      ASSERT_EQ(trace.support.Get(row, col), 0);
+      ASSERT_EQ(trace.winners.Get(row, col), 0);
+      const int source_row = row == 0 ? 0 : row - 1;
+      const float source_depth = trace.hypotheses.Get(source_row, col, 0);
+      const float propagated_depth = trace.hypotheses.Get(row, col, 4);
+      for (int axis = 0; axis < 3; ++axis) {
+        EXPECT_EQ(trace.hypotheses.Get(row, col, 5 + axis),
+                  trace.hypotheses.Get(source_row, col, 1 + axis));
+      }
+      if (row == 0) {
+        EXPECT_EQ(propagated_depth, source_depth);
+        continue;
+      }
+      const auto source_ray = ReferenceRay(image, orientation, row - 1, col);
+      const auto target_ray = ReferenceRay(image, orientation, row, col);
+      double source_dot = 0;
+      double target_dot = 0;
+      for (int axis = 0; axis < 3; ++axis) {
+        const double normal = trace.hypotheses.Get(source_row, col, 1 + axis);
+        source_dot += normal * source_ray[axis];
+        target_dot += normal * target_ray[axis];
+      }
+      // This fixture stays far from the production fallback and plane horizon.
+      ASSERT_GT(std::abs(target_dot), 0.1);
+      const double expected = source_depth * source_dot / target_dot;
+      ASSERT_GT(expected, 0);
+      const double tolerance = 2e-5 * expected;
+      EXPECT_NEAR(propagated_depth, expected, tolerance);
+      changed_depths += std::abs(expected - source_depth) > 10 * tolerance;
+    }
+    // Every nonzero row, including each band's first row, needs a real
+    // transfer.
+    if (row > 0) {
+      EXPECT_GT(changed_depths, 0) << "row=" << row;
+    }
+  }
+}
+
+TEST_F(CudaTest, PropagationUsesTheActualSourcePixel) {
+  constexpr int kWidth = 35;
+  constexpr int kHeight = 259;
+  auto inputs = MakeInputs(0, 1, kHeight, kWidth);
+  for (Image& image : inputs.images) {
+    Bitmap bitmap(image.GetWidth(), image.GetHeight(), false);
+    bitmap.Fill(BitmapColor<uint8_t>(0));
+    image.SetBitmap(std::move(bitmap));
+  }
+  for (int row = 0; row < kHeight; ++row) {
+    for (int col = 0; col < kWidth; ++col) {
+      inputs.depths[0].Set(row, col, 3.2f + 0.001f * row);
+      inputs.normals[0].Set(row, col, 0, 0.2f);
+      inputs.normals[0].Set(row, col, 1, 0.3f);
+      inputs.normals[0].Set(row, col, 2, -std::sqrt(0.87f));
+    }
+  }
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  problem.src_image_idxs = {1};
+  problem.images = &inputs.images;
+  problem.depth_maps = &inputs.depths;
+  problem.normal_maps = &inputs.normals;
+  auto options = MakeOptions(true, false, false);
+  options.window_radius = 5;
+  options.sigma_spatial = 5.0;
+  options.ncc_sigma = 0.01;
+  options.num_samples = 1;
+  options.num_iterations = 1;
+  ASSERT_TRUE(options.Check());
+
+  // Constant images give cost=2. At this sigma the emission is exactly zero,
+  // so the real sweep retains the seed while still tracing every hypothesis.
+  // This makes every propagation boundary informative without relying on RNG
+  // winners or claiming that the incorrect candidate must win its comparison.
+  for (const bool cooperative : {false, true}) {
+    SCOPED_TRACE(cooperative);
+    PatchMatchCuda patch_match(options, problem);
+    const auto traces =
+        internal::ProbeSweepSequence(patch_match, cooperative, 1873);
+    ASSERT_EQ(traces.size(), 4);
+    for (int orientation = 0; orientation < 4; ++orientation) {
+      SCOPED_TRACE(orientation);
+      ExpectPropagationAnchors(
+          traces[orientation], inputs.images[0], orientation);
+    }
+  }
 }
 
 TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
@@ -989,8 +1125,12 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
     EXPECT_GT(supported_pixels, 0);
     EXPECT_GT(supported_rows, 1);
     EXPECT_GT(duplicate_pixels, 0);
-    if (sources == 31) EXPECT_GT(high30, 0);
-    if (sources >= 32) EXPECT_GT(high31, 0);
+    if (sources == 31) {
+      EXPECT_GT(high30, 0);
+    }
+    if (sources >= 32) {
+      EXPECT_GT(high31, 0);
+    }
     if (c.look_ahead) {
       EXPECT_GT(distinct_sampled_costs, 0);
       EXPECT_GT(cross_window_duplicate_pixels, 0);
