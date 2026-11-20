@@ -34,6 +34,7 @@ DAMAGE.
 #include <stdlib.h>
 #include <float.h>
 #include <algorithm>
+#include <memory>
 #include <type_traits>
 #include <unordered_set>
 #include <list>
@@ -579,18 +580,17 @@ int ExecuteWithPosition( void )
 	static constexpr unsigned int Dim = DEFAULT_DIMENSION;
 	typedef VertexFactory::Factory< Real , typename VertexFactory::PositionFactory< PositionReal , Dim > , typename VertexFactory::ValueFactory< Real > > Factory;
 	Factory factory;
-	bool *readFlags = new bool[ factory.plyReadNum() ];
+	std::unique_ptr< bool[] > readFlags( new bool[ factory.plyReadNum() ] );
 	std::vector< PlyProperty > unprocessedProperties;
 	size_t vNum;
-	PLY::ReadVertexHeader( In.value , factory , readFlags , unprocessedProperties , vNum );
+	PLY::ReadVertexHeader( In.value , factory , readFlags.get() , unprocessedProperties , vNum );
 	if( vNum>std::numeric_limits< int >::max() )
 	{
 		if( !Long.set ) MK_WARN( "Number of vertices not supported by 32-bit indexing. Switching to 64-bit indexing" );
 		Long.set = true;
 	}
-	if( !factory.template plyValidReadProperties<0>( readFlags ) ) MK_THROW( "Ply file does not contain positions" );
-	if( !factory.template plyValidReadProperties<1>( readFlags ) ) MK_THROW( "Ply file does not contain values" );
-	delete[] readFlags;
+	if( !factory.template plyValidReadProperties<0>( readFlags.get() ) ) MK_THROW( "Ply file does not contain positions" );
+	if( !factory.template plyValidReadProperties<1>( readFlags.get() ) ) MK_THROW( "Ply file does not contain values" );
 
 	if( Long.set ) return Execute< PositionReal , Real , Dim , long long >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
 	else           return Execute< PositionReal , Real , Dim , int       >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
