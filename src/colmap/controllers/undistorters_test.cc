@@ -9,6 +9,7 @@
 #include "colmap/util/testing.h"
 
 #include <filesystem>
+#include <fstream>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -41,6 +42,105 @@ Reconstruction CreateSyntheticReconstructionWithBitmaps(
   }
 
   return reconstruction;
+}
+
+TEST(ImageUndistorters, ApplyRegionOfInterestToPinhole) {
+  const auto temp_dir = CreateTestDir();
+  const auto image_path = temp_dir / "input_images";
+  CreateDirIfNotExists(image_path);
+  Reconstruction reconstruction =
+      CreateSyntheticReconstructionWithBitmaps(image_path, /*num_images=*/1);
+  for (const auto& [camera_id, _] : reconstruction.Cameras()) {
+    reconstruction.Camera(camera_id) = Camera::CreateFromModelId(
+        camera_id, CameraModelId::kPinhole, 100, 100, 100);
+  }
+  const Image& image = reconstruction.Images().begin()->second;
+  Bitmap input(100, 100, true);
+  for (int y = 0; y < 100; ++y) {
+    for (int x = 0; x < 100; ++x) {
+      input.SetPixel(x,
+                     y,
+                     BitmapColor<uint8_t>(
+                         10 * (x / 5), 10 * (y / 5), 10 * ((x + y) / 10)));
+    }
+  }
+  ASSERT_TRUE(input.Write(image_path / image.Name()));
+  {
+    // These bytes survive copying, but not decoding and writing the image.
+    std::ofstream file(image_path / image.Name(),
+                       std::ios::binary | std::ios::app);
+    file << "copy-through-marker";
+  }
+  std::vector<char> input_bytes;
+  ReadBinaryBlob(image_path / image.Name(), &input_bytes);
+
+  for (const bool crop : {false, true}) {
+    for (const auto copy_type : {FileCopyType::COPY,
+                                 FileCopyType::HARD_LINK,
+                                 FileCopyType::SOFT_LINK}) {
+      // The unchanged control needs no symlink privileges on Windows.
+      if (!crop && copy_type != FileCopyType::COPY) {
+        continue;
+      }
+      SCOPED_TRACE(crop);
+      SCOPED_TRACE(static_cast<int>(copy_type));
+      const auto output_path =
+          temp_dir / StringPrintf("output_%d_%d", crop, int(copy_type));
+      const auto standalone_path =
+          temp_dir / StringPrintf("standalone_%d_%d", crop, int(copy_type));
+      CreateDirIfNotExists(output_path);
+      UndistortCameraOptions camera_options;
+      if (crop) {
+        camera_options.roi_min_x = 0.1;
+        camera_options.roi_min_y = 0.2;
+        camera_options.roi_max_x = 0.9;
+        camera_options.roi_max_y = 0.8;
+      }
+      COLMAPUndistorter::Options options;
+      options.num_threads = 1;
+      options.copy_type = copy_type;
+      COLMAPUndistorter undistorter(
+          options, camera_options, reconstruction, image_path, output_path);
+      undistorter.Run();
+      StandaloneImageUndistorter::Options standalone_options;
+      standalone_options.num_threads = 1;
+      standalone_options.copy_type = copy_type;
+      standalone_options.image_names_and_cameras.emplace_back(
+          image.Name(), *image.CameraPtr());
+      StandaloneImageUndistorter standalone(
+          standalone_options, camera_options, image_path, standalone_path);
+      standalone.Run();
+
+      for (const auto& path : {output_path / "images", standalone_path}) {
+        if (crop) {
+          Bitmap bitmap;
+          ASSERT_TRUE(bitmap.Read(path / image.Name()));
+          EXPECT_EQ(bitmap.Width(), 80);
+          EXPECT_EQ(bitmap.Height(), 60);
+          const auto pixel = bitmap.GetPixel(22, 22);
+          ASSERT_TRUE(pixel.has_value());
+          // Output (22, 22) comes from input (32, 42), not (22, 22).
+          EXPECT_EQ(*pixel, BitmapColor<uint8_t>(60, 80, 70));
+          EXPECT_FALSE(std::filesystem::equivalent(image_path / image.Name(),
+                                                   path / image.Name()));
+        } else {
+          std::vector<char> output_bytes;
+          ReadBinaryBlob(path / image.Name(), &output_bytes);
+          EXPECT_EQ(output_bytes, input_bytes);
+        }
+      }
+      Reconstruction output_reconstruction;
+      output_reconstruction.Read(output_path / "sparse");
+      const Camera& camera = output_reconstruction.Camera(image.CameraId());
+      EXPECT_EQ(camera.width, crop ? 80 : 100);
+      EXPECT_EQ(camera.height, crop ? 60 : 100);
+      EXPECT_EQ(camera.PrincipalPointX(), crop ? 40 : 50);
+      EXPECT_EQ(camera.PrincipalPointY(), crop ? 30 : 50);
+      std::vector<char> remaining_input_bytes;
+      ReadBinaryBlob(image_path / image.Name(), &remaining_input_bytes);
+      EXPECT_EQ(remaining_input_bytes, input_bytes);
+    }
+  }
 }
 
 TEST(COLMAPUndistorter, Integration) {
