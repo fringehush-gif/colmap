@@ -101,18 +101,16 @@ class FaissVisualIndex : public VisualIndex {
       return;
     }
 
-    image_ids_.insert(image_id);
-
-    prepared_ = false;
-
-    if (descriptors.data.rows() == 0) {
-      return;
+    WordIds word_ids;
+    if (descriptors.data.rows() > 0) {
+      word_ids = FindWordIds(descriptors.data,
+                             options.num_neighbors,
+                             options.num_checks,
+                             options.num_threads);
     }
 
-    const WordIds word_ids = FindWordIds(descriptors.data,
-                                         options.num_neighbors,
-                                         options.num_checks,
-                                         options.num_threads);
+    image_ids_.insert(image_id);
+    prepared_ = false;
 
     for (Eigen::Index i = 0; i < descriptors.data.rows(); ++i) {
       const auto& descriptor = descriptors.data.row(i);
