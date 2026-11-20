@@ -141,7 +141,7 @@ const std::array<std::array<double, 3>, 4> kMapped{{
     {{-0.18906250409781933, 0.5328125115483999, -0.8250000178813934}},
     {{-0.1804687539115548, 0.5342952009611821, -0.8259852647994919}},
 }};
-const std::vector<std::vector<int>> kFaces{{2, 0, 1}, {2, 3, 0}};
+constexpr std::array<std::array<int, 3>, 2> kFaces{{{{2, 0, 1}}, {{2, 3, 0}}}};
 
 template <bool InCore>
 void WriteRetainedWitness(const std::string& filename, int format) {
@@ -207,7 +207,8 @@ void ExpectRetainedWitness(const Mesh& mesh) {
   }
   EXPECT_NE(mesh.vertices[0].get<0>()[2], mesh.vertices[2].get<0>()[2]);
   for (size_t i = 0; i < 2; ++i) {
-    EXPECT_EQ(mesh.faces[i], kFaces[i]);
+    EXPECT_EQ(mesh.faces[i],
+              std::vector<int>(kFaces[i].begin(), kFaces[i].end()));
     const auto a = mesh.vertices[kFaces[i][1]].get<0>() -
                    mesh.vertices[kFaces[i][0]].get<0>();
     const auto b = mesh.vertices[kFaces[i][2]].get<0>() -
@@ -219,6 +220,7 @@ void ExpectRetainedWitness(const Mesh& mesh) {
 
 int RunEntry(int (*entry)(int, char**), std::vector<std::string> arguments) {
   std::vector<char*> raw;
+  raw.reserve(arguments.size());
   for (auto& argument : arguments) raw.push_back(argument.data());
   return entry(static_cast<int>(raw.size()), raw.data());
 }
@@ -294,8 +296,25 @@ TEST(OutputPositionPrecision, TrimsWidePositionsAndTranslatedIntersections) {
   EXPECT_EQ(trimmed.vertices[6].get<3>()[0], 9.0f);
 }
 
+// The test inherits the vendor's fast-math flags. Inspect the representation
+// instead of calling a floating predicate that those flags may optimize away.
+bool IsFiniteBinary64(const double& value) {
+  static_assert(std::numeric_limits<double>::is_iec559 &&
+                sizeof(double) == sizeof(std::uint64_t));
+  std::uint64_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  constexpr std::uint64_t kExponentMask = 0x7ff0000000000000ULL;
+  return (bits & kExponentMask) != kExponentMask;
+}
+
 TEST(OutputPositionPrecision,
      DefaultPublicReconstructionWritesDoublePositions) {
+  // These controls ensure that fast-math has not made the check vacuous.
+  for (std::uint64_t pattern : {0x7ff0000000000000ULL, 0x7ff8000000000001ULL}) {
+    double nonfinite;
+    std::memcpy(&nonfinite, &pattern, sizeof(nonfinite));
+    EXPECT_FALSE(IsFiniteBinary64(nonfinite));
+  }
   SerialThreads threads;
   TemporaryDirectory directory;
   const auto input = directory.File("sphere.ply");
@@ -352,7 +371,7 @@ TEST(OutputPositionPrecision,
   ASSERT_FALSE(mesh.faces.empty());
   for (const auto& vertex : mesh.vertices)
     for (unsigned int d = 0; d < 3; ++d)
-      EXPECT_TRUE(std::isfinite(vertex.get<0>()[d]));
+      EXPECT_TRUE(IsFiniteBinary64(vertex.get<0>()[d]));
 }
 
 }  // namespace
