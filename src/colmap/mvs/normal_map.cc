@@ -24,6 +24,13 @@ NormalMap::NormalMap(Mat<float>&& mat) : NormalMap() {
   Mat<float>::operator=(std::move(mat));
 }
 
+void NormalMap::Read(const std::filesystem::path& path) {
+  Mat<float> mat;
+  mat.Read(path);
+  THROW_CHECK_EQ(mat.GetDepth(), 3) << path;
+  Mat<float>::operator=(std::move(mat));
+}
+
 void NormalMap::Rescale(const float factor) {
   if (width_ * height_ == 0) {
     return;

@@ -22,6 +22,10 @@ class DepthMap : public Mat<float> {
 
   inline float Get(size_t row, size_t col) const;
 
+  // Intentionally hide Mat::Read to validate channels before replacing data.
+  // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
+  void Read(const std::filesystem::path& path);
+
   void Rescale(float factor);
   void Downsize(size_t max_width, size_t max_height);
 

@@ -33,15 +33,37 @@ std::string GetCudaErrorMessage(const cudaError_t error) {
   return message;
 }
 
-CudaTimer::CudaTimer(cudaStream_t stream) : stream_(stream) {
-  CUDA_SAFE_CALL(cudaEventCreate(&start_));
-  CUDA_SAFE_CALL(cudaEventCreate(&stop_));
-  CUDA_SAFE_CALL(cudaEventRecord(start_, stream_));
+CudaTimer::CudaTimer(cudaStream_t stream)
+    : stream_(stream), start_(nullptr), stop_(nullptr) {
+  bool start_created = false;
+  bool stop_created = false;
+  try {
+    const auto start_status = cudaEventCreate(&start_);
+    start_created = start_status == cudaSuccess;
+    CUDA_SAFE_CALL(start_status);
+    const auto stop_status = cudaEventCreate(&stop_);
+    stop_created = stop_status == cudaSuccess;
+    CUDA_SAFE_CALL(stop_status);
+    CUDA_SAFE_CALL(cudaEventRecord(start_, stream_));
+  } catch (...) {
+    if (start_created) {
+      CudaCleanupScope::ObserveCleanup("cudaEventDestroy CudaTimer",
+                                       cudaEventDestroy(start_));
+    }
+    if (stop_created) {
+      CudaCleanupScope::ObserveCleanup("cudaEventDestroy CudaTimer",
+                                       cudaEventDestroy(stop_));
+    }
+    throw;
+  }
 }
 
 CudaTimer::~CudaTimer() {
-  CUDA_SAFE_CALL(cudaEventDestroy(start_));
-  CUDA_SAFE_CALL(cudaEventDestroy(stop_));
+  // Record release failures without throwing or skipping the second event.
+  CudaCleanupScope::ObserveCleanup("cudaEventDestroy CudaTimer",
+                                   cudaEventDestroy(start_));
+  CudaCleanupScope::ObserveCleanup("cudaEventDestroy CudaTimer",
+                                   cudaEventDestroy(stop_));
 }
 
 void CudaTimer::Print(const std::string& message) {

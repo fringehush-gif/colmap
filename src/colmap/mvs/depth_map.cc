@@ -36,6 +36,13 @@ DepthMap::DepthMap(Mat<float>&& mat,
   Mat<float>::operator=(std::move(mat));
 }
 
+void DepthMap::Read(const std::filesystem::path& path) {
+  Mat<float> mat;
+  mat.Read(path);
+  THROW_CHECK_EQ(mat.GetDepth(), 1) << path;
+  Mat<float>::operator=(std::move(mat));
+}
+
 void DepthMap::Rescale(const float factor) {
   if (width_ * height_ == 0) {
     return;
