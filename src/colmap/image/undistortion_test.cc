@@ -617,9 +617,13 @@ TEST(UndistortReconstruction, RescalesAlreadyUndistortedCameras) {
   EXPECT_EQ(cropped.Camera(1).camera_id, 1);
   EXPECT_EQ(cropped.Camera(1).source, camera.source);
   EXPECT_TRUE(cropped.Camera(1).HasPriorFocalLength());
-  EXPECT_NO_THROW({ const Reconstruction copy = cropped; });
+  Reconstruction copy = cropped;
+  EXPECT_EQ(copy.Camera(1).camera_id, 1);
   ASSERT_EQ(cropped.NumImages(), kNumImages);
   for (const auto& [image_id, image] : cropped.Images()) {
+    EXPECT_EQ(copy.Image(image_id).CameraId(), 1);
+    EXPECT_EQ(copy.Image(image_id).CameraPtr(), &copy.Camera(1));
+    EXPECT_NE(copy.Image(image_id).CameraPtr(), image.CameraPtr());
     ASSERT_EQ(image.NumPoints2D(), 2);
     EXPECT_THAT(image.Point2D(0).xy,
                 EigenMatrixNear(Eigen::Vector2d(50, 20), 1e-10));
