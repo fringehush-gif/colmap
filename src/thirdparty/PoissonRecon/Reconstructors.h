@@ -190,6 +190,8 @@ namespace PoissonRecon
 
 			// A method that writes the extracted mesh to the streams
 			void extractLevelSet( OutputLevelSetVertexStream< Real , Dim , AuxData... > &vertexStream , OutputFaceStream< Dim-1 > &faceStream , LevelSetExtractionParameters params ) const;
+			template< typename PositionReal >
+			void extractLevelSet( OutputLevelSetVertexStreamWithPosition< PositionReal , Real , Dim , AuxData... > &vertexStream , OutputFaceStream< Dim-1 > &faceStream , LevelSetExtractionParameters params ) const;
 
 			struct Evaluator
 			{
@@ -591,6 +593,13 @@ namespace PoissonRecon
 		template< typename Real , unsigned int Dim , unsigned int ... FEMSigs , typename ... AuxData >
 		void Implicit< Real , Dim , UIntPack< FEMSigs ... > , AuxData ... >::extractLevelSet( OutputLevelSetVertexStream< Real , Dim , AuxData... > &vertexStream , OutputFaceStream< Dim-1 > &faceStream , LevelSetExtractionParameters params ) const
 		{
+			extractLevelSet< Real >( vertexStream , faceStream , params );
+		}
+
+		template< typename Real , unsigned int Dim , unsigned int ... FEMSigs , typename ... AuxData >
+		template< typename PositionReal >
+		void Implicit< Real , Dim , UIntPack< FEMSigs ... > , AuxData ... >::extractLevelSet( OutputLevelSetVertexStreamWithPosition< PositionReal , Real , Dim , AuxData... > &vertexStream , OutputFaceStream< Dim-1 > &faceStream , LevelSetExtractionParameters params ) const
+		{
 			XForm< Real , Dim+1 > unitCubeToModel;
 			if( params.gridCoordinates )
 			{
@@ -608,7 +617,7 @@ namespace PoissonRecon
 
 				std::string statsString;
 
-				TransformedOutputLevelSetVertexStream< Real , Dim , AuxData... > _vertexStream( unitCubeToModel , vertexStream );
+				TransformedOutputLevelSetVertexStreamWithPosition< PositionReal , Real , Dim , AuxData... > _vertexStream( unitCubeToModel , vertexStream );
 				if constexpr( sizeof...(AuxData) )
 				{
 					// Convert stream:

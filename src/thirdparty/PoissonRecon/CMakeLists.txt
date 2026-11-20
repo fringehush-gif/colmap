@@ -69,8 +69,13 @@ COLMAP_ADD_TEST(
     NAME ply_floating_properties_test
     SRCS ply_floating_properties_test.cc
 )
+COLMAP_ADD_TEST(
+    NAME output_position_precision_test
+    SRCS output_position_precision_test.cc
+    LINK_LIBS colmap_poisson_recon
+)
 if(TESTS_ENABLED)
-    foreach(test_name ply_floating_properties_test)
+    foreach(test_name ply_floating_properties_test output_position_precision_test)
         target_compile_definitions(colmap_thirdparty_${test_name} PRIVATE RELEASE)
         if(MSVC)
             target_compile_options(colmap_thirdparty_${test_name} PRIVATE /bigobj)
