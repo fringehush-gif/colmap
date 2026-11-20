@@ -1074,7 +1074,7 @@ public:
 #else // !SANITIZED_PR
 								volatile char &edgeSet = sScratch.eSet[vIndex];
 #endif // SANITIZED_PR
-								if( !edgeSet && ( vertexOwners.empty() || vertexOwners[vIndex]==(node_index_type)i ) )
+								if( ( vertexOwners.empty() || vertexOwners[vIndex]==(node_index_type)i ) && !edgeSet )
 								{
 									Vertex vertex;
 									Key key = _EdgeIndex( leaf , e );
@@ -1241,7 +1241,7 @@ public:
 #else // !SANITIZED_PR
 								volatile char &edgeSet = xScratch.eSet[vIndex];
 #endif // SANITIZED_PR
-								if( !edgeSet && ( vertexOwners.empty() || vertexOwners[vIndex]==(node_index_type)i ) )
+								if( ( vertexOwners.empty() || vertexOwners[vIndex]==(node_index_type)i ) && !edgeSet )
 								{
 									Vertex vertex;
 									Key key = _EdgeIndex( leaf , e.index );

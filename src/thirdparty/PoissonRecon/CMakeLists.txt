@@ -41,3 +41,26 @@ if(TESTS_ENABLED)
             PRIVATE -coverage)
     endif()
 endif()
+
+COLMAP_ADD_TEST(
+    NAME level_set_color_owner_test
+    SRCS level_set_color_owner_test.cc
+)
+if(TESTS_ENABLED)
+    # Use atomic edge flags so the controlled contender schedule has no
+    # unrelated volatile-read race in the original ownership implementation.
+    target_compile_definitions(colmap_thirdparty_level_set_color_owner_test
+        PRIVATE RELEASE SANITIZED_PR)
+    if(MSVC)
+        target_compile_options(colmap_thirdparty_level_set_color_owner_test
+            PRIVATE /bigobj)
+    endif()
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_thirdparty_level_set_color_owner_test
+            OpenMP::OpenMP_CXX)
+    endif()
+    if(COVERAGE_ENABLED)
+        target_link_options(colmap_thirdparty_level_set_color_owner_test
+            PRIVATE -coverage)
+    endif()
+endif()
