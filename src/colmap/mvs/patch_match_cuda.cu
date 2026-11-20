@@ -1162,12 +1162,15 @@ __global__ void SweepFromTopToBottom(
       // of the normal of the previous ray. This helps to better estimate
       // the depth of very oblique structures, i.e. pixels whose normal
       // direction is significantly different from their viewing direction.
-      prev_param_state.depth = internal::PropagateDepth(camera.inv_K,
-                                                        prev_param_state.depth,
-                                                        prev_param_state.normal,
-                                                        row - 1,
-                                                        row,
-                                                        col);
+      if (row > 0) {
+        prev_param_state.depth =
+            internal::PropagateDepth(camera.inv_K,
+                                     prev_param_state.depth,
+                                     prev_param_state.normal,
+                                     row - 1,
+                                     row,
+                                     col);
+      }
 
       // Read parameters for current pixel from previous sweep.
       curr_param_state.depth = depth_map.Get(row, col);
