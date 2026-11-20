@@ -236,6 +236,31 @@ void SplitPolygon
 	else if( gtCount==0  ){ if( ltPolygons ) ltPolygons->push_back( polygon ) ; if( ltFlags ) ltFlags->push_back( false ); }
 	else
 	{
+		auto IntersectionIndex = [&]( Index v1 , Index v2 )
+		{
+			// An exact trim endpoint keeps its identity and all its attributes.
+			if( vertices[v1].template get<1>()==trimValue ) return v1;
+			if( vertices[v2].template get<1>()==trimValue ) return v2;
+			EdgeKey< Index > key( v1 , v2 );
+			auto iter = vertexTable.find( key );
+			if( iter!=vertexTable.end() ) return iter->second;
+			Index vIdx = (Index)vertices.size();
+			vertexTable[key] = vIdx;
+			vertices.push_back( InterpolateVertices( vertices[v1] , vertices[v2] , trimValue ) );
+			// This crossing is exactly on the clipping boundary.
+			vertices.back().template get<1>() = trimValue;
+			return vIdx;
+		};
+		auto AddPolygon = [&]( std::vector< Index > &poly , bool gtFlag )
+		{
+			// Endpoint reuse can repeat consecutive or closing indices. Normalize
+			// both sides before their loops enter component and island processing.
+			poly.erase( std::unique( poly.begin() , poly.end() ) , poly.end() );
+			if( poly.size()>1 && poly.front()==poly.back() ) poly.pop_back();
+			if( poly.size()<3 ) return;
+			if( gtFlag ){ if( gtPolygons ) gtPolygons->push_back( poly ) ; if( gtFlags ) gtFlags->push_back( true ); }
+			else        { if( ltPolygons ) ltPolygons->push_back( poly ) ; if( ltFlags ) ltFlags->push_back( true ); }
+		};
 		int start;
 		for( start=0 ; start<sz ; start++ ) if( gt[start] && !gt[(start+sz-1)%sz] ) break;
 
@@ -245,15 +270,7 @@ void SplitPolygon
 		// Add the initial vertex
 		{
 			int j1 = (start+int(sz)-1)%sz , j2 = start;
-			Index v1 = polygon[j1] , v2 = polygon[j2] , vIdx;
-			typename std::unordered_map< EdgeKey< Index > , Index , typename EdgeKey< Index >::Hasher >::iterator iter = vertexTable.find( EdgeKey< Index >(v1,v2) );
-			if( iter==vertexTable.end() )
-			{
-				vertexTable[ EdgeKey< Index >(v1,v2) ] = vIdx = (Index)vertices.size();
-				vertices.push_back( InterpolateVertices( vertices[v1] , vertices[v2] , trimValue ) );
-			}
-			else vIdx = iter->second;
-			poly.push_back( vIdx );
+			poly.push_back( IntersectionIndex( polygon[j1] , polygon[j2] ) );
 		}
 
 		for( int _j=0  ; _j<=sz ; _j++ )
@@ -263,17 +280,9 @@ void SplitPolygon
 			if( gt[j2]==gtFlag ) poly.push_back( v2 );
 			else
 			{
-				Index vIdx;
-				typename std::unordered_map< EdgeKey< Index > , Index , typename EdgeKey< Index >::Hasher >::iterator iter = vertexTable.find( EdgeKey< Index >(v1,v2) );
-				if( iter==vertexTable.end() )
-				{
-					vertexTable[ EdgeKey< Index >(v1,v2) ] = vIdx = (Index)vertices.size();
-					vertices.push_back( InterpolateVertices( vertices[v1] , vertices[v2] , trimValue ) );
-				}
-				else vIdx = iter->second;
+				Index vIdx = IntersectionIndex( v1 , v2 );
 				poly.push_back( vIdx );
-				if( gtFlag ){ if( gtPolygons ) gtPolygons->push_back( poly ) ; if( ltFlags ) ltFlags->push_back( true ); }
-				else        { if( ltPolygons ) ltPolygons->push_back( poly ) ; if( gtFlags ) gtFlags->push_back( true ); }
+				AddPolygon( poly , gtFlag );
 				poly.clear() , poly.push_back( vIdx ) , poly.push_back( v2 );
 				gtFlag = !gtFlag;
 			}
@@ -402,7 +411,6 @@ int Execute( AuxDataFactories ... auxDataFactories )
 	typename VertexFactory::PositionFactory< Real , Dim > pFactory;
 	typename VertexFactory::ValueFactory< Real > vFactory;
 	Factory factory( pFactory , vFactory , auxDataFactories ... );
-	Real min , max;
 
 	std::vector< Vertex > vertices;
 	std::vector< std::vector< Index > > polygons;
@@ -410,9 +418,6 @@ int Execute( AuxDataFactories ... auxDataFactories )
 	int ft;
 	std::vector< std::string > comments;
 	PLY::ReadPolygons< Factory , Index >( In.value , factory , vertices , polygons , ft , comments );
-
-	min = max = vertices[0].template get<1>();
-	for( size_t i=0 ; i<vertices.size() ; i++ ) min = std::min< Real >( min , vertices[i].template get<1>() ) , max = std::max< Real >( max , vertices[i].template get<1>() );
 
 	std::unordered_map< EdgeKey< Index > , Index , typename EdgeKey< Index >::Hasher > vertexTable;
 	std::vector< std::vector< Index > > ltPolygons , gtPolygons;
@@ -437,7 +442,12 @@ int Execute( AuxDataFactories ... auxDataFactories )
 				else                std::cout << "\t--" << params[i]->name << std::endl;
 			}
 		}
-	if( Verbose.set ) printf( "Value Range: [%f,%f]\n" , min , max );
+	if( Verbose.set && vertices.size() )
+	{
+		Real min = vertices[0].template get<1>() , max = min;
+		for( size_t i=0 ; i<vertices.size() ; i++ ) min = std::min< Real >( min , vertices[i].template get<1>() ) , max = std::max< Real >( max , vertices[i].template get<1>() );
+		printf( "Value Range: [%f,%f]\n" , min , max );
+	}
 
 	double t=Time();
 	for( size_t i=0 ; i<polygons.size() ; i++ ) SplitPolygon( polygons[i] , vertices , &ltPolygons , &gtPolygons , &ltFlags , &gtFlags , vertexTable , Trim.value );
