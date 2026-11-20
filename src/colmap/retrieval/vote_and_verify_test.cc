@@ -8,6 +8,7 @@
 #include "colmap/retrieval/geometry.h"
 
 #include <cmath>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -85,6 +86,42 @@ TEST(VoteAndVerify, EffectiveInliers) {
   options.eff_inlier_count = true;
   const int num_inliers = VoteAndVerify(options, data.matches);
   EXPECT_GT(num_inliers, 0.8 * kNumInliers);
+}
+
+TEST(VoteAndVerify, EffectiveInliersWithZeroCoordinateSpan) {
+  struct TestCase {
+    float x;
+    float y;
+    float step_x;
+    float step_y;
+    int num_effective_inliers;
+  };
+  constexpr float kSmallStep = std::numeric_limits<float>::epsilon() / 16;
+  const TestCase test_cases[] = {{16, 16, 0, 16, 4},
+                                 {16, 16, 16, 0, 4},
+                                 {16, 16, 0, 0, 1},
+                                 {0, 16, kSmallStep, 0, 4},
+                                 {16, 0, 0, kSmallStep, 4}};
+  for (const auto& test_case : test_cases) {
+    SCOPED_TRACE(::testing::Message()
+                 << test_case.step_x << ", " << test_case.step_y);
+    std::vector<FeatureGeometryMatch> matches(4);
+    for (size_t i = 0; i < matches.size(); ++i) {
+      auto& match = matches[i];
+      match.geometry1.x =
+          test_case.x + static_cast<float>(i) * test_case.step_x;
+      match.geometry1.y =
+          test_case.y + static_cast<float>(i) * test_case.step_y;
+      match.geometry1.scale = 1;
+      match.geometry1.orientation = 0;
+      match.geometry2 = match.geometry1;
+    }
+
+    VoteAndVerifyOptions options;
+    EXPECT_EQ(VoteAndVerify(options, matches), test_case.num_effective_inliers);
+    options.eff_inlier_count = false;
+    EXPECT_EQ(VoteAndVerify(options, matches), 4);
+  }
 }
 
 }  // namespace

@@ -168,8 +168,9 @@ size_t ComputeEffectiveInlierCount(
     return 0;
   }
 
-  const float scale_x = num_bins / (max_x - min_x);
-  const float scale_y = num_bins / (max_y - min_y);
+  // A constant coordinate occupies one bin along its axis.
+  const float scale_x = max_x == min_x ? 0.0f : num_bins / (max_x - min_x);
+  const float scale_y = max_y == min_y ? 0.0f : num_bins / (max_y - min_y);
 
   Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic> counter(num_bins,
                                                              num_bins);
