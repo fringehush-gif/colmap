@@ -142,14 +142,48 @@ inline void write_ascii_item ( FILE * ,       int , unsigned int , long long , u
 /* store a value into where a pointer and a type specify */
 inline void store_item( void * , int , int , unsigned int , long long , unsigned long long , double );
 
+// Payloads consume one integer view. PLY_START_TYPE keeps the legacy
+// multi-view staging used by list counts, which also drive loop lengths.
+inline void get_floating_item( double value , int destination_type , int &int_val , unsigned int &uint_val , long long &longlong_val , unsigned long long &ulonglong_val )
+{
+	int_val = 0;
+	uint_val = 0;
+	longlong_val = 0;
+	ulonglong_val = 0;
+	switch( destination_type )
+	{
+	case PLY_CHAR: case PLY_INT_8: case PLY_SHORT: case PLY_INT_16: case PLY_INT: case PLY_INT_32:
+		int_val = (int)value;
+		break;
+	case PLY_UCHAR: case PLY_UINT_8: case PLY_USHORT: case PLY_UINT_16: case PLY_UINT: case PLY_UINT_32:
+		uint_val = (unsigned int)value;
+		break;
+	case PLY_LONGLONG: case PLY_INT_64:
+		longlong_val = (long long)value;
+		break;
+	case PLY_ULONGLONG: case PLY_UINT_64:
+		ulonglong_val = (unsigned long long)value;
+		break;
+	case PLY_FLOAT: case PLY_FLOAT_32: case PLY_DOUBLE: case PLY_FLOAT_64:
+		break;
+	case PLY_START_TYPE:
+		int_val = (int)value;
+		uint_val = (unsigned int)value;
+		longlong_val = (long long)value;
+		ulonglong_val = (unsigned long long)value;
+		break;
+	default: MK_THROW( "Bad destination type: " , destination_type );
+	}
+}
+
 /* return the value of a stored item */
-inline void get_stored_item( void * , int , int & , unsigned int & , long long & , unsigned long long & , double & , bool convert_to_integer=true );
+inline void get_stored_item( void * , int , int & , unsigned int & , long long & , unsigned long long & , double & , int destination_type );
 
 /* return the value stored in an item, given ptr to it and its type */
 inline double get_item_value( const void * , int );
 
 /* get binary or ascii item and store it according to ptr and type */
-inline void get_ascii_item( const std::string & , int , int & , unsigned int & , long long & , unsigned long long & , double & , bool convert_to_integer=true );
+inline void get_ascii_item( const std::string & , int , int & , unsigned int & , long long & , unsigned long long & , double & , int destination_type );
 inline void get_binary_item( FILE * , int       , int , int & , unsigned int & , long long & , unsigned long long & , double & , bool convert_to_integer=true );
 
 inline bool is_floating_type( int type )
@@ -438,7 +472,7 @@ void PlyFile::put_element( void *elem_ptr )
 			if( elem->props[j].prop.is_list )
 			{
 				item = elem_data + elem->props[j].prop.count_offset;
-				get_stored_item( (void *)item , elem->props[j].prop.count_internal , int_val , uint_val , longlong_val , ulonglong_val , double_val );
+				get_stored_item( (void *)item , elem->props[j].prop.count_internal , int_val , uint_val , longlong_val , ulonglong_val , double_val , PLY_START_TYPE );
 				write_ascii_item( fp , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.count_external );
 				list_count = uint_val;
 				item_ptr = (char **)( elem_data + elem->props[j].prop.offset );
@@ -446,7 +480,7 @@ void PlyFile::put_element( void *elem_ptr )
 				item_size = ply_type_size[ elem->props[j].prop.internal_type ];
 				for( int k=0 ; k<list_count ; k++ )
 				{
-					get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , !is_floating_type( elem->props[j].prop.external_type ) );
+					get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.external_type );
 					write_ascii_item( fp , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.external_type );
 					item += item_size;
 				}
@@ -454,7 +488,7 @@ void PlyFile::put_element( void *elem_ptr )
 			else
 			{
 				item = elem_data + elem->props[j].prop.offset;
-				get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , !is_floating_type( elem->props[j].prop.external_type ) );
+				get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.external_type );
 				write_ascii_item( fp , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.external_type );
 			}
 		}
@@ -471,7 +505,7 @@ void PlyFile::put_element( void *elem_ptr )
 			{
 				item = elem_data + elem->props[j].prop.count_offset;
 				item_size = ply_type_size[ elem->props[j].prop.count_internal ];
-				get_stored_item( (void *)item , elem->props[j].prop.count_internal , int_val , uint_val , longlong_val , ulonglong_val , double_val );
+				get_stored_item( (void *)item , elem->props[j].prop.count_internal , int_val , uint_val , longlong_val , ulonglong_val , double_val , PLY_START_TYPE );
 				write_binary_item( fp , file_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.count_external );
 				list_count = uint_val;
 				item_ptr = (char **)( elem_data + elem->props[j].prop.offset );
@@ -479,7 +513,7 @@ void PlyFile::put_element( void *elem_ptr )
 				item_size = ply_type_size[ elem->props[j].prop.internal_type ];
 				for( int k=0 ; k<list_count ; k++ )
 				{
-					get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , !is_floating_type( elem->props[j].prop.external_type ) );
+					get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.external_type );
 					write_binary_item( fp , file_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.external_type );
 					item += item_size;
 				}
@@ -488,7 +522,7 @@ void PlyFile::put_element( void *elem_ptr )
 			{
 				item = elem_data + elem->props[j].prop.offset;
 				item_size = ply_type_size[ elem->props[j].prop.internal_type ];
-				get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , !is_floating_type( elem->props[j].prop.external_type ) );
+				get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.external_type );
 				write_binary_item( fp , file_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.external_type );
 			}
 		}
@@ -1084,7 +1118,7 @@ void PlyFile::_ascii_get_element( void *elem_ptr )
 		if( prop.is_list )       /* a list */
 		{
 			/* get and store the number of items in the list */
-			get_ascii_item( words[which_word++] , prop.count_external , int_val , uint_val , longlong_val , ulonglong_val , double_val );
+			get_ascii_item( words[which_word++] , prop.count_external , int_val , uint_val , longlong_val , ulonglong_val , double_val , PLY_START_TYPE );
 			if( store_it )
 			{
 				item = (char *)elem_data + prop.count_offset;
@@ -1112,7 +1146,7 @@ void PlyFile::_ascii_get_element( void *elem_ptr )
 				/* read items and store them into the array */
 				for( int k=0 ; k<list_count ; k++ )
 				{
-					get_ascii_item( words[which_word++] , prop.external_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , store_it && !is_floating_type( prop.internal_type ) );
+					get_ascii_item( words[which_word++] , prop.external_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , store_it ? prop.internal_type : PLY_DOUBLE );
 					if( store_it )
 					{
 						store_item( item , prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val );
@@ -1123,7 +1157,7 @@ void PlyFile::_ascii_get_element( void *elem_ptr )
 		}
 		else                     /* not a list */
 		{
-			get_ascii_item( words[which_word++] , prop.external_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , store_it && !is_floating_type( prop.internal_type ) );
+			get_ascii_item( words[which_word++] , prop.external_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , store_it ? prop.internal_type : PLY_DOUBLE );
 			if( store_it )
 			{
 				item = (char *)elem_data + prop.offset;
@@ -1585,7 +1619,7 @@ uint_val   - unsigned integer value
 double_val - double-precision floating point value
 ******************************************************************************/
 
-void get_stored_item( void *ptr , int type , int &int_val , unsigned int &uint_val , long long &longlong_val , unsigned long long &ulonglong_val , double &double_val , bool convert_to_integer )
+void get_stored_item( void *ptr , int type , int &int_val , unsigned int &uint_val , long long &longlong_val , unsigned long long &ulonglong_val , double &double_val , int destination_type )
 {
 	int_val = 0;
 	uint_val = 0;
@@ -1660,20 +1694,12 @@ void get_stored_item( void *ptr , int type , int &int_val , unsigned int &uint_v
 	case PLY_FLOAT:
 	case PLY_FLOAT_32:
 		double_val = *((float *) ptr);
-		if( !convert_to_integer ) break;
-		int_val = (int)double_val;
-		uint_val = (unsigned int)double_val;
-		longlong_val = (long long)double_val;
-		ulonglong_val = (unsigned long long)double_val;
+		get_floating_item( double_val , destination_type , int_val , uint_val , longlong_val , ulonglong_val );
 		break;
 	case PLY_DOUBLE:
 	case PLY_FLOAT_64:
 		double_val = *((double *) ptr);
-		if( !convert_to_integer ) break;
-		int_val = (int)double_val;
-		uint_val = (unsigned int)double_val;
-		longlong_val = (long long)double_val;
-		ulonglong_val = (unsigned long long)double_val;
+		get_floating_item( double_val , destination_type , int_val , uint_val , longlong_val , ulonglong_val );
 		break;
 	default: MK_THROW( "Bad type: " , type );
 	}
@@ -1816,7 +1842,7 @@ int_val    - integer value
 uint_val   - unsigned integer value
 double_val - double-precision floating point value
 ******************************************************************************/
-void get_ascii_item( const std::string &word , int type , int &int_val , unsigned int &uint_val , long long &longlong_val , unsigned long long &ulonglong_val , double &double_val , bool convert_to_integer )
+void get_ascii_item( const std::string &word , int type , int &int_val , unsigned int &uint_val , long long &longlong_val , unsigned long long &ulonglong_val , double &double_val , int destination_type )
 {
 	int_val = 0;
 	uint_val = 0;
@@ -1871,12 +1897,8 @@ void get_ascii_item( const std::string &word , int type , int &int_val , unsigne
 	case PLY_FLOAT_64:
 		double_val = atof( word.c_str() );
 		// Honor the source width before conversion to a wider destination.
-		if( !convert_to_integer && ( type==PLY_FLOAT || type==PLY_FLOAT_32 ) ) double_val = (float)double_val;
-		if( !convert_to_integer ) break;
-		int_val = (int)double_val;
-		uint_val = (unsigned int)double_val;
-		longlong_val = (long long)double_val;
-		ulonglong_val = (unsigned long long)double_val;
+		if( is_floating_type( destination_type ) && ( type==PLY_FLOAT || type==PLY_FLOAT_32 ) ) double_val = (float)double_val;
+		get_floating_item( double_val , destination_type , int_val , uint_val , longlong_val , ulonglong_val );
 		break;
 	default: MK_THROW( "Bad type: " , type );
 	}
