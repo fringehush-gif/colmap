@@ -247,6 +247,8 @@ void SplitPolygon
 			Index vIdx = (Index)vertices.size();
 			vertexTable[key] = vIdx;
 			vertices.push_back( InterpolateVertices( vertices[v1] , vertices[v2] , trimValue ) );
+			// This crossing is exactly on the clipping boundary.
+			vertices.back().template get<1>() = trimValue;
 			return vIdx;
 		};
 		auto AddPolygon = [&]( std::vector< Index > &poly , bool gtFlag )
