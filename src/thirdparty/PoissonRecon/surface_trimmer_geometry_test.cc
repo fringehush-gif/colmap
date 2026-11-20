@@ -122,80 +122,92 @@ TEST(SurfaceTrimmerTriangulation,
       PoissonRecon::VertexFactory::PositionFactory<float, 3>,
       PoissonRecon::VertexFactory::ValueFactory<float>>;
   const Factory factory;
-  // Diagonal (0,2) uniquely minimizes the sum of ordinary triangle areas.
-  // The old overwrite and a sum of squared areas instead choose (1,3).
-  const std::array<std::array<float, 3>, 4> expected{
-      {{0, 0, 0}, {1, 0, 0}, {2, 1, 0}, {0, 2, 4}}};
-  std::vector<Factory::VertexType> input_vertices(expected.size());
-  for (size_t i = 0; i < input_vertices.size(); ++i) {
-    for (size_t axis = 0; axis < 3; ++axis) {
-      input_vertices[i].template get<0>()[axis] = expected[i][axis];
-    }
-    input_vertices[i].template get<1>() = 2;
-  }
+  // The first quad uniquely minimizes ordinary area at (0,2). The second
+  // ties in total area, but the alternative (1,3) creates a zero-area face.
+  const std::array<std::array<std::array<float, 3>, 4>, 2> fixtures{{
+      {{{0, 0, 0}, {1, 0, 0}, {2, 1, 0}, {0, 2, 4}}},
+      {{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {1, 2, 0}}},
+  }};
   const auto directory = colmap::CreateTestDir();
   const auto input_path = directory / "quad-input.ply";
   const auto output_path = directory / "quad-output.ply";
-  for (int winding = 0; winding < 2; ++winding) {
-    SCOPED_TRACE(winding);
-    std::vector<int> polygon{0, 1, 2, 3};
-    if (winding != 0) {
-      std::reverse(polygon.begin(), polygon.end());
-    }
-    PoissonRecon::PLY::WritePolygons<Factory, int>(input_path.string(),
-                                                   factory,
-                                                   input_vertices,
-                                                   {polygon},
-                                                   PLY_BINARY_NATIVE,
-                                                   {});
-    // Keep the complete quad and select triangle output. Disable component
-    // filtering so this witness isolates the triangulation objective.
-    std::vector<std::string> args{"SurfaceTrimmer",
-                                  "--in",
-                                  input_path.string(),
-                                  "--out",
-                                  output_path.string(),
-                                  "--trim",
-                                  "1",
-                                  "--aRatio",
-                                  "0"};
-    std::vector<char*> argv;
-    for (auto& arg : args) argv.push_back(arg.data());
-    ASSERT_EQ(RunSurfaceTrimmer(static_cast<int>(argv.size()), argv.data()), 0);
-
-    std::vector<Factory::VertexType> vertices;
-    std::vector<std::vector<int>> polygons;
-    std::vector<std::string> comments;
-    int file_type = 0;
-    PoissonRecon::PLY::ReadPolygons<Factory, int>(
-        output_path.string(), factory, vertices, polygons, file_type, comments);
-    ASSERT_TRUE(file_type == PLY_BINARY_LE || file_type == PLY_BINARY_BE);
-    ASSERT_EQ(vertices.size(), 4);
-    ASSERT_EQ(polygons.size(), 2);
-    for (size_t i = 0; i < vertices.size(); ++i) {
+  for (const auto& expected : fixtures) {
+    std::vector<Factory::VertexType> input_vertices(expected.size());
+    for (size_t i = 0; i < input_vertices.size(); ++i) {
       for (size_t axis = 0; axis < 3; ++axis) {
-        EXPECT_EQ(vertices[i].template get<0>()[axis], expected[i][axis]);
+        input_vertices[i].template get<0>()[axis] = expected[i][axis];
       }
-      EXPECT_EQ(vertices[i].template get<1>(), 2);
+      input_vertices[i].template get<1>() = 2;
     }
-    for (auto& triangle : polygons) {
-      ASSERT_EQ(triangle.size(), 3);
-      for (const int index : triangle) {
-        ASSERT_GE(index, 0);
-        ASSERT_LT(index, 4);
+    for (int winding = 0; winding < 2; ++winding) {
+      for (int rotation = 0; rotation < 4; ++rotation) {
+        SCOPED_TRACE(testing::Message() << winding << ":" << rotation);
+        std::vector<int> polygon{0, 1, 2, 3};
+        if (winding != 0) {
+          std::reverse(polygon.begin(), polygon.end());
+        }
+        std::rotate(polygon.begin(), polygon.begin() + rotation, polygon.end());
+        PoissonRecon::PLY::WritePolygons<Factory, int>(input_path.string(),
+                                                       factory,
+                                                       input_vertices,
+                                                       {polygon},
+                                                       PLY_BINARY_NATIVE,
+                                                       {});
+        // Keep the complete quad and select triangle output. Disable component
+        // filtering so this witness isolates the triangulation objective.
+        std::vector<std::string> args{"SurfaceTrimmer",
+                                      "--in",
+                                      input_path.string(),
+                                      "--out",
+                                      output_path.string(),
+                                      "--trim",
+                                      "1",
+                                      "--aRatio",
+                                      "0"};
+        std::vector<char*> argv;
+        for (auto& arg : args) argv.push_back(arg.data());
+        ASSERT_EQ(RunSurfaceTrimmer(static_cast<int>(argv.size()), argv.data()),
+                  0);
+
+        std::vector<Factory::VertexType> vertices;
+        std::vector<std::vector<int>> polygons;
+        std::vector<std::string> comments;
+        int file_type = 0;
+        PoissonRecon::PLY::ReadPolygons<Factory, int>(output_path.string(),
+                                                      factory,
+                                                      vertices,
+                                                      polygons,
+                                                      file_type,
+                                                      comments);
+        ASSERT_TRUE(file_type == PLY_BINARY_LE || file_type == PLY_BINARY_BE);
+        ASSERT_EQ(vertices.size(), 4);
+        ASSERT_EQ(polygons.size(), 2);
+        for (size_t i = 0; i < vertices.size(); ++i) {
+          for (size_t axis = 0; axis < 3; ++axis) {
+            EXPECT_EQ(vertices[i].template get<0>()[axis], expected[i][axis]);
+          }
+          EXPECT_EQ(vertices[i].template get<1>(), 2);
+        }
+        for (auto& triangle : polygons) {
+          ASSERT_EQ(triangle.size(), 3);
+          for (const int index : triangle) {
+            ASSERT_GE(index, 0);
+            ASSERT_LT(index, 4);
+          }
+          // Cyclic rotation preserves winding; sorting each face would not.
+          std::rotate(triangle.begin(),
+                      std::min_element(triangle.begin(), triangle.end()),
+                      triangle.end());
+        }
+        std::sort(polygons.begin(), polygons.end());
+        const std::vector<std::vector<int>> expected_faces =
+            winding == 0 ? std::vector<std::vector<int>>{{0, 1, 2}, {0, 2, 3}}
+                         : std::vector<std::vector<int>>{{0, 2, 1}, {0, 3, 2}};
+        EXPECT_EQ(polygons, expected_faces);
+        std::filesystem::remove(input_path);
+        std::filesystem::remove(output_path);
       }
-      // Cyclic rotation preserves winding; sorting each face would not.
-      std::rotate(triangle.begin(),
-                  std::min_element(triangle.begin(), triangle.end()),
-                  triangle.end());
     }
-    std::sort(polygons.begin(), polygons.end());
-    const std::vector<std::vector<int>> expected_faces =
-        winding == 0 ? std::vector<std::vector<int>>{{0, 1, 2}, {0, 2, 3}}
-                     : std::vector<std::vector<int>>{{0, 2, 1}, {0, 3, 2}};
-    EXPECT_EQ(polygons, expected_faces);
-    std::filesystem::remove(input_path);
-    std::filesystem::remove(output_path);
   }
   std::filesystem::remove(directory);
 }

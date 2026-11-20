@@ -85,13 +85,14 @@ TYPED_TEST_SUITE(PoissonQuadTriangulationTest, AreaTypes);
 TYPED_TEST(PoissonQuadTriangulationTest,
            MinimizesOrdinaryAreaAndPreservesWinding) {
   using Point = PoissonRecon::Point<TypeParam, 3>;
-  const std::array<std::array<Point, 4>, 3> fixtures{{
+  const std::array<std::array<Point, 4>, 4> fixtures{{
       {Point(0, 0, 0), Point(1, 0, 0), Point(1, 1, 0), Point(0, 1, 1)},
       {Point(0, 0, 0), Point(1, 0, 0), Point(2, 1, 0), Point(0, 2, 4)},
       {Point(TypeParam{5} / 16, TypeParam{3} / 16, TypeParam{9} / 16),
        Point(TypeParam{11} / 16, TypeParam{1} / 16, TypeParam{6} / 16),
        Point(TypeParam{9} / 16, TypeParam{4} / 16, 0),
        Point(0, 0, TypeParam{1} / 16)},
+      {Point(0, 0, 0), Point(1, 0, 0), Point(1, 1, 0), Point(1, 2, 0)},
   }};
   for (size_t fixture_idx = 0; fixture_idx < fixtures.size(); ++fixture_idx) {
     std::array<int, 4> order{0, 1, 2, 3};
@@ -117,9 +118,10 @@ TYPED_TEST(PoissonQuadTriangulationTest,
             has_zero |= order[index] == 0;
             has_two |= order[index] == 2;
           }
-          // Both fixtures have a unique ordinary-area minimum at diagonal
+          // The first three fixtures have a unique ordinary-area minimum at
           // (0,2); fixture 1 instead favors (1,3) under a squared-area sum.
-          // Fixture 2 is a scaled orthogonal transform of fixture 0.
+          // Fixture 2 is a scaled orthogonal transform of fixture 0. The last
+          // fixture ties in total area, but (1,3) creates a zero-area face.
           EXPECT_TRUE(has_zero && has_two);
           for (int edge = 0; edge < 3; ++edge) {
             const int from = triangle.idx[edge];
