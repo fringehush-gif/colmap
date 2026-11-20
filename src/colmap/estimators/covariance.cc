@@ -264,7 +264,19 @@ std::optional<Eigen::MatrixXd> BACovariance::GetCam2CovFromCam1(
   cov.block<6, 6>(6, 6) = *cov_22;
   cov.block<6, 6>(0, 6) = *cov_12;
   cov.block<6, 6>(6, 0) = cov_12->transpose();
-  return GetCovarianceForRelativeRigid3d(cam1_from_world, cam2_from_world, cov);
+  // Convert Ceres' half-angle/additive tangent coordinates to left SE(3).
+  Eigen::Matrix<double, 12, 12> ceres_to_se3 =
+      Eigen::Matrix<double, 12, 12>::Identity();
+  ceres_to_se3.block<3, 3>(0, 0) *= 2;
+  ceres_to_se3.block<3, 3>(3, 0) =
+      2 * CrossProductMatrix(cam1_from_world.translation());
+  ceres_to_se3.block<3, 3>(6, 6) *= 2;
+  ceres_to_se3.block<3, 3>(9, 6) =
+      2 * CrossProductMatrix(cam2_from_world.translation());
+  return GetCovarianceForRelativeRigid3d(
+      cam1_from_world,
+      cam2_from_world,
+      ceres_to_se3 * cov * ceres_to_se3.transpose());
 }
 
 std::optional<Eigen::MatrixXd> BACovariance::GetOtherParamsCov(

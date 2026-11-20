@@ -7,6 +7,7 @@
 #include "colmap/scene/reconstruction.h"
 #include "colmap/scene/synthetic.h"
 
+#include <array>
 #include <tuple>
 
 #include <ceres/evaluation_callback.h>
@@ -64,6 +65,73 @@ void ExpectNearEigenMatrixXd(const Eigen::MatrixXd& mat1,
     for (int j = 0; j < mat1.cols(); ++j) {
       ASSERT_NEAR(mat1(i, j), mat2(i, j), tol);
     }
+  }
+}
+
+TEST(BACovariance, RelativePoseUsesLeftSE3TangentCoordinates) {
+  const auto manifold = CreateProductManifold(CreateEigenQuaternionManifold(),
+                                              CreateEuclideanManifold<3>());
+  std::array<std::pair<Rigid3d, Rigid3d>, 3> poses;
+  poses[1].second.translation() = Eigen::Vector3d(10, 0, 0);
+  poses[2].first.rotation() =
+      Eigen::AngleAxisd(0.4, Eigen::Vector3d(1, 2, 3).normalized());
+  poses[2].second.rotation() =
+      Eigen::AngleAxisd(-0.7, Eigen::Vector3d(3, -2, 1).normalized());
+  poses[2].first.translation() = Eigen::Vector3d(1, 2, 3);
+  poses[2].second.translation() = Eigen::Vector3d(-2, 0.5, 4);
+
+  for (size_t i = 0; i < poses.size(); ++i) {
+    SCOPED_TRACE(i);
+    const auto& [cam1_from_world, cam2_from_world] = poses[i];
+    Eigen::Matrix<double, 12, 12> factor =
+        Eigen::Matrix<double, 12, 12>::Identity();
+    if (i == 2) {
+      for (int row = 0; row < 12; ++row) {
+        for (int col = 0; col < 12; ++col) {
+          factor(row, col) += 0.03 * ((3 * row + 5 * col) % 7 - 3);
+        }
+      }
+    }
+    const BACovariance covariance({}, {{1, {0, 6}}, {2, {6, 6}}}, {}, factor);
+    const auto actual =
+        covariance.GetCam2CovFromCam1(1, cam1_from_world, 2, cam2_from_world);
+    ASSERT_TRUE(actual.has_value());
+
+    const Rigid3d cam2_from_cam1 = cam2_from_world * Inverse(cam1_from_world);
+    Eigen::Matrix<double, 6, 12> J;
+    constexpr double kStep = 1e-6;
+    for (int parameter = 0; parameter < 12; ++parameter) {
+      Eigen::Vector6d differences[2];
+      for (int side = 0; side < 2; ++side) {
+        Eigen::Vector6d delta = Eigen::Vector6d::Zero();
+        delta(parameter % 6) = (side ? 1 : -1) * kStep;
+        Rigid3d perturbed_cam1 = cam1_from_world;
+        Rigid3d perturbed_cam2 = cam2_from_world;
+        Rigid3d& perturbed = parameter < 6 ? perturbed_cam1 : perturbed_cam2;
+        const Rigid3d& nominal =
+            parameter < 6 ? cam1_from_world : cam2_from_world;
+        ASSERT_TRUE(manifold->Plus(
+            nominal.params.data(), delta.data(), perturbed.params.data()));
+        const Rigid3d relative = perturbed_cam2 * Inverse(perturbed_cam1);
+        const Rigid3d left_difference = relative * Inverse(cam2_from_cam1);
+        const Eigen::AngleAxisd rotation_difference(left_difference.rotation());
+        differences[side].head<3>() =
+            rotation_difference.angle() * rotation_difference.axis();
+        // At zero, this translation has the same derivative as the SE(3) log.
+        differences[side].tail<3>() = left_difference.translation();
+      }
+      J.col(parameter) = (differences[1] - differences[0]) / (2 * kStep);
+    }
+    ExpectNearEigenMatrixXd(
+        *actual, J * factor.transpose() * factor * J.transpose(), 1e-7);
+    if (i == 1) {
+      const Eigen::Vector6d expected_diagonal(8, 8, 8, 2, 802, 802);
+      ExpectNearEigenMatrixXd(actual->diagonal(), expected_diagonal, 1e-10);
+    }
+    const auto identity_cov =
+        covariance.GetCam2CovFromCam1(1, cam1_from_world, 1, cam1_from_world);
+    ASSERT_TRUE(identity_cov.has_value());
+    ExpectNearEigenMatrixXd(*identity_cov, Eigen::Matrix6d::Zero(), 1e-10);
   }
 }
 
