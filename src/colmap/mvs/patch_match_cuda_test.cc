@@ -165,7 +165,9 @@ TEST(PatchMatchCuda, SourceSamplingPreservesSupportAndStrides) {
     EXPECT_EQ(SampleSource(probs.data(), 3, stride, 0.5f), 2);
     EXPECT_EQ(SampleSource(probs.data(), 3, stride, 1.0f), 2);
     for (size_t i = 0; i < probs.size(); ++i) {
-      if (i % stride != 0) EXPECT_EQ(probs[i], -7.0f);
+      if (i % stride != 0) {
+        EXPECT_EQ(probs[i], -7.0f);
+      }
     }
   }
   // Invalid distributions keep the old normalization/selection policy; they
@@ -1869,6 +1871,195 @@ TEST_F(CudaTest, DuplicatedSourcesPreservePhotoGeometryAcrossCacheBoundary) {
   ExpectExactlyEqual(nine.normals, thirty_three.normals);
 }
 
+// Compute the declared cost density independently in host double precision.
+double HmmNccEmission(const double cost, const float sigma) {
+  const double s = sigma;
+  const double integral =
+      s * std::sqrt(std::acos(-1.0) / 2) * std::erf(std::sqrt(2.0) / s);
+  return std::exp(-cost * cost / (2 * s * s)) / integral;
+}
+
+// Enumerate every binary state assignment, independently of message passing.
+// These fixtures contain at most eight nodes, hence at most 256 assignments.
+std::vector<double> EnumeratedHmmMarginals(
+    const std::vector<double>& emissions) {
+  const double stay = 0.99999f;
+  const double change = 1.0f - 0.99999f;
+  const unsigned length = static_cast<unsigned>(emissions.size());
+  std::vector<double> selected(length, 0);
+  double total = 0;
+  for (unsigned assignment = 0; assignment < (1u << length); ++assignment) {
+    double mass = 0.5;
+    for (unsigned node = 0; node < length; ++node) {
+      const bool state = (assignment & (1u << node)) != 0;
+      if (node > 0) {
+        const bool previous = (assignment & (1u << (node - 1u))) != 0;
+        mass *= state == previous ? stay : change;
+      }
+      mass *= state ? emissions[node] : 0.5;
+    }
+    total += mass;
+    for (unsigned node = 0; node < length; ++node) {
+      if ((assignment & (1u << node)) != 0) selected[node] += mass;
+    }
+  }
+  for (double& marginal : selected) marginal /= total;
+  return selected;
+}
+
+struct HmmStorageCase {
+  bool checkpoint;
+  int cost_bits;
+  bool probability_unorm16;
+  bool normal_oct40;
+};
+
+// All compressed cost formats require the radius-five checkpoint path. Keep
+// the raw full-map path and isolated codec combinations in the same fixture.
+constexpr std::array<HmmStorageCase, 8> kHmmStorageCases = {{
+    {false, 0, false, false},
+    {true, 0, false, false},
+    {true, 0, true, false},
+    {true, 16, false, false},
+    {true, 20, false, false},
+    {true, 24, false, false},
+    {true, 20, true, false},
+    {true, 20, true, true},
+}};
+
+// Apply the declared storage grid independently of the device encoder. This
+// rounds committed history only; the new emission and its messages stay FP32.
+double HmmStoredProbability(const double probability, const bool unorm16) {
+  if (!unorm16) return probability;
+  const float code = static_cast<float>(std::nearbyint(probability * 65535));
+  return code * 0x1.0001p-16f;
+}
+
+Mat<float> HmmIdentitySelection(const int side,
+                                const bool impulse,
+                                const int num_sources,
+                                const float sigma,
+                                const HmmStorageCase& storage) {
+  // Coincident views keep the ideal warp independent of plane hypotheses.
+  const float K[9] = {1, 0, 0.5f, 0, 1, 0.5f, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const float T[3] = {0, 0, 0};
+  Inputs inputs;
+  for (int index = 0; index <= num_sources; ++index) {
+    Image image("hmm-identity-" + std::to_string(index), side, side, K, R, T);
+    Bitmap bitmap(side, side, false);
+    bitmap.Fill(BitmapColor<uint8_t>(0));
+    if (impulse) {
+      bitmap.SetPixel(side - 1, side - 1, BitmapColor<uint8_t>(255));
+    }
+    image.SetBitmap(std::move(bitmap));
+    inputs.images.push_back(std::move(image));
+    inputs.depths.emplace_back(side, side, kDepthMin, kDepthMax);
+    inputs.normals.emplace_back(side, side);
+    for (int row = 0; row < side; ++row) {
+      for (int col = 0; col < side; ++col) {
+        inputs.depths.back().Set(row, col, kPlaneZ);
+        inputs.normals.back().Set(row, col, 0, 0);
+        inputs.normals.back().Set(row, col, 1, 0);
+        inputs.normals.back().Set(row, col, 2, -1);
+      }
+    }
+  }
+  PatchMatchOptions options = MakeOptions(true, false, false);
+  options.window_radius = 5;
+  options.window_step = 1;
+  options.sigma_spatial = 3;
+  options.sigma_color = 1;
+  options.ncc_sigma = sigma;
+  options.min_triangulation_angle = 0;
+  options.num_iterations = 1;
+  options.num_samples = 1;
+  options.geom_consistency_regularizer = 0;
+  options.checkpoint_hmm = storage.checkpoint;
+  options.ncc_cost_unorm16 = storage.cost_bits == 16;
+  options.ncc_cost_fixed20 = storage.cost_bits == 20;
+  options.ncc_cost_fixed24 = storage.cost_bits == 24;
+  options.probability_unorm16 = storage.probability_unorm16;
+  options.normal_oct40 = storage.normal_oct40;
+  return RunPatchMatch(&inputs, options).selection;
+}
+
+TEST_F(CudaTest, HmmStorageMatchesEnumeratedPosteriors) {
+  // The UNORM16 cases allow one storage step in addition to the FP32 fixture's
+  // tolerance. These endpoint images exercise real dispatch and serialization;
+  // cost-codec interior rounding is covered by the codec tests.
+  constexpr double kFloatTolerance = 2e-5;
+  constexpr double kUnormTolerance = 4e-5;
+  for (const unsigned side : {1u, 2u, 7u, 8u}) {
+    const bool impulse = side != 1;
+    const unsigned first_bright = side > 6 ? side - 6 : 0;
+    const int num_sources = side > 2 ? 2 : 1;
+    for (const float sigma : {0.6f, 1.2f}) {
+      const double dark = HmmNccEmission(2, sigma);
+      const double bright = HmmNccEmission(0, sigma);
+      const auto dark_chain =
+          EnumeratedHmmMarginals(std::vector<double>(side, dark));
+      std::vector<double> emissions(side, impulse ? bright : dark);
+      std::fill_n(emissions.begin(), first_bright, dark);
+      const auto mixed_chain = EnumeratedHmmMarginals(emissions);
+      // A radius-five patch includes the impulse in the final six rows/cols.
+      // Seven/eight rows have three-row stripes and one/two-row tails. The
+      // one/two-node cases independently expose the boundary emission count.
+      for (const auto& storage : kHmmStorageCases) {
+        SCOPED_TRACE(::testing::Message()
+                     << "side=" << side << " sigma=" << sigma << " checkpoint="
+                     << storage.checkpoint << " cost_bits=" << storage.cost_bits
+                     << " unorm16=" << storage.probability_unorm16
+                     << " oct40=" << storage.normal_oct40);
+        const auto expected_at = [&](const unsigned row, const unsigned col) {
+          const double vertical =
+              (col < first_bright ? dark_chain : mixed_chain)[row];
+          const double horizontal =
+              (row < first_bright ? dark_chain : mixed_chain)[col];
+          // Symmetric transitions make reversal preserve each marginal. Four
+          // sweeps blend new marginals with independently rounded history.
+          double history =
+              HmmStoredProbability(vertical, storage.probability_unorm16);
+          history = HmmStoredProbability(0.25 * history + 0.75 * horizontal,
+                                         storage.probability_unorm16);
+          history = HmmStoredProbability(0.5 * history + 0.5 * vertical,
+                                         storage.probability_unorm16);
+          return HmmStoredProbability(0.75 * history + 0.25 * horizontal,
+                                      storage.probability_unorm16);
+        };
+        const double tolerance =
+            storage.probability_unorm16 ? kUnormTolerance : kFloatTolerance;
+        if (side > 2) {
+          ASSERT_GT(
+              std::abs(expected_at(0, side - 1) - expected_at(side - 1, 0)),
+              2 * tolerance);
+          ASSERT_GT(expected_at(side - 1, side - 1), tolerance);
+        } else {
+          ASSERT_GT(expected_at(0, 0), tolerance);
+        }
+        const auto selection =
+            HmmIdentitySelection(side, impulse, num_sources, sigma, storage);
+        ASSERT_EQ(selection.GetWidth(), side);
+        ASSERT_EQ(selection.GetHeight(), side);
+        ASSERT_EQ(selection.GetDepth(), static_cast<size_t>(num_sources));
+        ASSERT_EQ(selection.GetData().size(), side * side * num_sources);
+        for (int source = 0; source < num_sources; ++source) {
+          for (unsigned row = 0; row < side; ++row) {
+            for (unsigned col = 0; col < side; ++col) {
+              SCOPED_TRACE(::testing::Message()
+                           << "source=" << source << " row=" << row
+                           << " col=" << col);
+              const float probability = selection.Get(row, col, source);
+              ASSERT_TRUE(std::isfinite(probability));
+              EXPECT_NEAR(probability, expected_at(row, col), tolerance);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 TEST_P(PatchMatchCudaTest, CheckpointHmmPreservesAlgorithmOutputs) {
   const auto [geometry, filter] = GetParam();
   for (const int num_sources : {1, 9, 17}) {
@@ -2080,7 +2271,9 @@ TEST_F(CudaTest, ProbabilityFailureInvalidatesBatchResults) {
     } streams;
     for (auto& stream : streams.values)
       CUDA_SAFE_CALL(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-    const auto [sa, sb, sc] = streams.values;
+    const cudaStream_t sa = streams.values[0];
+    const cudaStream_t sb = streams.values[1];
+    const cudaStream_t sc = streams.values[2];
     ASSERT_NO_THROW(
         (RunPatchMatchBatch({&first, &second, &third}, {sa, sb, sc})));
     PatchMatchCudaTestPeer::PoisonProbability(second);
@@ -2273,7 +2466,9 @@ TEST_F(CudaTest, OctNormalFailureInvalidatesSingleAndBatchResults) {
     } streams;
     for (auto& stream : streams.values)
       CUDA_SAFE_CALL(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-    const auto [sa, sb, sc] = streams.values;
+    const cudaStream_t sa = streams.values[0];
+    const cudaStream_t sb = streams.values[1];
+    const cudaStream_t sc = streams.values[2];
     ASSERT_NO_THROW(
         (RunPatchMatchBatch({&first, &second, &third}, {sa, sb, sc})));
     ASSERT_NO_THROW(
