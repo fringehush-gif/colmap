@@ -416,13 +416,14 @@ class FaissVisualIndex : public VisualIndex {
              const FeatureDescriptorsFloat& descriptors) override {
     THROW_CHECK_EQ(descriptors.data.cols(), kDescDim);
 
-    feature_type_ = descriptors.type;
-
     const Eigen::RowMajorMatrixXf visual_words =
         Quantize(options, descriptors.data);
     THROW_CHECK_EQ(visual_words.cols(), kDescDim);
 
     index_ = BuildFaissIndex(options, visual_words);
+    prepared_ = false;
+    image_ids_.clear();
+    feature_type_ = descriptors.type;
 
     // Initialize a new inverted index.
     inverted_index_ = InvertedIndexType();
