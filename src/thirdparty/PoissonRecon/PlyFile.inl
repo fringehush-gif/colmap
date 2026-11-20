@@ -142,21 +142,20 @@ inline void write_ascii_item ( FILE * ,       int , unsigned int , long long , u
 /* store a value into where a pointer and a type specify */
 inline void store_item( void * , int , int , unsigned int , long long , unsigned long long , double );
 
-// Floating destinations do not consume the integer representations of a value.
-inline bool ply_is_floating_type( int type )
-{
-	return type==PLY_FLOAT || type==PLY_FLOAT_32 || type==PLY_DOUBLE || type==PLY_FLOAT_64;
-}
-
 /* return the value of a stored item */
-inline void get_stored_item( void * , int , int & , unsigned int & , long long & , unsigned long long & , double & , bool=true );
+inline void get_stored_item( void * , int , int & , unsigned int & , long long & , unsigned long long & , double & , bool convert_to_integer=true );
 
 /* return the value stored in an item, given ptr to it and its type */
 inline double get_item_value( const void * , int );
 
 /* get binary or ascii item and store it according to ptr and type */
-inline void get_ascii_item( const std::string & , int , int & , unsigned int & , long long & , unsigned long long & , double & , bool=true );
-inline void get_binary_item( FILE * , int       , int , int & , unsigned int & , long long & , unsigned long long & , double & , bool=true );
+inline void get_ascii_item( const std::string & , int , int & , unsigned int & , long long & , unsigned long long & , double & , bool convert_to_integer=true );
+inline void get_binary_item( FILE * , int       , int , int & , unsigned int & , long long & , unsigned long long & , double & , bool convert_to_integer=true );
+
+inline bool is_floating_type( int type )
+{
+	return type==PLY_FLOAT || type==PLY_FLOAT_32 || type==PLY_DOUBLE || type==PLY_FLOAT_64;
+}
 
 /* byte ordering */
 inline void get_native_binary_type();
@@ -447,7 +446,7 @@ void PlyFile::put_element( void *elem_ptr )
 				item_size = ply_type_size[ elem->props[j].prop.internal_type ];
 				for( int k=0 ; k<list_count ; k++ )
 				{
-					get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , !ply_is_floating_type( elem->props[j].prop.external_type ) );
+					get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , !is_floating_type( elem->props[j].prop.external_type ) );
 					write_ascii_item( fp , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.external_type );
 					item += item_size;
 				}
@@ -455,7 +454,7 @@ void PlyFile::put_element( void *elem_ptr )
 			else
 			{
 				item = elem_data + elem->props[j].prop.offset;
-				get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , !ply_is_floating_type( elem->props[j].prop.external_type ) );
+				get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , !is_floating_type( elem->props[j].prop.external_type ) );
 				write_ascii_item( fp , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.external_type );
 			}
 		}
@@ -480,7 +479,7 @@ void PlyFile::put_element( void *elem_ptr )
 				item_size = ply_type_size[ elem->props[j].prop.internal_type ];
 				for( int k=0 ; k<list_count ; k++ )
 				{
-					get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , !ply_is_floating_type( elem->props[j].prop.external_type ) );
+					get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , !is_floating_type( elem->props[j].prop.external_type ) );
 					write_binary_item( fp , file_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.external_type );
 					item += item_size;
 				}
@@ -489,7 +488,7 @@ void PlyFile::put_element( void *elem_ptr )
 			{
 				item = elem_data + elem->props[j].prop.offset;
 				item_size = ply_type_size[ elem->props[j].prop.internal_type ];
-				get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , !ply_is_floating_type( elem->props[j].prop.external_type ) );
+				get_stored_item( (void *)item , elem->props[j].prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , !is_floating_type( elem->props[j].prop.external_type ) );
 				write_binary_item( fp , file_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , elem->props[j].prop.external_type );
 			}
 		}
@@ -1113,7 +1112,7 @@ void PlyFile::_ascii_get_element( void *elem_ptr )
 				/* read items and store them into the array */
 				for( int k=0 ; k<list_count ; k++ )
 				{
-					get_ascii_item( words[which_word++] , prop.external_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , store_it && !ply_is_floating_type( prop.internal_type ) );
+					get_ascii_item( words[which_word++] , prop.external_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , store_it && !is_floating_type( prop.internal_type ) );
 					if( store_it )
 					{
 						store_item( item , prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val );
@@ -1124,7 +1123,7 @@ void PlyFile::_ascii_get_element( void *elem_ptr )
 		}
 		else                     /* not a list */
 		{
-			get_ascii_item( words[which_word++] , prop.external_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , store_it && !ply_is_floating_type( prop.internal_type ) );
+			get_ascii_item( words[which_word++] , prop.external_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , store_it && !is_floating_type( prop.internal_type ) );
 			if( store_it )
 			{
 				item = (char *)elem_data + prop.offset;
@@ -1215,7 +1214,7 @@ void PlyFile::_binary_get_element( void *elem_ptr )
 				/* read items and store them into the array */
 				for( int k=0 ; k<list_count ; k++ )
 				{
-					get_binary_item( fp , file_type , prop.external_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , store_it && !ply_is_floating_type( prop.internal_type ) );
+					get_binary_item( fp , file_type , prop.external_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , store_it && !is_floating_type( prop.internal_type ) );
 					if( store_it )
 					{
 						store_item( item , prop.internal_type , int_val , uint_val , longlong_val , ulonglong_val , double_val );
@@ -1226,7 +1225,7 @@ void PlyFile::_binary_get_element( void *elem_ptr )
 		}
 		else                     /* not a list */
 		{
-			get_binary_item( fp , file_type , prop.external_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , store_it && !ply_is_floating_type( prop.internal_type ) );
+			get_binary_item( fp , file_type , prop.external_type , int_val , uint_val , longlong_val , ulonglong_val , double_val , store_it && !is_floating_type( prop.internal_type ) );
 			if( store_it )
 			{
 				item = (char *)elem_data + prop.offset;
@@ -1586,8 +1585,12 @@ uint_val   - unsigned integer value
 double_val - double-precision floating point value
 ******************************************************************************/
 
-void get_stored_item( void *ptr , int type , int &int_val , unsigned int &uint_val , long long &longlong_val , unsigned long long &ulonglong_val , double &double_val , bool convertToInteger )
+void get_stored_item( void *ptr , int type , int &int_val , unsigned int &uint_val , long long &longlong_val , unsigned long long &ulonglong_val , double &double_val , bool convert_to_integer )
 {
+	int_val = 0;
+	uint_val = 0;
+	longlong_val = 0;
+	ulonglong_val = 0;
 	switch( type )
 	{
 	case PLY_CHAR:
@@ -1657,26 +1660,20 @@ void get_stored_item( void *ptr , int type , int &int_val , unsigned int &uint_v
 	case PLY_FLOAT:
 	case PLY_FLOAT_32:
 		double_val = *((float *) ptr);
-		int_val = 0 , uint_val = 0 , longlong_val = 0 , ulonglong_val = 0;
-		if( convertToInteger )
-		{
-			int_val = (int)double_val;
-			uint_val = (unsigned int)double_val;
-			longlong_val = (long long)double_val;
-			ulonglong_val = (unsigned long long)double_val;
-		}
+		if( !convert_to_integer ) break;
+		int_val = (int)double_val;
+		uint_val = (unsigned int)double_val;
+		longlong_val = (long long)double_val;
+		ulonglong_val = (unsigned long long)double_val;
 		break;
 	case PLY_DOUBLE:
 	case PLY_FLOAT_64:
 		double_val = *((double *) ptr);
-		int_val = 0 , uint_val = 0 , longlong_val = 0 , ulonglong_val = 0;
-		if( convertToInteger )
-		{
-			int_val = (int)double_val;
-			uint_val = (unsigned int)double_val;
-			longlong_val = (long long)double_val;
-			ulonglong_val = (unsigned long long)double_val;
-		}
+		if( !convert_to_integer ) break;
+		int_val = (int)double_val;
+		uint_val = (unsigned int)double_val;
+		longlong_val = (long long)double_val;
+		ulonglong_val = (unsigned long long)double_val;
 		break;
 	default: MK_THROW( "Bad type: " , type );
 	}
@@ -1696,8 +1693,12 @@ uint_val   - unsigned integer value
 double_val - double-precision floating point value
 ******************************************************************************/
 
-void get_binary_item( FILE *fp , int file_type , int type , int &int_val , unsigned int &uint_val , long long &longlong_val , unsigned long long &ulonglong_val , double &double_val , bool convertToInteger )
+void get_binary_item( FILE *fp , int file_type , int type , int &int_val , unsigned int &uint_val , long long &longlong_val , unsigned long long &ulonglong_val , double &double_val , bool convert_to_integer )
 {
+	int_val = 0;
+	uint_val = 0;
+	longlong_val = 0;
+	ulonglong_val = 0;
 	// Use memcpy instead of type-punning pointer casts to read from the
 	// buffer.  The original code cast char* to int*/float*/etc. which
 	// violates C++ strict-aliasing rules.  At -O3 GCC exploits this and
@@ -1705,12 +1706,8 @@ void get_binary_item( FILE *fp , int file_type , int type , int &int_val , unsig
 	// Note: -Wstrict-aliasing does not catch this because the cast goes
 	// through a void* intermediate which defeats the heuristic checker.
 	//
-	// For the float/double cases we also avoid direct casts from
-	// floating-point to unsigned integer types, which are UB when the
-	// value is negative or out-of-range.  Instead we convert through
-	// long long first (well-defined truncation from double for values
-	// within ±2^63) and then use the well-defined signed-to-unsigned
-	// integer conversion.
+	// Floating destinations use double_val without integer conversion.
+	// Retain the legacy conversions only when an integer result is needed.
 	char c[8];
 
 	if( fread( c , ply_type_size[type] , 1 , fp )!=1 ) MK_THROW( "fread() failed -- aborting: " , std::string( type_names[type] ) );
@@ -1785,28 +1782,22 @@ void get_binary_item( FILE *fp , int file_type , int type , int &int_val , unsig
 	case PLY_FLOAT:
 	case PLY_FLOAT_32:
 		{ float v; memcpy( &v , c , sizeof(v) ); double_val = v; }
-		int_val = 0 , uint_val = 0 , longlong_val = 0 , ulonglong_val = 0;
-		if( convertToInteger )
-		{
-			// Clamp to avoid undefined behavior with an out of range double.
-			longlong_val = static_cast<long long>(std::clamp(double_val, static_cast<double>(std::numeric_limits<long long>::min()), static_cast<double>(std::numeric_limits<long long>::max())));
-			int_val = (int)longlong_val;
-			uint_val = (unsigned int)longlong_val;
-			ulonglong_val = (unsigned long long)longlong_val;
-		}
+		if( !convert_to_integer ) break;
+		// Retain the legacy conversion for integer destinations.
+		longlong_val = static_cast<long long>(std::clamp(double_val, static_cast<double>(std::numeric_limits<long long>::min()), static_cast<double>(std::numeric_limits<long long>::max())));
+		int_val = (int)longlong_val;
+		uint_val = (unsigned int)longlong_val;
+		ulonglong_val = (unsigned long long)longlong_val;
 		break;
 	case PLY_DOUBLE:
 	case PLY_FLOAT_64:
 		memcpy( &double_val , c , sizeof(double_val) );
-		int_val = 0 , uint_val = 0 , longlong_val = 0 , ulonglong_val = 0;
-		if( convertToInteger )
-		{
-			// Clamp to avoid undefined behavior with an out of range double.
-			longlong_val = static_cast<long long>(std::clamp(double_val, static_cast<double>(std::numeric_limits<long long>::min()), static_cast<double>(std::numeric_limits<long long>::max())));
-			int_val = (int)longlong_val;
-			uint_val = (unsigned int)longlong_val;
-			ulonglong_val = (unsigned long long)longlong_val;
-		}
+		if( !convert_to_integer ) break;
+		// Retain the legacy conversion for integer destinations.
+		longlong_val = static_cast<long long>(std::clamp(double_val, static_cast<double>(std::numeric_limits<long long>::min()), static_cast<double>(std::numeric_limits<long long>::max())));
+		int_val = (int)longlong_val;
+		uint_val = (unsigned int)longlong_val;
+		ulonglong_val = (unsigned long long)longlong_val;
 		break;
 	default: MK_THROW( "Bad type: " , type );
 	}
@@ -1825,8 +1816,12 @@ int_val    - integer value
 uint_val   - unsigned integer value
 double_val - double-precision floating point value
 ******************************************************************************/
-void get_ascii_item( const std::string &word , int type , int &int_val , unsigned int &uint_val , long long &longlong_val , unsigned long long &ulonglong_val , double &double_val , bool convertToInteger )
+void get_ascii_item( const std::string &word , int type , int &int_val , unsigned int &uint_val , long long &longlong_val , unsigned long long &ulonglong_val , double &double_val , bool convert_to_integer )
 {
+	int_val = 0;
+	uint_val = 0;
+	longlong_val = 0;
+	ulonglong_val = 0;
 	switch( type )
 	{
 	case PLY_CHAR:
@@ -1848,7 +1843,7 @@ void get_ascii_item( const std::string &word , int type , int &int_val , unsigne
 
 	case PLY_UINT:
 	case PLY_UINT_32:
-		uint_val = strtol( word.c_str() , (char **)NULL , 10 );
+		uint_val = strtoul( word.c_str() , (char **)NULL , 10 );
 		int_val = (int)uint_val;
 		double_val = (double)uint_val;
 		longlong_val = (long long)uint_val;
@@ -1876,15 +1871,12 @@ void get_ascii_item( const std::string &word , int type , int &int_val , unsigne
 	case PLY_FLOAT_64:
 		double_val = atof( word.c_str() );
 		// Honor the source width before conversion to a wider destination.
-		if( !convertToInteger && ( type==PLY_FLOAT || type==PLY_FLOAT_32 ) ) double_val = (float)double_val;
-		int_val = 0 , uint_val = 0 , longlong_val = 0 , ulonglong_val = 0;
-		if( convertToInteger )
-		{
-			int_val = (int)double_val;
-			uint_val = (unsigned int)double_val;
-			longlong_val = (long long)double_val;
-			ulonglong_val = (unsigned long long)double_val;
-		}
+		if( !convert_to_integer && ( type==PLY_FLOAT || type==PLY_FLOAT_32 ) ) double_val = (float)double_val;
+		if( !convert_to_integer ) break;
+		int_val = (int)double_val;
+		uint_val = (unsigned int)double_val;
+		longlong_val = (long long)double_val;
+		ulonglong_val = (unsigned long long)double_val;
 		break;
 	default: MK_THROW( "Bad type: " , type );
 	}
