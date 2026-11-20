@@ -535,22 +535,25 @@ bool FeatureMatcherController::Setup() {
     guided_matcher->Start();
   }
 
-  // If a worker failed to set up because it threw (e.g., a model that cannot be
-  // loaded), Wait rethrows the exception here. The worker has finished, so Wait
-  // returns immediately, and the destructor's Wait no longer throws.
-  for (auto& matcher : matchers_) {
-    if (!matcher->CheckValidSetup()) {
-      matcher->Wait();
-      return false;
+  // Consume every failed worker's exception before propagating the first one.
+  // Otherwise, a second failed worker would throw from the destructor's Wait.
+  // Healthy workers keep waiting for jobs until the controller stops them.
+  std::exception_ptr error;
+  bool valid_setup = true;
+  for (auto* matchers : {&matchers_, &guided_matchers_}) {
+    for (auto& matcher : *matchers) {
+      if (!matcher->CheckValidSetup()) {
+        valid_setup = false;
+        try {
+          matcher->Wait();
+        } catch (...) {
+          if (!error) error = std::current_exception();
+        }
+      }
     }
   }
-
-  for (auto& guided_matcher : guided_matchers_) {
-    if (!guided_matcher->CheckValidSetup()) {
-      guided_matcher->Wait();
-      return false;
-    }
-  }
+  if (error) std::rethrow_exception(error);
+  if (!valid_setup) return false;
 
   is_setup_ = true;
 

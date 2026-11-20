@@ -575,13 +575,19 @@ TEST(FeatureMatcherController, SetupPropagatesMatcherCreationErrors) {
 #else
   const std::string expected_message = "requires ONNX support";
 #endif
-  {
-    FeatureMatcherController controller(
-        matching_options, geometry_options, data.cache);
-    // The worker fails to create the matcher. Setup rethrows its error, and
-    // the controller then destructs without terminating.
-    EXPECT_THAT(ThrownMessage([&]() { controller.Setup(); }),
-                testing::HasSubstr(expected_message));
+  for (const int num_threads : {1, 2}) {
+    for (const bool guided_matching : {false, true}) {
+      SCOPED_TRACE(testing::Message() << num_threads << ":" << guided_matching);
+      auto options = matching_options;
+      options.num_threads = num_threads;
+      options.guided_matching = guided_matching;
+      FeatureMatcherController controller(
+          options, geometry_options, data.cache);
+      // Every independent worker fails. Setup must consume ordinary and guided
+      // worker errors so destruction cannot throw a second setup exception.
+      EXPECT_THAT(ThrownMessage([&]() { controller.Setup(); }),
+                  testing::HasSubstr(expected_message));
+    }
   }
 
   // Also test SharedFeatureMatcher error propagation across multiple sibling
