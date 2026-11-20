@@ -1177,25 +1177,27 @@ TEST_P(ParameterizedWorkspaceTests, SourceNormalProbeFallsBackOnInvalidInput) {
   non_normal.Fill(1.0f);
   non_normal.Write(path);
   EXPECT_FALSE(workspace->ValidateSourceNormalWithoutMaterialization(0));
-  EXPECT_EQ(workspace->GetNormalMap(0).GetDepth(), 2);
-  // A second instance avoids the intentionally cached two-channel map.
-  auto uncached = GetParam()(GetOptions());
+  EXPECT_THROW(workspace->GetNormalMap(0), std::invalid_argument);
+  // A rejected read must not publish a resident normal map.
   for (const char* bytes : {"10&5&3&",
                             "0&5&3&",
                             "10,5&3&",
                             "18446744073709551615&5&3&",
                             "garbage"}) {
     std::ofstream(path, std::ios::binary | std::ios::trunc) << bytes;
-    EXPECT_FALSE(uncached->ValidateSourceNormalWithoutMaterialization(0));
+    EXPECT_FALSE(workspace->ValidateSourceNormalWithoutMaterialization(0));
   }
   std::ofstream(path, std::ios::binary | std::ios::trunc)
       << std::string(129, ' ') << "10&5&3&";
-  EXPECT_FALSE(uncached->ValidateSourceNormalWithoutMaterialization(0));
+  EXPECT_FALSE(workspace->ValidateSourceNormalWithoutMaterialization(0));
   Mat<float> normal(10, 5, 3);
   normal.Fill(1.0f);
   normal.Write(path);
   std::ofstream(path, std::ios::binary | std::ios::app) << "tail";
-  EXPECT_TRUE(uncached->ValidateSourceNormalWithoutMaterialization(0));
+  EXPECT_TRUE(workspace->ValidateSourceNormalWithoutMaterialization(0));
+  const auto& repaired = workspace->GetNormalMap(0);
+  EXPECT_EQ(repaired.GetDepth(), 3);
+  EXPECT_FLOAT_EQ(repaired.Get(0, 0, 0), 1.0f);
 }
 
 INSTANTIATE_TEST_SUITE_P(WorkspaceTests,
