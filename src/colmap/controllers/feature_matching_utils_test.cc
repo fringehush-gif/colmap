@@ -843,13 +843,15 @@ TEST(FeatureMatcherController, FlexGlueSharedCudaWorkersMatchPairs) {
   }
 
   const auto pairs = AllPairs(image_ids);
-  auto run_with_workers = [&](int num_workers_per_gpu) {
+  auto run_with_workers = [&](const std::string& gpu_indices,
+                              int num_workers_per_gpu) {
+    SCOPED_TRACE(gpu_indices + ":" + std::to_string(num_workers_per_gpu));
     database->ClearMatches();
     database->ClearTwoViewGeometries();
     auto cache = std::make_shared<FeatureMatcherCache>(100, database);
     FeatureMatchingOptions matching_options(FeatureMatcherType::FLEXGLUE);
     matching_options.use_gpu = true;
-    matching_options.gpu_index = "0";
+    matching_options.gpu_index = gpu_indices;
     // Smaller than num_workers_per_gpu = 3 to also exercise the std::max(1, .)
     // clamping when dividing num_threads across GPU workers.
     matching_options.num_threads = 2;
@@ -870,13 +872,19 @@ TEST(FeatureMatcherController, FlexGlueSharedCudaWorkersMatchPairs) {
     return all_matches;
   };
 
-  const std::vector<FeatureMatches> expected_matches = run_with_workers(1);
+  const std::vector<FeatureMatches> expected_matches = run_with_workers("0", 1);
   for (const FeatureMatches& matches : expected_matches) {
     ASSERT_FALSE(matches.empty());
   }
 
-  const std::vector<FeatureMatches> concurrent_matches = run_with_workers(3);
+  const std::vector<FeatureMatches> concurrent_matches =
+      run_with_workers("0", 3);
   EXPECT_EQ(concurrent_matches, expected_matches);
+
+  // In a mixed list, -1 aliases device 0 even when multiple GPUs are present.
+  const std::vector<FeatureMatches> repeated_matches =
+      run_with_workers("0,0,-1", 1);
+  EXPECT_EQ(repeated_matches, expected_matches);
 }
 #endif
 
