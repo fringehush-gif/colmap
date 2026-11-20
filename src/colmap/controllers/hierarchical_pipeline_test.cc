@@ -292,9 +292,9 @@ TEST_F(HierarchicalCacheFilterTest, EmptySourceAndUnconnectedCluster) {
   EXPECT_EQ(candidate->NumImages(), 0);
 }
 
-// These counterexamples deliberately bypass the production guard. They witness
-// why the original two-stage path must remain for each excluded option. The
-// maintained HierarchicalPipeline tests below exercise the real call site.
+// These direct-filter counterexamples show why cluster and incremental filtering
+// remain separate. The maintained HierarchicalPipeline tests below exercise the
+// real call site.
 TEST_F(HierarchicalCacheFilterTest, ExplicitNamesNeedComposedFilter) {
   auto source = DatabaseCache::Create(*database, {});
   IncrementalPipelineOptions options;
