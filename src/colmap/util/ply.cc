@@ -605,8 +605,8 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
       auto ReadTyped = [&](auto type_tag) {
         using T = decltype(type_tag);
         const auto val = ReadFromBuffer<T>(buf, byte_pos);
-        return static_cast<float>(is_little_endian ? LittleEndianToNative(val)
-                                                   : BigEndianToNative(val));
+        return static_cast<double>(is_little_endian ? LittleEndianToNative(val)
+                                                    : BigEndianToNative(val));
       };
 
       if (type == "float" || type == "float32") {
@@ -627,7 +627,7 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
         return ReadTyped(uint32_t{});
       }
       LOG(FATAL_THROW) << "Invalid PLY vertex data type: " << type;
-      return 0.0f;
+      return 0.0;
     };
 
     // Decode a color channel from its declared scalar type. Integer channels
@@ -660,9 +660,9 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
       file.read(buffer.data(), num_bytes_per_vertex);
       THROW_CHECK(file.good()) << "Unexpected end of PLY file at vertex " << i;
 
-      const float x = ReadScalar(buffer.data(), X_byte_pos, X_type);
-      const float y = ReadScalar(buffer.data(), Y_byte_pos, Y_type);
-      const float z = ReadScalar(buffer.data(), Z_byte_pos, Z_type);
+      const double x = ReadScalar(buffer.data(), X_byte_pos, X_type);
+      const double y = ReadScalar(buffer.data(), Y_byte_pos, Y_type);
+      const double z = ReadScalar(buffer.data(), Z_byte_pos, Z_type);
 
       if (has_colors) {
         const uint8_t r = ReadColor(buffer.data(), R_byte_pos, R_type);
@@ -729,6 +729,14 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
       }
     }
   } else {
+    auto ParseAsciiCoordinate = [](const std::string& item,
+                                   const std::string& type) {
+      const double value = StringToDouble(item);
+      // Match binary input and preserve the precision of legacy float meshes.
+      return type == "float" || type == "float32"
+                 ? static_cast<double>(static_cast<float>(value))
+                 : value;
+    };
     // Parse an ASCII color channel from its declared scalar type. Integer
     // channels keep the historical parsing; float/double channels use the
     // standard 0-1 range and are scaled to 8-bit, matching the binary path.
@@ -753,9 +761,9 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
         items.push_back(item);
       }
 
-      const float x = StringToDouble(items.at(X_index));
-      const float y = StringToDouble(items.at(Y_index));
-      const float z = StringToDouble(items.at(Z_index));
+      const double x = ParseAsciiCoordinate(items.at(X_index), X_type);
+      const double y = ParseAsciiCoordinate(items.at(Y_index), Y_type);
+      const double z = ParseAsciiCoordinate(items.at(Z_index), Z_type);
 
       if (has_colors) {
         const uint8_t r = ParseAsciiColor(items.at(R_index), R_type);
@@ -828,9 +836,9 @@ void WriteTextPlyMesh(const std::filesystem::path& path,
     file << "comment TextureFile " << mesh.texture_file << '\n';
   }
   file << "element vertex " << mesh.mesh.vertices.size() << '\n';
-  file << "property float x\n";
-  file << "property float y\n";
-  file << "property float z\n";
+  file << "property double x\n";
+  file << "property double y\n";
+  file << "property double z\n";
   file << "element face " << mesh.mesh.faces.size() << '\n';
   if (has_texcoords) {
     file << "property list uchar int vertex_indices\n";
@@ -876,9 +884,9 @@ void WriteBinaryPlyMesh(const std::filesystem::path& path,
     text_file << "comment TextureFile " << mesh.texture_file << '\n';
   }
   text_file << "element vertex " << mesh.mesh.vertices.size() << '\n';
-  text_file << "property float x\n";
-  text_file << "property float y\n";
-  text_file << "property float z\n";
+  text_file << "property double x\n";
+  text_file << "property double y\n";
+  text_file << "property double z\n";
   text_file << "element face " << mesh.mesh.faces.size() << '\n';
   if (has_texcoords) {
     text_file << "property list uchar int vertex_indices\n";
@@ -894,9 +902,9 @@ void WriteBinaryPlyMesh(const std::filesystem::path& path,
   THROW_CHECK_FILE_OPEN(binary_file, path);
 
   for (const auto& vertex : mesh.mesh.vertices) {
-    WriteBinaryLittleEndian<float>(&binary_file, vertex.x);
-    WriteBinaryLittleEndian<float>(&binary_file, vertex.y);
-    WriteBinaryLittleEndian<float>(&binary_file, vertex.z);
+    WriteBinaryLittleEndian<double>(&binary_file, vertex.x);
+    WriteBinaryLittleEndian<double>(&binary_file, vertex.y);
+    WriteBinaryLittleEndian<double>(&binary_file, vertex.z);
   }
 
   for (size_t i = 0; i < mesh.mesh.faces.size(); ++i) {

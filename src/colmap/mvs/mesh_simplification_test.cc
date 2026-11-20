@@ -196,10 +196,11 @@ TEST(SimplifyMesh, BoundaryPreservation) {
   const auto result_high = SimplifyMesh(mesh, options);
 
   // Verify that the bounding box is approximately preserved.
-  float min_x = std::numeric_limits<float>::max();
-  float max_x = std::numeric_limits<float>::lowest();
-  float min_y = std::numeric_limits<float>::max();
-  float max_y = std::numeric_limits<float>::lowest();
+  using Coordinate = decltype(PlyMeshVertex::x);
+  Coordinate min_x = std::numeric_limits<Coordinate>::max();
+  Coordinate max_x = std::numeric_limits<Coordinate>::lowest();
+  Coordinate min_y = std::numeric_limits<Coordinate>::max();
+  Coordinate max_y = std::numeric_limits<Coordinate>::lowest();
   for (const auto& v : result_high.vertices) {
     min_x = std::min(min_x, v.x);
     max_x = std::max(max_x, v.x);

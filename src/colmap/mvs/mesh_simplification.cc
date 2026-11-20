@@ -533,9 +533,9 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
         const auto& vd = vertex_data[f[j]];
         const Eigen::Vector3f clamped_color =
             vd.color.array().round().max(0.0f).min(255.0f);
-        result.vertices.emplace_back(static_cast<float>(vd.position.x()),
-                                     static_cast<float>(vd.position.y()),
-                                     static_cast<float>(vd.position.z()),
+        result.vertices.emplace_back(vd.position.x(),
+                                     vd.position.y(),
+                                     vd.position.z(),
                                      static_cast<uint8_t>(clamped_color.x()),
                                      static_cast<uint8_t>(clamped_color.y()),
                                      static_cast<uint8_t>(clamped_color.z()));
