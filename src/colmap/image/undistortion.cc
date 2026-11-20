@@ -267,7 +267,20 @@ void UndistortImage(const UndistortCameraOptions& options,
 
   *undistorted_camera = UndistortCamera(options, distorted_camera);
 
-  WarpImageBetweenCameras(options.warp_options,
+  WarpImageOptions warp_options = options.warp_options;
+  // A pinhole crop changes the field of view but not the pixel scale.
+  // Leave larger or invalid thresholds to the usual warp path.
+  if (options.HasRegionOfInterest() &&
+      (distorted_camera.model_id == SimplePinholeCameraModel::model_id ||
+       distorted_camera.model_id == PinholeCameraModel::model_id) &&
+      undistorted_camera->FocalLengthX() == distorted_camera.FocalLengthX() &&
+      undistorted_camera->FocalLengthY() == distorted_camera.FocalLengthY() &&
+      warp_options.direct_warp_min_scale >= 0 &&
+      warp_options.direct_warp_min_scale <= 1) {
+    warp_options.direct_warp_min_scale = 0;
+  }
+
+  WarpImageBetweenCameras(warp_options,
                           distorted_camera,
                           *undistorted_camera,
                           distorted_bitmap,

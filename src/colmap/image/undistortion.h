@@ -45,7 +45,10 @@ struct UndistortCameraOptions {
   // Set to -1 to disable the check (default).
   double max_cam_point_norm = -1;
 
-  // Options controlling image warping during undistortion.
+  // Options controlling image warping during undistortion. A pure pinhole ROI
+  // crop is sampled directly for direct_warp_min_scale in [0, 1]; larger
+  // thresholds retain the usual warp behavior. Actual downscaling follows the
+  // warp options.
   WarpImageOptions warp_options;
 };
 
