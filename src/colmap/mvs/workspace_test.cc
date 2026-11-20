@@ -8,6 +8,8 @@
 #include "colmap/util/testing.h"
 
 #include <filesystem>
+#include <future>
+#include <thread>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -107,6 +109,22 @@ TEST_P(ParameterizedWorkspaceTests, Load) {
   workspace->Load({image_name_});
 }
 
+TEST_P(ParameterizedWorkspaceTests, DuplicateImageNames) {
+  Workspace::Options options = GetOptions();
+  options.num_threads = 2;
+  auto workspace = GetParam()(options);
+  workspace->Load(std::vector<std::string>(8, image_name_));
+  const auto& bitmap = workspace->GetBitmap(0);
+  const auto& depth_map = workspace->GetDepthMap(0);
+  const auto& normal_map = workspace->GetNormalMap(0);
+  ASSERT_EQ(bitmap.RowMajorData().size(), 150);
+  ASSERT_EQ(depth_map.GetData().size(), 50);
+  ASSERT_EQ(normal_map.GetData().size(), 150);
+  EXPECT_THAT(bitmap.RowMajorData(), testing::Each(0));
+  EXPECT_THAT(depth_map.GetData(), testing::Each(1.0f));
+  EXPECT_THAT(normal_map.GetData(), testing::Each(1.0f));
+}
+
 INSTANTIATE_TEST_SUITE_P(WorkspaceTests,
                          ParameterizedWorkspaceTests,
                          ::testing::Values(
@@ -117,6 +135,127 @@ INSTANTIATE_TEST_SUITE_P(WorkspaceTests,
                                return std::make_unique<CachedWorkspace>(
                                    options);
                              }));
+
+TEST_P(ParameterizedWorkspaceTests, ComponentLeasesPreserveOwnershipPolicy) {
+  auto workspace = GetParam()(GetOptions());
+  workspace->Load({image_name_});
+  const auto bitmap = workspace->GetBitmapLease(0);
+  const auto depth = workspace->GetDepthMapLease(0);
+  const auto normal = workspace->GetNormalMapLease(0);
+  ASSERT_TRUE(bitmap);
+  ASSERT_TRUE(depth);
+  ASSERT_TRUE(normal);
+  EXPECT_EQ(bitmap.get(), &workspace->GetBitmap(0));
+  EXPECT_EQ(depth.get(), &workspace->GetDepthMap(0));
+  EXPECT_EQ(normal.get(), &workspace->GetNormalMap(0));
+  if (dynamic_cast<CachedWorkspace*>(workspace.get()) == nullptr) {
+    EXPECT_EQ(bitmap.use_count(), 0);
+    EXPECT_EQ(depth.use_count(), 0);
+    EXPECT_EQ(normal.use_count(), 0);
+  } else {
+    EXPECT_GT(bitmap.use_count(), 0);
+    EXPECT_FALSE(bitmap.owner_before(depth));
+    EXPECT_FALSE(depth.owner_before(bitmap));
+    EXPECT_FALSE(bitmap.owner_before(normal));
+    EXPECT_FALSE(normal.owner_before(bitmap));
+  }
+}
+
+TEST(CachedWorkspaceLease, SurvivesConcurrentEvictionAndClear) {
+  const auto temp_dir = CreateTestDir();
+  CreateDirIfNotExists(temp_dir / "sparse");
+  CreateDirIfNotExists(temp_dir / "images");
+  CreateDirIfNotExists(temp_dir / "stereo");
+  CreateDirIfNotExists(temp_dir / "stereo" / "depth_maps");
+  CreateDirIfNotExists(temp_dir / "stereo" / "normal_maps");
+
+  SyntheticDatasetOptions dataset_options;
+  dataset_options.num_rigs = 1;
+  dataset_options.num_cameras_per_rig = 1;
+  dataset_options.num_frames_per_rig = 2;
+  dataset_options.camera_width = 10;
+  dataset_options.camera_height = 5;
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset_options, &reconstruction);
+  reconstruction.Write(temp_dir / "sparse");
+
+  std::vector<std::string> image_names;
+  for (int image_id = 1; image_id <= 2; ++image_id) {
+    const std::string name = reconstruction.Image(image_id).Name();
+    image_names.push_back(name);
+    DepthMap depth_map(10, 5, 1.0f, 10.0f);
+    depth_map.Fill(static_cast<float>(image_id + 1));
+    depth_map.Write(temp_dir / "stereo" / "depth_maps" /
+                    (name + ".geometric.bin"));
+    NormalMap normal_map(10, 5);
+    normal_map.Fill(static_cast<float>(image_id + 1));
+    normal_map.Write(temp_dir / "stereo" / "normal_maps" /
+                     (name + ".geometric.bin"));
+    Bitmap bitmap(10, 5, true);
+    bitmap.Fill(BitmapColor<uint8_t>(image_id, image_id, image_id));
+    bitmap.Write(temp_dir / "images" / name);
+  }
+
+  Workspace::Options options;
+  options.workspace_path = temp_dir;
+  options.workspace_format = "COLMAP";
+  options.input_type = "geometric";
+  options.cache_size = 1000.0 / (1024.0 * 1024.0 * 1024.0);
+  CachedWorkspace workspace(options);
+  workspace.Load(image_names);
+  const int first = workspace.GetModel().GetImageIdx(image_names[0]);
+  const int second = workspace.GetModel().GetImageIdx(image_names[1]);
+
+  const auto bitmap = workspace.GetBitmapLease(first);
+  const auto depth = workspace.GetDepthMapLease(first);
+  const auto normal = workspace.GetNormalMapLease(first);
+  ASSERT_TRUE(bitmap);
+  ASSERT_TRUE(depth);
+  ASSERT_TRUE(normal);
+  const size_t first_bytes =
+      bitmap->NumBytes() + depth->GetNumBytes() + normal->GetNumBytes();
+  ASSERT_LE(first_bytes, 1000);
+  ASSERT_GT(first_bytes + depth->GetNumBytes(), 1000);
+  ASSERT_FALSE(bitmap.owner_before(depth));
+  ASSERT_FALSE(depth.owner_before(bitmap));
+  ASSERT_FALSE(bitmap.owner_before(normal));
+  ASSERT_FALSE(normal.owner_before(bitmap));
+  ASSERT_EQ(bitmap.get(), workspace.GetBitmapLease(first).get());
+  std::thread evictor([&] { workspace.GetDepthMapLease(second); });
+  evictor.join();
+
+  const auto replacement = workspace.GetBitmapLease(first);
+  ASSERT_NE(bitmap.get(), replacement.get());
+
+  std::promise<void> start;
+  auto started = start.get_future().share();
+  auto clearer = std::async(std::launch::async, [&] {
+    started.wait();
+    for (int i = 0; i < 32; ++i) {
+      workspace.ClearCache();
+    }
+  });
+  start.set_value();
+  for (int i = 0; i < 32; ++i) {
+    const auto current = workspace.GetDepthMapLease(first);
+    EXPECT_FLOAT_EQ(current->Get(0, 0), 2.0f);
+  }
+  clearer.get();
+  workspace.ClearCache();
+
+  // Copies after eviction and clearing must still read the retained owners.
+  const Bitmap bitmap_copy = *bitmap;
+  const DepthMap depth_copy = *depth;
+  const NormalMap normal_copy = *normal;
+  EXPECT_EQ(bitmap_copy.Width(), 10);
+  EXPECT_EQ(bitmap_copy.Height(), 5);
+  ASSERT_EQ(bitmap_copy.RowMajorData().size(), 150);
+  EXPECT_THAT(bitmap_copy.RowMajorData(), testing::Each(1));
+  ASSERT_EQ(depth_copy.GetData().size(), 50);
+  EXPECT_THAT(depth_copy.GetData(), testing::Each(2.0f));
+  ASSERT_EQ(normal_copy.GetData().size(), 150);
+  EXPECT_THAT(normal_copy.GetData(), testing::Each(2.0f));
+}
 
 }  // namespace
 }  // namespace mvs
