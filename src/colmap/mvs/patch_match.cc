@@ -5,6 +5,7 @@
 #include "colmap/math/math.h"
 #include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/patch_match_cuda.h"
+#include "colmap/mvs/patch_match_input.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/file.h"
@@ -470,21 +471,14 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
       }
     }
 
-    // Read images in parallel using the shared I/O thread pool.
-    std::vector<std::shared_future<void>> futures;
-    futures.reserve(valid_image_idxs.size());
-    for (const auto image_idx : valid_image_idxs) {
-      futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
-        images.at(image_idx).SetBitmap(*workspace_->GetBitmapLease(image_idx));
-        if (options.geom_consistency) {
-          depth_maps.at(image_idx) = *workspace_->GetDepthMapLease(image_idx);
-          normal_maps.at(image_idx) = *workspace_->GetNormalMapLease(image_idx);
-        }
-      }));
-    }
-    for (auto& future : futures) {
-      future.get();
-    }
+    // Accepted reads finish before this lock or the destinations can unwind.
+    internal::StagePatchMatchInputs(*workspace_,
+                                    *io_thread_pool_,
+                                    valid_image_idxs,
+                                    options.geom_consistency,
+                                    images,
+                                    depth_maps,
+                                    normal_maps);
 
     problem.src_image_idxs = src_image_idxs;
   }
