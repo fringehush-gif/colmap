@@ -145,24 +145,6 @@ bool Workspace::HasNormalMap(const int image_idx) const {
   return ExistsFile(GetNormalMapPath(image_idx));
 }
 
-CachedWorkspace::CachedImage::CachedImage(CachedImage&& other) noexcept {
-  num_bytes = other.num_bytes;
-  bitmap = std::move(other.bitmap);
-  depth_map = std::move(other.depth_map);
-  normal_map = std::move(other.normal_map);
-}
-
-CachedWorkspace::CachedImage& CachedWorkspace::CachedImage::operator=(
-    CachedImage&& other) noexcept {
-  if (this != &other) {
-    num_bytes = other.num_bytes;
-    bitmap = std::move(other.bitmap);
-    depth_map = std::move(other.depth_map);
-    normal_map = std::move(other.normal_map);
-  }
-  return *this;
-}
-
 CachedWorkspace::CachedWorkspace(const Options& options)
     : Workspace(options),
       cache_((size_t)(1024.0 * 1024.0 * 1024.0 * options.cache_size),
