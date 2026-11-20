@@ -545,17 +545,17 @@ PlyFile *PlyFile::_Read( FILE *fp , std::vector< std::string > &elem_names )
 
 	/* read and parse the file's header */
 	words = get_words( plyfile->fp , &orig_line );
-	if( !words.size() || words[0]!="ply" ) return NULL;
+	if( !words.size() || words[0]!="ply" ){ delete plyfile ; return NULL; }
 	while( words.size() )
 	{
 		/* parse words */
 		if( words[0]=="format" )
 		{
-			if( words.size()!=3 ) return NULL;
+			if( words.size()!=3 ){ delete plyfile ; return NULL; }
 			if     ( words[1]=="ascii"                ) plyfile->file_type = PLY_ASCII;
 			else if( words[1]=="binary_big_endian"    ) plyfile->file_type = PLY_BINARY_BE;
 			else if( words[1]=="binary_little_endian" ) plyfile->file_type = PLY_BINARY_LE;
-			else return NULL;
+			else{ delete plyfile ; return NULL; }
 			plyfile->version = (float)atof( words[2].c_str() );
 		}
 		else if( words[0]=="element"    ) plyfile->add_element ( words );
@@ -610,6 +610,7 @@ PlyFile *PlyFile::Read( const std::string &filename , std::vector< std::string >
 
 	/* create the PlyFile data structure */
 	PlyFile *plyfile = _Read( fp , elem_names );
+	if( plyfile==NULL ) return NULL;
 
 	/* determine the file type and version */
 	file_type = plyfile->file_type;
