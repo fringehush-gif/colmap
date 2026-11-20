@@ -27,6 +27,9 @@ constexpr struct {
     {"bad_magic", "not_ply\n"},
     {"format_arity", "ply\nformat ascii\n"},
     {"unknown_encoding", "ply\nformat unknown 1.0\n"},
+    {"missing_format", "ply\nend_header\n"},
+    {"missing_end_header",
+     "ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\n"},
 };
 
 void WriteFixture(const std::filesystem::path& path,
@@ -100,6 +103,28 @@ TEST(PlyRead, ReadsSupportedEncodings) {
     ply->get_element(&x);
     EXPECT_FLOAT_EQ(x, 1.5f);
   }
+}
+
+TEST(PlyRead, PreservesHeaderOrderingAndUnknownKeywords) {
+  const auto path = colmap::CreateTestDir() / "ordered_header.ply";
+  WriteFixture(path,
+               "ply\ncomment before format\nunknown_extension ignored\n"
+               "element vertex 0\nproperty float x\n"
+               "format ascii 1.0\nend_header\n");
+  std::vector<std::string> names;
+  int file_type = -1;
+  float version = -1.0f;
+  std::unique_ptr<PlyFile> ply(
+      PlyFile::Read(path.string(), names, file_type, version));
+  ASSERT_NE(ply, nullptr);
+  EXPECT_EQ(names, std::vector<std::string>{"vertex"});
+  EXPECT_EQ(file_type, PLY_ASCII);
+  EXPECT_EQ(version, 1.0f);
+  size_t num_vertices = 1;
+  const auto properties = ply->get_element_description("vertex", num_vertices);
+  EXPECT_EQ(num_vertices, 0);
+  ASSERT_EQ(properties.size(), 1);
+  EXPECT_EQ(properties[0].external_type, PLY_FLOAT);
 }
 
 #ifdef __linux__
