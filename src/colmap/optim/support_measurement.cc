@@ -5,6 +5,8 @@
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/logging.h"
 
+#include <algorithm>
+
 namespace colmap {
 
 InlierSupportMeasurer::Support InlierSupportMeasurer::Evaluate(
@@ -35,7 +37,24 @@ bool InlierSupportMeasurer::IsLeftBetter(const Support& left,
 
 UniqueInlierSupportMeasurer::UniqueInlierSupportMeasurer(
     std::vector<size_t> unique_sample_ids)
-    : unique_sample_ids_(std::move(unique_sample_ids)) {}
+    : unique_sample_ids_(std::move(unique_sample_ids)) {
+  if (unique_sample_ids_.empty()) {
+    return;
+  }
+  const size_t max_id =
+      *std::max_element(unique_sample_ids_.begin(), unique_sample_ids_.end());
+  if (max_id < unique_sample_ids_.size()) {
+    // Existing labels already fit at most one scratch slot per sample.
+    num_label_slots_ = max_id + 1;
+    return;
+  }
+  FlatHashMap<size_t, size_t> dense_ids;
+  for (size_t& id : unique_sample_ids_) {
+    const auto [it, inserted] = dense_ids.try_emplace(id, dense_ids.size());
+    id = it->second;
+  }
+  num_label_slots_ = dense_ids.size();
+}
 
 UniqueInlierSupportMeasurer::Support UniqueInlierSupportMeasurer::Evaluate(
     const std::vector<double>& residuals, const double max_residual) {
@@ -45,15 +64,29 @@ UniqueInlierSupportMeasurer::Support UniqueInlierSupportMeasurer::Evaluate(
   support.num_unique_inliers = 0;
   support.residual_sum = 0;
 
-  FlatHashSet<size_t> inlier_point_ids;
-  for (size_t idx = 0; idx < residuals.size(); ++idx) {
-    if (residuals[idx] <= max_residual) {
-      support.num_inliers += 1;
-      inlier_point_ids.insert(unique_sample_ids_[idx]);
-      support.residual_sum += residuals[idx];
-    }
+  const auto is_inlier = [max_residual](const double residual) {
+    return residual <= max_residual;
+  };
+  auto residual_it =
+      std::find_if(residuals.begin(), residuals.end(), is_inlier);
+  if (residual_it == residuals.end()) {
+    return support;
   }
-  support.num_unique_inliers = inlier_point_ids.size();
+
+  // Keep scratch local: independent Evaluate calls may share a measurer.
+  std::vector<char> inlier_point_ids(num_label_slots_, false);
+  for (; residual_it != residuals.end();
+       residual_it =
+           std::find_if(residual_it + 1, residuals.end(), is_inlier)) {
+    const size_t idx = residual_it - residuals.begin();
+    support.num_inliers += 1;
+    const size_t id = unique_sample_ids_[idx];
+    if (!inlier_point_ids[id]) {
+      inlier_point_ids[id] = true;
+      ++support.num_unique_inliers;
+    }
+    support.residual_sum += *residual_it;
+  }
   return support;
 }
 

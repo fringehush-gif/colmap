@@ -54,7 +54,10 @@ struct UniqueInlierSupportMeasurer {
   bool IsLeftBetter(const Support& left, const Support& right);
 
  private:
+  // Equivalence-class labels in [0, num_label_slots_), independent of
+  // residuals.
   std::vector<size_t> unique_sample_ids_;
+  size_t num_label_slots_ = 0;
 };
 
 // Measure the support of a model by its fitness to the data as used in MSAC.
