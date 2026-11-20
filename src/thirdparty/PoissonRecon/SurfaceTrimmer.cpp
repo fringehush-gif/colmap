@@ -38,6 +38,7 @@ DAMAGE.
 #include <stdlib.h>
 #include <float.h>
 #include <algorithm>
+#include <memory>
 #include <iterator>
 #include <utility>
 #include <unordered_set>
@@ -657,18 +658,17 @@ int RunSurfaceTrimmer( int argc , char* argv[] )
 	static constexpr unsigned int Dim = DEFAULT_DIMENSION;
 	typedef VertexFactory::Factory< Real , typename VertexFactory::PositionFactory< Real , Dim > , typename VertexFactory::ValueFactory< Real > > Factory;
 	Factory factory;
-	bool *readFlags = new bool[ factory.plyReadNum() ];
+	std::unique_ptr< bool[] > readFlags( new bool[ factory.plyReadNum() ] );
 	std::vector< PlyProperty > unprocessedProperties;
 	size_t vNum;
-	PLY::ReadVertexHeader( options.In.value , factory , readFlags , unprocessedProperties , vNum );
+	PLY::ReadVertexHeader( options.In.value , factory , readFlags.get() , unprocessedProperties , vNum );
 	if( vNum>std::numeric_limits< int >::max() )
 	{
 		if( !options.Long.set ) MK_WARN( "Number of vertices not supported by 32-bit indexing. Switching to 64-bit indexing" );
 		options.Long.set = true;
 	}
-	if( !factory.template plyValidReadProperties<0>( readFlags ) ) MK_THROW( "Ply file does not contain positions" );
-	if( !factory.template plyValidReadProperties<1>( readFlags ) ) MK_THROW( "Ply file does not contain values" );
-	delete[] readFlags;
+	if( !factory.template plyValidReadProperties<0>( readFlags.get() ) ) MK_THROW( "Ply file does not contain positions" );
+	if( !factory.template plyValidReadProperties<1>( readFlags.get() ) ) MK_THROW( "Ply file does not contain values" );
 
     // Preserve arbitrary PLY metadata through the dynamic factory. Only the
     // standard ordered three-byte RGB layout uses inline colour storage.

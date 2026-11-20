@@ -3,9 +3,14 @@
 #include "colmap/util/testing.h"
 
 #include <cstddef>
+#include <array>
+#include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -15,6 +20,7 @@
 
 #include "Ply.h"
 #include "PreProcessor.h"
+#include "VertexFactory.h"
 #include <gtest/gtest.h>
 
 namespace {
@@ -362,5 +368,234 @@ TEST(PlyWriterTest, ClosesFileAfterSourceStreamThrows) {
   }
 }
 #endif
+
+TEST(PlyScalarProperties, PreservesDynamicFactoryScalarTypes) {
+  struct Scalar {
+    const char* name;
+    int input_type;
+    int output_type;
+    float value;
+  };
+  // Keep values representable in every legacy intermediate conversion.
+  // Property descriptors independently check signedness and scalar widths.
+  // Existing canonical output spellings remain unchanged for working types.
+  const std::array<Scalar, 20> scalars{{
+      {"char", PLY_CHAR, PLY_CHAR, 7},
+      {"short", PLY_SHORT, PLY_INT_16, 7},
+      {"int", PLY_INT, PLY_INT, 7},
+      {"longlong", PLY_LONGLONG, PLY_INT_64, 7},
+      {"uchar", PLY_UCHAR, PLY_UCHAR, 7},
+      {"ushort", PLY_USHORT, PLY_UINT_16, 7},
+      {"uint", PLY_UINT, PLY_UINT, 7},
+      {"ulonglong", PLY_ULONGLONG, PLY_UINT_64, 7},
+      {"float", PLY_FLOAT, PLY_FLOAT, 1.25f},
+      {"double", PLY_DOUBLE, PLY_DOUBLE, 1.25f},
+      {"int8", PLY_INT_8, PLY_INT_8, 7},
+      {"uint8", PLY_UINT_8, PLY_UCHAR, 7},
+      {"int16", PLY_INT_16, PLY_INT_16, 7},
+      {"uint16", PLY_UINT_16, PLY_UINT_16, 7},
+      {"int32", PLY_INT_32, PLY_INT, 7},
+      {"uint32", PLY_UINT_32, PLY_UINT, 7},
+      {"int64", PLY_INT_64, PLY_INT_64, 7},
+      {"uint64", PLY_UINT_64, PLY_UINT_64, 7},
+      {"float32", PLY_FLOAT_32, PLY_FLOAT, 1.25f},
+      {"float64", PLY_FLOAT_64, PLY_DOUBLE, 1.25f},
+  }};
+  const auto dir = colmap::CreateTestDir();
+  const auto input = dir / "scalar-types.ply";
+  {
+    std::ofstream file(input);
+    ASSERT_TRUE(file.is_open());
+    file << "ply\nformat ascii 1.0\nelement vertex 1\n";
+    for (size_t i = 0; i < scalars.size(); ++i) {
+      file << "property " << scalars[i].name << " metadata_" << i << '\n';
+    }
+    file << "element face 0\nproperty list uchar int vertex_indices\nend_header\n";
+    file << std::setprecision(std::numeric_limits<float>::max_digits10);
+    for (const auto& scalar : scalars) {
+      if (scalar.input_type == PLY_FLOAT || scalar.input_type == PLY_DOUBLE ||
+          scalar.input_type == PLY_FLOAT_32 || scalar.input_type == PLY_FLOAT_64) {
+        file << scalar.value;
+      } else {
+        file << static_cast<int64_t>(scalar.value);
+      }
+      file << ' ';
+    }
+    file << '\n';
+    ASSERT_TRUE(file.good());
+  }
+  std::vector<PoissonRecon::PlyProperty> properties;
+  PoissonRecon::PLY::ReadVertexHeader(input.string(), properties);
+  ASSERT_EQ(properties.size(), scalars.size());
+  using Factory = PoissonRecon::VertexFactory::DynamicFactory<float>;
+  const Factory factory(properties);
+  for (size_t i = 0; i < scalars.size(); ++i) {
+    SCOPED_TRACE(scalars[i].name);
+    EXPECT_EQ(properties[i].external_type, scalars[i].input_type);
+    EXPECT_EQ(factory.plyReadProperty(i).external_type, scalars[i].output_type);
+    EXPECT_EQ(factory.plyWriteProperty(i).external_type, scalars[i].output_type);
+  }
+  std::vector<Factory::VertexType> vertices;
+  std::vector<std::vector<int>> faces;
+  std::vector<std::string> comments;
+  int input_format = 0;
+  PoissonRecon::PLY::ReadPolygons<Factory, int>(
+      input.string(), factory, vertices, faces, input_format, comments);
+  ASSERT_EQ(vertices.size(), 1);
+  EXPECT_TRUE(faces.empty());
+  for (size_t i = 0; i < scalars.size(); ++i) {
+    SCOPED_TRACE(scalars[i].name);
+    EXPECT_EQ(vertices[0][i], scalars[i].value);
+  }
+  for (const int format : {PLY_ASCII, PLY_BINARY_LE, PLY_BINARY_BE}) {
+    SCOPED_TRACE(format);
+    const auto output = dir / ("roundtrip-" + std::to_string(format) + ".ply");
+    PoissonRecon::PLY::WritePolygons<Factory, int>(
+        output.string(), factory, vertices, faces, format, {});
+    std::vector<PoissonRecon::PlyProperty> written_properties;
+    PoissonRecon::PLY::ReadVertexHeader(output.string(), written_properties);
+    ASSERT_EQ(written_properties.size(), scalars.size());
+    std::vector<Factory::VertexType> decoded;
+    std::vector<std::vector<int>> decoded_faces;
+    int read_format = 0;
+    PoissonRecon::PLY::ReadPolygons<Factory, int>(
+        output.string(), factory, decoded, decoded_faces, read_format, comments);
+    EXPECT_EQ(read_format, format);
+    EXPECT_TRUE(decoded_faces.empty());
+    ASSERT_EQ(decoded.size(), 1);
+    for (size_t i = 0; i < scalars.size(); ++i) {
+      SCOPED_TRACE(scalars[i].name);
+      EXPECT_EQ(written_properties[i].external_type, scalars[i].output_type);
+      EXPECT_EQ(decoded[0][i], scalars[i].value);
+    }
+  }
+}
+
+TEST(PlyScalarProperties, WritesOnlySelectedFloatingRepresentations) {
+  const auto dir = colmap::CreateTestDir();
+  int case_index = 0;
+  const auto check_source = [&](auto source_zero, int source_type) {
+    using Source = decltype(source_zero);
+    const auto check = [&](double value, auto expected, int destination_type) {
+      using Destination = decltype(expected);
+      struct Input {
+        Source scalar;
+        unsigned char count;
+        Source* list;
+      };
+      struct Output {
+        Destination scalar = 0;
+        unsigned char count = 0;
+        Destination* list = nullptr;
+      };
+      std::array<Source, 2> values{{static_cast<Source>(value), Source(7)}};
+      Input input{values[0], 2, values.data()};
+      PoissonRecon::PlyProperty write_properties[] = {
+          {"scalar", destination_type, source_type, offsetof(Input, scalar)},
+          {"list", destination_type, source_type, offsetof(Input, list),
+           1, PLY_UCHAR, PLY_UCHAR, offsetof(Input, count)}};
+      PoissonRecon::PlyProperty read_properties[] = {
+          {"scalar", destination_type, destination_type, offsetof(Output, scalar)},
+          {"list", destination_type, destination_type, offsetof(Output, list),
+           1, PLY_UCHAR, PLY_UCHAR, offsetof(Output, count)}};
+      for (int format : {PLY_ASCII, PLY_BINARY_LE, PLY_BINARY_BE}) {
+        SCOPED_TRACE(source_type);
+        SCOPED_TRACE(destination_type);
+        SCOPED_TRACE(format);
+        const auto path = dir / ("selected-" + std::to_string(case_index++) + ".ply");
+        float version = 1;
+        std::vector<std::string> names{"vertex"};
+        {
+          std::unique_ptr<PoissonRecon::PlyFile> file(
+              PoissonRecon::PlyFile::Write(path.string(), names, format, version));
+          ASSERT_NE(file, nullptr);
+          file->describe_element("vertex", 1, 2, write_properties);
+          file->header_complete();
+          file->put_element_setup("vertex");
+          file->put_element(&input);
+        }
+        Output output;
+        {
+          std::unique_ptr<PoissonRecon::PlyFile> file(
+              PoissonRecon::PlyFile::Read(path.string(), names, format, version));
+          ASSERT_NE(file, nullptr);
+          file->get_element_setup("vertex", 2, read_properties);
+          file->get_element(&output);
+        }
+        std::unique_ptr<Destination, decltype(&std::free)> allocation(output.list,
+                                                                    &std::free);
+        EXPECT_EQ(output.scalar, expected);
+        ASSERT_EQ(output.count, 2);
+        ASSERT_NE(output.list, nullptr);
+        EXPECT_EQ(output.list[0], expected);
+        EXPECT_EQ(output.list[1], Destination(7));
+      }
+    };
+    // Each value fits its selected destination and both floating source types.
+    // Wide values are written as integer payloads, then decoded as integers.
+    check(-7.75, -7, PLY_INT);
+    check(2147483648.0, 2147483648u, PLY_UINT);
+    check(-1099511627776.0, -(1LL << 40), PLY_INT_64);
+    check(1099511627776.0, 1ULL << 40, PLY_UINT_64);
+    check(-1.25, -1.25f, PLY_FLOAT);
+    check(-1.25, -1.25, PLY_DOUBLE);
+  };
+  check_source(float{}, PLY_FLOAT);
+  check_source(double{}, PLY_DOUBLE);
+}
+
+TEST(PlyScalarProperties, ReadsOnlySelectedAsciiFloatingRepresentations) {
+  const auto dir = colmap::CreateTestDir();
+  int case_index = 0;
+  for (const auto* source_type : {"float", "float32", "double", "float64"}) {
+    const auto check = [&](const char* token, auto expected, int destination_type) {
+      using Destination = decltype(expected);
+      struct Output {
+        Destination scalar = 0;
+        unsigned char count = 0;
+        Destination* list = nullptr;
+      };
+      SCOPED_TRACE(source_type);
+      SCOPED_TRACE(destination_type);
+      const auto path = dir / ("selected-" + std::to_string(case_index++) + ".ply");
+      {
+        std::ofstream file(path);
+        ASSERT_TRUE(file.is_open());
+        file << "ply\nformat ascii 1.0\nelement vertex 1\nproperty "
+             << source_type << " scalar\nproperty list uchar " << source_type
+             << " list\nend_header\n" << token << " 2 " << token << " 7\n";
+        ASSERT_TRUE(file.good());
+      }
+      PoissonRecon::PlyProperty properties[] = {
+          {"scalar", PLY_DOUBLE, destination_type, offsetof(Output, scalar)},
+          {"list", PLY_DOUBLE, destination_type, offsetof(Output, list),
+           1, PLY_UCHAR, PLY_UCHAR, offsetof(Output, count)}};
+      Output output;
+      int format = 0;
+      float version = 1;
+      std::vector<std::string> names;
+      {
+        std::unique_ptr<PoissonRecon::PlyFile> file(
+            PoissonRecon::PlyFile::Read(path.string(), names, format, version));
+        ASSERT_NE(file, nullptr);
+        file->get_element_setup("vertex", 2, properties);
+        file->get_element(&output);
+      }
+      std::unique_ptr<Destination, decltype(&std::free)> allocation(output.list,
+                                                                  &std::free);
+      EXPECT_EQ(output.scalar, expected);
+      ASSERT_EQ(output.count, 2);
+      ASSERT_NE(output.list, nullptr);
+      EXPECT_EQ(output.list[0], expected);
+      EXPECT_EQ(output.list[1], Destination(7));
+    };
+    check("-7.75", -7, PLY_INT);
+    check("2147483648", 2147483648u, PLY_UINT);
+    check("-1099511627776", -(1LL << 40), PLY_INT_64);
+    check("1099511627776", 1ULL << 40, PLY_UINT_64);
+    check("-1.25", -1.25f, PLY_FLOAT);
+    check("-1.25", -1.25, PLY_DOUBLE);
+  }
+}
 
 }  // namespace
