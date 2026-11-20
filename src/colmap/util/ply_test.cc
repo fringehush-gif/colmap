@@ -8,6 +8,9 @@
 #include <array>
 #include <cstdint>
 #include <fstream>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -92,7 +95,7 @@ std::filesystem::path WriteTextPlyMesh(
 
 // Check a mesh vertex or point position.
 template <typename Vertex>
-void ExpectPositionEq(const Vertex& vertex, float x, float y, float z) {
+void ExpectPositionEq(const Vertex& vertex, double x, double y, double z) {
   EXPECT_EQ(vertex.x, x);
   EXPECT_EQ(vertex.y, y);
   EXPECT_EQ(vertex.z, z);
@@ -726,6 +729,94 @@ TEST(Ply, ReadBinaryPlyMeshWithDoubleCoordinates) {
   ASSERT_EQ(mesh.vertices.size(), 2);
   ExpectPositionEq(mesh.vertices[0], 1.5f, -2.25f, 100000.0f);
   ExpectPositionEq(mesh.vertices[1], -0.5f, 0.0f, -30000.0f);
+}
+
+TEST(Ply, ReadMeshRespectsFloatingCoordinateTypes) {
+  for (const auto& types :
+       {std::vector<std::string>{"float x", "double y", "float z"},
+        std::vector<std::string>{"float32 x", "float64 y", "float32 z"}}) {
+    const auto ascii =
+        WriteTextPlyMesh("mixed_ascii.ply", types, {"0.1 0.1 -0.1"});
+    const auto binary = WriteBinaryPlyMesh("mixed_binary.ply",
+                                           "binary_little_endian",
+                                           1,
+                                           types,
+                                           [](const auto& Write) {
+                                             Write(0.1f);
+                                             Write(0.1);
+                                             Write(-0.1f);
+                                           });
+    for (const auto& path : {ascii, binary}) {
+      const auto mesh = ReadPlyMesh(path).mesh;
+      ASSERT_EQ(mesh.vertices.size(), 1);
+      ExpectPositionEq(mesh.vertices[0], 0.1f, 0.1, -0.1f);
+    }
+  }
+}
+
+TEST(Ply, PreserveThinTriangleThroughMeshRoundTrip) {
+  // World positions of three distinct Poisson vertices. Narrowing to float
+  // makes the first two coincide and collapses their incident triangle.
+  constexpr std::array<std::array<double, 3>, 3> positions = {{
+      {-0x1.833333c000000p-3, 0x1.10cccd3000000p-1, -0x1.a666678ccccd0p-1},
+      {-0x1.833333c000000p-3, 0x1.10cccd3000000p-1, -0x1.a666670000000p-1},
+      {-0x1.83333c8cccd00p-3, 0x1.10cccd3000000p-1, -0x1.a666670000000p-1},
+  }};
+  const std::vector<std::string> properties = {
+      "double x", "double y", "double z"};
+  const auto CheckMesh = [&](const PlyMesh& mesh) {
+    ASSERT_EQ(mesh.vertices.size(), positions.size());
+    ASSERT_EQ(mesh.faces.size(), 1);
+    for (size_t i = 0; i < positions.size(); ++i) {
+      ExpectPositionEq(
+          mesh.vertices[i], positions[i][0], positions[i][1], positions[i][2]);
+    }
+    EXPECT_EQ(mesh.faces[0].vertex_idx1, 1);
+    EXPECT_EQ(mesh.faces[0].vertex_idx2, 0);
+    EXPECT_EQ(mesh.faces[0].vertex_idx3, 2);
+    // The only nonzero component of the oriented cross product is y.
+    EXPECT_GT((mesh.vertices[0].z - mesh.vertices[1].z) *
+                  (mesh.vertices[2].x - mesh.vertices[1].x),
+              0.0);
+  };
+
+  for (const std::string format :
+       {"ascii", "binary_little_endian", "binary_big_endian"}) {
+    SCOPED_TRACE(format);
+    std::filesystem::path input;
+    if (format == "ascii") {
+      std::vector<std::string> lines;
+      for (const auto& position : positions) {
+        std::ostringstream line;
+        line << std::setprecision(std::numeric_limits<double>::max_digits10)
+             << position[0] << " " << position[1] << " " << position[2];
+        lines.push_back(line.str());
+      }
+      input =
+          WriteTextPlyMesh("thin_ascii.ply", properties, lines, {"3 1 0 2"});
+    } else {
+      input = WriteBinaryPlyMesh("thin_" + format + ".ply",
+                                 format,
+                                 positions.size(),
+                                 properties,
+                                 [&](const auto& Write) {
+                                   for (const auto& position : positions) {
+                                     for (const double coordinate : position) {
+                                       Write(coordinate);
+                                     }
+                                   }
+                                 },
+                                 {{1, 0, 2}});
+    }
+    const PlyTexturedMesh mesh = ReadPlyMesh(input);
+    CheckMesh(mesh.mesh);
+    const auto binary_output = CreateTestDir() / (format + "_binary.ply");
+    const auto text_output = CreateTestDir() / (format + "_text.ply");
+    WriteBinaryPlyMesh(binary_output, mesh);
+    WriteTextPlyMesh(text_output, mesh);
+    CheckMesh(ReadPlyMesh(binary_output).mesh);
+    CheckMesh(ReadPlyMesh(text_output).mesh);
+  }
 }
 
 TEST(Ply, ReadBinaryPlyMeshWith8And32BitCoordinates) {
