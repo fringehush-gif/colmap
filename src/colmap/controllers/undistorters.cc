@@ -229,11 +229,12 @@ bool COLMAPUndistorter::Undistort(const image_t image_id) const {
     return true;
   }
 
-  // Already-undistorted perspective images are copied only when neither
-  // rescaling nor a region of interest is requested.
-  if (camera.IsUndistorted() && camera_options_.max_image_size < 0 &&
-      (!camera.IsPerspective() || !camera_options_.HasRegionOfInterest()) &&
-      ExistsFile(input_image_path)) {
+  // Fisheye projections still need conversion even with zero distortion
+  // coefficients. Copy pinhole projections only when no resize or crop is
+  // requested.
+  if (camera.IsPerspectivePinhole() && camera.IsUndistorted() &&
+      camera_options_.max_image_size < 0 &&
+      !camera_options_.HasRegionOfInterest() && ExistsFile(input_image_path)) {
     LOG(INFO) << "Copying already undistorted image to location: "
               << output_image_path;
     FileCopy(input_image_path, output_image_path, options_.copy_type);
@@ -673,8 +674,10 @@ bool StandaloneImageUndistorter::Undistort(const size_t image_idx) const {
   const auto input_image_path = image_path_ / image_name;
 
   // Copy unchanged images unless scaling or a perspective ROI is requested.
-  if (camera.IsUndistorted() && camera_options_.max_image_size < 0 &&
-      (!camera.IsPerspective() || !camera_options_.HasRegionOfInterest()) &&
+  if (camera_options_.max_image_size < 0 &&
+      (camera.IsSpherical() ||
+       (camera.IsPerspectivePinhole() && camera.IsUndistorted() &&
+        !camera_options_.HasRegionOfInterest())) &&
       ExistsFile(input_image_path)) {
     FileCopy(input_image_path, output_image_path, options_.copy_type);
     return true;

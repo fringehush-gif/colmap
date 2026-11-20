@@ -8,6 +8,7 @@
 #include "colmap/util/string.h"
 #include "colmap/util/testing.h"
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 
@@ -209,6 +210,111 @@ TEST(ImageUndistorters, ThinRegionOfInterestWithMaxImageSize) {
     ASSERT_EQ(output_image.NumPoints2D(), image.NumPoints2D());
     EXPECT_NEAR(output_image.Point2D(0).xy.x(), horizontal ? 20.2 : 0.5, 1e-12);
     EXPECT_NEAR(output_image.Point2D(0).xy.y(), horizontal ? 0.5 : 20.2, 1e-12);
+  }
+}
+
+TEST(ImageUndistorters, ConvertFisheyeWithoutDistortionCoefficients) {
+  const auto temp_dir = CreateTestDir();
+  const auto image_path = temp_dir / "input_images";
+  CreateDirIfNotExists(image_path);
+  Reconstruction reconstruction = CreateSyntheticReconstructionWithBitmaps(
+      image_path, /*num_images=*/1, /*image_width=*/128, /*image_height=*/64);
+  ASSERT_EQ(reconstruction.NumImages(), 1);
+  Image& image = reconstruction.Image(reconstruction.Images().begin()->first);
+  ASSERT_GT(image.NumPoints2D(), 0);
+  Camera& camera = reconstruction.Camera(image.CameraId());
+
+  Bitmap input(128, 64, true);
+  for (int y = 0; y < input.Height(); ++y) {
+    for (int x = 0; x < input.Width(); ++x) {
+      input.SetPixel(x,
+                     y,
+                     BitmapColor<uint8_t>(static_cast<uint8_t>(2 * x),
+                                          static_cast<uint8_t>(4 * y),
+                                          static_cast<uint8_t>(x + y)));
+    }
+  }
+  ASSERT_TRUE(input.Write(image_path / image.Name()));
+
+  struct TestCase {
+    CameraModelId model;
+    bool convert;
+  };
+  const TestCase test_cases[] = {{CameraModelId::kSimpleFisheye, true},
+                                 {CameraModelId::kFisheye, true},
+                                 {CameraModelId::kOpenCVFisheye, true},
+                                 {CameraModelId::kPinhole, false},
+                                 {CameraModelId::kEquirectangular, false}};
+  for (const auto& test_case : test_cases) {
+    SCOPED_TRACE(static_cast<int>(test_case.model));
+    camera = Camera::CreateFromModelId(
+        image.CameraId(), test_case.model, 64, 128, 64);
+    ASSERT_TRUE(camera.IsUndistorted());
+    // For the equidistant models, x = cx + f * theta with theta = 0.25.
+    image.Point2D(0).xy = Eigen::Vector2d(80, 32);
+    const UndistortCameraOptions camera_options;
+    Bitmap expected;
+    Camera expected_camera;
+    if (test_case.convert) {
+      UndistortImage(
+          camera_options, input, camera, &expected, &expected_camera);
+      ASSERT_EQ(expected_camera.model_id, CameraModelId::kPinhole);
+      ASSERT_NE(expected.RowMajorData(), input.RowMajorData());
+    } else {
+      expected = input.Clone();
+      expected_camera = camera;
+    }
+
+    const auto output_path =
+        temp_dir / StringPrintf("output_%d", int(test_case.model));
+    const auto standalone_path =
+        temp_dir / StringPrintf("standalone_%d", int(test_case.model));
+    CreateDirIfNotExists(output_path);
+    COLMAPUndistorter::Options options;
+    options.num_threads = 1;
+    COLMAPUndistorter undistorter(
+        options, camera_options, reconstruction, image_path, output_path);
+    undistorter.Run();
+    StandaloneImageUndistorter::Options standalone_options;
+    standalone_options.num_threads = 1;
+    standalone_options.image_names_and_cameras.emplace_back(image.Name(),
+                                                            camera);
+    StandaloneImageUndistorter standalone(
+        standalone_options, camera_options, image_path, standalone_path);
+    standalone.Run();
+
+    for (const auto& path : {output_path / "images", standalone_path}) {
+      Bitmap actual;
+      ASSERT_TRUE(actual.Read(path / image.Name()));
+      EXPECT_EQ(actual.Width(), expected.Width());
+      EXPECT_EQ(actual.Height(), expected.Height());
+      EXPECT_EQ(actual.RowMajorData(), expected.RowMajorData());
+    }
+
+    Reconstruction output_reconstruction;
+    output_reconstruction.Read(output_path / "sparse");
+    const Image& output_image = output_reconstruction.Image(image.ImageId());
+    EXPECT_EQ(output_image.CameraId(), image.CameraId());
+    const Camera& output_camera =
+        output_reconstruction.Camera(image.CameraId());
+    EXPECT_EQ(output_camera.camera_id, image.CameraId());
+    EXPECT_EQ(output_camera.model_id, expected_camera.model_id);
+    EXPECT_EQ(output_camera.width, expected_camera.width);
+    EXPECT_EQ(output_camera.height, expected_camera.height);
+    EXPECT_EQ(output_camera.params, expected_camera.params);
+    ASSERT_EQ(output_image.NumPoints2D(), image.NumPoints2D());
+    const Eigen::Vector2d& xy = output_image.Point2D(0).xy;
+    if (test_case.convert) {
+      // Independent equidistant-to-pinhole projection for a noncentral ray.
+      EXPECT_NEAR(xy.x(),
+                  output_camera.PrincipalPointX() +
+                      output_camera.FocalLengthX() * std::tan(0.25),
+                  1e-12);
+      EXPECT_NEAR(xy.y(), output_camera.PrincipalPointY(), 1e-12);
+    } else {
+      EXPECT_EQ(xy.x(), 80);
+      EXPECT_EQ(xy.y(), 32);
+    }
   }
 }
 
