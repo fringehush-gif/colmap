@@ -8,9 +8,28 @@
 #include "colmap/util/hash_containers.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace colmap {
 namespace {
+
+// Recognize the neutral parameter settings supported by the direct pinhole
+// path. Do not use Camera::IsUndistorted's tolerance for an exact crop.
+bool HasNeutralPinholeParameters(const Camera& camera) {
+  if (!camera.IsPerspectivePinhole()) {
+    return false;
+  }
+  if (camera.model_id == EUCMCameraModel::model_id) {
+    // At alpha = 0, any finite positive beta gives the pinhole projection.
+    return camera.params[4] == 0 && camera.params[5] > 0 &&
+           std::isfinite(camera.params[5]);
+  }
+  const auto extra_param_idxs = camera.ExtraParamsIdxs();
+  return std::all_of(
+      extra_param_idxs.begin(),
+      extra_param_idxs.end(),
+      [&camera](const size_t idx) { return camera.params[idx] == 0; });
+}
 
 // Rescale a camera in place so that neither dimension exceeds
 // options.max_image_size, keeping its model. A no-op when no size limit is
@@ -102,9 +121,8 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
   }
 
   // Scale in order to match the boundary of the undistorted image.
-  // Pinhole cameras need only the crop above; their borders need no warp.
-  if (camera.model_id != SimplePinholeCameraModel::model_id &&
-      camera.model_id != PinholeCameraModel::model_id) {
+  // Neutral pinhole parameters need only the crop above; no border warp.
+  if (!HasNeutralPinholeParameters(camera)) {
     // For fisheye camera, CamFromImg returns perspective-normalized coords
     // where |cam_point| = tan(theta). Near theta = pi/2, tan(theta) diverges:
     // border pixels outside the valid fisheye circle (common with off-center
@@ -271,8 +289,7 @@ void UndistortImage(const UndistortCameraOptions& options,
   // A pinhole crop changes the field of view but not the pixel scale.
   // Leave larger or invalid thresholds to the usual warp path.
   if (options.HasRegionOfInterest() &&
-      (distorted_camera.model_id == SimplePinholeCameraModel::model_id ||
-       distorted_camera.model_id == PinholeCameraModel::model_id) &&
+      HasNeutralPinholeParameters(distorted_camera) &&
       undistorted_camera->FocalLengthX() == distorted_camera.FocalLengthX() &&
       undistorted_camera->FocalLengthY() == distorted_camera.FocalLengthY() &&
       warp_options.direct_warp_min_scale >= 0 &&

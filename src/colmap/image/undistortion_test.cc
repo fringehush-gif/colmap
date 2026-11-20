@@ -145,10 +145,26 @@ TEST(UndistortCamera, PinholeRegionOfInterest) {
   options.roi_min_y = 0.2;
   options.roi_max_x = 0.9;
   options.roi_max_y = 0.8;
-  for (const CameraModelId model :
-       {CameraModelId::kSimplePinhole, CameraModelId::kPinhole}) {
-    const Camera camera =
+  for (const CameraModelId model : {CameraModelId::kSimplePinhole,
+                                    CameraModelId::kPinhole,
+                                    CameraModelId::kSimpleRadial,
+                                    CameraModelId::kRadial,
+                                    CameraModelId::kOpenCV,
+                                    CameraModelId::kFullOpenCV,
+                                    CameraModelId::kFOV,
+                                    CameraModelId::kSimpleDivision,
+                                    CameraModelId::kDivision,
+                                    CameraModelId::kSkewedPinhole,
+                                    CameraModelId::kEUCM}) {
+    SCOPED_TRACE(static_cast<int>(model));
+    Camera camera =
         Camera::CreateFromModelId(1, model, 100, 100, 100, CameraSource::EXIF);
+    if (model == CameraModelId::kFOV) {
+      camera.params[4] = 0;
+    } else if (model == CameraModelId::kEUCM) {
+      // A neutral alpha is independent of the valid positive beta value.
+      camera.params[5] = 2;
+    }
     const Camera cropped = UndistortCamera(options, camera);
     EXPECT_EQ(cropped.source, camera.source);
     EXPECT_TRUE(cropped.HasPriorFocalLength());
@@ -158,6 +174,30 @@ TEST(UndistortCamera, PinholeRegionOfInterest) {
     EXPECT_EQ(cropped.PrincipalPointY(), 30);
     EXPECT_EQ(cropped.FocalLengthX(), 100);
     EXPECT_EQ(cropped.FocalLengthY(), 100);
+  }
+}
+
+TEST(UndistortCamera, NeutralPinholeScaleOptions) {
+  for (const CameraModelId model : {CameraModelId::kPinhole,
+                                    CameraModelId::kSimpleRadial,
+                                    CameraModelId::kEUCM}) {
+    SCOPED_TRACE(static_cast<int>(model));
+    const Camera camera = Camera::CreateFromModelId(1, model, 100, 100, 80);
+    for (const int max_image_size : {-1, 50}) {
+      SCOPED_TRACE(max_image_size);
+      UndistortCameraOptions options;
+      options.min_scale = 2;
+      options.max_scale = 3;
+      options.max_image_size = max_image_size;
+      const Camera output = UndistortCamera(options, camera);
+      const double scale = max_image_size < 0 ? 1.0 : 0.5;
+      EXPECT_EQ(output.width, max_image_size < 0 ? 100 : 50);
+      EXPECT_EQ(output.height, max_image_size < 0 ? 80 : 40);
+      EXPECT_EQ(output.FocalLengthX(), 100 * scale);
+      EXPECT_EQ(output.FocalLengthY(), 100 * scale);
+      EXPECT_EQ(output.PrincipalPointX(), 50 * scale);
+      EXPECT_EQ(output.PrincipalPointY(), 40 * scale);
+    }
   }
 }
 
@@ -345,16 +385,28 @@ TEST(UndistortImage, PinholeCropPreservesPixels) {
   const TestCase test_cases[] = {
       {CameraModelId::kPinhole, 128, 48, 32, 0},
       {CameraModelId::kSimplePinhole, 128, 48, 32, 0},
+      {CameraModelId::kSimpleRadial, 128, 48, 32, 0},
+      {CameraModelId::kRadial, 128, 48, 32, 0},
+      {CameraModelId::kOpenCV, 128, 48, 32, 0},
+      {CameraModelId::kFullOpenCV, 128, 48, 32, 0},
+      {CameraModelId::kFOV, 128, 48, 32, 0},
+      {CameraModelId::kSimpleDivision, 128, 48, 32, 0},
+      {CameraModelId::kDivision, 128, 48, 32, 0},
+      {CameraModelId::kSkewedPinhole, 128, 48, 32, 0},
+      {CameraModelId::kEUCM, 128, 48, 32, 0},
       {CameraModelId::kPinhole, 100, 45, 10, 1},
       {CameraModelId::kSimplePinhole, 100, 45, 10, 1}};
   for (const auto& test_case : test_cases) {
     SCOPED_TRACE(test_case.image_size);
     SCOPED_TRACE(static_cast<int>(test_case.model));
-    const Camera camera = Camera::CreateFromModelId(1,
-                                                    test_case.model,
-                                                    test_case.image_size,
-                                                    test_case.image_size,
-                                                    test_case.image_size);
+    Camera camera = Camera::CreateFromModelId(1,
+                                              test_case.model,
+                                              test_case.image_size,
+                                              test_case.image_size,
+                                              test_case.image_size);
+    if (test_case.model == CameraModelId::kFOV) {
+      camera.params[4] = 0;
+    }
     const Bitmap input = CreateCheckerboardBitmap(test_case.image_size, 1);
     Bitmap expected = input.Clone();
     expected.Crop(test_case.crop_offset,
@@ -413,8 +465,10 @@ TEST(UndistortImage, PinholeCropPreservesPixels) {
 
 TEST(UndistortImage, PinholeCropRetainsFilteredWarpOptions) {
   const Bitmap input = CreateCheckerboardBitmap(128, 2);
-  for (const CameraModelId model :
-       {CameraModelId::kPinhole, CameraModelId::kSimplePinhole}) {
+  for (const CameraModelId model : {CameraModelId::kPinhole,
+                                    CameraModelId::kSimplePinhole,
+                                    CameraModelId::kSimpleRadial,
+                                    CameraModelId::kEUCM}) {
     SCOPED_TRACE(static_cast<int>(model));
     const Camera camera = Camera::CreateFromModelId(1, model, 128, 128, 128);
     for (const bool downscale : {false, true}) {
@@ -445,6 +499,42 @@ TEST(UndistortImage, PinholeCropRetainsFilteredWarpOptions) {
           options.warp_options, camera, output_camera, input, &direct);
       EXPECT_NE(expected.RowMajorData(), direct.RowMajorData());
     }
+  }
+}
+
+TEST(UndistortImage, NonNeutralCropRetainsFilteredWarp) {
+  const Bitmap input = CreateCheckerboardBitmap(128, 2);
+  struct TestCase {
+    CameraModelId model;
+    double first_extra_param;
+  };
+  const TestCase test_cases[] = {{CameraModelId::kSimpleRadial, 1e-9},
+                                 {CameraModelId::kSimpleRadial, 0.05},
+                                 {CameraModelId::kFOV, 0.01},
+                                 {CameraModelId::kEUCM, 0.1},
+                                 {CameraModelId::kOpenCVFisheye, 0.0}};
+  for (const auto& test_case : test_cases) {
+    SCOPED_TRACE(static_cast<int>(test_case.model));
+    SCOPED_TRACE(test_case.first_extra_param);
+    Camera camera =
+        Camera::CreateFromModelId(1, test_case.model, 128, 128, 128);
+    camera.params[camera.ExtraParamsIdxs()[0]] = test_case.first_extra_param;
+    UndistortCameraOptions options;
+    options.roi_min_x = options.roi_min_y = 0.375;
+    options.roi_max_x = options.roi_max_y = 0.625;
+    Bitmap output;
+    Camera output_camera;
+    UndistortImage(options, input, camera, &output, &output_camera);
+    Bitmap expected;
+    WarpImageBetweenCameras(
+        options.warp_options, camera, output_camera, input, &expected);
+    EXPECT_EQ(output.RowMajorData(), expected.RowMajorData());
+
+    options.warp_options.direct_warp_min_scale = 0;
+    Bitmap direct;
+    WarpImageBetweenCameras(
+        options.warp_options, camera, output_camera, input, &direct);
+    EXPECT_NE(expected.RowMajorData(), direct.RowMajorData());
   }
 }
 

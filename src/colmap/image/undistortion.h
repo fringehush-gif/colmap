@@ -45,10 +45,10 @@ struct UndistortCameraOptions {
   // Set to -1 to disable the check (default).
   double max_cam_point_norm = -1;
 
-  // Options controlling image warping during undistortion. A pure pinhole ROI
-  // crop is sampled directly for direct_warp_min_scale in [0, 1]; larger
-  // thresholds retain the usual warp behavior. Actual downscaling follows the
-  // warp options.
+  // Options controlling image warping during undistortion. A pinhole ROI with
+  // neutral parameters is sampled directly for direct_warp_min_scale in [0, 1].
+  // Larger thresholds retain the usual warp behavior. Actual downscaling
+  // follows the warp options.
   WarpImageOptions warp_options;
 };
 
@@ -67,8 +67,10 @@ struct UndistortCameraOptions {
 // states can be achieved by setting `blank_pixels` between 0 and 1.
 //
 // The relative location of the principal point of the distorted camera is
-// preserved. The scaling of the image dimensions is subject to the `min_scale`,
-// `max_scale`, and `max_image_size` constraints.
+// preserved. Neutral perspective-pinhole parameters retain the source
+// dimensions apart from ROI cropping and `max_image_size`. Otherwise, boundary
+// scaling is subject to the `min_scale`, `max_scale`, and `max_image_size`
+// constraints.
 Camera UndistortCamera(const UndistortCameraOptions& options,
                        const Camera& camera);
 
