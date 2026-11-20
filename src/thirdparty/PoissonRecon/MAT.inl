@@ -132,7 +132,7 @@ Real _MinimalAreaTriangulation< Index , Real , Dim >::_subPolygonArea( Index i ,
 {
 	Index idx = _subPolygonIndex( i , j );
 	if( _midpoint[idx]!=-1 ) return _bestTriangulation[idx];
-	Real a = FLT_MAX , temp;
+	Real a = std::numeric_limits< Real >::max() , temp;
 	size_t zeroAreaCount = 0;
 	if( j<i ) j += (Index)_vCount;
 	// If either i==j or i+1=j, the polygon has trivial area

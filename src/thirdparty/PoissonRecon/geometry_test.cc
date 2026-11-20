@@ -179,43 +179,51 @@ TYPED_TEST(PoissonQuadTriangulationTest,
        Point(1, 1, 0),
        Point(0, 1, 0)},
   }};
-  for (auto vertices : fixtures) {
-    const int count = static_cast<int>(vertices.size());
-    for (int winding = 0; winding < 2; ++winding) {
-      for (int rotation = 0; rotation < count; ++rotation) {
-        SCOPED_TRACE(testing::Message()
-                     << count << ":" << winding << ":" << rotation);
-        const auto triangles =
-            PoissonRecon::MinimalAreaTriangulation<int, TypeParam, 3>(
-                GetPointer(vertices), vertices.size());
-        ASSERT_EQ(triangles.size(), vertices.size() - 2);
-        std::vector<std::vector<int>> edges(count, std::vector<int>(count));
-        TypeParam twice_area = 0;
-        for (const auto& triangle : triangles) {
-          for (const int index : triangle.idx) {
-            ASSERT_GE(index, 0);
-            ASSERT_LT(index, count);
+  // Wider types can represent finite squared areas whose square roots already
+  // exceed float's maximum. Keep the float fixture below squared-area overflow.
+  const TypeParam large_scale =
+      std::is_same_v<TypeParam, float> ? TypeParam{0x1p16} : TypeParam{0x1p65};
+  for (const TypeParam scale : {TypeParam{1}, large_scale}) {
+    for (auto vertices : fixtures) {
+      for (auto& vertex : vertices) vertex *= scale;
+      const int count = static_cast<int>(vertices.size());
+      for (int winding = 0; winding < 2; ++winding) {
+        for (int rotation = 0; rotation < count; ++rotation) {
+          SCOPED_TRACE(testing::Message()
+                       << count << ":" << scale << ":" << winding << ":"
+                       << rotation);
+          const auto triangles =
+              PoissonRecon::MinimalAreaTriangulation<int, TypeParam, 3>(
+                  GetPointer(vertices), vertices.size());
+          ASSERT_EQ(triangles.size(), vertices.size() - 2);
+          std::vector<std::vector<int>> edges(count, std::vector<int>(count));
+          TypeParam twice_area = 0;
+          for (const auto& triangle : triangles) {
+            for (const int index : triangle.idx) {
+              ASSERT_GE(index, 0);
+              ASSERT_LT(index, count);
+            }
+            const auto a = vertices[triangle.idx[1]] - vertices[triangle.idx[0]];
+            const auto b = vertices[triangle.idx[2]] - vertices[triangle.idx[0]];
+            const TypeParam oriented_area =
+                (a[0] * b[1] - a[1] * b[0]) * (winding ? -1 : 1);
+            EXPECT_GT(oriented_area, 0);
+            twice_area += oriented_area;
+            for (int i = 0; i < 3; ++i)
+              ++edges[triangle.idx[i]][triangle.idx[(i + 1) % 3]];
           }
-          const auto a = vertices[triangle.idx[1]] - vertices[triangle.idx[0]];
-          const auto b = vertices[triangle.idx[2]] - vertices[triangle.idx[0]];
-          const TypeParam oriented_area =
-              (a[0] * b[1] - a[1] * b[0]) * (winding ? -1 : 1);
-          EXPECT_GT(oriented_area, 0);
-          twice_area += oriented_area;
-          for (int i = 0; i < 3; ++i)
-            ++edges[triangle.idx[i]][triangle.idx[(i + 1) % 3]];
-        }
-        EXPECT_EQ(twice_area, TypeParam{4});
-        for (int i = 0; i < count; ++i) {
-          for (int j = 0; j < count; ++j) {
-            const int boundary = j == (i + 1) % count ? 1 : 0;
-            const int reverse = i == (j + 1) % count ? 1 : 0;
-            EXPECT_EQ(edges[i][j] - edges[j][i], boundary - reverse);
+          EXPECT_EQ(twice_area, TypeParam{4} * scale * scale);
+          for (int i = 0; i < count; ++i) {
+            for (int j = 0; j < count; ++j) {
+              const int boundary = j == (i + 1) % count ? 1 : 0;
+              const int reverse = i == (j + 1) % count ? 1 : 0;
+              EXPECT_EQ(edges[i][j] - edges[j][i], boundary - reverse);
+            }
           }
+          std::rotate(vertices.begin(), vertices.begin() + 1, vertices.end());
         }
-        std::rotate(vertices.begin(), vertices.begin() + 1, vertices.end());
+        std::reverse(vertices.begin(), vertices.end());
       }
-      std::reverse(vertices.begin(), vertices.end());
     }
   }
 }
