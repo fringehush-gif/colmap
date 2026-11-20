@@ -112,6 +112,8 @@ TEST(UniqueInlierSupportMeasurer, SparseIdsAndIndependentEvaluations) {
 }
 
 TEST(UniqueInlierSupportMeasurer, MatchesOrderedSetOracle) {
+  // Keep the randomized oracle cases reproducible.
+  // NOLINTNEXTLINE(bugprone-random-generator-seed)
   std::mt19937 rng(19);
   const double infinity = std::numeric_limits<double>::infinity();
   for (const size_t num_samples :
@@ -158,6 +160,7 @@ TEST(UniqueInlierSupportMeasurer, MatchesOrderedSetOracle) {
 TEST(UniqueInlierSupportMeasurer, ConcurrentEvaluationsAreIndependent) {
   UniqueInlierSupportMeasurer measurer({0, 0, 3, 3});
   std::vector<std::future<void>> workers;
+  workers.reserve(4);
   for (size_t i = 0; i < 4; ++i) {
     workers.push_back(std::async(std::launch::async, [&measurer, i]() {
       const std::vector<double> residuals =
