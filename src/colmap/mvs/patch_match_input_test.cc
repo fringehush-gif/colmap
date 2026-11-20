@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <exception>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -41,20 +42,21 @@ class InputWorkspace : public Workspace {
     }
   }
 
-  std::shared_ptr<const Bitmap> GetBitmapLease(const int index) override {
+  // Exercise the default lease methods' dispatch to legacy virtual getters.
+  const Bitmap& GetBitmap(const int index) override {
     ++reads.at(index)[0];
     if (before_read) before_read(index, Payload::Bitmap);
-    return bitmaps.at(index);
+    return *bitmaps.at(index);
   }
-  std::shared_ptr<const DepthMap> GetDepthMapLease(const int index) override {
+  const DepthMap& GetDepthMap(const int index) override {
     ++reads.at(index)[1];
     if (before_read) before_read(index, Payload::Depth);
-    return depths.at(index);
+    return *depths.at(index);
   }
-  std::shared_ptr<const NormalMap> GetNormalMapLease(const int index) override {
+  const NormalMap& GetNormalMap(const int index) override {
     ++reads.at(index)[2];
     if (before_read) before_read(index, Payload::Normal);
-    return normals.at(index);
+    return *normals.at(index);
   }
 
   std::array<std::shared_ptr<Bitmap>, 2> bitmaps;
@@ -128,7 +130,7 @@ struct ReadGate {
   bool caller_returned = false;
   bool completed_before_return = false;
 
-  void Signal(bool ReadGate::* field) {
+  void Signal(bool ReadGate::*field) {
     {
       std::lock_guard<std::mutex> lock(mutex);
       this->*field = true;
@@ -136,7 +138,7 @@ struct ReadGate {
     condition.notify_all();
   }
 
-  bool WaitFor(bool ReadGate::* field,
+  bool WaitFor(bool ReadGate::*field,
                std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
     std::unique_lock<std::mutex> lock(mutex);
     return condition.wait_for(lock, timeout, [&] { return this->*field; });
@@ -147,10 +149,12 @@ struct ReadCleanup {
   ReadGate& gate;
   ThreadPool& pool;
   std::thread caller;
+  std::thread stopper;
 
   ~ReadCleanup() {
     gate.Signal(&ReadGate::released);
     if (caller.joinable()) caller.join();
+    if (stopper.joinable()) stopper.join();
     try {
       pool.Wait();
     } catch (...) {  // NOLINT(bugprone-empty-catch)
@@ -192,7 +196,7 @@ TEST_F(PatchMatchInputTest, ReadFailureDrainsAcceptedReadsBeforeReturning) {
           throw std::runtime_error("second input read failed");
         }
       };
-      ReadCleanup cleanup{gate, pool, {}};
+      ReadCleanup cleanup{gate, pool, {}, {}};
       cleanup.caller = std::thread([&] {
         try {
           internal::StagePatchMatchInputs(
@@ -257,6 +261,83 @@ TEST_F(PatchMatchInputTest, SubmissionFailurePreservesPoolDiagnostic) {
   }
   EXPECT_EQ(workspace->reads, (std::array<std::array<int, 3>, 2>{}));
   EXPECT_NO_THROW(pool.Wait());
+}
+
+TEST_F(PatchMatchInputTest, SubmissionFailureDrainsPreviouslyAcceptedWork) {
+  ThreadPool pool(1);
+  ReadGate gate;
+  auto images = workspace->GetModel().images;
+  std::vector<DepthMap> depths;
+  std::vector<NormalMap> normals;
+  std::exception_ptr observed;
+  std::exception_ptr stop_error;
+  ReadCleanup cleanup{gate, pool, {}, {}};
+
+  pool.AddTask([&] {
+    gate.Signal(&ReadGate::delayed_entered);
+    if (!gate.WaitFor(&ReadGate::released)) {
+      throw std::runtime_error("accepted input was not released");
+    }
+    images[0].SetBitmap(*workspace->GetBitmapLease(0));
+    gate.Signal(&ReadGate::delayed_completed);
+    throw std::runtime_error("previously accepted input failed");
+  });
+  ASSERT_TRUE(gate.WaitFor(&ReadGate::delayed_entered));
+  const auto queued = pool.AddTask([] {});
+  cleanup.stopper = std::thread([&] {
+    try {
+      pool.Stop();
+    } catch (...) {
+      stop_error = std::current_exception();
+    }
+  });
+
+  // Stop sets its rejection state before discarding this queued task. The
+  // active callback remains gated, so this observes Stop without polling.
+  ASSERT_EQ(queued.wait_for(std::chrono::seconds(10)),
+            std::future_status::ready);
+  try {
+    queued.get();
+    FAIL() << "Expected Stop to discard the queued task";
+  } catch (const std::future_error& error) {
+    EXPECT_EQ(error.code(),
+              std::make_error_code(std::future_errc::broken_promise));
+  }
+
+  cleanup.caller = std::thread([&] {
+    try {
+      internal::StagePatchMatchInputs(
+          *workspace, pool, {1}, false, images, depths, normals);
+    } catch (...) {
+      observed = std::current_exception();
+    }
+    {
+      std::lock_guard<std::mutex> lock(gate.mutex);
+      gate.completed_before_return = gate.delayed_completed;
+    }
+    gate.Signal(&ReadGate::caller_returned);
+  });
+  EXPECT_FALSE(
+      gate.WaitFor(&ReadGate::caller_returned, std::chrono::milliseconds(500)));
+  gate.Signal(&ReadGate::released);
+  cleanup.caller.join();
+  cleanup.stopper.join();
+  EXPECT_EQ(stop_error, nullptr);
+  EXPECT_TRUE(gate.completed_before_return);
+  ASSERT_NE(observed, nullptr);
+  try {
+    std::rethrow_exception(observed);
+  } catch (const std::runtime_error& error) {
+    EXPECT_EQ(std::string(error.what()),
+              "Cannot add task to stopped thread pool.");
+  } catch (...) {
+    ADD_FAILURE() << "Expected the submission error";
+  }
+  EXPECT_NO_THROW(pool.Wait());
+  EXPECT_EQ(workspace->reads[0], (std::array<int, 3>{1, 0, 0}));
+  EXPECT_EQ(workspace->reads[1], (std::array<int, 3>{0, 0, 0}));
+  EXPECT_EQ(images[0].GetBitmap().RowMajorData(),
+            workspace->bitmaps[0]->RowMajorData());
 }
 
 }  // namespace

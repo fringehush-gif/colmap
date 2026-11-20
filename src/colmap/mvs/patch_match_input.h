@@ -15,6 +15,7 @@ namespace internal {
 
 // The caller retains its workspace lock and destination vectors until this
 // returns or throws. Every accepted input read finishes before either occurs.
+// Image indices must be unique and valid for the destination vectors.
 void StagePatchMatchInputs(Workspace& workspace,
                            ThreadPool& io_thread_pool,
                            const std::vector<int>& image_idxs,

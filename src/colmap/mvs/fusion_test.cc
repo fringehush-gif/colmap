@@ -54,9 +54,9 @@ TEST(StereoFusion, Integration) {
                           3);
     const size_t num_pixels = normal_map.GetHeight() * normal_map.GetWidth();
     for (size_t i = 0; i < num_pixels; ++i) {
-      normal_map.GetPtr()[3 * i + 0] = 0.0f;  // nx
-      normal_map.GetPtr()[3 * i + 1] = 0.0f;  // ny
-      normal_map.GetPtr()[3 * i + 2] = 1.0f;  // nz
+      normal_map.GetPtr()[i] = 0.0f;                   // nx
+      normal_map.GetPtr()[num_pixels + i] = 0.0f;      // ny
+      normal_map.GetPtr()[2 * num_pixels + i] = 1.0f;  // nz
     }
     normal_map.Write(temp_dir / "stereo" / "normal_maps" /
                      (image.Name() + ".geometric.bin"));
@@ -110,6 +110,40 @@ TEST(StereoFusion, Integration) {
 
   for (const auto& vis : visibility) {
     EXPECT_GT(vis.size(), 0);
+  }
+
+  // Keep the parallel eager check above; compare exact output in serial mode.
+  auto serial_options = options;
+  serial_options.num_threads = 1;
+  StereoFusion serial_fusion(
+      serial_options, temp_dir, "COLMAP", "", "geometric");
+  serial_fusion.Run();
+  const auto& serial_points = serial_fusion.GetFusedPoints();
+  ASSERT_GT(serial_points.size(), 0);
+
+  // One byte cannot hold either image's components, so changing images must
+  // evict a cache entry. Cached reads must preserve the eager output.
+  serial_options.use_cache = true;
+  serial_options.cache_size = 1.0 / (1024.0 * 1024.0 * 1024.0);
+  StereoFusion cached_fusion(
+      serial_options, temp_dir, "COLMAP", "", "geometric");
+  cached_fusion.Run();
+  const auto& cached_points = cached_fusion.GetFusedPoints();
+  ASSERT_EQ(cached_points.size(), serial_points.size());
+  EXPECT_EQ(cached_fusion.GetFusedPointsVisibility(),
+            serial_fusion.GetFusedPointsVisibility());
+  for (size_t index = 0; index < serial_points.size(); ++index) {
+    const auto& point = serial_points[index];
+    const auto& cached = cached_points[index];
+    EXPECT_EQ(cached.x, point.x);
+    EXPECT_EQ(cached.y, point.y);
+    EXPECT_EQ(cached.z, point.z);
+    EXPECT_EQ(cached.nx, point.nx);
+    EXPECT_EQ(cached.ny, point.ny);
+    EXPECT_EQ(cached.nz, point.nz);
+    EXPECT_EQ(cached.r, point.r);
+    EXPECT_EQ(cached.g, point.g);
+    EXPECT_EQ(cached.b, point.b);
   }
 
   bool stop_checked = false;

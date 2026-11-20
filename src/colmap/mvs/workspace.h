@@ -101,6 +101,8 @@ class CachedWorkspace : public Workspace {
   const DepthMap& GetDepthMap(int image_idx) override;
   const NormalMap& GetNormalMap(int image_idx) override;
 
+  // Subclasses that customize a legacy getter must also override its lease
+  // method: these owning cache reads do not call the legacy virtual getters.
   std::shared_ptr<const Bitmap> GetBitmapLease(int image_idx) override;
   std::shared_ptr<const DepthMap> GetDepthMapLease(int image_idx) override;
   std::shared_ptr<const NormalMap> GetNormalMapLease(int image_idx) override;
