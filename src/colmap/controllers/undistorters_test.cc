@@ -143,6 +143,75 @@ TEST(ImageUndistorters, ApplyRegionOfInterestToPinhole) {
   }
 }
 
+TEST(ImageUndistorters, ThinRegionOfInterestWithMaxImageSize) {
+  const auto temp_dir = CreateTestDir();
+  const auto image_path = temp_dir / "input_images";
+  CreateDirIfNotExists(image_path);
+  Reconstruction reconstruction =
+      CreateSyntheticReconstructionWithBitmaps(image_path, /*num_images=*/1);
+  for (const auto& [camera_id, _] : reconstruction.Cameras()) {
+    reconstruction.Camera(camera_id) = Camera::CreateFromModelId(
+        camera_id, CameraModelId::kPinhole, 100, 100, 100);
+  }
+  Image& image = reconstruction.Image(reconstruction.Images().begin()->first);
+  ASSERT_GT(image.NumPoints2D(), 0);
+  image.Point2D(0).xy = Eigen::Vector2d(50.5, 50.5);
+
+  for (const bool horizontal : {false, true}) {
+    SCOPED_TRACE(horizontal);
+    UndistortCameraOptions camera_options;
+    camera_options.max_image_size = 40;
+    if (horizontal) {
+      camera_options.roi_min_y = 0.501;
+      camera_options.roi_max_y = 0.502;
+    } else {
+      camera_options.roi_min_x = 0.501;
+      camera_options.roi_max_x = 0.502;
+    }
+    const auto output_path = temp_dir / StringPrintf("output_%d", horizontal);
+    const auto standalone_path =
+        temp_dir / StringPrintf("standalone_%d", horizontal);
+    CreateDirIfNotExists(output_path);
+    COLMAPUndistorter::Options options;
+    options.num_threads = 1;
+    COLMAPUndistorter undistorter(
+        options, camera_options, reconstruction, image_path, output_path);
+    ASSERT_NO_THROW(undistorter.Run());
+
+    StandaloneImageUndistorter::Options standalone_options;
+    standalone_options.num_threads = 1;
+    standalone_options.image_names_and_cameras.emplace_back(image.Name(),
+                                                            *image.CameraPtr());
+    StandaloneImageUndistorter standalone(
+        standalone_options, camera_options, image_path, standalone_path);
+    ASSERT_NO_THROW(standalone.Run());
+
+    for (const auto& path : {output_path / "images", standalone_path}) {
+      Bitmap bitmap;
+      ASSERT_TRUE(bitmap.Read(path / image.Name()));
+      EXPECT_EQ(bitmap.Width(), horizontal ? 40 : 1);
+      EXPECT_EQ(bitmap.Height(), horizontal ? 1 : 40);
+      for (const uint8_t pixel : bitmap.RowMajorData()) {
+        EXPECT_GT(pixel, 0);
+      }
+    }
+
+    Reconstruction output_reconstruction;
+    output_reconstruction.Read(output_path / "sparse");
+    const Camera& camera = output_reconstruction.Camera(image.CameraId());
+    EXPECT_EQ(camera.width, horizontal ? 40 : 1);
+    EXPECT_EQ(camera.height, horizontal ? 1 : 40);
+    EXPECT_EQ(camera.FocalLengthX(), horizontal ? 40 : 100);
+    EXPECT_EQ(camera.FocalLengthY(), horizontal ? 100 : 40);
+    EXPECT_EQ(camera.PrincipalPointX(), horizontal ? 20 : 0);
+    EXPECT_EQ(camera.PrincipalPointY(), horizontal ? 0 : 20);
+    const Image& output_image = output_reconstruction.Image(image.ImageId());
+    ASSERT_EQ(output_image.NumPoints2D(), image.NumPoints2D());
+    EXPECT_NEAR(output_image.Point2D(0).xy.x(), horizontal ? 20.2 : 0.5, 1e-12);
+    EXPECT_NEAR(output_image.Point2D(0).xy.y(), horizontal ? 0.5 : 20.2, 1e-12);
+  }
+}
+
 TEST(COLMAPUndistorter, Integration) {
   const auto temp_dir = CreateTestDir();
   const auto image_path = temp_dir / "input_images";

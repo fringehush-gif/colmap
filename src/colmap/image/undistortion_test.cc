@@ -282,6 +282,44 @@ TEST(UndistortCamera, MaxImageSizeKeepsPositiveDimensions) {
   }
 }
 
+TEST(UndistortImage, ThinRegionOfInterestWithMaxImageSize) {
+  const Camera camera = Camera::CreateFromModelId(
+      1, CameraModelId::kPinhole, 100, 100, 100, CameraSource::EXIF);
+  Bitmap input(100, 100, false);
+  input.Fill(BitmapColor<uint8_t>(255));
+  for (const bool horizontal : {false, true}) {
+    SCOPED_TRACE(horizontal);
+    UndistortCameraOptions options;
+    options.max_image_size = 40;
+    if (horizontal) {
+      options.roi_min_y = 0.501;
+      options.roi_max_y = 0.502;
+    } else {
+      options.roi_min_x = 0.501;
+      options.roi_max_x = 0.502;
+    }
+    Bitmap output;
+    Camera output_camera;
+    ASSERT_NO_THROW(
+        UndistortImage(options, input, camera, &output, &output_camera));
+    EXPECT_EQ(output.Width(), horizontal ? 40 : 1);
+    EXPECT_EQ(output.Height(), horizontal ? 1 : 40);
+    EXPECT_EQ(output_camera.width, horizontal ? 40 : 1);
+    EXPECT_EQ(output_camera.height, horizontal ? 1 : 40);
+    EXPECT_EQ(output_camera.FocalLengthX(), horizontal ? 40 : 100);
+    EXPECT_EQ(output_camera.FocalLengthY(), horizontal ? 100 : 40);
+    EXPECT_EQ(output_camera.PrincipalPointX(), horizontal ? 20 : 0);
+    EXPECT_EQ(output_camera.PrincipalPointY(), horizontal ? 0 : 20);
+    EXPECT_EQ(output_camera.source, camera.source);
+    EXPECT_TRUE(output_camera.HasPriorFocalLength());
+    // Keep the default bilinear/intermediate-warp path for a normal input
+    // image. Every output pixel must retain a valid source contribution.
+    for (const uint8_t pixel : output.RowMajorData()) {
+      EXPECT_GT(pixel, 0);
+    }
+  }
+}
+
 TEST(UndistortImage, RejectsZeroMaxImageSize) {
   UndistortCameraOptions options;
   options.max_image_size = 0;
