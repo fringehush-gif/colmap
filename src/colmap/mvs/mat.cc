@@ -22,6 +22,7 @@
 #if defined(__linux__)
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
+#include <sys/stat.h>
 #endif
 
 namespace colmap {
@@ -208,9 +209,14 @@ ImmutableMapSource::ImmutableMapSource(const std::filesystem::path& path)
   namespace bip = boost::interprocess;
   impl_->file =
       std::make_unique<bip::file_mapping>(path.c_str(), bip::read_only);
-  bip::offset_t file_bytes = 0;
-  THROW_CHECK(impl_->file->get_size(file_bytes));
+  // Query the same opened file, including on Boost versions before get_size().
+  struct stat native_stat{};
+  THROW_CHECK_EQ(fstat(impl_->file->get_mapping_handle().handle, &native_stat),
+                 0);
+  const auto file_bytes = native_stat.st_size;
   THROW_CHECK_GE(file_bytes, 0);
+  THROW_CHECK_LE(static_cast<std::uintmax_t>(file_bytes),
+                 std::numeric_limits<size_t>::max());
   const size_t start = impl_->shape.payload_start;
   THROW_CHECK_LE(impl_->shape.bytes,
                  std::numeric_limits<size_t>::max() - start);

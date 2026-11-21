@@ -237,9 +237,12 @@ if(CUDA_ENABLED)
         if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
            AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT BUILD_SHARED_LIBS)
             target_compile_definitions(colmap_mvs_patch_match_cuda_test PRIVATE
-                COLMAP_TEST_CUDA_FREE_WRAPPING=1)
+                COLMAP_TEST_CUDA_FREE_WRAPPING=1
+                COLMAP_TEST_CUDA_COMPLETION_WRAPPING=1)
             target_link_options(colmap_mvs_patch_match_cuda_test PRIVATE
-                "LINKER:--wrap=cudaFree")
+                "LINKER:--wrap=cudaFree"
+                "LINKER:--wrap=cudaStreamSynchronize"
+                "LINKER:--wrap=cudaStreamSynchronize_ptsz")
             COLMAP_ADD_TEST(
                 NAME cuda_texture_constructor_test
                 SRCS cuda_texture_constructor_test.cc

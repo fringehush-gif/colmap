@@ -585,8 +585,9 @@ TEST_F(OctNormalCodec, FourFrameOwnerRotationAndWinnerCodeCarry) {
   CUDA_SAFE_CALL(cudaFree(codes));
 }
 TEST_F(OctNormalCodec, PlaneScratchRotationMatchesOutOfPlace) {
-  for (const auto shape :
-       {std::pair<size_t, size_t>{1, 1}, {43, 55}, {129, 17}, {17, 129}}) {
+  const std::pair<size_t, size_t> shapes[] = {
+      {1, 1}, {43, 55}, {129, 17}, {17, 129}};
+  for (const auto shape : shapes) {
     const auto [width, height] = shape;
     SCOPED_TRACE(::testing::Message() << width << "x" << height);
     const auto xyz = ScratchNormals(width * height);
