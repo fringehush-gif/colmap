@@ -30,6 +30,7 @@ DAMAGE.
 
 #include <float.h>
 #include <complex>
+#include <type_traits>
 #include <unordered_map>
 #include "SparseMatrixInterface.h"
 #include "Array.h"
@@ -120,6 +121,7 @@ namespace PoissonRecon
 			std::swap( M1._rowNum , M2._rowNum );
 			std::swap( M1._rowSizes , M2._rowSizes );
 			std::swap( M1._entries , M2._entries );
+			std::swap( M1._maxRows , M2._maxRows );
 		}
 		typedef SparseMatrixInterface< T , ConstPointer( MatrixEntry< T , IndexType > ) > Interface;
 		typedef ConstPointer( MatrixEntry< T , IndexType > ) RowIterator;
