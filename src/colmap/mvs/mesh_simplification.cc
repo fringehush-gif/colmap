@@ -466,23 +466,14 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
         }
         SortedErase(vertex_data[v1].adjacent_faces, fi);
       } else {
-        // Remap v2 -> v1 in this face.
+        // Remap v2 -> v1. Since v1 is absent, indices remain distinct.
         for (int j = 0; j < 3; ++j) {
           if (f[j] == v2) {
             f[j] = v1;
             break;
           }
         }
-        // Check for degenerate face after remapping.
-        if (f[0] == f[1] || f[0] == f[2] || f[1] == f[2]) {
-          face_removed[fi] = true;
-          --current_faces;
-          for (int j = 0; j < 3; ++j) {
-            SortedErase(vertex_data[f[j]].adjacent_faces, fi);
-          }
-        } else {
-          SortedInsert(vertex_data[v1].adjacent_faces, fi);
-        }
+        SortedInsert(vertex_data[v1].adjacent_faces, fi);
       }
     }
 
