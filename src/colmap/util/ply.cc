@@ -269,15 +269,7 @@ std::vector<PlyPoint> ReadPly(const std::filesystem::path& path) {
       }
 
       index += 1;
-      if (line_elems[1] == "float" || line_elems[1] == "float32") {
-        num_bytes_per_line += 4;
-      } else if (line_elems[1] == "double" || line_elems[1] == "float64") {
-        num_bytes_per_line += 8;
-      } else if (line_elems[1] == "uchar") {
-        num_bytes_per_line += 1;
-      } else {
-        LOG(FATAL_THROW) << "Invalid data type: " << line_elems[1];
-      }
+      num_bytes_per_line += PlyScalarTypeSize(line_elems[1]);
     }
   }
 
