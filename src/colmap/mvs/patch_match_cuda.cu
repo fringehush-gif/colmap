@@ -1533,8 +1533,24 @@ __global__ void SweepFromTopToBottom(
         if (winner == 0) {
           cost = cost_map.Get(row, col, image_idx);
         } else {
-          pcc_computer.src_image_idx = image_idx;
-          cost = pcc_computer.Compute();
+          if constexpr (kCooperative) {
+            // Only the final sample window remains live through winner refresh.
+            const int cache_size = min(options.num_samples, kSampleWindowSize);
+            int slot = 0;
+            while (slot < cache_size &&
+                   cooperative_job.source[slot][threadIdx.x] != image_idx) {
+              ++slot;
+            }
+            if (slot < cache_size) {
+              cost = cooperative_job.results[slot][winner - 1][threadIdx.x];
+            } else {
+              pcc_computer.src_image_idx = image_idx;
+              cost = pcc_computer.Compute();
+            }
+          } else {
+            pcc_computer.src_image_idx = image_idx;
+            cost = pcc_computer.Compute();
+          }
           cost_map.Set(row, col, image_idx, cost);
         }
 

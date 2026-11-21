@@ -109,6 +109,24 @@ Inputs MakeInputs(const int variant,
   return inputs;
 }
 
+void MakeSourceTexturesDistinct(Inputs* inputs) {
+  // Spatial errors distinguish sources; an affine intensity change would not
+  // distinguish their NCC values reliably.
+  for (int source = 1; source < static_cast<int>(inputs->images.size()); ++source) {
+    Bitmap bitmap = inputs->images[source].GetBitmap().Clone();
+    for (int row = 0; row < bitmap.Height(); ++row) {
+      for (int col = 0; col < bitmap.Width(); ++col) {
+        const int perturbation =
+            ((row * (source + 1) + col * (2 * source + 1)) % 17) - 8;
+        const int value = bitmap.GetPixel(col, row)->r + perturbation;
+        bitmap.SetPixel(col, row, BitmapColor<uint8_t>(
+            static_cast<uint8_t>(std::clamp(value, 0, 255))));
+      }
+    }
+    inputs->images[source].SetBitmap(std::move(bitmap));
+  }
+}
+
 PatchMatchOptions MakeOptions(const bool geometry,
                               const bool filter,
                               const bool /*unused*/) {
@@ -403,12 +421,19 @@ TEST_F(CudaTest, PropagationUsesTheActualSourcePixel) {
 TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
   constexpr int kWidth = 35;
   constexpr int kHeight = 65;
-  constexpr int kSamples = 17;
   constexpr unsigned long long kSeed = 9182;
   static_assert(kWidth % 8 != 0 && kWidth % 32 != 0);
 
-  for (const int sources : {32, 33}) {
-    SCOPED_TRACE(sources);
+  struct Case {
+    int sources, samples;
+  };
+  const Case cases[] = {
+      {32, 15}, {32, 16}, {32, 17}, {33, 17}, {33, 33}};
+  for (const auto& c : cases) {
+    const int sources = c.sources;
+    const int kSamples = c.samples;
+    SCOPED_TRACE(::testing::Message()
+                 << "sources=" << sources << " samples=" << kSamples);
     auto inputs = MakeInputs(0, 2, kHeight, kWidth);
     // Repeating a real overlapping source makes the high IDs eligible for
     // sampling rather than placing later cameras outside the reference view.
@@ -423,6 +448,7 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
       inputs.depths.push_back(source_depth);
       inputs.normals.push_back(source_normal);
     }
+    MakeSourceTexturesDistinct(&inputs);
     // Alternating non-ground-truth depths provide a useful propagation and
     // perturbation challenge; the source geometry remains valid.
     for (int row = 0; row < kHeight; ++row) {
@@ -480,6 +506,7 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
     int high31 = 0;
     int high32 = 0;
     int strict_new_winners = 0;
+    int distinct_sampled_costs = 0;
     for (int row = 0; row < kHeight; ++row) {
       bool row_supported = false;
       for (int col = 0; col < kWidth; ++col) {
@@ -489,6 +516,8 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
         row_supported = row_supported || supported;
         std::vector<bool> seen(sources, false);
         bool duplicate = false;
+        int first_sampled_source = -1;
+        bool distinct_sampled_cost = false;
         for (int sample = 0; sample < kSamples; ++sample) {
           const int source = a.draws.Get(row, col, sample);
           ASSERT_GE(source, -1);
@@ -499,11 +528,19 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
               duplicate = duplicate || seen[source];
               seen[source] = true;
             }
+            if (first_sampled_source < 0) {
+              first_sampled_source = source;
+            } else {
+              distinct_sampled_cost = distinct_sampled_cost ||
+                  a.initial_cost.Get(row, col, source) !=
+                      a.initial_cost.Get(row, col, first_sampled_source);
+            }
             high31 += source == 31;
             high32 += source == 32;
           }
         }
         duplicate_pixels += duplicate;
+        distinct_sampled_costs += distinct_sampled_cost;
         const int winner = a.winners.Get(row, col);
         ASSERT_GE(winner, 0);
         ASSERT_LT(winner, 5);
@@ -530,19 +567,21 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
     EXPECT_GT(supported_pixels, 0);
     EXPECT_GT(supported_rows, 1);
     EXPECT_GT(duplicate_pixels, 0);
+    EXPECT_GT(distinct_sampled_costs, 0);
     EXPECT_GT(high31, 0);
     if (sources == 33) {
       EXPECT_GT(high32, 0);
     }
     EXPECT_GT(strict_new_winners, 0);
-    RecordProperty("sources_" + std::to_string(sources) + "_supported_pixels",
-                   supported_pixels);
-    RecordProperty("sources_" + std::to_string(sources) + "_duplicate_pixels",
-                   duplicate_pixels);
-    RecordProperty("sources_" + std::to_string(sources) + "_draws_31", high31);
-    RecordProperty("sources_" + std::to_string(sources) + "_draws_32", high32);
-    RecordProperty("sources_" + std::to_string(sources) + "_strict_winners",
-                   strict_new_winners);
+    const std::string property_prefix = "sources_" + std::to_string(sources) +
+                                        "_samples_" + std::to_string(kSamples);
+    RecordProperty(property_prefix + "_supported_pixels", supported_pixels);
+    RecordProperty(property_prefix + "_duplicate_pixels", duplicate_pixels);
+    RecordProperty(property_prefix + "_distinct_sampled_costs",
+                   distinct_sampled_costs);
+    RecordProperty(property_prefix + "_draws_31", high31);
+    RecordProperty(property_prefix + "_draws_32", high32);
+    RecordProperty(property_prefix + "_strict_winners", strict_new_winners);
   }
 }
 
