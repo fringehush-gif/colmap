@@ -38,14 +38,14 @@ namespace VertexFactory
 			case TypeOnDisk::UINT:    return PLY::Type< unsigned  int >();
 			case TypeOnDisk::FLOAT:   return PLY::Type<         float >();
 			case TypeOnDisk::DOUBLE:  return PLY::Type<        double >();
-			case TypeOnDisk::INT_8:   return PLY::Type<        int8_t >();
+			case TypeOnDisk::INT_8:   return PLY_INT_8;
 			case TypeOnDisk::UINT_8:  return PLY::Type<       uint8_t >();
-			case TypeOnDisk::INT_16:  return PLY::Type<       int16_t >();
-			case TypeOnDisk::UINT_16: return PLY::Type<      uint16_t >();
+			case TypeOnDisk::INT_16:  return PLY_INT_16;
+			case TypeOnDisk::UINT_16: return PLY_UINT_16;
 			case TypeOnDisk::INT_32:  return PLY::Type<       int32_t >();
 			case TypeOnDisk::UINT_32: return PLY::Type<      uint32_t >();
-			case TypeOnDisk::INT_64:  return PLY::Type<       int64_t >();
-			case TypeOnDisk::UINT_64: return PLY::Type<      uint64_t >();
+			case TypeOnDisk::INT_64:  return PLY_INT_64;
+			case TypeOnDisk::UINT_64: return PLY_UINT_64;
 			default: MK_THROW( "Unrecognized type: " , typeOnDisk );
 		}
 		return -1;
@@ -59,6 +59,10 @@ namespace VertexFactory
 			case PLY_UINT:      return TypeOnDisk::UINT;
 			case PLY_CHAR:      return TypeOnDisk::CHAR;
 			case PLY_UCHAR:     return TypeOnDisk::UCHAR;
+			case PLY_SHORT:     return TypeOnDisk::INT_16;
+			case PLY_USHORT:    return TypeOnDisk::UINT_16;
+			case PLY_LONGLONG:  return TypeOnDisk::INT_64;
+			case PLY_ULONGLONG: return TypeOnDisk::UINT_64;
 			case PLY_FLOAT:     return TypeOnDisk::FLOAT;
 			case PLY_DOUBLE:    return TypeOnDisk::DOUBLE;
 			case PLY_INT_8:     return TypeOnDisk::INT_8;
