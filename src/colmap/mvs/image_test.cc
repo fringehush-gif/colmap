@@ -2,6 +2,9 @@
 
 #include "colmap/mvs/image.h"
 
+#include "colmap/mvs/depth_map.h"
+#include "colmap/mvs/normal_map.h"
+
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -92,6 +95,83 @@ TEST(Image, Downsize) {
   EXPECT_FLOAT_EQ(image_K[2], 25.0f);  // cx scaled
   EXPECT_FLOAT_EQ(image_K[4], 50.0f);  // fy scaled
   EXPECT_FLOAT_EQ(image_K[5], 25.0f);  // cy scaled
+}
+
+TEST(Image, DownsizeThinWorkspaceData) {
+  const struct {
+    size_t width, height, max_size;
+    size_t image_width, image_height, map_width, map_height;
+  } cases[] = {{1, 40, 16, 1, 16, 1, 16},
+               {40, 1, 16, 16, 1, 16, 1},
+               {2, 7, 1, 1, 1, 1, 1},
+               {7, 2, 1, 1, 1, 1, 1},
+               {37, 21, 16, 16, 9, 16, 9},
+               {3, 40, 16, 1, 16, 1, 13},
+               {40, 3, 16, 16, 1, 13, 1},
+               {40, 40, 16, 16, 16, 16, 16},
+               {1, 1, 1, 1, 1, 1, 1}};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const float T[3] = {0, 0, 0};
+
+  for (const auto& c : cases) {
+    SCOPED_TRACE(::testing::Message()
+                 << c.width << "x" << c.height << " -> " << c.max_size);
+    const float K[9] = {80, 0, c.width * 0.5f, 0, 60, c.height * 0.5f, 0, 0, 1};
+    const float scale_x = c.image_width / static_cast<float>(c.width);
+    const float scale_y = c.image_height / static_cast<float>(c.height);
+    const float fx = K[0] * scale_x, cx = K[2] * scale_x;
+    const float fy = K[4] * scale_y, cy = K[5] * scale_y;
+    const float P[12] = {fx, 0, cx, 0, 0, fy, cy, 0, 0, 0, 1, 0};
+    const float inv_P[12] = {
+        1 / fx, 0, -cx / fx, 0, 0, 1 / fy, -cy / fy, 0, 0, 0, 1, 0};
+    for (const bool with_bitmap : {false, true}) {
+      Image image("test.jpg", c.width, c.height, K, R, T);
+      if (with_bitmap) {
+        image.SetBitmap(Bitmap(c.width, c.height, false));
+      }
+      ASSERT_NO_THROW(image.Downsize(c.max_size, c.max_size));
+      ASSERT_EQ(image.GetWidth(), c.image_width);
+      ASSERT_EQ(image.GetHeight(), c.image_height);
+      if (with_bitmap) {
+        EXPECT_EQ(image.GetBitmap().Width(), c.image_width);
+        EXPECT_EQ(image.GetBitmap().Height(), c.image_height);
+      }
+      EXPECT_FLOAT_EQ(image.GetK()[0], fx);
+      EXPECT_FLOAT_EQ(image.GetK()[2], cx);
+      EXPECT_FLOAT_EQ(image.GetK()[4], fy);
+      EXPECT_FLOAT_EQ(image.GetK()[5], cy);
+      for (int i = 0; i < 12; ++i) {
+        EXPECT_FLOAT_EQ(image.GetP()[i], P[i]);
+        EXPECT_FLOAT_EQ(image.GetInvP()[i], inv_P[i]);
+      }
+    }
+
+    // Workspace downsizes each map to the image bounds, preserving its aspect
+    // ratio. Rounding can therefore leave a map smaller than the image.
+    DepthMap depth(c.width, c.height, 1, 3);
+    depth.Fill(2);
+    NormalMap normal(c.width, c.height);
+    normal.Fill(0);
+    for (size_t y = 0; y < c.height; ++y) {
+      for (size_t x = 0; x < c.width; ++x) {
+        normal.Set(y, x, 2, -1);
+      }
+    }
+    ASSERT_NO_THROW(depth.Downsize(c.image_width, c.image_height));
+    ASSERT_NO_THROW(normal.Downsize(c.image_width, c.image_height));
+    ASSERT_EQ(depth.GetWidth(), c.map_width);
+    ASSERT_EQ(depth.GetHeight(), c.map_height);
+    ASSERT_EQ(normal.GetWidth(), c.map_width);
+    ASSERT_EQ(normal.GetHeight(), c.map_height);
+    for (size_t y = 0; y < c.map_height; ++y) {
+      for (size_t x = 0; x < c.map_width; ++x) {
+        EXPECT_NEAR(depth.Get(y, x), 2, 1e-5);
+        EXPECT_FLOAT_EQ(normal.Get(y, x, 0), 0);
+        EXPECT_FLOAT_EQ(normal.Get(y, x, 1), 0);
+        EXPECT_FLOAT_EQ(normal.Get(y, x, 2), -1);
+      }
+    }
+  }
 }
 
 TEST(Image, DownsizeNoChange) {
