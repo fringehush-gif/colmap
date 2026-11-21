@@ -94,6 +94,7 @@ testpaths = [
     "python",
     "benchmark",
     "src/pycolmap",
+    "src/thirdparty/Symforce-Caspar",
 ]
 norecursedirs = [
     "build",
