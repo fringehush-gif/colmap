@@ -16,3 +16,20 @@ endif()
 if(MSVC)
     target_compile_options(colmap_poisson_recon PRIVATE /bigobj)
 endif()
+
+COLMAP_ADD_TEST(
+    NAME fem_constraints_test
+    SRCS fem_constraints_test.cc
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(${COLMAP_ADD_TEST_TARGET} PRIVATE RELEASE)
+    if(OPENMP_FOUND)
+        target_link_libraries(${COLMAP_ADD_TEST_TARGET} OpenMP::OpenMP_CXX)
+    endif()
+    if(MSVC)
+        target_compile_options(${COLMAP_ADD_TEST_TARGET} PRIVATE /bigobj)
+    endif()
+    if(COVERAGE_ENABLED)
+        target_link_options(${COLMAP_ADD_TEST_TARGET} PRIVATE -coverage)
+    endif()
+endif()
