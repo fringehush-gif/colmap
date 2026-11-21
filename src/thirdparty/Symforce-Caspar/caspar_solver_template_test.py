@@ -4,6 +4,7 @@
 import importlib.util
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 spec = importlib.util.spec_from_file_location(
     "caspar_solver_template",
@@ -15,6 +16,20 @@ spec.loader.exec_module(template)
 
 # Only the repaired regions are needed; no SymForce, CUDA or generated kernels.
 SOURCE = """#include <chrono>
+  indices_valid_ = false;
+  if (params.pcg_rel_error_exit<= 0.0f){
+    throw std::runtime_error("params.pcg_rel_error_exit must be positive");
+  }
+  if (params.diag_init < 0.0f){
+    throw std::runtime_error("params.diag_init must be positive");
+  }
+  if (params.pcg_iter_max < 1){
+    throw std::runtime_error("params.pcg_iter_max must be at least 1");
+  }
+  allocation_size_ = get_nbytes();
+void {{ solver.struct_name }}::set_params(const SolverParams<double> &params){
+  this->params_ = params;
+}
 void {{ solver.struct_name }}::DoUpdateRFirst() {
     Zero({{solver_key("r_0_norm2_tot")}}, {{solver_key("r_0_norm2_tot")}}+1);
 
@@ -100,9 +115,72 @@ for original, repaired in REPAIR_REGIONS:
 OWNER_HEADER = HEADER.replace(
     "private:\n", "private:\n  friend struct GraphSolverTestAccess;\n"
 )
+PARAMETER_GUARDS = """  if (params.pcg_rel_error_exit <= 0.0f) {
+    throw std::runtime_error("params.pcg_rel_error_exit must be positive");
+  }
+  if (params.diag_init < 0.0f) {
+    throw std::runtime_error("params.diag_init must be positive");
+  }
+  if (params.pcg_iter_max < 1) {
+    throw std::runtime_error("params.pcg_iter_max must be at least 1");
+  }
+"""
+LEGACY_PARAMETER_GUARDS = SOURCE[
+    SOURCE.index("  if (params.pcg_rel_error_exit") : SOURCE.index(
+        "  allocation_size_ = get_nbytes();"
+    )
+]
+OWNER_SOURCE = OWNER_SOURCE.replace(
+    LEGACY_PARAMETER_GUARDS, "  set_params(params);\n"
+).replace(
+    "  this->params_ = params;", PARAMETER_GUARDS + "  this->params_ = params;"
+)
 
 
 class CasparSolverTemplateTest(unittest.TestCase):
+    def test_parameter_checks_precede_assignment_and_allocation(self) -> None:
+        for source, header in ((SOURCE, HEADER), (OWNER_SOURCE, OWNER_HEADER)):
+            result, _ = template.patch_solver_templates(source, header)
+            self.assertIn(
+                "  indices_valid_ = false;\n  set_params(params);\n"
+                "  allocation_size_ = get_nbytes();",
+                result,
+            )
+            self.assertIn(
+                "void {{ solver.struct_name }}::set_params(const SolverParams<double> &params){\n"
+                + PARAMETER_GUARDS
+                + "  this->params_ = params;\n}",
+                result,
+            )
+            self.assertEqual(result.count(PARAMETER_GUARDS), 1)
+
+    def test_partial_or_duplicate_parameter_checks_are_refused(self) -> None:
+        for source, header, guard in (
+            (SOURCE, HEADER, LEGACY_PARAMETER_GUARDS),
+            (OWNER_SOURCE, OWNER_HEADER, PARAMETER_GUARDS),
+        ):
+            setter = source[
+                source.index(
+                    "void {{ solver.struct_name }}::set_params"
+                ) : source.index(
+                    "void {{ solver.struct_name }}::DoUpdateRFirst"
+                )
+            ]
+            for malformed in (
+                source.replace(guard, "", 1),
+                source + setter,
+                source.replace(
+                    "  this->params_ = params;",
+                    "  this->params_ = params;\n" + guard,
+                ),
+                source.replace(
+                    "params.pcg_iter_max < 1", "params.pcg_iter_max < 0"
+                ),
+            ):
+                with self.subTest(malformed=malformed):
+                    with self.assertRaises(RuntimeError):
+                        template.patch_solver_templates(malformed, header)
+
     def test_repairs_scored_proposals_and_both_norm_totals(self) -> None:
         result, _ = template.patch_solver_templates(SOURCE, HEADER)
         for expected in (
@@ -233,6 +311,57 @@ void {{ solver.struct_name }}::DoBeta() {""",
             with self.subTest(source=source):
                 with self.assertRaises(RuntimeError):
                     template.patch_solver_templates(source, header)
+
+
+class CasparReadbackTemplateTest(unittest.TestCase):
+    def test_runtime_copy_does_not_follow_existing_symlink(self) -> None:
+        with TemporaryDirectory() as directory:
+            owner = Path(directory) / "installed.cu"
+            output = Path(directory) / "solver_tools.cu"
+            owner.write_text("original owner")
+            try:
+                output.symlink_to(owner)
+            except (OSError, NotImplementedError) as error:
+                self.skipTest(f"Symlink creation unavailable: {error}")
+            template.write_solver_tools(output, "checked readback")
+            self.assertEqual(owner.read_text(), "original owner")
+            self.assertFalse(output.is_symlink())
+            self.assertEqual(output.read_text(), "checked readback")
+            template.write_solver_tools(output, "checked readback")
+            self.assertEqual(owner.read_text(), "original owner")
+            self.assertEqual(output.read_text(), "checked readback")
+
+    def test_scalar_readback_checks_and_refuses_drift(self) -> None:
+        source = '#include "solver_tools.h"\n' + template._SCALAR_READBACK[0]
+        result = template.patch_solver_tools(source)
+        self.assertIn("status != cudaSuccess", result)
+        self.assertIn("ReadCuMem cudaMemcpy failed:", result)
+        for changed in (source.replace("T result;", "T result = 1;"), result):
+            with self.assertRaises(RuntimeError):
+                template.patch_solver_tools(changed)
+
+    def test_readback_owners_and_drift(self) -> None:
+        source = (
+            "#include <chrono>\nnamespace {\n\n"
+            + template._READBACK_GETTERS[0]
+            + template._READBACK_SCRATCH[0]
+        )
+        result = template.patch_readback_template(source)
+        self.assertIn("CheckReadbackRange", result)
+        self.assertIn("solver.fields[node_key", result)
+        self.assertIn("fac.const_arg_types.items()", result)
+        self.assertIn("fac.isconstuniq[arg]", result)
+        self.assertIn("fac.isnodeshared.values()", result)
+        self.assertIn("std::numeric_limits<unsigned int>::max() - 32", result)
+        for anchor in (
+            template._READBACK_GETTERS[0],
+            template._READBACK_SCRATCH[0],
+        ):
+            for changed in (source.replace(anchor, ""), source + anchor):
+                with self.assertRaises(RuntimeError):
+                    template.patch_readback_template(changed)
+        with self.assertRaises(RuntimeError):
+            template.patch_readback_template(result)
 
 
 if __name__ == "__main__":
