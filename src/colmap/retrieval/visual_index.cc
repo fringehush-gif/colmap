@@ -89,6 +89,7 @@ class FaissVisualIndex : public VisualIndex {
            int image_id,
            const FeatureKeypoints& keypoints,
            const FeatureDescriptorsFloat& descriptors) override {
+    THROW_CHECK_GE(image_id, 0);
     THROW_CHECK_EQ(descriptors.data.cols(), kDescDim);
     THROW_CHECK_EQ(keypoints.size(), descriptors.data.rows());
     THROW_CHECK_EQ(descriptors.type, feature_type_)
@@ -137,11 +138,6 @@ class FaissVisualIndex : public VisualIndex {
   void Query(const QueryOptions& options,
              const FeatureDescriptorsFloat& descriptors,
              std::vector<ImageScore>* image_scores) const override {
-    THROW_CHECK_EQ(descriptors.data.cols(), kDescDim);
-    THROW_CHECK_EQ(descriptors.type, feature_type_)
-        << "Feature type mismatch: index was built with "
-        << FeatureExtractorTypeToString(feature_type_) << " but received "
-        << FeatureExtractorTypeToString(descriptors.type);
     Query(options, /*keypoints=*/{}, descriptors, image_scores);
   }
 

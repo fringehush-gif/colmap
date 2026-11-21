@@ -47,6 +47,25 @@ TEST(VisualIndex, RejectedAddPreservesIndexAndAllowsRetry) {
   ASSERT_EQ(image_scores.size(), 1);
   ASSERT_EQ(image_scores[0].image_id, 7);
 
+  const FeatureDescriptorsFloat empty_descriptors(
+      FeatureExtractorType::SIFT, FeatureDescriptorsFloatData(0, 128));
+  for (const bool empty : {false, true}) {
+    SCOPED_TRACE(empty);
+    const int image_id = empty ? -2 : -1;
+    const auto& rejected_descriptors = empty ? empty_descriptors : descriptors;
+    const FeatureKeypoints rejected_keypoints(rejected_descriptors.data.rows());
+    EXPECT_THROW(
+        visual_index->Add(
+            index_options, image_id, rejected_keypoints, rejected_descriptors),
+        std::invalid_argument);
+    EXPECT_EQ(visual_index->NumImages(), 1);
+    EXPECT_FALSE(visual_index->IsImageIndexed(image_id));
+    EXPECT_NO_THROW(
+        visual_index->Query(query_options, descriptors, &image_scores));
+    ASSERT_EQ(image_scores.size(), 1);
+    EXPECT_EQ(image_scores[0].image_id, 7);
+  }
+
   auto invalid_options = index_options;
   invalid_options.num_neighbors = 0;
   // Existing image IDs remain a no-op, even if unused options are invalid.
@@ -71,8 +90,6 @@ TEST(VisualIndex, RejectedAddPreservesIndexAndAllowsRetry) {
   EXPECT_EQ(image_scores[0].image_id, 9);
 
   // An empty image still needs no word lookup or neighbor-option validation.
-  const FeatureDescriptorsFloat empty_descriptors(
-      FeatureExtractorType::SIFT, FeatureDescriptorsFloatData(0, 128));
   EXPECT_NO_THROW(visual_index->Add(
       invalid_options, 11, FeatureKeypoints(), empty_descriptors));
   EXPECT_TRUE(visual_index->IsImageIndexed(11));
