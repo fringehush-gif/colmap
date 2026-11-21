@@ -10,7 +10,6 @@
 #include "caspar_mappings.h"
 #include "shared_indices.h"
 #include "solver_tools.h"
-#include "sort_indices.h"
 
 #include "kernel_PinholeCalib_alpha_denominator_or_beta_numerator.h"
 #include "kernel_PinholeCalib_alpha_numerator_denominator.h"
@@ -1907,7 +1906,6 @@ GraphSolver::GraphSolver(
       assign_and_increment<float>(origin_ptr_, offset, 1 * 1, 1);
   solver__res_tot_ = assign_and_increment<float>(origin_ptr_, offset, 1 * 1, 1);
 
-  scratch_inout_size_ = offset; // sorting, sum,
 }
 
 GraphSolver::~GraphSolver() {
@@ -5589,13 +5587,6 @@ void GraphSolver::SetSimpleRadialPoseIndicesFromDevice(
                              "before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices, facs__simple_radial__args__pose__idx_shared_, num);
 }
 void GraphSolver::SetSimpleRadialCalibIndicesFromHost(
@@ -5623,13 +5614,6 @@ void GraphSolver::SetSimpleRadialCalibIndicesFromDevice(
                              "before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices, facs__simple_radial__args__calib__idx_shared_, num);
 }
 void GraphSolver::SetSimpleRadialPointIndicesFromHost(
@@ -5657,13 +5641,6 @@ void GraphSolver::SetSimpleRadialPointIndicesFromDevice(
                              "before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices, facs__simple_radial__args__point__idx_shared_, num);
 }
 void GraphSolver::SetSimpleRadialSensorFromRigDataFromStackedHost(
@@ -5749,13 +5726,6 @@ void GraphSolver::SetSimpleRadialFixedPoseCalibIndicesFromDevice(
         "before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices,
                 facs__simple_radial_fixed_pose__args__calib__idx_shared_, num);
 }
@@ -5786,13 +5756,6 @@ void GraphSolver::SetSimpleRadialFixedPosePointIndicesFromDevice(
         "before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices,
                 facs__simple_radial_fixed_pose__args__point__idx_shared_, num);
 }
@@ -5906,13 +5869,6 @@ void GraphSolver::SetSimpleRadialFixedPointPoseIndicesFromDevice(
         "Setsimple_radial_fixed_pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices,
                 facs__simple_radial_fixed_point__args__pose__idx_shared_, num);
 }
@@ -5943,13 +5899,6 @@ void GraphSolver::SetSimpleRadialFixedPointCalibIndicesFromDevice(
         "Setsimple_radial_fixed_pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices,
                 facs__simple_radial_fixed_point__args__calib__idx_shared_, num);
 }
@@ -6064,13 +6013,6 @@ void GraphSolver::SetSimpleRadialFixedPoseFixedPointCalibIndicesFromDevice(
         "Setsimple_radial_fixed_pose_fixed_pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_fixed_pose_fixed_point__args__calib__idx_shared_,
@@ -6221,13 +6163,6 @@ void GraphSolver::SetPinholePoseIndicesFromDevice(
         " != pinhole_num_. Use SetpinholeNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices, facs__pinhole__args__pose__idx_shared_, num);
 }
 void GraphSolver::SetPinholeCalibIndicesFromHost(
@@ -6254,13 +6189,6 @@ void GraphSolver::SetPinholeCalibIndicesFromDevice(
         " != pinhole_num_. Use SetpinholeNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices, facs__pinhole__args__calib__idx_shared_, num);
 }
 void GraphSolver::SetPinholePointIndicesFromHost(
@@ -6287,13 +6215,6 @@ void GraphSolver::SetPinholePointIndicesFromDevice(
         " != pinhole_num_. Use SetpinholeNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices, facs__pinhole__args__point__idx_shared_, num);
 }
 void GraphSolver::SetPinholeSensorFromRigDataFromStackedHost(
@@ -6381,13 +6302,6 @@ void GraphSolver::SetPinholeFixedPoseCalibIndicesFromDevice(
         "setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices, facs__pinhole_fixed_pose__args__calib__idx_shared_,
                 num);
 }
@@ -6418,13 +6332,6 @@ void GraphSolver::SetPinholeFixedPosePointIndicesFromDevice(
         "setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices, facs__pinhole_fixed_pose__args__point__idx_shared_,
                 num);
 }
@@ -6537,13 +6444,6 @@ void GraphSolver::SetPinholeFixedPointPoseIndicesFromDevice(
         "setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices, facs__pinhole_fixed_point__args__pose__idx_shared_,
                 num);
 }
@@ -6574,13 +6474,6 @@ void GraphSolver::SetPinholeFixedPointCalibIndicesFromDevice(
         "setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices, facs__pinhole_fixed_point__args__calib__idx_shared_,
                 num);
 }
@@ -6692,13 +6585,6 @@ void GraphSolver::SetPinholeFixedPoseFixedPointCalibIndicesFromDevice(
         "Setpinhole_fixed_pose_fixed_pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices,
                 facs__pinhole_fixed_pose_fixed_point__args__calib__idx_shared_,
                 num);
@@ -6845,13 +6731,6 @@ void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraPoseIndicesFromDevice(
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra__args__pose__idx_shared_,
@@ -6888,13 +6767,6 @@ void GraphSolver::
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra__args__principal_point__idx_shared_,
@@ -6929,13 +6801,6 @@ void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraPointIndicesFromDevice(
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra__args__point__idx_shared_,
@@ -7070,13 +6935,6 @@ void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointPoseIndicesFromDevice(
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_principal_point__args__pose__idx_shared_,
@@ -7113,13 +6971,6 @@ void GraphSolver::
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_principal_point__args__focal_and_extra__idx_shared_,
@@ -7154,13 +7005,6 @@ void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointPointIndicesFromDevice(
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_principal_point__args__point__idx_shared_,
@@ -7298,13 +7142,6 @@ void GraphSolver::
         "setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__principal_point__idx_shared_,
@@ -7341,13 +7178,6 @@ void GraphSolver::
         "setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__point__idx_shared_,
@@ -7533,13 +7363,6 @@ void GraphSolver::
         "setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_principal_point__args__focal_and_extra__idx_shared_,
@@ -7576,13 +7399,6 @@ void GraphSolver::
         "setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_principal_point__args__point__idx_shared_,
@@ -7776,13 +7592,6 @@ void GraphSolver::
         "before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__pose__idx_shared_,
@@ -7825,13 +7634,6 @@ void GraphSolver::
         "before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__point__idx_shared_,
@@ -8025,13 +7827,6 @@ void GraphSolver::
         "setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__pose__idx_shared_,
@@ -8068,13 +7863,6 @@ void GraphSolver::
         "setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__principal_point__idx_shared_,
@@ -8260,13 +8048,6 @@ void GraphSolver::
         "setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_principal_point_fixed_point__args__pose__idx_shared_,
@@ -8303,13 +8084,6 @@ void GraphSolver::
         "setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_principal_point_fixed_point__args__focal_and_extra__idx_shared_,
@@ -8505,13 +8279,6 @@ void GraphSolver::
         "principal_pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__point__idx_shared_,
@@ -8750,13 +8517,6 @@ void GraphSolver::
         "pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__principal_point__idx_shared_,
@@ -8995,13 +8755,6 @@ void GraphSolver::
         "pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__focal_and_extra__idx_shared_,
@@ -9242,13 +8995,6 @@ void GraphSolver::
         "fixed_pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__pose__idx_shared_,
@@ -9473,13 +9219,6 @@ void GraphSolver::SetPinholeSplitFixedFocalPoseIndicesFromDevice(
         "Setpinhole_split_fixed_focalNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices,
                 facs__pinhole_split_fixed_focal__args__pose__idx_shared_, num);
 }
@@ -9510,13 +9249,6 @@ void GraphSolver::SetPinholeSplitFixedFocalPrincipalPointIndicesFromDevice(
         "Setpinhole_split_fixed_focalNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_focal__args__principal_point__idx_shared_, num);
@@ -9548,13 +9280,6 @@ void GraphSolver::SetPinholeSplitFixedFocalPointIndicesFromDevice(
         "Setpinhole_split_fixed_focalNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(indices,
                 facs__pinhole_split_fixed_focal__args__point__idx_shared_, num);
 }
@@ -9669,13 +9394,6 @@ void GraphSolver::SetPinholeSplitFixedPrincipalPointPoseIndicesFromDevice(
         "Setpinhole_split_fixed_principal_pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_principal_point__args__pose__idx_shared_, num);
@@ -9707,13 +9425,6 @@ void GraphSolver::SetPinholeSplitFixedPrincipalPointFocalIndicesFromDevice(
         "Setpinhole_split_fixed_principal_pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_principal_point__args__focal__idx_shared_, num);
@@ -9745,13 +9456,6 @@ void GraphSolver::SetPinholeSplitFixedPrincipalPointPointIndicesFromDevice(
         "Setpinhole_split_fixed_principal_pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_principal_point__args__point__idx_shared_, num);
@@ -9877,13 +9581,6 @@ void GraphSolver::
         "Setpinhole_split_fixed_pose_fixed_focalNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_focal__args__principal_point__idx_shared_,
@@ -9916,13 +9613,6 @@ void GraphSolver::SetPinholeSplitFixedPoseFixedFocalPointIndicesFromDevice(
         "Setpinhole_split_fixed_pose_fixed_focalNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_focal__args__point__idx_shared_,
@@ -10083,13 +9773,6 @@ void GraphSolver::
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_principal_point__args__focal__idx_shared_,
@@ -10126,13 +9809,6 @@ void GraphSolver::
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_principal_point__args__point__idx_shared_,
@@ -10302,13 +9978,6 @@ void GraphSolver::
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_focal_fixed_principal_point__args__pose__idx_shared_,
@@ -10345,13 +10014,6 @@ void GraphSolver::
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_focal_fixed_principal_point__args__point__idx_shared_,
@@ -10516,13 +10178,6 @@ void GraphSolver::SetPinholeSplitFixedFocalFixedPointPoseIndicesFromDevice(
         "Setpinhole_split_fixed_focal_fixed_pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_focal_fixed_point__args__pose__idx_shared_,
@@ -10557,13 +10212,6 @@ void GraphSolver::
         "Setpinhole_split_fixed_focal_fixed_pointNum before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_focal_fixed_point__args__principal_point__idx_shared_,
@@ -10724,13 +10372,6 @@ void GraphSolver::
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_principal_point_fixed_point__args__pose__idx_shared_,
@@ -10767,13 +10408,6 @@ void GraphSolver::
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_principal_point_fixed_point__args__focal__idx_shared_,
@@ -10945,13 +10579,6 @@ void GraphSolver::
         "before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__point__idx_shared_,
@@ -11182,13 +10809,6 @@ void GraphSolver::
         "indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__principal_point__idx_shared_,
@@ -11401,13 +11021,6 @@ void GraphSolver::
         "before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__focal__idx_shared_,
@@ -11640,13 +11253,6 @@ void GraphSolver::
         "before setting indices.");
   }
 
-  size_t tmp_size = SortIndicesGetTmpNbytes(num);
-  if (tmp_size + num > scratch_inout_size_) {
-    throw std::runtime_error(
-        "Scratch_inout_size too small. tmp_size: " + std::to_string(tmp_size) +
-        ", num: " + std::to_string(num) +
-        ", scratch_inout_size_: " + std::to_string(scratch_inout_size_));
-  }
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__pose__idx_shared_,
