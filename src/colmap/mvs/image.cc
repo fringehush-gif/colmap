@@ -5,6 +5,7 @@
 #include "colmap/util/eigen_alignment.h"
 #include "colmap/util/logging.h"
 
+#include <algorithm>
 #include <utility>
 
 #include <Eigen/Core>
@@ -38,8 +39,8 @@ void Image::SetBitmap(Bitmap bitmap) {
 void Image::Rescale(const float factor) { Rescale(factor, factor); }
 
 void Image::Rescale(const float factor_x, const float factor_y) {
-  const size_t new_width = std::round(width_ * factor_x);
-  const size_t new_height = std::round(height_ * factor_y);
+  const size_t new_width = std::max(1.0f, std::round(width_ * factor_x));
+  const size_t new_height = std::max(1.0f, std::round(height_ * factor_y));
 
   if (!bitmap_.IsEmpty()) {
     bitmap_.Rescale(new_width, new_height);

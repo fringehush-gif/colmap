@@ -4,6 +4,8 @@
 
 #include "colmap/image/warp.h"
 
+#include <algorithm>
+
 namespace colmap {
 namespace mvs {
 
@@ -23,8 +25,8 @@ void NormalMap::Rescale(const float factor) {
     return;
   }
 
-  const size_t new_width = std::round(width_ * factor);
-  const size_t new_height = std::round(height_ * factor);
+  const size_t new_width = std::max(1.0f, std::round(width_ * factor));
+  const size_t new_height = std::max(1.0f, std::round(height_ * factor));
   std::vector<float> new_data(new_width * new_height * 3);
 
   // Resample the normal map.
