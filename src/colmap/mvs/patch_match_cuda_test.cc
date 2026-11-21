@@ -28,6 +28,7 @@ float ProbePropagatedDepth(const std::array<float, 4>& K,
 std::pair<std::vector<int>, std::vector<float>> ProbeSampledSources(
     const std::vector<int>&, const std::vector<float>&, int, bool);
 int ProbeSamplingSupport();
+std::vector<uint32_t> ProbeSelectionProbability(const std::vector<uint32_t>&);
 Mat<float> ProbeOwnershipInitialCost(PatchMatchCuda&, unsigned long long);
 }  // namespace internal
 namespace {
@@ -459,6 +460,13 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
     ExpectExactlyEqual(a.depth, b.depth);
     ExpectExactlyEqual(a.normal, b.normal);
     ExpectExactlyEqual(a.selection, b.selection);
+    for (const auto* map : {&a.selection, &b.selection}) {
+      for (float value : map->GetData()) {
+        ASSERT_TRUE(std::isfinite(value));
+        ASSERT_GE(value, 0.0f);
+        ASSERT_LE(value, 1.0f);
+      }
+    }
     ASSERT_EQ(a.continuation.GetWidth(), kWidth);
     ASSERT_EQ(a.continuation.GetDepth(), 3);
     ASSERT_EQ(a.continuation.GetData(), b.continuation.GetData());
@@ -831,6 +839,35 @@ TEST_F(CudaTest, AllInvalidSourceDepthsPublishSizedRejectedOutputs) {
   for (const auto& members : result.consistent_images)
     EXPECT_TRUE(members.empty());
 }
+
+TEST_F(CudaTest, SelectionProbabilityCapturedTupleAndDomain) {
+  // Captured alpha, beta, previous and weight, retained as exact binary32 bits.
+  const std::vector<uint32_t> input = {
+      0x3f7ff9b0, 0x3f7ff844, 0x3f000000, 0x00000000, 0x00000000, 0x00000000,
+      0x3f000000, 0x00000000, 0x3f800000, 0x3f800000, 0x3f000000, 0x00000000,
+      0x3f000000, 0x3f000000, 0x3f000000, 0x3e800000, 0x3f800000, 0x3f800000,
+      0x00000000, 0x3f800000, 0x00000000, 0x3f800000, 0x3f000000, 0x00000000,
+      0x7fc00000, 0x3f000000, 0x3f000000, 0x00000000, 0xbe800000, 0x3f000000,
+      0x3f000000, 0x00000000};
+  const auto out = internal::ProbeSelectionProbability(input);
+  ASSERT_EQ(out.size(), 8);
+  EXPECT_EQ(out[0], 0x3f800000u);  // Captured valid tuple: strict <= 1.
+  EXPECT_EQ(out[1], 0x00000000u);
+  EXPECT_EQ(out[2], 0x3f800000u);
+  EXPECT_EQ(out[3], 0x3f000000u);
+  EXPECT_EQ(out[4], 0x00000000u);
+  EXPECT_GT(out[5] & 0x7fffffffu, 0x7f800000u);  // Singular 0/0 remains NaN.
+  EXPECT_GT(out[6] & 0x7fffffffu, 0x7f800000u);  // NaN input remains NaN.
+  EXPECT_EQ(out[7], 0xbe800000u);  // Invalid input is not silently clamped.
+  std::vector<uint32_t> many;
+  for (int i = 0; i < 40; ++i) {
+    many.insert(many.end(), input.begin(), input.begin() + 4);
+  }
+  const auto many_out = internal::ProbeSelectionProbability(many);
+  ASSERT_EQ(many_out.size(), 40);
+  for (const auto value : many_out) EXPECT_EQ(value, 0x3f800000u);
+}
+
 }  // namespace
 }  // namespace mvs
 }  // namespace colmap
