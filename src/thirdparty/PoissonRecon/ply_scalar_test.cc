@@ -785,4 +785,101 @@ TEST(PlyScalarProperties, ReadsOnlySelectedAsciiFloatingRepresentations) {
   }
 }
 
+TEST(PlyScalarProperties, WidensUnsigned32ScalarsAndLists) {
+  const auto dir = colmap::CreateTestDir();
+  const std::array<unsigned int, 3> values{
+      0x7fffffffU, 0x80000000U, 0xffffffffU};
+  for (const int source_type : {PLY_UINT, PLY_UINT_32}) {
+    for (const int format : {PLY_ASCII, PLY_BINARY_LE, PLY_BINARY_BE}) {
+      for (const bool wide_count : {false, true}) {
+        SCOPED_TRACE(source_type);
+        SCOPED_TRACE(format);
+        SCOPED_TRACE(wide_count);
+        const auto path = dir / "unsigned32.ply";
+        {
+          std::ofstream file(path, std::ios::binary);
+          ASSERT_TRUE(file.is_open());
+          const char* format_name = format == PLY_ASCII ? "ascii"
+                                    : format == PLY_BINARY_LE
+                                        ? "binary_little_endian"
+                                        : "binary_big_endian";
+          const char* source_name = source_type == PLY_UINT ? "uint" : "uint32";
+          file << "ply\nformat " << format_name << " 1.0\nelement vertex "
+               << values.size() << "\nproperty " << source_name
+               << " scalar\nproperty list " << (wide_count ? "int" : "uchar")
+               << ' ' << source_name << " list\nend_header\n";
+          // Encode bytes independently of the PLY writer and host endianness.
+          const auto append = [&](unsigned int value, int width) {
+            if (format == PLY_ASCII) {
+              file << value << ' ';
+            } else {
+              std::array<unsigned char, 4> bytes{};
+              for (int i = 0; i < width; ++i) {
+                const int byte = format == PLY_BINARY_BE ? width - i - 1 : i;
+                bytes[i] = static_cast<unsigned char>(value >> (8 * byte));
+              }
+              file.write(reinterpret_cast<const char*>(bytes.data()), width);
+            }
+          };
+          for (const unsigned int value : values) {
+            append(value, 4);
+            append(static_cast<unsigned int>(values.size()),
+                   wide_count ? 4 : 1);
+            for (const unsigned int item : values) append(item, 4);
+            if (format == PLY_ASCII) file << '\n';
+          }
+          ASSERT_TRUE(file.good());
+        }
+        const auto check = [&](auto zero, int destination_type) {
+          using Destination = decltype(zero);
+          struct Output {
+            Destination scalar = 0;
+            int count = 0;
+            Destination* list = nullptr;
+          };
+          SCOPED_TRACE(destination_type);
+          PoissonRecon::PlyProperty properties[] = {
+              {"scalar",
+               source_type,
+               destination_type,
+               offsetof(Output, scalar)},
+              {"list",
+               source_type,
+               destination_type,
+               offsetof(Output, list),
+               PLY_LIST,
+               wide_count ? PLY_INT : PLY_UCHAR,
+               PLY_INT,
+               offsetof(Output, count)}};
+          int read_format = 0;
+          float version = 0;
+          std::vector<std::string> names;
+          std::unique_ptr<PoissonRecon::PlyFile> reader(
+              PoissonRecon::PlyFile::Read(
+                  path.string(), names, read_format, version));
+          ASSERT_NE(reader, nullptr);
+          EXPECT_EQ(read_format, format);
+          reader->get_element_setup("vertex", 2, properties);
+          for (const unsigned int value : values) {
+            Output output;
+            reader->get_element(&output);
+            std::unique_ptr<Destination, decltype(&std::free)> allocation(
+                output.list, &std::free);
+            EXPECT_EQ(output.scalar, static_cast<Destination>(value));
+            ASSERT_EQ(output.count, values.size());
+            ASSERT_NE(output.list, nullptr);
+            for (size_t i = 0; i < values.size(); ++i) {
+              EXPECT_EQ(output.list[i], static_cast<Destination>(values[i]));
+            }
+          }
+        };
+        check(0LL, PLY_LONGLONG);
+        check(0LL, PLY_INT_64);
+        check(0ULL, PLY_ULONGLONG);
+        check(0ULL, PLY_UINT_64);
+      }
+    }
+  }
+}
+
 }  // namespace

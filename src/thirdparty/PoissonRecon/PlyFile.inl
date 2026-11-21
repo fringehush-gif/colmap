@@ -1785,8 +1785,8 @@ void get_binary_item( FILE *fp , int file_type , int type , int &int_val , unsig
 	case PLY_UINT_32:
 		memcpy( &uint_val , c , sizeof(uint_val) );
 		int_val = uint_val;
-		longlong_val = int_val;
-		ulonglong_val = int_val;
+		longlong_val = uint_val;
+		ulonglong_val = uint_val;
 		double_val = uint_val;
 		break;
 	case PLY_LONGLONG:
