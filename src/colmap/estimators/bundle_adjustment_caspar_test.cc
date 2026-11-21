@@ -9,6 +9,7 @@
 #include "colmap/scene/reconstruction_matchers.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/models.h"
+#include "colmap/util/cuda.h"
 
 #include <algorithm>
 #include <array>
@@ -17,10 +18,17 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <cuda_runtime_api.h>
 #include <gtest/gtest.h>
+
+#ifdef CASPAR_USE_DOUBLE
+#include "thirdparty/Symforce-Caspar/generated/f64/shared_indices.h"
+#else
+#include "thirdparty/Symforce-Caspar/generated/f32/shared_indices.h"
+#endif
 
 #if defined(COLMAP_TEST_CASPAR_READBACK_WRAPPING)
 #ifdef CASPAR_USE_DOUBLE
@@ -30,55 +38,89 @@
 #endif
 
 namespace {
-enum class ReadbackCall { kNone, kSelect, kMap, kCopy };
-struct ReadbackTrace {
-  std::vector<ReadbackCall> calls;
-  ReadbackCall fault = ReadbackCall::kNone;
+enum class CudaCall { kNone, kSelect, kAllocate, kFree, kMap, kCopy };
+struct CudaTrace {
+  std::vector<CudaCall> calls;
+  CudaCall fault = CudaCall::kNone;
   bool fired = false;
   cudaError_t real_mapping_status = cudaSuccess;
+  cudaMemcpyKind copy_kind = cudaMemcpyDeviceToHost;
+  bool host_allocation = false;
+  std::vector<uint8_t> allocation;
+  bool freed_expected_pointer = false;
 };
-thread_local ReadbackTrace* readback_trace = nullptr;
-constexpr cudaError_t kInjectedReadbackError = cudaErrorInvalidValue;
+thread_local CudaTrace* cuda_trace = nullptr;
+constexpr cudaError_t kInjectedCudaError = cudaErrorInvalidValue;
 
-class ScopedReadbackFault {
+class ScopedCudaFault {
  public:
-  ScopedReadbackFault(ReadbackTrace& trace, ReadbackCall fault) {
-    if (readback_trace != nullptr) throw std::logic_error("nested fault arm");
+  ScopedCudaFault(CudaTrace& trace, CudaCall fault) {
+    if (cuda_trace != nullptr) throw std::logic_error("nested fault arm");
     trace.fault = fault;
-    readback_trace = &trace;
+    cuda_trace = &trace;
   }
-  ~ScopedReadbackFault() { readback_trace = nullptr; }
-  ScopedReadbackFault(const ScopedReadbackFault&) = delete;
-  ScopedReadbackFault& operator=(const ScopedReadbackFault&) = delete;
+  ~ScopedCudaFault() { cuda_trace = nullptr; }
+  ScopedCudaFault(const ScopedCudaFault&) = delete;
+  ScopedCudaFault& operator=(const ScopedCudaFault&) = delete;
 };
 }  // namespace
 
 extern "C" cudaError_t CUDARTAPI __real_cudaSetDevice(int);
 extern "C" cudaError_t CUDARTAPI __real_cudaGetLastError();
+extern "C" cudaError_t CUDARTAPI __real_cudaMalloc(void**, size_t);
+extern "C" cudaError_t CUDARTAPI __real_cudaFree(void*);
 extern "C" cudaError_t CUDARTAPI __real_cudaMemcpy(void*,
                                                    const void*,
                                                    size_t,
                                                    cudaMemcpyKind);
 
 extern "C" cudaError_t CUDARTAPI __wrap_cudaSetDevice(int device) {
-  if (readback_trace != nullptr) {
-    readback_trace->calls.push_back(ReadbackCall::kSelect);
-    if (readback_trace->fault == ReadbackCall::kSelect) {
-      readback_trace->fired = true;
-      return kInjectedReadbackError;
+  if (cuda_trace != nullptr) {
+    cuda_trace->calls.push_back(CudaCall::kSelect);
+    if (cuda_trace->fault == CudaCall::kSelect) {
+      cuda_trace->fired = true;
+      return kInjectedCudaError;
     }
+    if (cuda_trace->host_allocation) return cudaSuccess;
   }
   return __real_cudaSetDevice(device);
 }
 
+extern "C" cudaError_t CUDARTAPI __wrap_cudaMalloc(void** pointer,
+                                                   size_t bytes) {
+  if (cuda_trace != nullptr && cuda_trace->host_allocation) {
+    cuda_trace->calls.push_back(CudaCall::kAllocate);
+    // Even the failing control gets valid backing storage: the old unchecked
+    // constructor can form its pointers without relying on undefined behavior.
+    cuda_trace->allocation.resize(bytes);
+    *pointer = cuda_trace->allocation.data();
+    if (cuda_trace->fault == CudaCall::kAllocate) {
+      cuda_trace->fired = true;
+      return cudaErrorMemoryAllocation;
+    }
+    return cudaSuccess;
+  }
+  return __real_cudaMalloc(pointer, bytes);
+}
+
+extern "C" cudaError_t CUDARTAPI __wrap_cudaFree(void* pointer) {
+  if (cuda_trace != nullptr && cuda_trace->host_allocation) {
+    cuda_trace->calls.push_back(CudaCall::kFree);
+    cuda_trace->freed_expected_pointer =
+        pointer == cuda_trace->allocation.data();
+    return cudaSuccess;
+  }
+  return __real_cudaFree(pointer);
+}
+
 extern "C" cudaError_t CUDARTAPI __wrap_cudaGetLastError() {
   const cudaError_t actual = __real_cudaGetLastError();
-  if (readback_trace != nullptr) {
-    readback_trace->calls.push_back(ReadbackCall::kMap);
-    readback_trace->real_mapping_status = actual;
-    if (readback_trace->fault == ReadbackCall::kMap && actual == cudaSuccess) {
-      readback_trace->fired = true;
-      return kInjectedReadbackError;
+  if (cuda_trace != nullptr) {
+    cuda_trace->calls.push_back(CudaCall::kMap);
+    cuda_trace->real_mapping_status = actual;
+    if (cuda_trace->fault == CudaCall::kMap && actual == cudaSuccess) {
+      cuda_trace->fired = true;
+      return kInjectedCudaError;
     }
   }
   return actual;
@@ -88,12 +130,11 @@ extern "C" cudaError_t CUDARTAPI __wrap_cudaMemcpy(void* destination,
                                                    const void* source,
                                                    size_t bytes,
                                                    cudaMemcpyKind kind) {
-  if (readback_trace != nullptr) {
-    readback_trace->calls.push_back(ReadbackCall::kCopy);
-    if (readback_trace->fault == ReadbackCall::kCopy &&
-        kind == cudaMemcpyDeviceToHost) {
-      readback_trace->fired = true;
-      return kInjectedReadbackError;
+  if (cuda_trace != nullptr) {
+    cuda_trace->calls.push_back(CudaCall::kCopy);
+    if (cuda_trace->fault == CudaCall::kCopy && kind == cuda_trace->copy_kind) {
+      cuda_trace->fired = true;
+      return kInjectedCudaError;
     }
   }
   return __real_cudaMemcpy(destination, source, bytes, kind);
@@ -196,6 +237,93 @@ constexpr double kConstantPoseVarEps = 1e-9;
 
 namespace colmap {
 namespace {
+
+// Match the canonical generator's single-owner allocation contract.
+static_assert(!std::is_copy_constructible_v<caspar::GraphSolver>);
+static_assert(!std::is_copy_assignable_v<caspar::GraphSolver>);
+static_assert(!std::is_move_constructible_v<caspar::GraphSolver>);
+static_assert(!std::is_move_assignable_v<caspar::GraphSolver>);
+
+struct CudaDeviceBuffer {
+  void* ptr = nullptr;
+  ~CudaDeviceBuffer() {
+    if (ptr != nullptr) cudaFree(ptr);
+  }
+  CudaDeviceBuffer(const CudaDeviceBuffer&) = delete;
+  CudaDeviceBuffer& operator=(const CudaDeviceBuffer&) = delete;
+  CudaDeviceBuffer() = default;
+};
+
+TEST(CasparSharedIndices, MapsPartialBlocksAndDuplicateTargets) {
+  int device_count = 0;
+  const cudaError_t status = cudaGetDeviceCount(&device_count);
+  if (status != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
+  }
+  ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+  constexpr size_t kCapacity = 2049;
+  CudaDeviceBuffer device_indices;
+  CudaDeviceBuffer device_shared_indices;
+  ASSERT_EQ(cudaMalloc(&device_indices.ptr, kCapacity * sizeof(unsigned int)),
+            cudaSuccess);
+  ASSERT_EQ(cudaMalloc(&device_shared_indices.ptr,
+                       kCapacity * sizeof(caspar::SharedIndex)),
+            cudaSuccess);
+  for (const size_t size : {1, 31, 32, 33, 1023, 1024, 1025, 2049}) {
+    for (int pattern = 0; pattern < 4; ++pattern) {
+      SCOPED_TRACE(::testing::Message()
+                   << "size=" << size << " pattern=" << pattern);
+      std::vector<unsigned int> input(size);
+      for (size_t i = 0; i < size; ++i) {
+        // Sorted, reversed, interleaved duplicates, and one shared target.
+        input[i] = static_cast<unsigned int>(pattern == 0   ? i
+                                             : pattern == 1 ? size - i
+                                             : pattern == 2 ? (size - i) % 7
+                                                            : 7);
+      }
+      ASSERT_EQ(cudaMemcpy(device_indices.ptr,
+                           input.data(),
+                           size * sizeof(unsigned int),
+                           cudaMemcpyHostToDevice),
+                cudaSuccess);
+      caspar::SharedIndices(
+          static_cast<const unsigned int*>(device_indices.ptr),
+          static_cast<caspar::SharedIndex*>(device_shared_indices.ptr),
+          static_cast<unsigned int>(size));
+      ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+      std::vector<caspar::SharedIndex> output(size);
+      ASSERT_EQ(cudaMemcpy(output.data(),
+                           device_shared_indices.ptr,
+                           size * sizeof(caspar::SharedIndex),
+                           cudaMemcpyDeviceToHost),
+                cudaSuccess);
+      for (size_t start = 0; start < size; start += 1024) {
+        const size_t count = std::min(size_t{1024}, size - start);
+        std::vector<unsigned int> unique(input.begin() + start,
+                                         input.begin() + start + count);
+        std::sort(unique.begin(), unique.end());
+        unique.erase(std::unique(unique.begin(), unique.end()), unique.end());
+        std::vector<bool> seen(count, false);
+        for (size_t i = 0; i < count; ++i) {
+          const auto& index = output[start + i];
+          EXPECT_EQ(index.unique,
+                    i < unique.size()
+                        ? unique[i]
+                        : std::numeric_limits<unsigned int>::max());
+          ASSERT_LT(index.target, unique.size());
+          EXPECT_EQ(unique[index.target], input[start + i]);
+          ASSERT_LT(index.argsort, count);
+          EXPECT_FALSE(seen[index.argsort]);
+          seen[index.argsort] = true;
+          if (i != 0) {
+            EXPECT_LE(input[start + output[start + i - 1].argsort],
+                      input[start + index.argsort]);
+          }
+        }
+      }
+    }
+  }
+}
 
 TEST(CasparTransfers, ReservesFactorScratchWithoutPointNodes) {
   int device_count = 0;
@@ -406,7 +534,7 @@ TEST(CasparScoredPcg, IndependentCriteriaAcceptTheSameSingleStep) {
   double reference_score = 0;
   double reference_quality = 0;
 #if defined(COLMAP_TEST_CASPAR_READBACK_WRAPPING)
-  std::vector<ReadbackCall> reference_calls;
+  std::vector<CudaCall> reference_calls;
 #endif
   for (const double decrease : {-1.0, -0.5, -2.0, 1.0}) {
     for (const double score_exit : {-1.0, -0.5, -2.0, 0.5}) {
@@ -423,8 +551,8 @@ TEST(CasparScoredPcg, IndependentCriteriaAcceptTheSameSingleStep) {
       auto adjuster =
           CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
 #if defined(COLMAP_TEST_CASPAR_READBACK_WRAPPING)
-      ReadbackTrace trace;
-      ScopedReadbackFault scope(trace, ReadbackCall::kNone);
+      CudaTrace trace;
+      ScopedCudaFault scope(trace, CudaCall::kNone);
 #endif
       const auto summary =
           std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
@@ -532,7 +660,7 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
   FAIL() << "No retained-then-rejected witness in the fixed fixture grid";
 }
 
-TEST(DefaultBundleAdjuster, RigThrowsErrorOnVariableSensorFromRig) {
+TEST(CasparOptions, RigThrowsErrorOnVariableSensorFromRig) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions synthetic_dataset_options;
   synthetic_dataset_options.num_rigs = 1;
@@ -551,7 +679,16 @@ TEST(DefaultBundleAdjuster, RigThrowsErrorOnVariableSensorFromRig) {
       std::invalid_argument);
 }
 
-TEST(DefaultBundleAdjuster, MultiCameraRigLargeConstantSensorFromRig) {
+class DefaultBundleAdjuster : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    if (GetNumCudaDevices() == 0) {
+      GTEST_SKIP() << "No CUDA devices available";
+    }
+  }
+};
+
+TEST_F(DefaultBundleAdjuster, MultiCameraRigLargeConstantSensorFromRig) {
   // Real-world multi-camera rigs (stereo, surround-view) have large
   // sensor_from_rig offsets — typically 20–90 degrees and 0.1–1 m baseline.
   // This test uses a 30-degree Z-rotation and 0.3 m translation to exercise
@@ -596,7 +733,7 @@ TEST(DefaultBundleAdjuster, MultiCameraRigLargeConstantSensorFromRig) {
                                  /*num_obs_tolerance=*/0.0));
 }
 
-TEST(DefaultBundleAdjuster, MergedCalibConvergence) {
+TEST_F(DefaultBundleAdjuster, MergedCalibConvergence) {
   Reconstruction gt_reconstruction;
   SyntheticDatasetOptions synthetic_dataset_options;
   synthetic_dataset_options.num_rigs = 1;
@@ -635,7 +772,7 @@ TEST(DefaultBundleAdjuster, MergedCalibConvergence) {
                                  /*num_obs_tolerance=*/0.0));
 }
 
-TEST(DefaultBundleAdjuster, MergedCalibFixedPose) {
+TEST_F(DefaultBundleAdjuster, MergedCalibFixedPose) {
   // Verifies that all four intrinsic parameters change.
   Reconstruction reconstruction;
   SyntheticDatasetOptions synthetic_dataset_options;
@@ -684,7 +821,7 @@ TEST(DefaultBundleAdjuster, MergedCalibFixedPose) {
                             orig_reconstruction.Image(1));
 }
 
-TEST(DefaultBundleAdjuster, MergedCalibFixedPoint) {
+TEST_F(DefaultBundleAdjuster, MergedCalibFixedPoint) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions synthetic_dataset_options;
   synthetic_dataset_options.num_rigs = 2;
@@ -718,7 +855,7 @@ TEST(DefaultBundleAdjuster, MergedCalibFixedPoint) {
   }
 }
 
-TEST(DefaultBundleAdjuster, ExternalImagePoseIsInvariant) {
+TEST_F(DefaultBundleAdjuster, ExternalImagePoseIsInvariant) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions opts;
   opts.num_rigs = 3;
@@ -754,7 +891,7 @@ TEST(DefaultBundleAdjuster, ExternalImagePoseIsInvariant) {
                             orig_reconstruction.Image(3));
 }
 
-TEST(DefaultBundleAdjuster, ExternalCameraIntrinsicsOrderingIsConsistent) {
+TEST_F(DefaultBundleAdjuster, ExternalCameraIntrinsicsOrderingIsConsistent) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions opts;
   opts.num_rigs = 3;
@@ -787,7 +924,7 @@ TEST(DefaultBundleAdjuster, ExternalCameraIntrinsicsOrderingIsConsistent) {
   CheckConstantCamera(reconstruction.Camera(3), orig_reconstruction.Camera(3));
 }
 
-TEST(DefaultBundleAdjuster, ExternalImageViaConstantPointsIsInvariant) {
+TEST_F(DefaultBundleAdjuster, ExternalImageViaConstantPointsIsInvariant) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions opts;
   opts.num_rigs = 3;
@@ -823,7 +960,7 @@ TEST(DefaultBundleAdjuster, ExternalImageViaConstantPointsIsInvariant) {
                             orig_reconstruction.Image(3));
 }
 
-TEST(DefaultBundleAdjuster, MultipleExternalImagesAreInvariant) {
+TEST_F(DefaultBundleAdjuster, MultipleExternalImagesAreInvariant) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions opts;
   opts.num_rigs = 4;
@@ -862,7 +999,7 @@ TEST(DefaultBundleAdjuster, MultipleExternalImagesAreInvariant) {
                             orig_reconstruction.Image(4));
 }
 
-TEST(DefaultBundleAdjuster, MergedCalibMatchesCeres) {
+TEST_F(DefaultBundleAdjuster, MergedCalibMatchesCeres) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions synthetic_dataset_options;
   synthetic_dataset_options.num_rigs = 1;
@@ -938,7 +1075,7 @@ bool PoseExactlyUnchanged(const Image& a, const Image& b) {
          a.CamFromWorld().translation() == b.CamFromWorld().translation();
 }
 
-TEST(DefaultBundleAdjuster, GaugeFixingWithOneFrameFromWorld) {
+TEST_F(DefaultBundleAdjuster, GaugeFixingWithOneFrameFromWorld) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions opts;
   opts.num_rigs = 2;
@@ -974,8 +1111,8 @@ TEST(DefaultBundleAdjuster, GaugeFixingWithOneFrameFromWorld) {
   EXPECT_EQ(n_fixed, 1);
 }
 
-TEST(DefaultBundleAdjuster,
-     GaugeFixingWithOneFrameFromWorld_SkipsWhenAlreadyFixed) {
+TEST_F(DefaultBundleAdjuster,
+       GaugeFixingWithOneFrameFromWorld_SkipsWhenAlreadyFixed) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions opts;
   opts.num_rigs = 2;
@@ -1012,7 +1149,8 @@ TEST(DefaultBundleAdjuster,
                             orig_reconstruction.Image(2));
 }
 
-TEST(DefaultBundleAdjuster, GaugeFixingWithThreePoints_PinsExactlyThreePoints) {
+TEST_F(DefaultBundleAdjuster,
+       GaugeFixingWithThreePoints_PinsExactlyThreePoints) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions opts;
   opts.num_rigs = 2;
@@ -1051,8 +1189,8 @@ TEST(DefaultBundleAdjuster, GaugeFixingWithThreePoints_PinsExactlyThreePoints) {
   CheckVariableCamera(reconstruction.Camera(2), orig_reconstruction.Camera(2));
 }
 
-TEST(DefaultBundleAdjuster,
-     GaugeFixingWithThreePoints_CountsExistingConstantPoints) {
+TEST_F(DefaultBundleAdjuster,
+       GaugeFixingWithThreePoints_CountsExistingConstantPoints) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions opts;
   opts.num_rigs = 2;
@@ -1092,7 +1230,8 @@ TEST(DefaultBundleAdjuster,
   CheckConstantPoint(reconstruction.Point3D(1), orig_reconstruction.Point3D(1));
 }
 
-TEST(DefaultBundleAdjuster, MultiCameraRigResidualCountConstantSensorFromRig) {
+TEST_F(DefaultBundleAdjuster,
+       MultiCameraRigResidualCountConstantSensorFromRig) {
   // All sensor observations (ref and non-ref) must contribute residuals.
   // The old code skipped non-ref sensor observations when the pose was
   // variable, which would halve the residual count for a 2-camera rig.
@@ -1125,7 +1264,7 @@ TEST(DefaultBundleAdjuster, MultiCameraRigResidualCountConstantSensorFromRig) {
   EXPECT_EQ(summary->num_residuals, 800);
 }
 
-TEST(DefaultBundleAdjuster, MultiCameraRigConstantRigPoseHoldsAllSensors) {
+TEST_F(DefaultBundleAdjuster, MultiCameraRigConstantRigPoseHoldsAllSensors) {
   // When a frame's rig_from_world is held constant, and Caspar always holds
   // sensor_from_rig constant, ALL sensors in that frame (ref and non-ref)
   // must have invariant cam_from_world. Sensors in the variable frame must
@@ -1170,8 +1309,8 @@ TEST(DefaultBundleAdjuster, MultiCameraRigConstantRigPoseHoldsAllSensors) {
   }
 }
 
-TEST(DefaultBundleAdjuster,
-     MultiCameraRigLargeConvergenceConstantSensorFromRig) {
+TEST_F(DefaultBundleAdjuster,
+       MultiCameraRigLargeConvergenceConstantSensorFromRig) {
   // 2 rigs × 3 cameras × 5 frames = 30 images. Mirrors the Ceres
   // NominalMultiCameraRig test to verify Caspar converges to GT at the same
   // scale as the single-camera nominal test.
@@ -1215,40 +1354,216 @@ TEST(DefaultBundleAdjuster,
 }
 
 #if defined(COLMAP_TEST_CASPAR_READBACK_WRAPPING)
-struct ReadbackDeviceBuffer {
-  void* ptr = nullptr;
-  ~ReadbackDeviceBuffer() {
-    if (ptr != nullptr) cudaFree(ptr);
+TEST(CasparConstruction, StopsOnCudaFailure) {
+  // Only constructor/destructor host control flow runs here. No device calls
+  // or kernels are simulated beyond the three explicitly wrapped APIs.
+  using C = CudaCall;
+  for (const auto fault : {C::kNone, C::kSelect, C::kAllocate}) {
+    SCOPED_TRACE(static_cast<int>(fault));
+    CudaTrace trace;
+    trace.host_allocation = true;
+    bool constructed = false;
+    {
+      ScopedCudaFault scope(trace, fault);
+      try {
+        auto solver = CreateSolver(caspar::SolverParams<StorageType>{}, {}, 0);
+        constructed = true;
+        EXPECT_EQ(trace.allocation.size(), solver.get_allocation_size());
+      } catch (const std::runtime_error& error) {
+        const char* operation =
+            fault == C::kSelect ? "cudaSetDevice" : "cudaMalloc";
+        const cudaError_t status = fault == C::kSelect
+                                       ? kInjectedCudaError
+                                       : cudaErrorMemoryAllocation;
+        EXPECT_EQ(
+            std::string(error.what()),
+            std::string(operation) + " failed: " + cudaGetErrorString(status));
+      }
+    }
+    EXPECT_EQ(constructed, fault == C::kNone);
+    EXPECT_EQ(trace.fired, fault != C::kNone);
+    EXPECT_EQ(trace.freed_expected_pointer, fault == C::kNone);
+    const std::vector<C> expected =
+        fault == C::kSelect ? std::vector<C>{C::kSelect}
+        : fault == C::kAllocate
+            ? std::vector<C>{C::kSelect, C::kAllocate}
+            : std::vector<C>{C::kSelect, C::kAllocate, C::kSelect, C::kFree};
+    EXPECT_EQ(trace.calls, expected);
   }
-  ReadbackDeviceBuffer(const ReadbackDeviceBuffer&) = delete;
-  ReadbackDeviceBuffer& operator=(const ReadbackDeviceBuffer&) = delete;
-  ReadbackDeviceBuffer() = default;
-};
+}
 
 template <typename F>
-void ExpectReadbackFailure(ReadbackCall fault,
-                           const char* operation,
-                           const std::vector<ReadbackCall>& calls,
-                           F&& action) {
-  ReadbackTrace trace;
+void ExpectCudaFailure(CudaCall fault,
+                       const char* operation,
+                       const std::vector<CudaCall>& calls,
+                       F&& action,
+                       cudaMemcpyKind copy_kind = cudaMemcpyDeviceToHost) {
+  CudaTrace trace;
+  trace.copy_kind = copy_kind;
   bool threw = false;
   {
-    ScopedReadbackFault scope(trace, fault);
+    ScopedCudaFault scope(trace, fault);
     try {
       action();
     } catch (const std::runtime_error& error) {
       threw = true;
       EXPECT_NE(std::string(error.what()).find(operation), std::string::npos);
       EXPECT_NE(std::string(error.what())
-                    .find(cudaGetErrorString(kInjectedReadbackError)),
+                    .find(cudaGetErrorString(kInjectedCudaError)),
                 std::string::npos);
     }
   }
   EXPECT_TRUE(threw);
   EXPECT_TRUE(trace.fired);
   EXPECT_EQ(trace.calls, calls);
-  if (fault == ReadbackCall::kMap) {
+  if (fault == CudaCall::kMap) {
     EXPECT_EQ(trace.real_mapping_status, cudaSuccess);
+  }
+}
+
+TEST(CasparUploadFault, StopsOnCudaFailure) {
+  if (GetNumCudaDevices() == 0) {
+    GTEST_SKIP() << "No CUDA devices available";
+  }
+  ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+  using Real = StorageType;
+  using C = CudaCall;
+  CasparSolverSizing sizing;
+  sizing.num_points = 1;
+  sizing.num_simple_radial_poses = 1;
+  sizing.num_simple_radial_calibs = 1;
+  sizing.num_simple_radial = 1;
+  sizing.num_simple_radial_fixed_pose = 1;
+  auto solver = CreateSolver(caspar::SolverParams<Real>{}, sizing, 0);
+  const std::array<Real, 7> data{
+      Real(1), Real(2), Real(3), Real(1), Real(0), Real(0), Real(0)};
+  const std::array<unsigned, 1> indices{0};
+  CudaDeviceBuffer device_data;
+  CudaDeviceBuffer device_indices;
+  ASSERT_EQ(cudaMalloc(&device_data.ptr, sizeof(data)), cudaSuccess);
+  ASSERT_EQ(cudaMalloc(&device_indices.ptr, sizeof(indices)), cudaSuccess);
+  ASSERT_EQ(
+      cudaMemcpy(
+          device_data.ptr, data.data(), sizeof(data), cudaMemcpyHostToDevice),
+      cudaSuccess);
+  ASSERT_EQ(cudaMemcpy(device_indices.ptr,
+                       indices.data(),
+                       sizeof(indices),
+                       cudaMemcpyHostToDevice),
+            cudaSuccess);
+  solver.SetPointNodesFromStackedHost(data.data(), 0, 1);
+  CudaTrace probe;
+  {
+    ScopedCudaFault scope(probe, C::kNone);
+    std::array<Real, 3> readback{};
+    solver.GetPointNodesToStackedHost(readback.data(), 0, 1);
+  }
+  if (probe.calls != std::vector<C>{C::kSelect, C::kMap, C::kCopy}) {
+    GTEST_SKIP() << "Generated CUDA calls are not fully intercepted";
+  }
+
+  // Node, factor constant, and factor index uploads have distinct generators.
+  for (const int family : {0, 1, 2}) {
+    SCOPED_TRACE(family);
+    const auto host_upload = [&] {
+      if (family == 0) {
+        solver.SetPointNodesFromStackedHost(data.data(), 0, 1);
+      } else if (family == 1) {
+        solver.SetSimpleRadialFixedPosePoseDataFromStackedHost(
+            data.data(), 0, 1);
+      } else {
+        solver.SetSimpleRadialPoseIndicesFromHost(indices.data(), 1);
+      }
+    };
+    const auto device_upload = [&] {
+      if (family == 0) {
+        solver.SetPointNodesFromStackedDevice(
+            static_cast<Real*>(device_data.ptr), 0, 1);
+      } else if (family == 1) {
+        solver.SetSimpleRadialFixedPosePoseDataFromStackedDevice(
+            static_cast<Real*>(device_data.ptr), 0, 1);
+      } else {
+        solver.SetSimpleRadialPoseIndicesFromDevice(
+            static_cast<unsigned*>(device_indices.ptr), 1);
+      }
+    };
+    // Prime the scratch with valid data before any copy-failure control.
+    host_upload();
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    for (const auto fault : {C::kSelect, C::kCopy, C::kMap}) {
+      const char* operation = fault == C::kSelect ? "cudaSetDevice"
+                              : fault == C::kCopy ? "cudaMemcpy host-to-device"
+                              : family == 0       ? "PointStackedToCaspar"
+                              : family == 1
+                                  ? "ConstSimpleRadialPoseStackedToCaspar"
+                                  : "SharedIndices";
+      const std::vector<C> expected =
+          fault == C::kSelect ? std::vector<C>{C::kSelect}
+          : fault == C::kCopy ? std::vector<C>{C::kSelect, C::kCopy}
+          : family == 2
+              ? std::vector<C>{C::kSelect, C::kCopy, C::kSelect, C::kMap}
+              : std::vector<C>{C::kSelect, C::kCopy, C::kMap};
+      ExpectCudaFailure(
+          fault, operation, expected, host_upload, cudaMemcpyHostToDevice);
+      ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    }
+    for (const auto fault : {C::kSelect, C::kMap}) {
+      const char* operation = fault == C::kSelect ? "cudaSetDevice"
+                              : family == 0       ? "PointStackedToCaspar"
+                              : family == 1
+                                  ? "ConstSimpleRadialPoseStackedToCaspar"
+                                  : "SharedIndices";
+      const std::vector<C> expected = fault == C::kSelect
+                                          ? std::vector<C>{C::kSelect}
+                                          : std::vector<C>{C::kSelect, C::kMap};
+      ExpectCudaFailure(fault, operation, expected, device_upload);
+      ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    }
+  }
+
+  CudaTrace host_only;
+  {
+    ScopedCudaFault scope(host_only, C::kNone);
+    solver.SetPointNum(1);
+    solver.SetPointNodesFromStackedHost(data.data(), 1, 0);
+    solver.SetPointNodesFromStackedDevice(
+        static_cast<Real*>(device_data.ptr), 1, 0);
+    solver.SetSimpleRadialFixedPosePoseDataFromStackedHost(data.data(), 0, 0);
+    solver.SetSimpleRadialFixedPosePoseDataFromStackedDevice(
+        static_cast<Real*>(device_data.ptr), 0, 0);
+    solver.SetSimpleRadialNum(0);
+    solver.SetSimpleRadialPoseIndicesFromHost(indices.data(), 0);
+    solver.SetSimpleRadialPoseIndicesFromDevice(
+        static_cast<unsigned*>(device_indices.ptr), 0);
+    solver.SetSimpleRadialNum(1);
+    EXPECT_THROW(solver.SetPointNodesFromStackedHost(data.data(), 2, 0),
+                 std::runtime_error);
+    EXPECT_THROW(solver.SetSimpleRadialFixedPosePoseDataFromStackedHost(
+                     data.data(), std::numeric_limits<size_t>::max(), 0),
+                 std::runtime_error);
+    EXPECT_THROW(solver.SetSimpleRadialPoseIndicesFromHost(indices.data(), 0),
+                 std::runtime_error);
+  }
+  EXPECT_TRUE(host_only.calls.empty());
+  EXPECT_EQ(cudaGetLastError(), cudaSuccess);
+
+  // A zero-factor, zero-iteration control remains safe if an unchecked owner
+  // continues past an injected solve-entry error.
+  caspar::SolverParams<Real> params;
+  params.solver_iter_max = 0;
+  auto empty_solver = CreateSolver(params, {}, 0);
+  EXPECT_NO_THROW(empty_solver.solve(false, false));
+  for (const auto fault : {C::kSelect, C::kCopy}) {
+    const std::vector<C> expected = fault == C::kSelect
+                                        ? std::vector<C>{C::kSelect}
+                                        : std::vector<C>{C::kSelect, C::kCopy};
+    ExpectCudaFailure(
+        fault,
+        fault == C::kSelect ? "cudaSetDevice" : "cudaMemcpy host-to-device",
+        expected,
+        [&] { empty_solver.solve(false, false); },
+        cudaMemcpyHostToDevice);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   }
 }
 
@@ -1265,20 +1580,20 @@ TEST(CasparReadbackFault, GetterStagesAndRealRoundTrips) {
   const std::array<Real, 3> input{Real(1), Real(2), Real(3)};
   solver.SetPointNodesFromStackedHost(input.data(), 0, 1);
   std::array<Real, 3> host{};
-  ReadbackTrace probe;
+  CudaTrace probe;
   {
-    ScopedReadbackFault scope(probe, ReadbackCall::kNone);
+    ScopedCudaFault scope(probe, CudaCall::kNone);
     solver.GetPointNodesToStackedHost(host.data(), 0, 1);
   }
   EXPECT_EQ(host, input);
   // Verify interception reaches the generated getter, including CUDA's actual
   // copy entry point. Per-thread-default-stream aliases may bypass this wrap.
-  const std::vector<ReadbackCall> expected_probe{
-      ReadbackCall::kSelect, ReadbackCall::kMap, ReadbackCall::kCopy};
+  const std::vector<CudaCall> expected_probe{
+      CudaCall::kSelect, CudaCall::kMap, CudaCall::kCopy};
   if (probe.calls != expected_probe) {
     GTEST_SKIP() << "Generated getter CUDA calls are not fully intercepted";
   }
-  ReadbackDeviceBuffer device;
+  CudaDeviceBuffer device;
   ASSERT_EQ(cudaMalloc(&device.ptr, sizeof(input)), cudaSuccess);
   const std::array<Real, 3> sentinel{Real(-11), Real(-12), Real(-13)};
   ASSERT_EQ(cudaMemcpy(device.ptr,
@@ -1295,7 +1610,7 @@ TEST(CasparReadbackFault, GetterStagesAndRealRoundTrips) {
             cudaSuccess);
   EXPECT_EQ(host, input);
 
-  using C = ReadbackCall;
+  using C = CudaCall;
   for (const auto fault : {C::kSelect, C::kMap, C::kCopy}) {
     const std::vector<C> expected =
         fault == C::kSelect ? std::vector<C>{C::kSelect}
@@ -1304,7 +1619,7 @@ TEST(CasparReadbackFault, GetterStagesAndRealRoundTrips) {
     const char* operation = fault == C::kSelect ? "cudaSetDevice"
                             : fault == C::kMap  ? "PointCasparToStacked"
                                                 : "cudaMemcpy";
-    ExpectReadbackFailure(fault, operation, expected, [&] {
+    ExpectCudaFailure(fault, operation, expected, [&] {
       solver.GetPointNodesToStackedHost(host.data(), 0, 1);
     });
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
@@ -1313,7 +1628,7 @@ TEST(CasparReadbackFault, GetterStagesAndRealRoundTrips) {
     const std::vector<C> expected = fault == C::kSelect
                                         ? std::vector<C>{C::kSelect}
                                         : std::vector<C>{C::kSelect, C::kMap};
-    ExpectReadbackFailure(
+    ExpectCudaFailure(
         fault,
         fault == C::kSelect ? "cudaSetDevice" : "PointCasparToStacked",
         expected,
@@ -1332,26 +1647,25 @@ TEST(CasparReadbackFault, ScalarCopyFailure) {
   }
   ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
   using Real = StorageType;
-  ReadbackDeviceBuffer buffer;
+  CudaDeviceBuffer buffer;
   ASSERT_EQ(cudaMalloc(&buffer.ptr, sizeof(Real)), cudaSuccess);
   const Real input = Real(0.25);
   ASSERT_EQ(
       cudaMemcpy(buffer.ptr, &input, sizeof(input), cudaMemcpyHostToDevice),
       cudaSuccess);
-  ReadbackTrace probe;
+  CudaTrace probe;
   Real result;
   {
-    ScopedReadbackFault scope(probe, ReadbackCall::kNone);
+    ScopedCudaFault scope(probe, CudaCall::kNone);
     result = caspar::ReadCuMem(static_cast<const Real*>(buffer.ptr));
   }
   EXPECT_EQ(result, input);
-  if (probe.calls != std::vector<ReadbackCall>{ReadbackCall::kCopy}) {
+  if (probe.calls != std::vector<CudaCall>{CudaCall::kCopy}) {
     GTEST_SKIP() << "Generated scalar CUDA copy is not intercepted";
   }
-  ExpectReadbackFailure(
-      ReadbackCall::kCopy, "ReadCuMem", {ReadbackCall::kCopy}, [&] {
-        (void)caspar::ReadCuMem(static_cast<const Real*>(buffer.ptr));
-      });
+  ExpectCudaFailure(CudaCall::kCopy, "ReadCuMem", {CudaCall::kCopy}, [&] {
+    (void)caspar::ReadCuMem(static_cast<const Real*>(buffer.ptr));
+  });
 }
 
 TEST(CasparReadbackFault, EmptyAndOverflowRange) {
@@ -1366,9 +1680,9 @@ TEST(CasparReadbackFault, EmptyAndOverflowRange) {
   for (const Getter getter :
        {&caspar::GraphSolver::GetPointNodesToStackedHost,
         &caspar::GraphSolver::GetPointNodesToStackedDevice}) {
-    ReadbackTrace trace;
+    CudaTrace trace;
     {
-      ScopedReadbackFault scope(trace, ReadbackCall::kSelect);
+      ScopedCudaFault scope(trace, CudaCall::kSelect);
       EXPECT_NO_THROW((solver.*getter)(nullptr, 1, 0));
       EXPECT_THROW((solver.*getter)(nullptr, 2, 0), std::runtime_error);
       EXPECT_THROW(
@@ -1387,6 +1701,14 @@ TEST(CasparReadbackFault, EmptyAndOverflowRange) {
 }
 
 #else
+TEST(CasparConstruction, WrappingUnavailable) {
+  GTEST_SKIP()
+      << "Constructor fault injection requires a GNU/Linux static test link";
+}
+TEST(CasparUploadFault, WrappingUnavailable) {
+  GTEST_SKIP() << "CUDA fault wrapping unavailable";
+}
+
 TEST(CasparReadbackFault, WrappingUnavailable) {
   GTEST_SKIP()
       << "Readback fault injection requires a GNU/Linux static test link";
