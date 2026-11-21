@@ -274,9 +274,10 @@ namespace PoissonRecon
 
 		Point &operator = ( const Point &p )
 		{
-			if( !_dim || !p._dim ){ _resize( p._dim ) ; memcpy( _coords , p._coords , sizeof(Real)*_dim ); }
-			else if( _dim==p._dim ) memcpy( _coords , p._coords , sizeof(Real)*_dim );
-			else MK_THROW( "Dimensions don't match: " , _dim , " != " , p._dim );
+			if( this==&p ) return *this;
+			if( !_dim || !p._dim ) _resize( p._dim );
+			else if( _dim!=p._dim ) MK_THROW( "Dimensions don't match: " , _dim , " != " , p._dim );
+			if( _dim ) memcpy( _coords , p._coords , sizeof(Real)*_dim );
 			return *this;
 		}
 
@@ -316,7 +317,7 @@ namespace PoissonRecon
 
 		static Real Dot( const Point &p1 , const Point &p2 )
 		{
-			Real dot;
+			Real dot = {};
 			if( p1._dim!=p2._dim ) MK_THROW( "Dimensions differ: " , p1._dim , " != " , p2._dim );
 			for( size_t d=0 ; d<p1._dim ; d++ ) dot += p1[d] * p2[d];
 			return dot;
