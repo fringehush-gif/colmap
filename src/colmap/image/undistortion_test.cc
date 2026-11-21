@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <stdexcept>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -112,6 +113,83 @@ TEST(UndistortCamera, Nominal) {
   EXPECT_EQ(undistorted_camera.height, 60);
   EXPECT_EQ(undistorted_camera.PrincipalPointX(), 40);
   EXPECT_EQ(undistorted_camera.PrincipalPointY(), 30);
+}
+
+TEST(UndistortCamera, MaxImageSizeKeepsPositiveDimensions) {
+  struct TestCase {
+    size_t width;
+    size_t height;
+    int max_image_size;
+    size_t expected_width;
+    size_t expected_height;
+  };
+  const TestCase test_cases[] = {{1, 100, 40, 1, 40},
+                                 {100, 1, 40, 40, 1},
+                                 {1, 100, 1, 1, 1},
+                                 {100, 1, 1, 1, 1},
+                                 {1, 1, 1, 1, 1},
+                                 {51, 101, 40, 20, 40},
+                                 {101, 51, 40, 40, 20}};
+  for (const auto& test : test_cases) {
+    SCOPED_TRACE(test.width);
+    SCOPED_TRACE(test.height);
+    SCOPED_TRACE(test.max_image_size);
+    UndistortCameraOptions options;
+    options.max_image_size = test.max_image_size;
+    const Camera camera = Camera::CreateFromModelId(
+        1, CameraModelId::kPinhole, 100, test.width, test.height);
+    const Camera resized = UndistortCamera(options, camera);
+    EXPECT_EQ(resized.width, test.expected_width);
+    EXPECT_EQ(resized.height, test.expected_height);
+    EXPECT_NEAR(resized.FocalLengthX(),
+                100.0 * test.expected_width / test.width,
+                1e-12);
+    EXPECT_NEAR(resized.FocalLengthY(),
+                100.0 * test.expected_height / test.height,
+                1e-12);
+    EXPECT_EQ(resized.PrincipalPointX(), test.expected_width / 2.0);
+    EXPECT_EQ(resized.PrincipalPointY(), test.expected_height / 2.0);
+
+    // Nearest-neighbor interpolation also supports a one-pixel source axis.
+    options.warp_options.interpolation =
+        WarpImageOptions::Interpolation::kNearestNeighbor;
+    Bitmap input(test.width, test.height, false);
+    input.Fill(BitmapColor<uint8_t>(255));
+    for (const CameraModelId model :
+         {CameraModelId::kPinhole, CameraModelId::kEquirectangular}) {
+      SCOPED_TRACE(static_cast<int>(model));
+      Bitmap output;
+      Camera output_camera;
+      ASSERT_NO_THROW(UndistortImage(
+          options,
+          input,
+          Camera::CreateFromModelId(1, model, 100, test.width, test.height),
+          &output,
+          &output_camera));
+      EXPECT_EQ(output.Width(), test.expected_width);
+      EXPECT_EQ(output.Height(), test.expected_height);
+      EXPECT_EQ(output_camera.width, test.expected_width);
+      EXPECT_EQ(output_camera.height, test.expected_height);
+      EXPECT_EQ(output_camera.model_id, model);
+      EXPECT_EQ(output.GetPixel(0, 0), BitmapColor<uint8_t>(255));
+    }
+  }
+}
+
+TEST(UndistortImage, RejectsZeroMaxImageSize) {
+  UndistortCameraOptions options;
+  options.max_image_size = 0;
+  Bitmap input(10, 10, false);
+  Bitmap output;
+  Camera output_camera;
+  for (const CameraModelId model :
+       {CameraModelId::kPinhole, CameraModelId::kEquirectangular}) {
+    SCOPED_TRACE(static_cast<int>(model));
+    const Camera camera = Camera::CreateFromModelId(1, model, 100, 10, 10);
+    EXPECT_THROW(
+        UndistortImage(options, input, camera, &output, &output_camera),
+        std::invalid_argument);
+  }
 }
 
 TEST(UndistortCamera, MaxCamPointNorm) {
