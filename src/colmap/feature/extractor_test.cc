@@ -159,7 +159,7 @@ TEST(FeatureExtractionOptions, RequiresRGB) {
   }
 }
 
-TEST(FeatureExtractionOptions, CheckAndRequiresOpenGLWithNoGpu) {
+TEST(FeatureExtractionOptions, CheckAndRequiresOpenGL) {
   FeatureExtractionOptions options;
   options.use_gpu = false;
 
@@ -173,8 +173,31 @@ TEST(FeatureExtractionOptions, CheckAndRequiresOpenGLWithNoGpu) {
 
   for (const auto& type : kTypes) {
     options.type = type;
-    EXPECT_TRUE(options.Check());
-    EXPECT_FALSE(options.RequiresOpenGL());
+    for (const bool use_gpu : {false, true}) {
+      options.use_gpu = use_gpu;
+#ifdef COLMAP_GPU_ENABLED
+      const bool expected = true;
+#elif defined(COLMAP_COREML_ENABLED)
+      const bool expected = !use_gpu || type != FeatureExtractorType::SIFT;
+#else
+      const bool expected = !use_gpu;
+#endif
+      EXPECT_EQ(options.Check(), expected) << type;
+#if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+      EXPECT_FALSE(options.RequiresOpenGL());
+#else
+      EXPECT_EQ(options.RequiresOpenGL(),
+                use_gpu && type == FeatureExtractorType::SIFT);
+#endif
+    }
+  }
+
+  // The CoreML admission does not accept unknown extractor types.
+  options.max_image_size = 1600;
+  options.type = FeatureExtractorType::UNDEFINED;
+  for (const bool use_gpu : {false, true}) {
+    options.use_gpu = use_gpu;
+    EXPECT_FALSE(options.Check());
   }
 }
 

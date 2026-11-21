@@ -106,7 +106,9 @@ bool FeatureExtractionOptions::Check() const {
   CHECK_OPTION_GT(EffMaxImageSize(), 0);
   if (use_gpu) {
     CHECK_OPTION_GT(CSVToVector<int>(gpu_index).size(), 0);
-#if !defined(COLMAP_GPU_ENABLED)
+#if defined(COLMAP_COREML_ENABLED) && !defined(COLMAP_GPU_ENABLED)
+    CHECK_OPTION(type != FeatureExtractorType::SIFT);
+#elif !defined(COLMAP_GPU_ENABLED)
     LOG(ERROR) << "Cannot use GPU feature extraction without CUDA, HIP or "
                   "OpenGL support. Consider setting use_gpu to false.";
     return false;
