@@ -165,7 +165,9 @@ TEST(PatchMatchCuda, SourceSamplingPreservesSupportAndStrides) {
     EXPECT_EQ(SampleSource(probs.data(), 3, stride, 0.5f), 2);
     EXPECT_EQ(SampleSource(probs.data(), 3, stride, 1.0f), 2);
     for (size_t i = 0; i < probs.size(); ++i) {
-      if (i % stride != 0) EXPECT_EQ(probs[i], -7.0f);
+      if (i % stride != 0) {
+        EXPECT_EQ(probs[i], -7.0f);
+      }
     }
   }
   // Invalid distributions keep the old normalization/selection policy; they
