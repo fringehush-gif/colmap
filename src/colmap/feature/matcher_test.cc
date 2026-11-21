@@ -4,6 +4,7 @@
 
 #include "colmap/feature/aliked.h"
 #include "colmap/feature/extractor.h"
+#include "colmap/feature/flexglue.h"
 #include "colmap/feature/loma.h"
 #include "colmap/feature/onnx_matchers.h"
 #include "colmap/feature/sift.h"
@@ -85,7 +86,9 @@ TEST(FeatureMatchingOptions, RequiresOpenGL) {
 
 TEST(FeatureMatchingOptions, Check) {
   FeatureMatchingOptions options;
-  options.use_gpu = false;
+  options.flexglue->image_path = ".";
+  options.flexglue->descriptor_model_path = "unused.onnx";
+  options.flexglue->matcher_model_path = "unused.onnx";
 
   const FeatureMatcherType types[] = {FeatureMatcherType::SIFT_BRUTEFORCE,
                                       FeatureMatcherType::SIFT_LIGHTGLUE,
@@ -96,11 +99,30 @@ TEST(FeatureMatchingOptions, Check) {
                                       FeatureMatcherType::LOMA_B128,
                                       FeatureMatcherType::LOMA_R,
                                       FeatureMatcherType::LOMA_L,
-                                      FeatureMatcherType::LOMA_G};
+                                      FeatureMatcherType::LOMA_G,
+                                      FeatureMatcherType::FLEXGLUE};
 
   for (const auto type : types) {
     options.type = type;
-    EXPECT_TRUE(options.Check());
+    for (const bool use_gpu : {false, true}) {
+      options.use_gpu = use_gpu;
+#ifdef COLMAP_GPU_ENABLED
+      const bool expected = true;
+#elif defined(COLMAP_COREML_ENABLED)
+      const bool expected =
+          !use_gpu || type != FeatureMatcherType::SIFT_BRUTEFORCE;
+#else
+      const bool expected = !use_gpu;
+#endif
+      EXPECT_EQ(options.Check(), expected) << type;
+    }
+  }
+
+  // Named unsupported types still reach the ordinary rejection path.
+  options.type = FeatureMatcherType::UNDEFINED;
+  for (const bool use_gpu : {false, true}) {
+    options.use_gpu = use_gpu;
+    EXPECT_FALSE(options.Check());
   }
 }
 
