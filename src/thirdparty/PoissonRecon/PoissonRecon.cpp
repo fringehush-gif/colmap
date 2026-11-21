@@ -29,6 +29,8 @@ DAMAGE.
 #include "PreProcessor.h"
 #include "Reconstructors.h"
 
+#include <algorithm>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -45,6 +47,20 @@ DAMAGE.
 #define DEFAULT_DIMENSION 3
 
 using namespace PoissonRecon;
+
+namespace {
+template< typename Real >
+void RemoveColorProperties( std::vector< PlyProperty > &properties )
+{
+	const VertexFactory::RGBColorFactory< Real > factory;
+	for( unsigned int i=0 ; i<factory.plyReadNum() ; i++ )
+	{
+		const std::string name = factory.plyReadProperty(i).name;
+		properties.erase( std::remove_if( properties.begin() , properties.end() , [&]( const PlyProperty &property ){ return !property.is_list && property.name==name; } ) , properties.end() );
+	}
+}
+} // namespace
+
 
 namespace {
 
@@ -590,7 +606,7 @@ void Execute( const AuxDataFactory &auxDataFactory )
 
 } // namespace
 
-int RunPoissonRecon( int argc , char* argv[] )
+int RunPoissonRecon( int argc , char* argv[] , bool readPlyColors )
 {
 	Timer timer;
 #ifdef ARRAY_DEBUG
@@ -632,6 +648,7 @@ int RunPoissonRecon( int argc , char* argv[] )
 		if( !factory.template plyValidReadProperties<0>( readFlags ) ) MK_THROW( "Ply file does not contain positions" );
 		if( !factory.template plyValidReadProperties<1>( readFlags ) ) MK_THROW( "Ply file does not contain normals" );
 		delete[] readFlags;
+		if( !readPlyColors ) RemoveColorProperties< Real >( unprocessedProperties );
 
 		if( unprocessedProperties.size() ) Execute< Real , Dim , FEMSig >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
 		else                               Execute< Real , Dim , FEMSig >( VertexFactory::EmptyFactory< Real >() );
@@ -655,6 +672,7 @@ int RunPoissonRecon( int argc , char* argv[] )
 		if( !factory.template plyValidReadProperties<0>( readFlags ) ) MK_THROW( "Ply file does not contain positions" );
 		if( !factory.template plyValidReadProperties<1>( readFlags ) ) MK_THROW( "Ply file does not contain normals" );
 		delete[] readFlags;
+		if( !readPlyColors ) RemoveColorProperties< Real >( unprocessedProperties );
 
 		if( unprocessedProperties.size() ) Execute< DEFAULT_DIMENSION , Real >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
 		else                               Execute< DEFAULT_DIMENSION , Real >( VertexFactory::EmptyFactory< Real >() );
@@ -673,4 +691,9 @@ int RunPoissonRecon( int argc , char* argv[] )
 	}
 
 	return EXIT_SUCCESS;
+}
+
+int RunPoissonRecon( int argc , char* argv[] )
+{
+	return RunPoissonRecon( argc , argv , true );
 }
