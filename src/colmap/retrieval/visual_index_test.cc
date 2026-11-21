@@ -7,7 +7,9 @@
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
+#include <exception>
 #include <sstream>
+#include <stdexcept>
 
 #include <gtest/gtest.h>
 
@@ -21,6 +23,79 @@ FeatureDescriptorsFloat CreateRandomDescriptors(int num_rows,
                                                 FeatureExtractorType type) {
   return FeatureDescriptorsFloat(
       type, FeatureDescriptorsFloatData::Random(num_rows, desc_dim));
+}
+
+TEST(VisualIndex, RejectedAddPreservesIndexAndAllowsRetry) {
+  const auto descriptors =
+      CreateRandomDescriptors(200, 128, FeatureExtractorType::SIFT);
+  const FeatureKeypoints keypoints(descriptors.data.rows());
+  auto visual_index = VisualIndex::Create(128, 64);
+  VisualIndex::BuildOptions build_options;
+  build_options.num_iterations = 10;
+  build_options.num_rounds = 1;
+  build_options.num_visual_words = 5;
+  build_options.num_threads = 1;
+  VisualIndex::IndexOptions index_options;
+  index_options.num_threads = 1;
+  VisualIndex::QueryOptions query_options;
+  query_options.num_threads = 1;
+  visual_index->Build(build_options, descriptors);
+  visual_index->Add(index_options, 7, keypoints, descriptors);
+  visual_index->Prepare();
+  std::vector<ImageScore> image_scores;
+  visual_index->Query(query_options, descriptors, &image_scores);
+  ASSERT_EQ(image_scores.size(), 1);
+  ASSERT_EQ(image_scores[0].image_id, 7);
+
+  const FeatureDescriptorsFloat empty_descriptors(
+      FeatureExtractorType::SIFT, FeatureDescriptorsFloatData(0, 128));
+  for (const bool empty : {false, true}) {
+    SCOPED_TRACE(empty);
+    const int image_id = empty ? -2 : -1;
+    const auto& rejected_descriptors = empty ? empty_descriptors : descriptors;
+    const FeatureKeypoints rejected_keypoints(rejected_descriptors.data.rows());
+    EXPECT_THROW(
+        visual_index->Add(
+            index_options, image_id, rejected_keypoints, rejected_descriptors),
+        std::invalid_argument);
+    EXPECT_EQ(visual_index->NumImages(), 1);
+    EXPECT_FALSE(visual_index->IsImageIndexed(image_id));
+    EXPECT_NO_THROW(
+        visual_index->Query(query_options, descriptors, &image_scores));
+    ASSERT_EQ(image_scores.size(), 1);
+    EXPECT_EQ(image_scores[0].image_id, 7);
+  }
+
+  auto invalid_options = index_options;
+  invalid_options.num_neighbors = 0;
+  // Existing image IDs remain a no-op, even if unused options are invalid.
+  EXPECT_NO_THROW(
+      visual_index->Add(invalid_options, 7, keypoints, descriptors));
+  EXPECT_THROW(visual_index->Add(invalid_options, 9, keypoints, descriptors),
+               std::invalid_argument);
+  EXPECT_EQ(visual_index->NumImages(), 1);
+  EXPECT_FALSE(visual_index->IsImageIndexed(9));
+  EXPECT_NO_THROW(
+      visual_index->Query(query_options, descriptors, &image_scores));
+  ASSERT_EQ(image_scores.size(), 1);
+  EXPECT_EQ(image_scores[0].image_id, 7);
+
+  visual_index->Add(index_options, 9, keypoints, descriptors);
+  visual_index->Prepare();
+  query_options.image_id_filter = [](const int image_id) {
+    return image_id == 9;
+  };
+  visual_index->Query(query_options, descriptors, &image_scores);
+  ASSERT_EQ(image_scores.size(), 1);
+  EXPECT_EQ(image_scores[0].image_id, 9);
+
+  // An empty image still needs no word lookup or neighbor-option validation.
+  EXPECT_NO_THROW(visual_index->Add(
+      invalid_options, 11, FeatureKeypoints(), empty_descriptors));
+  EXPECT_TRUE(visual_index->IsImageIndexed(11));
+  EXPECT_THROW(
+      visual_index->Query(query_options, empty_descriptors, &image_scores),
+      std::invalid_argument);
 }
 
 class ParameterizedVisualIndexTests
@@ -116,6 +191,90 @@ TEST_P(ParameterizedVisualIndexTests, Nominal) {
     ASSERT_EQ(image_scores.size(), 1);
     EXPECT_EQ(image_scores[0].image_id, 2);
   }
+}
+
+TEST_P(ParameterizedVisualIndexTests, RebuildClearsImagesAndPreparation) {
+  const auto [desc_dim, embedding_dim] = GetParam();
+  const auto descriptors =
+      CreateRandomDescriptors(200, desc_dim, FeatureExtractorType::SIFT);
+  const FeatureKeypoints keypoints(descriptors.data.rows());
+
+  VisualIndex::BuildOptions build_options;
+  build_options.num_iterations = 10;
+  build_options.num_rounds = 1;
+  build_options.num_visual_words = 5;
+  build_options.num_threads = 1;
+  VisualIndex::IndexOptions index_options;
+  index_options.num_threads = 1;
+  VisualIndex::QueryOptions query_options;
+  query_options.num_threads = 1;
+
+  auto visual_index = VisualIndex::Create(desc_dim, embedding_dim);
+  visual_index->Build(build_options, descriptors);
+  visual_index->Add(index_options, 7, keypoints, descriptors);
+  visual_index->Prepare();
+  std::vector<ImageScore> image_scores;
+  visual_index->Query(query_options, descriptors, &image_scores);
+  ASSERT_EQ(image_scores.size(), 1);
+  EXPECT_EQ(image_scores[0].image_id, 7);
+
+  visual_index->Build(build_options, descriptors);
+  EXPECT_EQ(visual_index->NumImages(), 0);
+  EXPECT_FALSE(visual_index->IsImageIndexed(7));
+  const FeatureDescriptorsFloat empty_descriptors(
+      FeatureExtractorType::SIFT, FeatureDescriptorsFloatData(0, desc_dim));
+  EXPECT_THROW(
+      visual_index->Query(query_options, empty_descriptors, &image_scores),
+      std::invalid_argument);
+
+  visual_index->Add(index_options, 7, keypoints, descriptors);
+  EXPECT_EQ(visual_index->NumImages(), 1);
+  EXPECT_TRUE(visual_index->IsImageIndexed(7));
+  visual_index->Prepare();
+  visual_index->Query(query_options, descriptors, &image_scores);
+  ASSERT_EQ(image_scores.size(), 1);
+  EXPECT_EQ(image_scores[0].image_id, 7);
+}
+
+TEST_P(ParameterizedVisualIndexTests, RejectedTrainingPreservesIndex) {
+  const auto [desc_dim, embedding_dim] = GetParam();
+  const auto descriptors =
+      CreateRandomDescriptors(200, desc_dim, FeatureExtractorType::SIFT);
+  const FeatureKeypoints keypoints(descriptors.data.rows());
+
+  VisualIndex::BuildOptions build_options;
+  build_options.num_iterations = 10;
+  build_options.num_rounds = 1;
+  build_options.num_visual_words = 5;
+  build_options.num_threads = 1;
+  VisualIndex::IndexOptions index_options;
+  index_options.num_threads = 1;
+  VisualIndex::QueryOptions query_options;
+  query_options.num_threads = 1;
+
+  auto visual_index = VisualIndex::Create(desc_dim, embedding_dim);
+  visual_index->Build(build_options, descriptors);
+  visual_index->Add(index_options, 7, keypoints, descriptors);
+  visual_index->Prepare();
+  std::vector<ImageScore> image_scores;
+  visual_index->Query(query_options, descriptors, &image_scores);
+  ASSERT_EQ(image_scores.size(), 1);
+  EXPECT_EQ(image_scores[0].image_id, 7);
+
+  const auto insufficient_descriptors =
+      CreateRandomDescriptors(build_options.num_visual_words - 1,
+                              desc_dim,
+                              FeatureExtractorType::ALIKED_N16ROT);
+  EXPECT_THROW(visual_index->Build(build_options, insufficient_descriptors),
+               std::exception);
+  EXPECT_EQ(visual_index->FeatureType(), FeatureExtractorType::SIFT);
+  EXPECT_EQ(visual_index->NumImages(), 1);
+  EXPECT_TRUE(visual_index->IsImageIndexed(7));
+  image_scores.clear();
+  ASSERT_NO_THROW(
+      visual_index->Query(query_options, descriptors, &image_scores));
+  ASSERT_EQ(image_scores.size(), 1);
+  EXPECT_EQ(image_scores[0].image_id, 7);
 }
 
 TEST_P(ParameterizedVisualIndexTests, ReadWrite) {
