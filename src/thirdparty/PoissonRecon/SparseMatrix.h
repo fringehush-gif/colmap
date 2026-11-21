@@ -30,6 +30,7 @@ DAMAGE.
 
 #include <float.h>
 #include <complex>
+#include <type_traits>
 #include <unordered_map>
 #include "SparseMatrixInterface.h"
 #include "Array.h"

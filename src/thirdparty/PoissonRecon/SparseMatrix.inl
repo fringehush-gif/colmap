@@ -378,9 +378,15 @@ SparseMatrix< T , IndexType , 0 > SparseMatrix< T , IndexType , 0 >::transpose( 
 {
 	SparseMatrix A;
 	const SparseMatrix& At = *this;
-	size_t _aRows = 0 , aCols = At.rowNum;
-	for( size_t i=0 ; i<At.rowNum ; i++ ) for( size_t j=0 ; j<At.rowSizes[i] ; j++ ) if( aCols<=At[i][j].N ) _aRows = At[i][j].N+1;
-	if( _aRows>aRows ) MK_THROW( "Prescribed output dimension too low: " , aRows , " < " , _aRows );
+	for( size_t i=0 ; i<At.rowNum ; i++ ) for( size_t j=0 ; j<At.rowSizes[i] ; j++ )
+	{
+		const auto index = At[i][j].N;
+		if constexpr( std::is_signed_v< decltype(index) > )
+			if( index<0 ) MK_THROW( "Negative column index: " , index );
+		using ComparisonType = std::common_type_t< decltype(index) , size_t >;
+		if( static_cast< ComparisonType >( index )>=static_cast< ComparisonType >( aRows ) )
+			MK_THROW( "Prescribed output dimension too low: " , aRows , " <= column " , index );
+	}
 
 	A.resize( aRows );
 	for( size_t i=0 ; i<aRows ; i++ ) A.rowSizes[i] = 0;
@@ -489,9 +495,16 @@ template< class const_iterator >
 SparseMatrix< T , IndexType , 0 > SparseMatrix< T , IndexType , 0 >::Transpose( const SparseMatrixInterface< T , const_iterator >& At , size_t outRows , T (*TransposeFunction)( const T& ) )
 {
 	SparseMatrix< T , IndexType , 0 > A;
-	size_t _aRows = 0 , aCols = At.rows() , aRows = outRows;
-	for( size_t i=0 ; i<At.rows() ; i++ ) for( const_iterator iter=At.begin(i) ; iter!=At.end(i) ; iter++ ) if( aCols<=iter->N ) _aRows = iter->N+1;
-	if( _aRows>aRows ) MK_THROW( "Prescribed output dimension too low: " , aRows , " < " , _aRows );
+	const size_t aRows = outRows;
+	for( size_t i=0 ; i<At.rows() ; i++ ) for( const_iterator iter=At.begin(i) ; iter!=At.end(i) ; iter++ )
+	{
+		const auto index = iter->N;
+		if constexpr( std::is_signed_v< decltype(index) > )
+			if( index<0 ) MK_THROW( "Negative column index: " , index );
+		using ComparisonType = std::common_type_t< decltype(index) , size_t >;
+		if( static_cast< ComparisonType >( index )>=static_cast< ComparisonType >( aRows ) )
+			MK_THROW( "Prescribed output dimension too low: " , aRows , " <= column " , index );
+	}
 
 	A.resize( aRows );
 	for( size_t i=0 ; i<aRows ; i++ ) A.rowSizes[i] = 0;
@@ -515,7 +528,7 @@ SparseMatrix< T , IndexType , 0 > SparseMatrix< T , IndexType , 0 >::Transpose( 
 			size_t ii = (size_t)iter->N;
 			A[ii][ A.rowSizes[ii]++ ] = MatrixEntry< T , IndexType >( (IndexType)i , iter->Value );
 		}
-	return true;
+	return A;
 }
 
 ///////////////////////////////////////////
