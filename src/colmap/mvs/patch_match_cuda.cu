@@ -2750,15 +2750,21 @@ size_t PairResidentBlocksPerSm(bool geometric,
 }
 bool PairFitsResidentWaves(size_t first_grid,
                            size_t second_grid,
+                           size_t sm_count,
+                           size_t per_sm) {
+  return sm_count > 0 &&
+         (first_grid - 1) / sm_count + (second_grid - 1) / sm_count + 2 <=
+             per_sm;
+}
+bool PairFitsResidentWaves(size_t first_grid,
+                           size_t second_grid,
                            bool geometric,
                            bool final_filter,
                            bool checkpoint_hmm) {
   size_t sm_count = 0;
   const size_t per_sm = PairResidentBlocksPerSm(
       geometric, final_filter, checkpoint_hmm, &sm_count);
-  return sm_count > 0 &&
-         (first_grid - 1) / sm_count + (second_grid - 1) / sm_count + 2 <=
-             per_sm;
+  return PairFitsResidentWaves(first_grid, second_grid, sm_count, per_sm);
 }
 }  // namespace
 
@@ -2822,13 +2828,13 @@ bool CanBatchPatchMatchViews(
   const size_t grid_width = (width - 1) / 8 + 1;
   const size_t grid_height = (height - 1) / 8 + 1;
   const size_t max_grid = std::max(grid_width, grid_height);
-  // This is the incumbent's actual pair decision; otherwise each reference
-  // runs as a singleton on the one-GPU worker.
-  const bool incumbent_pair = PairFitsResidentWaves(
-      max_grid, max_grid, geometric, false, checkpoint_hmm);
   size_t sm_count = 0;
   const size_t resident =
       PairResidentBlocksPerSm(geometric, false, checkpoint_hmm, &sm_count);
+  // Reuse this phase's resource query for the incumbent pair decision and
+  // batch capacity. Otherwise each reference runs as a singleton.
+  const bool incumbent_pair =
+      PairFitsResidentWaves(max_grid, max_grid, sm_count, resident);
   size_t capacity = 0, batch_grid_width = 0, batch_grid_height = 0;
   if (!sm_count || !resident || !multiply(sm_count, resident, &capacity) ||
       !multiply(count, grid_width, &batch_grid_width) ||
@@ -2880,7 +2886,8 @@ bool CanBatchPatchMatchViews(
       return false;
     const bool final_pair_together =
         incumbent_pair &&
-        PairFitsResidentWaves(max_grid, max_grid, true, true, checkpoint_hmm);
+        PairFitsResidentWaves(
+            max_grid, max_grid, final_sm_count, final_resident);
     const size_t final_single_waves = waves(grid_height, final_capacity);
     size_t final_per_pair = 1;
     if (!final_pair_together &&
