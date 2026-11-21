@@ -904,6 +904,8 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
   const Case cases[] = {
       {8, 17, 257, true},
       {31, 33, 65, true},   // Last second-history slot is inactive, not source 31.
+      {32, 15, 65, false},  // Default sample count and a partial final window.
+      {32, 16, 65, false},  // A complete final window.
       {32, 17, 65, false},  // Retain the S>P fallback control.
       {32, 33, 65, true},   // Two source slots per worker; P exceeds 32.
       {33, 33, 65, false},  // Source-capacity fallback while S<=P.
@@ -929,7 +931,7 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
       inputs.depths.push_back(source_depth);
       inputs.normals.push_back(source_normal);
     }
-    if (c.look_ahead) MakeSourceTexturesDistinct(&inputs);
+    MakeSourceTexturesDistinct(&inputs);
     // Alternating non-ground-truth depths provide a useful propagation and
     // perturbation challenge; the source geometry remains valid.
     for (int row = 0; row < kHeight; ++row) {
@@ -1139,8 +1141,8 @@ TEST_F(CudaTest, SameWindowScalarAndCooperativeSweep) {
     if (sources >= 32) {
       EXPECT_GT(high31, 0);
     }
+    EXPECT_GT(distinct_sampled_costs, 0);
     if (c.look_ahead) {
-      EXPECT_GT(distinct_sampled_costs, 0);
       EXPECT_GT(cross_window_duplicate_pixels, 0);
       EXPECT_GT(propagated_earlier_window_sources, 0);
       // Incumbent reuse must consume nontrivial source history, not only
