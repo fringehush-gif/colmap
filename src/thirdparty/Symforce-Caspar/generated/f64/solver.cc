@@ -1951,10 +1951,18 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
     printf("                                 score_init: % .6e\n", score_best);
   }
 
+  bool step_accepted = false;
   for (solver_iter_ = 0; solver_iter_ < params_.solver_iter_max;
        solver_iter_++) {
     if (solver_iter_ != 0) {
-      DoResJac();
+      if (step_accepted) {
+        DoResJac();
+      } else {
+        // Rejection preserves the current state and its linearization.
+        // Restore the PCG inputs consumed by the previous attempt.
+        Copy(marker__r_0_start_, marker__r_0_end_, marker__r_k_start_);
+        Copy(marker__r_0_start_, marker__r_0_end_, marker__Mp_start_);
+      }
     }
     score_best_pcg = score_best;
     // The inner loop can break before storing a proposal in storage_new_best_.
@@ -2043,7 +2051,7 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
     }
 
     const double diag_current = diag;
-    bool step_accepted = false;
+    step_accepted = false;
     if (have_pcg_proposal &&
         score_best_pcg < score_best * params_.solver_rel_decrease_min) {
       const double pred_decrease =

@@ -661,6 +661,94 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
   FAIL() << "No retained-then-rejected witness in the fixed fixture grid";
 }
 
+TEST(CasparRejectedStep, RetriesMatchFreshLinearizations) {
+  int device_count = 0;
+  const cudaError_t status = cudaGetDeviceCount(&device_count);
+  if (status != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
+  }
+  SetPRNGSeed(0);
+  Reconstruction initial;
+  SyntheticDatasetOptions data;
+  data.num_rigs = 1;
+  data.num_cameras_per_rig = 1;
+  data.num_frames_per_rig = 3;
+  data.num_points3D = 67;
+  SynthesizeDataset(data, &initial);
+  SyntheticNoiseOptions noise;
+  noise.point3D_stddev = 0.02;
+  noise.rig_from_world_translation_stddev = 0.01;
+  SynthesizeNoise(noise, &initial);
+  BundleAdjustmentConfig config;
+  for (const image_t id : initial.RegImageIds()) {
+    config.AddImage(id);
+    config.SetConstantCamIntrinsics(initial.Image(id).CameraId());
+  }
+  config.SetConstantRigFromWorldPose(
+      initial.Image(initial.RegImageIds().front()).FrameId());
+  config.AddConstantPoint(initial.Points3D().begin()->first);
+
+  // Reject every proposal while keeping a coupled pose/point linear system.
+  // Each retry must match a fresh solve at the same state and damping.
+  for (const int pcg_limit : {1, 3}) {
+    for (const bool score_pcg : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "pcg_limit=" << pcg_limit << " score_pcg=" << score_pcg);
+      const auto solve = [&](int iterations,
+                             double diag,
+                             Reconstruction& reconstruction) {
+        BundleAdjustmentOptions options;
+        options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
+        options.caspar->solver_iter_max = iterations;
+        options.caspar->pcg_iter_max = pcg_limit;
+        options.caspar->diag_init = diag;
+        options.caspar->solver_rel_decrease_min = 0;
+        options.caspar->pcg_rel_decrease_min = score_pcg ? 1 : -1;
+        options.caspar->pcg_rel_score_exit = -1;
+        options.caspar->pcg_rel_error_exit = 1e-20;
+        options.caspar->collect_iteration_data = true;
+        options.caspar->gpu_index = "0";
+        auto adjuster =
+            CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+        return std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
+            adjuster->Solve());
+      };
+      Reconstruction retried = initial;
+      const auto retries = solve(3, 1, retried);
+      ASSERT_NE(retries, nullptr);
+      ASSERT_GT(retries->initial_score, 0);
+      ASSERT_EQ(retries->iterations.size(), 3u);
+      for (const auto& retry : retries->iterations) {
+        SCOPED_TRACE(retry.solver_iter);
+        Reconstruction fresh = initial;
+        const auto reference = solve(1, retry.diag, fresh);
+        ASSERT_NE(reference, nullptr);
+        ASSERT_EQ(reference->iterations.size(), 1u);
+        const auto& expected = reference->iterations.front();
+        EXPECT_FALSE(retry.step_accepted);
+        EXPECT_FALSE(expected.step_accepted);
+        EXPECT_EQ(retry.score_best, retries->initial_score);
+        EXPECT_EQ(retry.step_quality, 0);
+        EXPECT_EQ(retry.pcg_iter, expected.pcg_iter);
+        if (!score_pcg) {
+          EXPECT_EQ(retry.pcg_iter, pcg_limit - 1);
+        }
+        ASSERT_TRUE(std::isfinite(retry.score_current));
+        ASSERT_TRUE(std::isfinite(expected.score_current));
+        // GPU reductions can sum identical inputs in a different order.
+        const double tolerance =
+            std::is_same_v<StorageType, double> ? 1e-8 : 5e-4;
+        EXPECT_NEAR(retry.score_current,
+                    expected.score_current,
+                    tolerance * std::max(1.0, std::abs(expected.score_current)));
+        for (const auto& [point_id, point] : retried.Points3D()) {
+          EXPECT_EQ(point.xyz, fresh.Point3D(point_id).xyz);
+        }
+      }
+    }
+  }
+}
+
 TEST(CasparOptions, RigThrowsErrorOnVariableSensorFromRig) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions synthetic_dataset_options;
