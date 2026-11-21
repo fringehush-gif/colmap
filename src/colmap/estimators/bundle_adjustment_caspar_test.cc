@@ -23,6 +23,12 @@
 #include <cuda_runtime_api.h>
 #include <gtest/gtest.h>
 
+#ifdef CASPAR_USE_DOUBLE
+#include "thirdparty/Symforce-Caspar/generated/f64/shared_indices.h"
+#else
+#include "thirdparty/Symforce-Caspar/generated/f32/shared_indices.h"
+#endif
+
 #if defined(COLMAP_TEST_CASPAR_READBACK_WRAPPING)
 #ifdef CASPAR_USE_DOUBLE
 #include "thirdparty/Symforce-Caspar/generated/f64/solver_tools.h"
@@ -198,49 +204,85 @@ constexpr double kConstantPoseVarEps = 1e-9;
 namespace colmap {
 namespace {
 
-caspar::GraphSolver MakeParameterTestSolver(
-    const caspar::SolverParams<double>& params, const int device) {
-  return caspar::GraphSolver(params,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             device);
+struct CudaDeviceBuffer {
+  void* ptr = nullptr;
+  ~CudaDeviceBuffer() {
+    if (ptr != nullptr) cudaFree(ptr);
+  }
+  CudaDeviceBuffer(const CudaDeviceBuffer&) = delete;
+  CudaDeviceBuffer& operator=(const CudaDeviceBuffer&) = delete;
+  CudaDeviceBuffer() = default;
+};
+
+TEST(CasparSharedIndices, MapsPartialBlocksAndDuplicateTargets) {
+  int device_count = 0;
+  const cudaError_t status = cudaGetDeviceCount(&device_count);
+  if (status != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
+  }
+  ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+  constexpr size_t kCapacity = 2049;
+  CudaDeviceBuffer device_indices;
+  CudaDeviceBuffer device_shared_indices;
+  ASSERT_EQ(cudaMalloc(&device_indices.ptr, kCapacity * sizeof(unsigned int)),
+            cudaSuccess);
+  ASSERT_EQ(cudaMalloc(&device_shared_indices.ptr,
+                       kCapacity * sizeof(caspar::SharedIndex)),
+            cudaSuccess);
+  for (const size_t size : {1, 31, 32, 33, 1023, 1024, 1025, 2049}) {
+    for (int pattern = 0; pattern < 4; ++pattern) {
+      SCOPED_TRACE(::testing::Message()
+                   << "size=" << size << " pattern=" << pattern);
+      std::vector<unsigned int> input(size);
+      for (size_t i = 0; i < size; ++i) {
+        // Sorted, reversed, interleaved duplicates, and one shared target.
+        input[i] = static_cast<unsigned int>(pattern == 0   ? i
+                                             : pattern == 1 ? size - i
+                                             : pattern == 2 ? (size - i) % 7
+                                                            : 7);
+      }
+      ASSERT_EQ(cudaMemcpy(device_indices.ptr,
+                           input.data(),
+                           size * sizeof(unsigned int),
+                           cudaMemcpyHostToDevice),
+                cudaSuccess);
+      caspar::SharedIndices(
+          static_cast<const unsigned int*>(device_indices.ptr),
+          static_cast<caspar::SharedIndex*>(device_shared_indices.ptr),
+          static_cast<unsigned int>(size));
+      ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+      std::vector<caspar::SharedIndex> output(size);
+      ASSERT_EQ(cudaMemcpy(output.data(),
+                           device_shared_indices.ptr,
+                           size * sizeof(caspar::SharedIndex),
+                           cudaMemcpyDeviceToHost),
+                cudaSuccess);
+      for (size_t start = 0; start < size; start += 1024) {
+        const size_t count = std::min(size_t{1024}, size - start);
+        std::vector<unsigned int> unique(input.begin() + start,
+                                         input.begin() + start + count);
+        std::sort(unique.begin(), unique.end());
+        unique.erase(std::unique(unique.begin(), unique.end()), unique.end());
+        std::vector<bool> seen(count, false);
+        for (size_t i = 0; i < count; ++i) {
+          const auto& index = output[start + i];
+          EXPECT_EQ(index.unique,
+                    i < unique.size()
+                        ? unique[i]
+                        : std::numeric_limits<unsigned int>::max());
+          ASSERT_LT(index.target, unique.size());
+          EXPECT_EQ(unique[index.target], input[start + i]);
+          ASSERT_LT(index.argsort, count);
+          EXPECT_FALSE(seen[index.argsort]);
+          seen[index.argsort] = true;
+          if (i != 0) {
+            EXPECT_LE(input[start + output[start + i - 1].argsort],
+                      input[start + index.argsort]);
+          }
+        }
+      }
+    }
+  }
 }
 
 TEST(CasparTransfers, ReservesFactorScratchWithoutPointNodes) {
@@ -279,8 +321,8 @@ TEST(CasparParameters, RejectsInvalidUpdatesWithoutChangingParameters) {
   }
 
   using Access = caspar::GraphSolverTestAccess;
-  const caspar::SolverParams<double> valid;
-  auto solver = MakeParameterTestSolver(valid, 0);
+  const caspar::SolverParams<StorageType> valid;
+  auto solver = CreateSolver(valid, {}, 0);
   const auto original = Access::Params(solver);
   const auto expect_error = [](const auto& action, const char* message) {
     try {
@@ -298,7 +340,7 @@ TEST(CasparParameters, RejectsInvalidUpdatesWithoutChangingParameters) {
     EXPECT_EQ(stored.pcg_rel_error_exit, original.pcg_rel_error_exit);
     EXPECT_EQ(stored.diag_init, original.diag_init);
     EXPECT_EQ(stored.solver_iter_max, original.solver_iter_max);
-    expect_error([&] { MakeParameterTestSolver(invalid, -1); }, message);
+    expect_error([&] { CreateSolver(invalid, {}, device_count); }, message);
   };
   auto invalid = valid;
   for (const int count : {0, -1}) {
@@ -332,16 +374,13 @@ TEST(CasparFirstNorm, ResetsBothAccumulatorsBeforeRealKernelUpdates) {
 
   using Access = caspar::GraphSolverTestAccess;
   using Real = StorageType;
-  auto solver = MakeParameterTestSolver(caspar::SolverParams<double>(), 0);
-  // The constructor allocates one of every node; only these two are
-  // initialized.
+  CasparSolverSizing sizing;
+  sizing.num_pinhole_calibs = 1;
+  sizing.num_points = 1;
+  auto solver = CreateSolver(caspar::SolverParams<StorageType>{}, sizing, 0);
+  // The calibration pool also allocates these two uninitialized node types.
   solver.SetPinholeCalibNum(0);
   solver.SetPinholeFocalNum(0);
-  solver.SetPinholePoseNum(0);
-  solver.SetSimpleRadialCalibNum(0);
-  solver.SetSimpleRadialFocalAndExtraNum(0);
-  solver.SetSimpleRadialPoseNum(0);
-  solver.SetSimpleRadialPrincipalPointNum(0);
   const Real neg_alpha = -0.5;
   const Real principal_r[] = {1, 2}, principal_w[] = {2, 0};
   const Real point_r[] = {3, 0, 0, 0}, point_w[] = {2, 0, 0, 0};
@@ -1580,16 +1619,6 @@ TEST(DefaultBundleAdjuster,
 }
 
 #if defined(COLMAP_TEST_CASPAR_READBACK_WRAPPING)
-struct ReadbackDeviceBuffer {
-  void* ptr = nullptr;
-  ~ReadbackDeviceBuffer() {
-    if (ptr != nullptr) cudaFree(ptr);
-  }
-  ReadbackDeviceBuffer(const ReadbackDeviceBuffer&) = delete;
-  ReadbackDeviceBuffer& operator=(const ReadbackDeviceBuffer&) = delete;
-  ReadbackDeviceBuffer() = default;
-};
-
 template <typename F>
 void ExpectReadbackFailure(ReadbackCall fault,
                            const char* operation,
@@ -1624,8 +1653,9 @@ TEST(CasparReadbackFault, GetterStagesAndRealRoundTrips) {
   }
   ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
   using Real = StorageType;
-  auto solver = MakeParameterTestSolver(caspar::SolverParams<double>(), 0);
-  solver.SetPointNum(1);
+  CasparSolverSizing sizing;
+  sizing.num_points = 1;
+  auto solver = CreateSolver(caspar::SolverParams<StorageType>{}, sizing, 0);
   const std::array<Real, 3> input{Real(1), Real(2), Real(3)};
   solver.SetPointNodesFromStackedHost(input.data(), 0, 1);
   std::array<Real, 3> host{};
@@ -1642,7 +1672,7 @@ TEST(CasparReadbackFault, GetterStagesAndRealRoundTrips) {
   if (probe.calls != expected_probe) {
     GTEST_SKIP() << "Generated getter CUDA calls are not fully intercepted";
   }
-  ReadbackDeviceBuffer device;
+  CudaDeviceBuffer device;
   ASSERT_EQ(cudaMalloc(&device.ptr, sizeof(input)), cudaSuccess);
   const std::array<Real, 3> sentinel{Real(-11), Real(-12), Real(-13)};
   ASSERT_EQ(cudaMemcpy(device.ptr,
@@ -1696,7 +1726,7 @@ TEST(CasparReadbackFault, ScalarCopyFailure) {
   }
   ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
   using Real = StorageType;
-  ReadbackDeviceBuffer buffer;
+  CudaDeviceBuffer buffer;
   ASSERT_EQ(cudaMalloc(&buffer.ptr, sizeof(Real)), cudaSuccess);
   const Real input = Real(0.25);
   ASSERT_EQ(
@@ -1723,7 +1753,9 @@ TEST(CasparReadbackFault, EmptyAndOverflowRange) {
   if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
     GTEST_SKIP() << "CUDA device unavailable";
   }
-  auto solver = MakeParameterTestSolver(caspar::SolverParams<double>(), 0);
+  CasparSolverSizing sizing;
+  sizing.num_points = 1;
+  auto solver = CreateSolver(caspar::SolverParams<StorageType>{}, sizing, 0);
   using Getter = void (caspar::GraphSolver::*)(StorageType*, size_t, size_t);
   for (const Getter getter :
        {&caspar::GraphSolver::GetPointNodesToStackedHost,
