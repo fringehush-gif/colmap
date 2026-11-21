@@ -8,6 +8,8 @@
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/logging.h"
 
+#include <cmath>
+
 #include <Eigen/Geometry>
 
 namespace colmap {
@@ -171,14 +173,23 @@ size_t ComputeEffectiveInlierCount(
   // A constant coordinate occupies one bin along its axis.
   const float scale_x = max_x == min_x ? 0.0f : num_bins / (max_x - min_x);
   const float scale_y = max_y == min_y ? 0.0f : num_bins / (max_y - min_y);
+  const auto compute_bin = [num_bins](
+                               float coord, float min, float max, float scale) {
+    if (std::isfinite(scale) && std::isfinite(max - min)) {
+      return static_cast<int>((coord - min) * scale);
+    }
+    // Widen only exceptional spans to preserve ordinary float bin boundaries.
+    return static_cast<int>((static_cast<double>(coord) - min) /
+                            (static_cast<double>(max) - min) * num_bins);
+  };
 
   Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic> counter(num_bins,
                                                              num_bins);
   counter.setZero();
 
   for (const auto& coord : inlier_coords) {
-    const int c_x = (coord.first - min_x) * scale_x;
-    const int c_y = (coord.second - min_y) * scale_y;
+    const int c_x = compute_bin(coord.first, min_x, max_x, scale_x);
+    const int c_y = compute_bin(coord.second, min_y, max_y, scale_y);
     counter(std::clamp(c_x, 0, num_bins - 1),
             std::clamp(c_y, 0, num_bins - 1)) = 1;
   }

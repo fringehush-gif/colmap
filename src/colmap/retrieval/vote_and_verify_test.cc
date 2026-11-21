@@ -149,6 +149,34 @@ TEST(VoteAndVerify, EffectiveInlierCountIsTranslationInvariant) {
   }
 }
 
+TEST(VoteAndVerify, EffectiveInliersWithExtremeCoordinateSpan) {
+  constexpr float kSmall = std::numeric_limits<float>::min();
+  constexpr float kLarge = std::numeric_limits<float>::max();
+  const float coordinates[][3] = {{0, kSmall, 2 * kSmall},
+                                  {-kLarge, 0, kLarge}};
+  for (const auto& coords : coordinates) {
+    for (const bool swap_xy : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << coords[0] << ", " << coords[2] << ", " << swap_xy);
+      std::vector<FeatureGeometryMatch> matches(3);
+      for (size_t i = 0; i < matches.size(); ++i) {
+        auto& match = matches[i];
+        match.geometry1.x = swap_xy ? 0.25f : coords[i];
+        match.geometry1.y = swap_xy ? coords[i] : 0.25f;
+        match.geometry1.scale = 1;
+        match.geometry1.orientation = 0;
+        match.geometry2 = match.geometry1;
+      }
+
+      VoteAndVerifyOptions options;
+      options.local_optimization = false;
+      EXPECT_EQ(VoteAndVerify(options, matches), 3);
+      options.eff_inlier_count = false;
+      EXPECT_EQ(VoteAndVerify(options, matches), 3);
+    }
+  }
+}
+
 }  // namespace
 }  // namespace retrieval
 }  // namespace colmap
