@@ -16,3 +16,13 @@ endif()
 if(MSVC)
     target_compile_options(colmap_poisson_recon PRIVATE /bigobj)
 endif()
+
+set(FOLDER_NAME "poisson_recon")
+COLMAP_ADD_TEST(
+    NAME vertex_factory_test
+    SRCS vertex_factory_test.cc
+)
+if(TESTS_ENABLED AND OPENMP_FOUND)
+    target_link_libraries(colmap_poisson_recon_vertex_factory_test
+        OpenMP::OpenMP_CXX)
+endif()
