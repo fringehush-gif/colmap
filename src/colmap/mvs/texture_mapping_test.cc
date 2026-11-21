@@ -675,6 +675,75 @@ TEST(MeshTextureMapping, SamplesAtPixelCenters) {
   EXPECT_EQ(color->b, 255);
 }
 
+TEST(MeshTextureMapping, PreservesDoublePositionGeometry) {
+  for (const double offset : {0.0, 16777216.0}) {
+    for (const bool blocked : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << offset << ", " << blocked);
+      PlyMesh mesh;
+      mesh.vertices = {{offset + 0.25, 0.25, 1.0},
+                       {offset + 0.75, 0.25, 1.0},
+                       {offset + 0.25, 0.75, 1.0}};
+      mesh.faces = {{0, 2, 1}};
+      if (blocked) {
+        // All three target rays meet the strict interior of this nearer face.
+        mesh.vertices.insert(mesh.vertices.end(),
+                             {{offset + 0.0625, 0.0625, 0.5},
+                              {offset + 0.5, 0.0625, 0.5},
+                              {offset + 0.0625, 0.5, 0.5}});
+        mesh.faces.emplace_back(3, 5, 4);
+      }
+      // The public float camera coefficients are exact, including at 2^24.
+      // The target image corners remain (16,16), (16,48), and (48,16).
+      const float K[9] = {64, 0, 0, 0, 64, 0, 0, 0, 1};
+      const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+      const float T[3] = {-static_cast<float>(offset), 0, 0};
+      Image image("position-precision.png", 128, 128, K, R, T);
+      const BitmapColor<uint8_t> color(61, 137, 223);
+      Bitmap bitmap(128, 128, true);
+      bitmap.Fill(color);
+      image.SetBitmap(std::move(bitmap));
+
+      MeshTextureMappingOptions options;
+      options.num_threads = 1;
+      options.view_selection_smoothing_iterations = 0;
+      options.apply_color_correction = false;
+      options.inpaint_radius = 0;
+      const auto result = MeshTextureMapping(mesh, {image}, options);
+      std::vector<int> expected(mesh.faces.size(), 0);
+#if defined(COLMAP_CGAL_ENABLED)
+      if (blocked) expected[0] = -1;
+#endif
+      ASSERT_EQ(result.face_view_ids, expected);
+      ASSERT_EQ(result.face_uvs.size(), mesh.faces.size() * 6);
+      for (size_t face = 0; face < mesh.faces.size(); ++face) {
+        const float* uv = result.face_uvs.data() + face * 6;
+        for (size_t i = 0; i < 6; ++i) {
+          EXPECT_TRUE(std::isfinite(uv[i]));
+          EXPECT_GE(uv[i], 0);
+          EXPECT_LE(uv[i], 1);
+        }
+        const double area = (double(uv[2]) - uv[0]) * (double(uv[5]) - uv[1]) -
+                            (double(uv[4]) - uv[0]) * (double(uv[3]) - uv[1]);
+        if (expected[face] >= 0) EXPECT_NE(area, 0);
+      }
+      EXPECT_GT(result.atlas_width, 0);
+      EXPECT_GT(result.atlas_height, 0);
+      size_t colored_pixels = 0;
+      for (int y = 0; y < result.atlas_height; ++y) {
+        for (int x = 0; x < result.atlas_width; ++x) {
+          const auto pixel = result.texture_atlas.GetPixel(x, y);
+          ASSERT_TRUE(pixel.has_value());
+          if (pixel->r == color.r && pixel->g == color.g &&
+              pixel->b == color.b) {
+            ++colored_pixels;
+          }
+        }
+      }
+      EXPECT_GT(colored_pixels, 0);
+    }
+  }
+}
+
 }  // namespace
 }  // namespace mvs
 }  // namespace colmap
