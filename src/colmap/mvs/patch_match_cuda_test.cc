@@ -602,6 +602,67 @@ TEST_F(CudaTest, EmptySamplingSupportRetainsInitializedParameters) {
   }
 }
 
+TEST_F(CudaTest, UnchangedNormalProposalRetainsAdmittedOct40Normal) {
+  // Admission need not be closed under decode and re-encoding. Establish the
+  // boundary using the actual device codec before exercising the GEO caller.
+  const float source[3] = {0x1p-17f, 0.0f, 0x1.ffff02p-1f};
+  OctNormalMap admitted(1, 1);
+  ASSERT_NO_THROW(admitted.CopyFromCPU(source, sizeof(float)));
+  const auto decoded = admitted.CopyToMat();
+  ASSERT_LT(std::abs(decoded.Get(0, 0, 0)) + std::abs(decoded.Get(0, 0, 1)),
+            1e-4f);
+  ASSERT_GT(decoded.Get(0, 0, 2), 0.99f);
+  OctNormalMap readmission(1, 1);
+  try {
+    readmission.CopyFromCPU(decoded.GetPtr(), sizeof(float));
+    FAIL() << "The fixture must refuse re-admission of its decoded normal";
+  } catch (const std::invalid_argument& error) {
+    ASSERT_NE(std::string(error.what())
+                  .find("Oct40 normal domain refusal (sticky bits)"),
+              std::string::npos);
+  }
+
+  Inputs inputs = MakeInputs(0, 2, 9, 9);
+  for (auto& image : inputs.images) {
+    Bitmap bitmap(image.GetWidth(), image.GetHeight(), false);
+    bitmap.Fill(BitmapColor<uint8_t>(0));
+    image.SetBitmap(std::move(bitmap));
+  }
+  auto& input_normal = inputs.normals[0];
+  for (size_t row = 0; row < input_normal.GetHeight(); ++row) {
+    for (size_t col = 0; col < input_normal.GetWidth(); ++col) {
+      for (int axis = 0; axis < 3; ++axis) {
+        input_normal.Set(row, col, axis, source[axis]);
+      }
+    }
+  }
+  for (const bool packed : {false, true}) {
+    NormalMap expected_normal = input_normal;
+    if (packed) {
+      for (size_t row = 0; row < expected_normal.GetHeight(); ++row) {
+        for (size_t col = 0; col < expected_normal.GetWidth(); ++col) {
+          for (int axis = 0; axis < 3; ++axis) {
+            expected_normal.Set(row, col, axis, decoded.Get(0, 0, axis));
+          }
+        }
+      }
+    }
+    for (const bool reuse : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << packed << " / reuse " << reuse);
+      auto options = MakeOptions(true, false, reuse);
+      options.normal_oct40 = packed;
+      options.ncc_sigma = 1.0 / 16;
+      // Zero-variance images give empty support while proposals still run.
+      // In iteration 2, |a1|, |a2| <= pi/4 and these rays have |x|+|y| < .2:
+      // the positive-z normal keeps dot(normal, ray) > .29 in every retry.
+      options.num_iterations = 2;
+      const Result result = RunPatchMatch(&inputs, options);
+      ExpectExactlyEqual(inputs.depths[0], result.depths);
+      ExpectExactlyEqual(expected_normal, result.normals);
+    }
+  }
+}
+
 TEST_F(CudaTest, NondefaultFilteredPhotoPreservesRotatedStatistics) {
   Inputs inputs = MakeInputs(0, 4, 77, 95);
   auto options = MakeOptions(false, true, false);
