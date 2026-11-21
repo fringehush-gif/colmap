@@ -160,7 +160,7 @@ namespace PoissonRecon
 		// Transformed Output Vertex Stream //
 		//////////////////////////////////////
 		template< typename PositionReal , typename Real , unsigned int Dim , typename ... Data >
-		struct TransformedOutputLevelSetVertexStreamWithPosition : public OutputLevelSetVertexStream< Real , Dim , Data ... >
+		struct TransformedOutputLevelSetVertexStreamWithPosition : public OutputLevelSetVertexStreamWithPosition< PositionReal , Real , Dim , Data ... >
 		{
 			// A constructor initialized with the transformation to be applied to the samples, and a sample stream
 			TransformedOutputLevelSetVertexStreamWithPosition( XForm< Real , Dim+1 > xForm , OutputLevelSetVertexStreamWithPosition< PositionReal , Real , Dim , Data ... > &stream ) : _stream(stream) , _positionXForm(xForm)
@@ -169,8 +169,8 @@ namespace PoissonRecon
 			}
 
 			// Need to write the union to ensure that the counter gets set
-			size_t write(                       const Position< Real , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > &w , const Data& ... d ){ return _stream.write(          _positionXForm * Position< PositionReal , Dim >(p) , _gradientXForm * g , w , d... ); }
-			size_t write( unsigned int thread , const Position< Real , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > &w , const Data& ... d ){ return _stream.write( thread , _positionXForm * Position< PositionReal , Dim >(p) , _gradientXForm * g , w , d... ); }
+			size_t write(                       const Position< PositionReal , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > &w , const Data& ... d ){ return _stream.write(          _positionXForm * p , _gradientXForm * g , w , d... ); }
+			size_t write( unsigned int thread , const Position< PositionReal , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > &w , const Data& ... d ){ return _stream.write( thread , _positionXForm * p , _gradientXForm * g , w , d... ); }
 			size_t size( void ) const { return _stream.size(); }
 
 		protected:

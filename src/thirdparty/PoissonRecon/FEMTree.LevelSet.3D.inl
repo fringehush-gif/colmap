@@ -27,23 +27,23 @@ DAMAGE.
 */
 
 // Specialized level-set surface extraction
-template< bool HasData , typename Real , typename Data >
-struct _LevelSetExtractor< HasData , Real , 3 , Data >
+template< bool HasData , typename Real , typename Data , typename PositionReal >
+struct _LevelSetExtractor< HasData , Real , 3 , Data , PositionReal >
 {
 	static const unsigned int Dim = 3;
 	// Store the position, the (interpolated) gradient, the weight, and possibly data
 	typedef std::conditional_t
 		<
 			HasData ,
-			DirectSum< Real , Point< Real , Dim > , Point< Real , Dim > , Real , Data > ,
-			DirectSum< Real , Point< Real , Dim > , Point< Real , Dim > , Real >
+			DirectSum< Real , Point< PositionReal , Dim > , Point< Real , Dim > , Real , Data > ,
+			DirectSum< Real , Point< PositionReal , Dim > , Point< Real , Dim > , Real >
 		> Vertex;
 
 	using OutputVertexStream = std::conditional_t
 		<
 			HasData ,
-			OutputDataStream< Point< Real , Dim > , Point< Real , Dim > , Real , Data > ,
-			OutputDataStream< Point< Real , Dim > , Point< Real , Dim > , Real >
+			OutputDataStream< Point< PositionReal , Dim > , Point< Real , Dim > , Real , Data > ,
+			OutputDataStream< Point< PositionReal , Dim > , Point< Real , Dim > , Real >
 		>;
 
 protected:
@@ -1757,7 +1757,8 @@ public:
 			if( averageRoot<0 ) averageRoot = 0;
 			if( averageRoot>1 ) averageRoot = 1;
 		}
-		position[o] = Real( start + width*averageRoot );
+		const auto coordinate = start + width*averageRoot;
+		position[o] = Real( coordinate );
 		gradient = dx0 * (Real)( 1.-averageRoot ) + dx1 * (Real)averageRoot;
 		Real depth = (Real)1.;
 		Data dataValue;
@@ -1783,6 +1784,7 @@ public:
 			}
 		}
 		vertex.template get<0>() = position;
+		vertex.template get<0>()[o] = PositionReal( coordinate );
 		vertex.template get<1>() = gradient;
 		vertex.template get<2>() = depth;
 		if constexpr( HasData ) vertex.template get<3>() = dataValue;
@@ -1868,7 +1870,8 @@ public:
 			if( averageRoot<0 ) averageRoot = 0;
 			if( averageRoot>1 ) averageRoot = 1;
 		}
-		position[2] = Real( bCoordinate + (fCoordinate-bCoordinate)*averageRoot );
+		const auto coordinate = bCoordinate + (fCoordinate-bCoordinate)*averageRoot;
+		position[2] = Real( coordinate );
 		gradient = dx0 * (Real)( 1.-averageRoot ) + dx1 * (Real)averageRoot;
 		Real depth = (Real)1.;
 		Data dataValue;
@@ -1894,6 +1897,7 @@ public:
 			}
 		}
 		vertex.template get<0>() = position;
+		vertex.template get<0>()[2] = PositionReal( coordinate );
 		vertex.template get<1>() = gradient;
 		vertex.template get<2>() = depth;
 		if constexpr( HasData ) vertex.template get<3>() = dataValue;
@@ -1942,9 +1946,9 @@ public:
 			}
 			else
 			{
-				std::vector< Point< Real , Dim > > vertices( polygon.size() );
+				std::vector< Point< PositionReal , Dim > > vertices( polygon.size() );
 				for( unsigned int i=0 ; i<polygon.size() ; i++ ) vertices[i] = polygon[i].second.template get<0>();
-				std::vector< TriangleIndex< node_index_type > > triangles = MinimalAreaTriangulation< node_index_type , Real , Dim >( ( ConstPointer( Point< Real , Dim > ) )GetPointer( vertices ) , (node_index_type)vertices.size() );
+				std::vector< TriangleIndex< node_index_type > > triangles = MinimalAreaTriangulation< node_index_type , PositionReal , Dim >( ( ConstPointer( Point< PositionReal , Dim > ) )GetPointer( vertices ) , (node_index_type)vertices.size() );
 				if( triangles.size()!=polygon.size()-2 ) MK_THROW( "Minimal area triangulation failed:" , triangles.size() , " != " , polygon.size()-2 );
 				for( unsigned int i=0 ; i<triangles.size() ; i++ )
 				{
@@ -2400,7 +2404,7 @@ public:
 	}
 };
 
-template< bool HasData , typename Real , typename Data > std::atomic< size_t > _LevelSetExtractor< HasData , Real , 3 , Data >::_BadRootCount;
+template< bool HasData , typename Real , typename Data , typename PositionReal > std::atomic< size_t > _LevelSetExtractor< HasData , Real , 3 , Data , PositionReal >::_BadRootCount;
 
 template< typename Real >
 struct LevelSetExtractor< Real , 3 >
@@ -2414,26 +2418,26 @@ struct LevelSetExtractor< Real , 3 >
 	using OutputVertexStream = typename _LevelSetExtractor< HasData , Real , Dim , Data >::OutputVertexStream;
 	template< unsigned int WeightDegree > using DensityEstimator = typename _LevelSetExtractor< HasData , Real , Dim , Data >::template DensityEstimator< WeightDegree >;
 
-	template< unsigned int WeightDegree , unsigned int ... FEMSigs >
-	static Stats Extract( UIntPack< FEMSigs ... > , UIntPack< WeightDegree > , const FEMTree< Dim , Real >& tree , const DensityEstimator< WeightDegree > *densityWeights , const DenseNodeData< Real , UIntPack< FEMSigs ... > > &coefficients , Real isoValue , OutputVertexStream &vertexStream , OutputDataStream< std::vector< node_index_type > > &polygonStream , bool nonLinearFit , bool outputGradients , bool addBarycenter , bool polygonMesh , bool flipOrientation )
+	template< unsigned int WeightDegree , unsigned int ... FEMSigs , typename PositionReal=Real >
+	static auto Extract( UIntPack< FEMSigs ... > , UIntPack< WeightDegree > , const FEMTree< Dim , Real >& tree , const DensityEstimator< WeightDegree > *densityWeights , const DenseNodeData< Real , UIntPack< FEMSigs ... > > &coefficients , Real isoValue , OutputDataStream< Point< PositionReal , Dim > , Point< Real , Dim > , Real > &vertexStream , OutputDataStream< std::vector< node_index_type > > &polygonStream , bool nonLinearFit , bool outputGradients , bool addBarycenter , bool polygonMesh , bool flipOrientation )
 	{
 		return Extract( UIntPack< FEMSigs ... >() , UIntPack< WeightDegree >() , tree , densityWeights , coefficients , isoValue , 0 , 0 , 1 , vertexStream , polygonStream , nonLinearFit , outputGradients , addBarycenter , polygonMesh , flipOrientation );
 	}
 
-	template< unsigned int WeightDegree , unsigned int ... FEMSigs >
-	static Stats Extract( UIntPack< FEMSigs ... > , UIntPack< WeightDegree > , const FEMTree< Dim , Real >& tree , const DensityEstimator< WeightDegree >* densityWeights , const DenseNodeData< Real , UIntPack< FEMSigs ... > >& coefficients , Real isoValue , unsigned int slabDepth , unsigned int slabStart , unsigned int slabEnd , OutputVertexStream &vertexStream , OutputDataStream< std::vector< node_index_type > > &polygonStream , bool nonLinearFit , bool outputGradients , bool addBarycenter , bool polygonMesh , bool flipOrientation )
+	template< unsigned int WeightDegree , unsigned int ... FEMSigs , typename PositionReal=Real >
+	static auto Extract( UIntPack< FEMSigs ... > , UIntPack< WeightDegree > , const FEMTree< Dim , Real >& tree , const DensityEstimator< WeightDegree >* densityWeights , const DenseNodeData< Real , UIntPack< FEMSigs ... > >& coefficients , Real isoValue , unsigned int slabDepth , unsigned int slabStart , unsigned int slabEnd , OutputDataStream< Point< PositionReal , Dim > , Point< Real , Dim > , Real > &vertexStream , OutputDataStream< std::vector< node_index_type > > &polygonStream , bool nonLinearFit , bool outputGradients , bool addBarycenter , bool polygonMesh , bool flipOrientation )
 	{
 		std::vector< std::vector< Real > > dValues;
 		return Extract( UIntPack< FEMSigs ... >() , UIntPack< WeightDegree >() , tree , tree._maxDepth , densityWeights , coefficients , isoValue , slabDepth , slabStart , slabEnd , vertexStream , polygonStream , nonLinearFit , outputGradients , addBarycenter , polygonMesh , flipOrientation , NULL , NULL , dValues , dValues , false );
 	}
 
-	template< unsigned int WeightDegree , unsigned int ... FEMSigs >
-	static Stats Extract( UIntPack< FEMSigs ... > , UIntPack< WeightDegree > , const FEMTree< Dim , Real >& tree , int maxKeyDepth , const DensityEstimator< WeightDegree >* densityWeights , const DenseNodeData< Real , UIntPack< FEMSigs ... > >& coefficients , Real isoValue , unsigned int slabDepth , unsigned int slabStart , unsigned int slabEnd , OutputVertexStream &vertexStream , OutputDataStream< std::vector< node_index_type > > &polygonStream , bool nonLinearFit , bool outputGradients , bool addBarycenter , bool polygonMesh , bool flipOrientation , const typename LevelSetExtractor< Real , Dim-1 , Point< Real , Dim-1 > >::TreeSliceValuesAndVertexPositions *backBoundary , const typename LevelSetExtractor< Real , Dim-1 , Point< Real , Dim-1 > >::TreeSliceValuesAndVertexPositions *frontBoundary , const std::vector< std::vector< Real > > &backDValues , const std::vector< std::vector< Real > > &frontDValues , bool copyTopology )
+	template< unsigned int WeightDegree , unsigned int ... FEMSigs , typename PositionReal=Real >
+	static auto Extract( UIntPack< FEMSigs ... > , UIntPack< WeightDegree > , const FEMTree< Dim , Real >& tree , int maxKeyDepth , const DensityEstimator< WeightDegree >* densityWeights , const DenseNodeData< Real , UIntPack< FEMSigs ... > >& coefficients , Real isoValue , unsigned int slabDepth , unsigned int slabStart , unsigned int slabEnd , OutputDataStream< Point< PositionReal , Dim > , Point< Real , Dim > , Real > &vertexStream , OutputDataStream< std::vector< node_index_type > > &polygonStream , bool nonLinearFit , bool outputGradients , bool addBarycenter , bool polygonMesh , bool flipOrientation , const typename LevelSetExtractor< Real , Dim-1 , Point< Real , Dim-1 > >::TreeSliceValuesAndVertexPositions *backBoundary , const typename LevelSetExtractor< Real , Dim-1 , Point< Real , Dim-1 > >::TreeSliceValuesAndVertexPositions *frontBoundary , const std::vector< std::vector< Real > > &backDValues , const std::vector< std::vector< Real > > &frontDValues , bool copyTopology )
 	{
 		static const unsigned int DataSig = FEMDegreeAndBType< 0 , BOUNDARY_FREE >::Signature;
 		const SparseNodeData< ProjectiveData< Data , Real > , IsotropicUIntPack< Dim , DataSig > > *data = NULL;
 		Data zeroData = 0;
-		return _LevelSetExtractor< HasData , Real , Dim , Data >::template Extract< WeightDegree , DataSig , OutputVertexStream , FEMSigs ... >( UIntPack< FEMSigs ... >() , UIntPack< WeightDegree >() , UIntPack< DataSig >() , tree , maxKeyDepth , densityWeights , data , coefficients , isoValue , slabDepth , slabStart , slabEnd , vertexStream , polygonStream , zeroData , nonLinearFit , outputGradients , addBarycenter , polygonMesh , flipOrientation , backBoundary , frontBoundary , backDValues , frontDValues , copyTopology );
+		return _LevelSetExtractor< HasData , Real , Dim , Data , PositionReal >::Extract( UIntPack< FEMSigs ... >() , UIntPack< WeightDegree >() , UIntPack< DataSig >() , tree , maxKeyDepth , densityWeights , data , coefficients , isoValue , slabDepth , slabStart , slabEnd , vertexStream , polygonStream , zeroData , nonLinearFit , outputGradients , addBarycenter , polygonMesh , flipOrientation , backBoundary , frontBoundary , backDValues , frontDValues , copyTopology );
 	}
 };
 
@@ -2448,22 +2452,22 @@ struct LevelSetExtractor< Real , 3 , Data >
 	using OutputVertexStream = typename _LevelSetExtractor< HasData , Real , Dim , Data >::OutputVertexStream;
 	template< unsigned int WeightDegree > using DensityEstimator = typename _LevelSetExtractor< HasData , Real , Dim , Data >::template DensityEstimator< WeightDegree >;
 
-	template< unsigned int WeightDegree , unsigned int DataSig , unsigned int ... FEMSigs >
-	static Stats Extract( UIntPack< FEMSigs ... > , UIntPack< WeightDegree > , UIntPack< DataSig > , const FEMTree< Dim , Real >& tree , const DensityEstimator< WeightDegree > *densityWeights , const SparseNodeData< ProjectiveData< Data , Real > , IsotropicUIntPack< Dim , DataSig > > *data , const DenseNodeData< Real , UIntPack< FEMSigs ... > > &coefficients , Real isoValue , OutputVertexStream &vertexStream , OutputDataStream< std::vector< node_index_type > > &polygonStream , const Data &zeroData , bool nonLinearFit , bool outputGradients , bool addBarycenter , bool polygonMesh , bool flipOrientation )
+	template< unsigned int WeightDegree , unsigned int DataSig , unsigned int ... FEMSigs , typename PositionReal=Real >
+	static auto Extract( UIntPack< FEMSigs ... > , UIntPack< WeightDegree > , UIntPack< DataSig > , const FEMTree< Dim , Real >& tree , const DensityEstimator< WeightDegree > *densityWeights , const SparseNodeData< ProjectiveData< Data , Real > , IsotropicUIntPack< Dim , DataSig > > *data , const DenseNodeData< Real , UIntPack< FEMSigs ... > > &coefficients , Real isoValue , OutputDataStream< Point< PositionReal , Dim > , Point< Real , Dim > , Real , Data > &vertexStream , OutputDataStream< std::vector< node_index_type > > &polygonStream , const Data &zeroData , bool nonLinearFit , bool outputGradients , bool addBarycenter , bool polygonMesh , bool flipOrientation )
 	{
 		return Extract( UIntPack< FEMSigs ... >() , UIntPack< WeightDegree >() , UIntPack< DataSig >() , tree , densityWeights , data , coefficients , isoValue , 0 , 0 , 1 , vertexStream , polygonStream , zeroData , nonLinearFit , outputGradients , addBarycenter , polygonMesh , flipOrientation );
 	}
 
-	template< unsigned int WeightDegree , unsigned int DataSig , unsigned int ... FEMSigs >
-	static Stats Extract( UIntPack< FEMSigs ... > , UIntPack< WeightDegree > , UIntPack< DataSig > , const FEMTree< Dim , Real >& tree , const DensityEstimator< WeightDegree >* densityWeights , const SparseNodeData< ProjectiveData< Data , Real > , IsotropicUIntPack< Dim , DataSig > >* data , const DenseNodeData< Real , UIntPack< FEMSigs ... > >& coefficients , Real isoValue , unsigned int slabDepth , unsigned int slabStart , unsigned int slabEnd , OutputVertexStream &vertexStream , OutputDataStream< std::vector< node_index_type > > &polygonStream , const Data &zeroData , bool nonLinearFit , bool outputGradients , bool addBarycenter , bool polygonMesh , bool flipOrientation )
+	template< unsigned int WeightDegree , unsigned int DataSig , unsigned int ... FEMSigs , typename PositionReal=Real >
+	static auto Extract( UIntPack< FEMSigs ... > , UIntPack< WeightDegree > , UIntPack< DataSig > , const FEMTree< Dim , Real >& tree , const DensityEstimator< WeightDegree >* densityWeights , const SparseNodeData< ProjectiveData< Data , Real > , IsotropicUIntPack< Dim , DataSig > >* data , const DenseNodeData< Real , UIntPack< FEMSigs ... > >& coefficients , Real isoValue , unsigned int slabDepth , unsigned int slabStart , unsigned int slabEnd , OutputDataStream< Point< PositionReal , Dim > , Point< Real , Dim > , Real , Data > &vertexStream , OutputDataStream< std::vector< node_index_type > > &polygonStream , const Data &zeroData , bool nonLinearFit , bool outputGradients , bool addBarycenter , bool polygonMesh , bool flipOrientation )
 	{
 		std::vector< std::vector< Real >  > dValues;
 		return Extract( UIntPack< FEMSigs ... >() , UIntPack< WeightDegree >() , UIntPack< DataSig >() , tree , tree._maxDepth , densityWeights , data , coefficients , isoValue , slabDepth , slabStart , slabEnd , vertexStream , polygonStream , zeroData , nonLinearFit , outputGradients , addBarycenter , polygonMesh , flipOrientation , NULL , NULL , dValues , dValues , false );
 	}
 
-	template< unsigned int WeightDegree , unsigned int DataSig , unsigned int ... FEMSigs >
-	static Stats Extract( UIntPack< FEMSigs ... > , UIntPack< WeightDegree > , UIntPack< DataSig > , const FEMTree< Dim , Real >& tree , int maxKeyDepth , const DensityEstimator< WeightDegree >* densityWeights , const SparseNodeData< ProjectiveData< Data , Real > , IsotropicUIntPack< Dim , DataSig > >* data , const DenseNodeData< Real , UIntPack< FEMSigs ... > >& coefficients , Real isoValue , unsigned int slabDepth , unsigned int slabStart , unsigned int slabEnd , OutputVertexStream &vertexStream , OutputDataStream< std::vector< node_index_type > > &polygonStream , const Data &zeroData , bool nonLinearFit , bool outputGradients , bool addBarycenter , bool polygonMesh , bool flipOrientation , const typename LevelSetExtractor< Real , Dim-1 , Point< Real , Dim-1 > >::TreeSliceValuesAndVertexPositions *backBoundary , const typename LevelSetExtractor< Real , Dim-1 , Point< Real , Dim-1 > >::TreeSliceValuesAndVertexPositions *frontBoundary , const std::vector< std::vector< Real > > &backDValues , const std::vector< std::vector< Real > > &frontDValues , bool copyTopology )
+	template< unsigned int WeightDegree , unsigned int DataSig , unsigned int ... FEMSigs , typename PositionReal=Real >
+	static auto Extract( UIntPack< FEMSigs ... > , UIntPack< WeightDegree > , UIntPack< DataSig > , const FEMTree< Dim , Real >& tree , int maxKeyDepth , const DensityEstimator< WeightDegree >* densityWeights , const SparseNodeData< ProjectiveData< Data , Real > , IsotropicUIntPack< Dim , DataSig > >* data , const DenseNodeData< Real , UIntPack< FEMSigs ... > >& coefficients , Real isoValue , unsigned int slabDepth , unsigned int slabStart , unsigned int slabEnd , OutputDataStream< Point< PositionReal , Dim > , Point< Real , Dim > , Real , Data > &vertexStream , OutputDataStream< std::vector< node_index_type > > &polygonStream , const Data &zeroData , bool nonLinearFit , bool outputGradients , bool addBarycenter , bool polygonMesh , bool flipOrientation , const typename LevelSetExtractor< Real , Dim-1 , Point< Real , Dim-1 > >::TreeSliceValuesAndVertexPositions *backBoundary , const typename LevelSetExtractor< Real , Dim-1 , Point< Real , Dim-1 > >::TreeSliceValuesAndVertexPositions *frontBoundary , const std::vector< std::vector< Real > > &backDValues , const std::vector< std::vector< Real > > &frontDValues , bool copyTopology )
 	{
-		return _LevelSetExtractor< HasData , Real , Dim , Data >::template Extract< WeightDegree , DataSig , OutputVertexStream , FEMSigs ... >( UIntPack< FEMSigs ... >() , UIntPack< WeightDegree >() , UIntPack< DataSig >() , tree , maxKeyDepth , densityWeights , data , coefficients , isoValue , slabDepth , slabStart , slabEnd , vertexStream , polygonStream , zeroData , nonLinearFit , outputGradients , addBarycenter , polygonMesh , flipOrientation , backBoundary , frontBoundary , backDValues , frontDValues , copyTopology );
+		return _LevelSetExtractor< HasData , Real , Dim , Data , PositionReal >::Extract( UIntPack< FEMSigs ... >() , UIntPack< WeightDegree >() , UIntPack< DataSig >() , tree , maxKeyDepth , densityWeights , data , coefficients , isoValue , slabDepth , slabStart , slabEnd , vertexStream , polygonStream , zeroData , nonLinearFit , outputGradients , addBarycenter , polygonMesh , flipOrientation , backBoundary , frontBoundary , backDValues , frontDValues , copyTopology );
 	}
 };
