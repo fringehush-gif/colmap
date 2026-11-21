@@ -4043,6 +4043,7 @@ public:
   void SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointNum(size_t num);
 
 private:
+  friend struct GraphSolverTestAccess;
   SolverParams<double> params_;
   int device_id_;
   uint8_t *origin_ptr_;
@@ -4156,10 +4157,11 @@ private:
   void DoUpdateStep();
   void DoUpdateRFirst();
   void DoUpdateR();
-  double DoRetractScore();
+  double DoRetractScore(double* predicted_decrease = nullptr);
   void DoBeta();
   void DoUpdateP();
   void DoUpdateMp();
+  void LaunchPredDecrease();
   double GetPredDecrease();
 
   double *marker__start_;
