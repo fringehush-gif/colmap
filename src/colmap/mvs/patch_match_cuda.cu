@@ -147,7 +147,7 @@ __device__ inline float PerturbDepth(const float perturbation,
   return GenerateRandomDepth(depth_min, depth_max, rand_state);
 }
 
-__device__ inline void PerturbNormal(const RefCamera& camera,
+__device__ inline bool PerturbNormal(const RefCamera& camera,
                                      const int row,
                                      const int col,
                                      const float perturbation,
@@ -190,20 +190,19 @@ __device__ inline void PerturbNormal(const RefCamera& camera,
   if (DotProduct3(perturbed_normal, view_ray) >= 0.0f) {
     const int kMaxNumTrials = 3;
     if (num_trials < kMaxNumTrials) {
-      PerturbNormal(camera,
-                    row,
-                    col,
-                    0.5f * perturbation,
-                    normal,
-                    rand_state,
-                    perturbed_normal,
-                    num_trials + 1);
-      return;
+      return PerturbNormal(camera,
+                           row,
+                           col,
+                           0.5f * perturbation,
+                           normal,
+                           rand_state,
+                           perturbed_normal,
+                           num_trials + 1);
     } else {
       perturbed_normal[0] = normal[0];
       perturbed_normal[1] = normal[1];
       perturbed_normal[2] = normal[2];
-      return;
+      return false;
     }
   }
 
@@ -212,6 +211,7 @@ __device__ inline void PerturbNormal(const RefCamera& camera,
   perturbed_normal[0] *= inv_norm;
   perturbed_normal[1] *= inv_norm;
   perturbed_normal[2] *= inv_norm;
+  return true;
 }
 
 __device__ inline void ComputePointAtDepth(const RefCamera& camera,
@@ -1418,15 +1418,19 @@ __global__ void SweepFromTopToBottom(
       // Generate random parameters.
       rand_param_state.depth = PerturbDepth(
           options.perturbation, curr_param_state.depth, &rand_state);
-      PerturbNormal(camera,
-                    row,
-                    col,
-                    options.perturbation * M_PI,
-                    curr_param_state.normal,
-                    &rand_state,
-                    rand_param_state.normal);
-      PrepareNormal(
-          normal_map, rand_param_state.normal, rand_param_state.encoded);
+      if (PerturbNormal(camera,
+                        row,
+                        col,
+                        options.perturbation * M_PI,
+                        curr_param_state.normal,
+                        &rand_state,
+                        rand_param_state.normal)) {
+        PrepareNormal(
+            normal_map, rand_param_state.normal, rand_param_state.encoded);
+      } else {
+        // The admitted incumbent need not pass fresh-input admission again.
+        rand_param_state.encoded = curr_param_state.encoded;
+      }
     }
 
     // Compute independent source probabilities before the ordered CDF update.
