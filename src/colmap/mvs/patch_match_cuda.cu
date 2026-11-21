@@ -1232,8 +1232,13 @@ __global__ void SweepFromTopToBottom(
 #endif
       for (int row = cost_map.GetHeight() - 1; row >= 0; --row) {
         const float cost = cost_map.Get(row, col, image_idx);
+        if constexpr (!kCheckpointHmm) {
+          // Alpha includes this emission; each pixel needs the strict suffix.
+          sel_prob_map.Set(row, col, image_idx, beta);
+        }
         beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
         if constexpr (kCheckpointHmm) {
+          // Replay of the preceding stripe needs this boundary emission too.
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 610 && !defined(__HIPCC__)
           if (row == checkpoint_row) {
             checkpoint_beta.Set(checkpoint_idx, col, image_idx, beta);
@@ -1245,8 +1250,6 @@ __global__ void SweepFromTopToBottom(
             checkpoint_beta.Set(
                 row / checkpoint_stripe.GetHeight(), col, image_idx, beta);
 #endif
-        } else {
-          sel_prob_map.Set(row, col, image_idx, beta);
         }
       }
 
@@ -1341,8 +1344,8 @@ __global__ void SweepFromTopToBottom(
 #endif
           for (int beta_row = end - 1; beta_row >= row; --beta_row) {
             const float cost = cost_map.Get(beta_row, col, image_idx);
-            beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
             checkpoint_stripe.Set(beta_row - row, col, image_idx, beta);
+            beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
           }
         }
       }
@@ -1395,12 +1398,14 @@ __global__ void SweepFromTopToBottom(
       // of the normal of the previous ray. This helps to better estimate
       // the depth of very oblique structures, i.e. pixels whose normal
       // direction is significantly different from their viewing direction.
-      prev_param_state.depth = PropagateDepth(camera,
-                                              prev_param_state.depth,
-                                              prev_param_state.normal,
-                                              row - 1,
-                                              row,
-                                              col);
+      if (row > 0) {
+        prev_param_state.depth = PropagateDepth(camera,
+                                                prev_param_state.depth,
+                                                prev_param_state.normal,
+                                                row - 1,
+                                                row,
+                                                col);
+      }
 
       // Read parameters for current pixel from previous sweep.
       curr_param_state.depth = depth_map.Get(row, col);
