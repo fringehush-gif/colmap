@@ -79,6 +79,7 @@ class PatchMatchCuda {
             int kCostBits = 0>
   void RunWithWindowSizeAndStep();
   void CheckUsable() const;
+  void PoisonGeometryState() noexcept;
   void RunImpl();
 
   GpuMatView<float> GeometryView(const GpuMat<float>& owner) const;
@@ -106,7 +107,6 @@ class PatchMatchCuda {
   void CheckCostMapDomain() const;
 #ifndef COLMAP_HIP_ENABLED
   void InitAlternateOrientationMemory(const PatchMatchCuda* geometry_donor);
-  void PoisonGeometryState() noexcept;
   void EnsureGeometryRotationMemory(bool allow_checkpoint = true);
   bool CanRotateGeometryThroughCheckpoint() const;
   bool CheckpointGeometryFits() const;

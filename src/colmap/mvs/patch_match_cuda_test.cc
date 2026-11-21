@@ -165,7 +165,9 @@ TEST(PatchMatchCuda, SourceSamplingPreservesSupportAndStrides) {
     EXPECT_EQ(SampleSource(probs.data(), 3, stride, 0.5f), 2);
     EXPECT_EQ(SampleSource(probs.data(), 3, stride, 1.0f), 2);
     for (size_t i = 0; i < probs.size(); ++i) {
-      if (i % stride != 0) EXPECT_EQ(probs[i], -7.0f);
+      if (i % stride != 0) {
+        EXPECT_EQ(probs[i], -7.0f);
+      }
     }
   }
   // Invalid distributions keep the old normalization/selection policy; they
@@ -2106,54 +2108,218 @@ TEST_F(CudaTest, OctNormalFailureInvalidatesSingleAndBatchResults) {
     p.normal_maps = &inputs.normals;
     return p;
   };
-  auto options = MakeOptions(false, false, false);
-  const PatchMatchOptions defaults;
-  options.window_radius = defaults.window_radius;
-  options.window_step = defaults.window_step;
-  options.num_iterations = defaults.num_iterations;
-  options.num_samples = defaults.num_samples;
-  options.sigma_spatial = options.window_radius;
-  options.normal_oct40 = true;
-  auto unavailable = [](const PatchMatchCuda& owner) {
-    EXPECT_ANY_THROW(owner.GetDepthMap());
-    EXPECT_ANY_THROW(owner.GetNormalMap());
-    EXPECT_ANY_THROW(owner.GetSelProbMap());
-    EXPECT_TRUE(owner.GetConsistentImageIdxs().empty());
-  };
-  Inputs input = MakeInputs(0, 2, 25, 33);
-  auto problem = problem_for(input);
-  PatchMatchCuda single(options, problem);
-  unavailable(single);
-  ASSERT_NO_THROW(single.Run());
-  EXPECT_NO_THROW(single.GetDepthMap());
-  PatchMatchCudaTestPeer::PoisonOctNormal(single);
-  EXPECT_ANY_THROW(single.Run());
-  unavailable(single);
+  for (const bool reuse : {false, true}) {
+    SCOPED_TRACE(::testing::Message() << "rotation_buffer_reuse=" << reuse);
+    auto options = MakeOptions(false, false, reuse);
+    const PatchMatchOptions defaults;
+    options.window_radius = defaults.window_radius;
+    options.window_step = defaults.window_step;
+    options.num_iterations = defaults.num_iterations;
+    options.num_samples = defaults.num_samples;
+    options.sigma_spatial = options.window_radius;
+    options.normal_oct40 = true;
+    options.rotation_buffer_reuse = reuse;
+    options.checkpoint_hmm = false;
+    options.probability_unorm16 = false;
+    ASSERT_TRUE(options.Check());
 
-  Inputs a = MakeInputs(0, 2, 25, 33), b = MakeInputs(1, 2, 25, 33),
-         c = MakeInputs(2, 2, 25, 33);
-  auto pa = problem_for(a), pb = problem_for(b), pc = problem_for(c);
-  PatchMatchCuda first(options, pa), second(options, pb), third(options, pc);
-  struct Streams {
-    std::array<cudaStream_t, 3> values{};
-    ~Streams() {
-      for (auto stream : values)
-        if (stream) (void)cudaStreamDestroy(stream);
+    const auto expect_failure = [](auto&& run,
+                                   const char* message,
+                                   const char* operation) {
+      try {
+        run();
+        ADD_FAILURE() << "Expected refusal for " << operation;
+      } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find(message), std::string::npos)
+            << operation << ": " << error.what();
+      } catch (const std::exception& error) {
+        ADD_FAILURE() << "Unexpected exception for " << operation << ": "
+                      << error.what();
+      }
+    };
+    const auto expect_domain_failure = [](auto&& run) {
+      try {
+        run();
+        FAIL() << "Expected Oct40 refusal during normal rotation";
+      } catch (const std::invalid_argument& error) {
+        ASSERT_NE(std::string(error.what())
+                      .find("Oct40 normal domain refusal (sticky bits)"),
+                  std::string::npos)
+            << error.what();
+      }
+    };
+    const auto expect_partial_rotation =
+        [](const PatchMatchTestGeometry& before,
+           const PatchMatchTestGeometry& after) {
+          // MakeInputs(0, 2, 25, 33) has width 33 and height 25.
+          const std::pair<std::size_t, std::size_t> original{33, 25},
+              rotated{25, 33};
+          ASSERT_EQ(before.depth, original);
+          ASSERT_EQ(before.normal, original);
+          ASSERT_EQ(before.cost, original);
+          ASSERT_EQ(before.reference, original);
+          ASSERT_EQ(before.normal_frame, 0u);
+          ASSERT_EQ(before.rotation, 0);
+          // GpuMat dimensions are immutable: this proves the depth owner
+          // swapped.
+          ASSERT_EQ(after.depth, rotated);
+          ASSERT_EQ(after.normal, before.normal);
+          ASSERT_EQ(after.normal_frame, before.normal_frame);
+          ASSERT_EQ(after.cost, before.cost);
+          ASSERT_EQ(after.reference, before.reference);
+        };
+    const auto unavailable =
+        [&](const PatchMatchCuda& owner, bool poisoned, const char* label) {
+          SCOPED_TRACE(label);
+          if (!poisoned) {
+            EXPECT_ANY_THROW(owner.GetDepthMap());
+            EXPECT_ANY_THROW(owner.GetNormalMap());
+            EXPECT_ANY_THROW(owner.GetSelProbMap());
+            EXPECT_TRUE(owner.GetConsistentImageIdxs().empty());
+            return;
+          }
+          const char* message =
+              "Interrupted in-place geometry rotation; reconstruct the owner";
+          expect_failure(
+              [&] { (void)owner.GetDepthMap(); }, message, "GetDepthMap");
+          expect_failure(
+              [&] { (void)owner.GetNormalMap(); }, message, "GetNormalMap");
+          expect_failure(
+              [&] { (void)owner.GetSelProbMap(); }, message, "GetSelProbMap");
+          expect_failure([&] { (void)owner.GetConsistentImageIdxs(); },
+                         message,
+                         "GetConsistentImageIdxs");
+        };
+    const char* retry_message =
+        "Interrupted in-place geometry rotation; reconstruct the owner";
+
+    // Public-boundary invariant: a consistent RAW frame 3 models an owner
+    // left between batch rotations; no allocation failure is injected here.
+    {
+      auto raw_options = options;
+      raw_options.normal_oct40 = false;
+      Inputs raw_input = MakeInputs(0, 2, 25, 33);
+      auto raw_problem = problem_for(raw_input);
+      PatchMatchCuda raw(raw_options, raw_problem);
+      ASSERT_NO_THROW(raw.Run());
+      ASSERT_NO_THROW(raw.Run());
+      ASSERT_NO_THROW(raw.GetDepthMap());
+      ASSERT_NO_THROW(raw.GetNormalMap());
+      ASSERT_NO_THROW(raw.GetSelProbMap());
+      ASSERT_NO_THROW(raw.GetConsistentImageIdxs());
+      ASSERT_NO_THROW(PatchMatchCudaTestPeer::RotateThree(raw));
+      const auto state = PatchMatchCudaTestPeer::Geometry(raw);
+      const std::pair<std::size_t, std::size_t> rotated{25, 33};
+      ASSERT_EQ(state.rotation, 3);
+      ASSERT_EQ(state.depth, rotated);
+      ASSERT_EQ(state.normal, rotated);
+      ASSERT_EQ(state.cost, rotated);
+      ASSERT_EQ(state.reference, rotated);
+      ASSERT_EQ(state.probability, rotated);
+      RecordProperty(reuse ? "raw_frame3_reuse1" : "raw_frame3_reuse0", 1);
+      unavailable(raw, true, "raw_frame3");
+
+      // Do not execute the baseline solver from a nonzero orientation. Probe
+      // its actual entry check; only a refusal makes the subsequent Run safe.
+      bool guard_refused = false;
+      try {
+        PatchMatchCudaTestPeer::CheckUsable(raw);
+      } catch (const std::invalid_argument& error) {
+        guard_refused = true;
+        EXPECT_NE(std::string(error.what()).find(retry_message),
+                  std::string::npos)
+            << error.what();
+      } catch (const std::exception& error) {
+        ADD_FAILURE() << "Unexpected RAW entry exception: " << error.what();
+      }
+      EXPECT_TRUE(guard_refused);
+      if (guard_refused)
+        expect_failure([&] { raw.Run(); }, retry_message, "raw.Run");
     }
-  } streams;
-  for (auto& stream : streams.values)
-    CUDA_SAFE_CALL(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-  const auto [sa, sb, sc] = streams.values;
-  ASSERT_NO_THROW(
-      (RunPatchMatchBatch({&first, &second, &third}, {sa, sb, sc})));
-  EXPECT_NO_THROW(first.GetDepthMap());
-  EXPECT_NO_THROW(second.GetDepthMap());
-  PatchMatchCudaTestPeer::PoisonOctNormal(second);
-  EXPECT_ANY_THROW(
-      (RunPatchMatchBatch({&first, &second, &third}, {sa, sb, sc})));
-  unavailable(first);
-  unavailable(second);
-  unavailable(third);
+
+    Inputs input = MakeInputs(0, 2, 25, 33);
+    auto problem = problem_for(input);
+    PatchMatchCuda single(options, problem);
+    unavailable(single, false, "single");
+    ASSERT_NO_THROW(single.Run());
+    ASSERT_NO_THROW(
+        single.Run());  // A healthy retained owner remains reusable.
+    EXPECT_NO_THROW(single.GetDepthMap());
+    const auto single_before = PatchMatchCudaTestPeer::Geometry(single);
+    PatchMatchCudaTestPeer::PoisonOctNormal(single);
+    ASSERT_NO_FATAL_FAILURE(expect_domain_failure([&] { single.Run(); }));
+    const auto single_after = PatchMatchCudaTestPeer::Geometry(single);
+    ASSERT_NO_FATAL_FAILURE(
+        expect_partial_rotation(single_before, single_after));
+    RecordProperty(reuse ? "partial_single_reuse1" : "partial_single_reuse0",
+                   1);
+    EXPECT_EQ(single_after.rotation, -1);
+    for (int retry = 0; retry < 2; ++retry) {
+      expect_failure([&] { single.Run(); }, retry_message, "single.Run");
+      ASSERT_NO_FATAL_FAILURE(expect_partial_rotation(
+          single_before, PatchMatchCudaTestPeer::Geometry(single)));
+    }
+    unavailable(single, true, "single");
+
+    // Different third width selects per-owner rotation buffers when reused.
+    Inputs a = MakeInputs(0, 2, 25, 33), b = MakeInputs(1, 2, 25, 33),
+           c = MakeInputs(2, 2, 25, 35);
+    auto pa = problem_for(a), pb = problem_for(b), pc = problem_for(c);
+    PatchMatchCuda first(options, pa), second(options, pb), third(options, pc);
+    struct Streams {
+      std::array<cudaStream_t, 3> values{};
+      ~Streams() {
+        for (auto stream : values)
+          if (stream) (void)cudaStreamDestroy(stream);
+      }
+    } streams;
+    for (auto& stream : streams.values)
+      CUDA_SAFE_CALL(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    const auto [sa, sb, sc] = streams.values;
+    ASSERT_NO_THROW(
+        (RunPatchMatchBatch({&first, &second, &third}, {sa, sb, sc})));
+    ASSERT_NO_THROW(
+        (RunPatchMatchBatch({&first, &second, &third}, {sa, sb, sc})));
+    EXPECT_NO_THROW(first.GetDepthMap());
+    EXPECT_NO_THROW(second.GetDepthMap());
+    const auto second_before = PatchMatchCudaTestPeer::Geometry(second);
+    PatchMatchCudaTestPeer::PoisonOctNormal(second);
+    ASSERT_NO_FATAL_FAILURE(expect_domain_failure(
+        [&] { RunPatchMatchBatch({&first, &second, &third}, {sa, sb, sc}); }));
+    const auto second_after = PatchMatchCudaTestPeer::Geometry(second);
+    ASSERT_NO_FATAL_FAILURE(
+        expect_partial_rotation(second_before, second_after));
+    // The first view completed its rotation; the third was never rotated.
+    const auto first_after = PatchMatchCudaTestPeer::Geometry(first);
+    const auto third_after = PatchMatchCudaTestPeer::Geometry(third);
+    const std::pair<std::size_t, std::size_t> rotated{25, 33};
+    ASSERT_EQ(first_after.depth, rotated);
+    ASSERT_EQ(first_after.normal, rotated);
+    ASSERT_EQ(first_after.normal_frame, 1u);
+    ASSERT_EQ(first_after.cost, rotated);
+    ASSERT_EQ(first_after.reference, rotated);
+    const std::pair<std::size_t, std::size_t> third_original{35, 25};
+    ASSERT_EQ(third_after.depth, third_original);
+    ASSERT_EQ(third_after.normal, third_original);
+    ASSERT_EQ(third_after.normal_frame, 0u);
+    ASSERT_EQ(third_after.cost, third_original);
+    ASSERT_EQ(third_after.reference, third_original);
+    RecordProperty(reuse ? "partial_batch_reuse1" : "partial_batch_reuse0", 1);
+    EXPECT_EQ(first_after.rotation, -1);
+    EXPECT_EQ(second_after.rotation, -1);
+    EXPECT_EQ(third_after.rotation, -1);
+    for (int retry = 0; retry < 2; ++retry) {
+      expect_failure(
+          [&] { RunPatchMatchBatch({&first, &second, &third}, {sa, sb, sc}); },
+          retry_message,
+          "batch.Run");
+      ASSERT_NO_FATAL_FAILURE(expect_partial_rotation(
+          second_before, PatchMatchCudaTestPeer::Geometry(second)));
+    }
+    unavailable(first, true, "first");
+    unavailable(second, true, "second");
+    unavailable(third, true, "third");
+  }
 }
 
 TEST_F(CudaTest, NormalOct40RepeatsAcrossCostCodecsAndRotationModes) {
