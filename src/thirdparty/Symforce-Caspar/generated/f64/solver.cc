@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
+#include <string>
 #include <stdexcept>
 
 #include "caspar_mappings.h"
@@ -250,6 +252,33 @@
 
 namespace {
 
+void CheckReadbackCuda(cudaError_t status, const char* operation) {
+  if (status != cudaSuccess) {
+    throw std::runtime_error(std::string(operation) + " failed: " +
+                             cudaGetErrorString(status));
+  }
+}
+
+template <typename T, size_t Dimension, size_t StorageDimension>
+void CheckReadbackRange(size_t offset, size_t num, size_t count,
+                        size_t capacity, const char* node) {
+  static_assert(Dimension > 0 && StorageDimension >= Dimension);
+  if (offset > count || num > count - offset) {
+    throw std::runtime_error(std::string(node) +
+                             " readback range exceeds node count");
+  }
+  if (num == 0) {
+    return;
+  }
+  // Mappers use unsigned component indices and increment output lanes by 32.
+  constexpr size_t kIndexLimit = std::numeric_limits<unsigned int>::max() - 32;
+  if (capacity > kIndexLimit / StorageDimension ||
+      num > std::numeric_limits<size_t>::max() / sizeof(T) / Dimension) {
+    throw std::runtime_error(std::string(node) +
+                             " readback exceeds mapping argument limits");
+  }
+}
+
 void make_aligned(size_t &offset, size_t alignment_bytes) {
   offset = ((offset + alignment_bytes - 1) / alignment_bytes) * alignment_bytes;
 }
@@ -437,15 +466,7 @@ GraphSolver::GraphSolver(
       pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_(
           pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max) {
   indices_valid_ = false;
-  if (params.pcg_rel_error_exit <= 0.0f) {
-    throw std::runtime_error("params.pcg_rel_error_exit must be positive");
-  }
-  if (params.diag_init < 0.0f) {
-    throw std::runtime_error("params.diag_init must be positive");
-  }
-  if (params.pcg_iter_max < 1) {
-    throw std::runtime_error("params.pcg_iter_max must be at least 1");
-  }
+  set_params(params);
   allocation_size_ = get_nbytes();
 
   if (device_id_ < 0) {
@@ -1906,6 +1927,15 @@ GraphSolver::~GraphSolver() {
 }
 
 void GraphSolver::set_params(const SolverParams<double> &params) {
+  if (params.pcg_rel_error_exit <= 0.0f) {
+    throw std::runtime_error("params.pcg_rel_error_exit must be positive");
+  }
+  if (params.diag_init < 0.0f) {
+    throw std::runtime_error("params.diag_init must be positive");
+  }
+  if (params.pcg_iter_max < 1) {
+    throw std::runtime_error("params.pcg_iter_max must be at least 1");
+  }
   this->params_ = params;
 }
 
@@ -4977,31 +5007,35 @@ void GraphSolver::SetPinholeCalibNodesFromStackedDevice(
                               PinholeCalib_num_max_, offset, num);
 }
 
-void GraphSolver::GetPinholeCalibNodesToStackedHost(double *const data,
-                                                    const size_t offset,
-                                                    const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholeCalib_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholeCalib_num_");
+void GraphSolver::GetPinholeCalibNodesToStackedHost(
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 4, 4>(
+      offset, num, PinholeCalib_num_, PinholeCalib_num_max_, "PinholeCalib");
+  if (num == 0) {
+    return;
   }
-  PinholeCalibCasparToStacked(nodes__PinholeCalib__storage_current_,
-                              marker__scratch_inout_, PinholeCalib_num_max_,
-                              offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 4 * num * sizeof(double),
-             cudaMemcpyDeviceToHost);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholeCalibCasparToStacked(nodes__PinholeCalib__storage_current_,
+                            marker__scratch_inout_, PinholeCalib_num_max_, offset, num),
+      "PinholeCalibCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data, marker__scratch_inout_,
+                               4 * num * sizeof(double), cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
-void GraphSolver::GetPinholeCalibNodesToStackedDevice(double *const data,
-                                                      const size_t offset,
-                                                      const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholeCalib_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholeCalib_num_");
+void GraphSolver::GetPinholeCalibNodesToStackedDevice(
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 4, 4>(
+      offset, num, PinholeCalib_num_, PinholeCalib_num_max_, "PinholeCalib");
+  if (num == 0) {
+    return;
   }
-  PinholeCalibCasparToStacked(nodes__PinholeCalib__storage_current_, data,
-                              PinholeCalib_num_max_, offset, num);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholeCalibCasparToStacked(nodes__PinholeCalib__storage_current_,
+                            data, PinholeCalib_num_max_, offset, num),
+      "PinholeCalibCasparToStacked");
 }
 
 void GraphSolver::SetPinholeFocalNum(const size_t num) {
@@ -5038,31 +5072,35 @@ void GraphSolver::SetPinholeFocalNodesFromStackedDevice(
                               PinholeFocal_num_max_, offset, num);
 }
 
-void GraphSolver::GetPinholeFocalNodesToStackedHost(double *const data,
-                                                    const size_t offset,
-                                                    const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholeFocal_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholeFocal_num_");
+void GraphSolver::GetPinholeFocalNodesToStackedHost(
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 2, 2>(
+      offset, num, PinholeFocal_num_, PinholeFocal_num_max_, "PinholeFocal");
+  if (num == 0) {
+    return;
   }
-  PinholeFocalCasparToStacked(nodes__PinholeFocal__storage_current_,
-                              marker__scratch_inout_, PinholeFocal_num_max_,
-                              offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 2 * num * sizeof(double),
-             cudaMemcpyDeviceToHost);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholeFocalCasparToStacked(nodes__PinholeFocal__storage_current_,
+                            marker__scratch_inout_, PinholeFocal_num_max_, offset, num),
+      "PinholeFocalCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data, marker__scratch_inout_,
+                               2 * num * sizeof(double), cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
-void GraphSolver::GetPinholeFocalNodesToStackedDevice(double *const data,
-                                                      const size_t offset,
-                                                      const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholeFocal_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholeFocal_num_");
+void GraphSolver::GetPinholeFocalNodesToStackedDevice(
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 2, 2>(
+      offset, num, PinholeFocal_num_, PinholeFocal_num_max_, "PinholeFocal");
+  if (num == 0) {
+    return;
   }
-  PinholeFocalCasparToStacked(nodes__PinholeFocal__storage_current_, data,
-                              PinholeFocal_num_max_, offset, num);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholeFocalCasparToStacked(nodes__PinholeFocal__storage_current_,
+                            data, PinholeFocal_num_max_, offset, num),
+      "PinholeFocalCasparToStacked");
 }
 
 void GraphSolver::SetPinholePoseNum(const size_t num) {
@@ -5100,31 +5138,35 @@ void GraphSolver::SetPinholePoseNodesFromStackedDevice(const double *const data,
                              PinholePose_num_max_, offset, num);
 }
 
-void GraphSolver::GetPinholePoseNodesToStackedHost(double *const data,
-                                                   const size_t offset,
-                                                   const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholePose_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholePose_num_");
+void GraphSolver::GetPinholePoseNodesToStackedHost(
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 7, 8>(
+      offset, num, PinholePose_num_, PinholePose_num_max_, "PinholePose");
+  if (num == 0) {
+    return;
   }
-  PinholePoseCasparToStacked(nodes__PinholePose__storage_current_,
-                             marker__scratch_inout_, PinholePose_num_max_,
-                             offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 7 * num * sizeof(double),
-             cudaMemcpyDeviceToHost);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholePoseCasparToStacked(nodes__PinholePose__storage_current_,
+                            marker__scratch_inout_, PinholePose_num_max_, offset, num),
+      "PinholePoseCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data, marker__scratch_inout_,
+                               7 * num * sizeof(double), cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
-void GraphSolver::GetPinholePoseNodesToStackedDevice(double *const data,
-                                                     const size_t offset,
-                                                     const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholePose_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholePose_num_");
+void GraphSolver::GetPinholePoseNodesToStackedDevice(
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 7, 8>(
+      offset, num, PinholePose_num_, PinholePose_num_max_, "PinholePose");
+  if (num == 0) {
+    return;
   }
-  PinholePoseCasparToStacked(nodes__PinholePose__storage_current_, data,
-                             PinholePose_num_max_, offset, num);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholePoseCasparToStacked(nodes__PinholePose__storage_current_,
+                            data, PinholePose_num_max_, offset, num),
+      "PinholePoseCasparToStacked");
 }
 
 void GraphSolver::SetPinholePrincipalPointNum(const size_t num) {
@@ -5163,29 +5205,34 @@ void GraphSolver::SetPinholePrincipalPointNodesFromStackedDevice(
 }
 
 void GraphSolver::GetPinholePrincipalPointNodesToStackedHost(
-    double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholePrincipalPoint_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholePrincipalPoint_num_");
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 2, 2>(
+      offset, num, PinholePrincipalPoint_num_, PinholePrincipalPoint_num_max_, "PinholePrincipalPoint");
+  if (num == 0) {
+    return;
   }
-  PinholePrincipalPointCasparToStacked(
-      nodes__PinholePrincipalPoint__storage_current_, marker__scratch_inout_,
-      PinholePrincipalPoint_num_max_, offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 2 * num * sizeof(double),
-             cudaMemcpyDeviceToHost);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholePrincipalPointCasparToStacked(nodes__PinholePrincipalPoint__storage_current_,
+                            marker__scratch_inout_, PinholePrincipalPoint_num_max_, offset, num),
+      "PinholePrincipalPointCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data, marker__scratch_inout_,
+                               2 * num * sizeof(double), cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
 void GraphSolver::GetPinholePrincipalPointNodesToStackedDevice(
-    double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholePrincipalPoint_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > PinholePrincipalPoint_num_");
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 2, 2>(
+      offset, num, PinholePrincipalPoint_num_, PinholePrincipalPoint_num_max_, "PinholePrincipalPoint");
+  if (num == 0) {
+    return;
   }
-  PinholePrincipalPointCasparToStacked(
-      nodes__PinholePrincipalPoint__storage_current_, data,
-      PinholePrincipalPoint_num_max_, offset, num);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PinholePrincipalPointCasparToStacked(nodes__PinholePrincipalPoint__storage_current_,
+                            data, PinholePrincipalPoint_num_max_, offset, num),
+      "PinholePrincipalPointCasparToStacked");
 }
 
 void GraphSolver::SetPointNum(const size_t num) {
@@ -5220,28 +5267,35 @@ void GraphSolver::SetPointNodesFromStackedDevice(const double *const data,
                        offset, num);
 }
 
-void GraphSolver::GetPointNodesToStackedHost(double *const data,
-                                             const size_t offset,
-                                             const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > Point_num_) {
-    throw std::runtime_error(std::to_string(offset + num) + " > Point_num_");
+void GraphSolver::GetPointNodesToStackedHost(
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 3, 4>(
+      offset, num, Point_num_, Point_num_max_, "Point");
+  if (num == 0) {
+    return;
   }
-  PointCasparToStacked(nodes__Point__storage_current_, marker__scratch_inout_,
-                       Point_num_max_, offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 3 * num * sizeof(double),
-             cudaMemcpyDeviceToHost);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PointCasparToStacked(nodes__Point__storage_current_,
+                            marker__scratch_inout_, Point_num_max_, offset, num),
+      "PointCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data, marker__scratch_inout_,
+                               3 * num * sizeof(double), cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
-void GraphSolver::GetPointNodesToStackedDevice(double *const data,
-                                               const size_t offset,
-                                               const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > Point_num_) {
-    throw std::runtime_error(std::to_string(offset + num) + " > Point_num_");
+void GraphSolver::GetPointNodesToStackedDevice(
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 3, 4>(
+      offset, num, Point_num_, Point_num_max_, "Point");
+  if (num == 0) {
+    return;
   }
-  PointCasparToStacked(nodes__Point__storage_current_, data, Point_num_max_,
-                       offset, num);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      PointCasparToStacked(nodes__Point__storage_current_,
+                            data, Point_num_max_, offset, num),
+      "PointCasparToStacked");
 }
 
 void GraphSolver::SetSimpleRadialCalibNum(const size_t num) {
@@ -5279,32 +5333,35 @@ void GraphSolver::SetSimpleRadialCalibNodesFromStackedDevice(
                                    SimpleRadialCalib_num_max_, offset, num);
 }
 
-void GraphSolver::GetSimpleRadialCalibNodesToStackedHost(double *const data,
-                                                         const size_t offset,
-                                                         const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialCalib_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialCalib_num_");
+void GraphSolver::GetSimpleRadialCalibNodesToStackedHost(
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 4, 4>(
+      offset, num, SimpleRadialCalib_num_, SimpleRadialCalib_num_max_, "SimpleRadialCalib");
+  if (num == 0) {
+    return;
   }
-  SimpleRadialCalibCasparToStacked(nodes__SimpleRadialCalib__storage_current_,
-                                   marker__scratch_inout_,
-                                   SimpleRadialCalib_num_max_, offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 4 * num * sizeof(double),
-             cudaMemcpyDeviceToHost);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      SimpleRadialCalibCasparToStacked(nodes__SimpleRadialCalib__storage_current_,
+                            marker__scratch_inout_, SimpleRadialCalib_num_max_, offset, num),
+      "SimpleRadialCalibCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data, marker__scratch_inout_,
+                               4 * num * sizeof(double), cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
-void GraphSolver::GetSimpleRadialCalibNodesToStackedDevice(double *const data,
-                                                           const size_t offset,
-                                                           const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialCalib_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialCalib_num_");
+void GraphSolver::GetSimpleRadialCalibNodesToStackedDevice(
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 4, 4>(
+      offset, num, SimpleRadialCalib_num_, SimpleRadialCalib_num_max_, "SimpleRadialCalib");
+  if (num == 0) {
+    return;
   }
-  SimpleRadialCalibCasparToStacked(nodes__SimpleRadialCalib__storage_current_,
-                                   data, SimpleRadialCalib_num_max_, offset,
-                                   num);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      SimpleRadialCalibCasparToStacked(nodes__SimpleRadialCalib__storage_current_,
+                            data, SimpleRadialCalib_num_max_, offset, num),
+      "SimpleRadialCalibCasparToStacked");
 }
 
 void GraphSolver::SetSimpleRadialFocalAndExtraNum(const size_t num) {
@@ -5344,29 +5401,34 @@ void GraphSolver::SetSimpleRadialFocalAndExtraNodesFromStackedDevice(
 }
 
 void GraphSolver::GetSimpleRadialFocalAndExtraNodesToStackedHost(
-    double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialFocalAndExtra_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialFocalAndExtra_num_");
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 2, 2>(
+      offset, num, SimpleRadialFocalAndExtra_num_, SimpleRadialFocalAndExtra_num_max_, "SimpleRadialFocalAndExtra");
+  if (num == 0) {
+    return;
   }
-  SimpleRadialFocalAndExtraCasparToStacked(
-      nodes__SimpleRadialFocalAndExtra__storage_current_,
-      marker__scratch_inout_, SimpleRadialFocalAndExtra_num_max_, offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 2 * num * sizeof(double),
-             cudaMemcpyDeviceToHost);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      SimpleRadialFocalAndExtraCasparToStacked(nodes__SimpleRadialFocalAndExtra__storage_current_,
+                            marker__scratch_inout_, SimpleRadialFocalAndExtra_num_max_, offset, num),
+      "SimpleRadialFocalAndExtraCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data, marker__scratch_inout_,
+                               2 * num * sizeof(double), cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
 void GraphSolver::GetSimpleRadialFocalAndExtraNodesToStackedDevice(
-    double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialFocalAndExtra_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialFocalAndExtra_num_");
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 2, 2>(
+      offset, num, SimpleRadialFocalAndExtra_num_, SimpleRadialFocalAndExtra_num_max_, "SimpleRadialFocalAndExtra");
+  if (num == 0) {
+    return;
   }
-  SimpleRadialFocalAndExtraCasparToStacked(
-      nodes__SimpleRadialFocalAndExtra__storage_current_, data,
-      SimpleRadialFocalAndExtra_num_max_, offset, num);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      SimpleRadialFocalAndExtraCasparToStacked(nodes__SimpleRadialFocalAndExtra__storage_current_,
+                            data, SimpleRadialFocalAndExtra_num_max_, offset, num),
+      "SimpleRadialFocalAndExtraCasparToStacked");
 }
 
 void GraphSolver::SetSimpleRadialPoseNum(const size_t num) {
@@ -5404,31 +5466,35 @@ void GraphSolver::SetSimpleRadialPoseNodesFromStackedDevice(
                                   SimpleRadialPose_num_max_, offset, num);
 }
 
-void GraphSolver::GetSimpleRadialPoseNodesToStackedHost(double *const data,
-                                                        const size_t offset,
-                                                        const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialPose_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialPose_num_");
+void GraphSolver::GetSimpleRadialPoseNodesToStackedHost(
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 7, 8>(
+      offset, num, SimpleRadialPose_num_, SimpleRadialPose_num_max_, "SimpleRadialPose");
+  if (num == 0) {
+    return;
   }
-  SimpleRadialPoseCasparToStacked(nodes__SimpleRadialPose__storage_current_,
-                                  marker__scratch_inout_,
-                                  SimpleRadialPose_num_max_, offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 7 * num * sizeof(double),
-             cudaMemcpyDeviceToHost);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      SimpleRadialPoseCasparToStacked(nodes__SimpleRadialPose__storage_current_,
+                            marker__scratch_inout_, SimpleRadialPose_num_max_, offset, num),
+      "SimpleRadialPoseCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data, marker__scratch_inout_,
+                               7 * num * sizeof(double), cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
-void GraphSolver::GetSimpleRadialPoseNodesToStackedDevice(double *const data,
-                                                          const size_t offset,
-                                                          const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialPose_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialPose_num_");
+void GraphSolver::GetSimpleRadialPoseNodesToStackedDevice(
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 7, 8>(
+      offset, num, SimpleRadialPose_num_, SimpleRadialPose_num_max_, "SimpleRadialPose");
+  if (num == 0) {
+    return;
   }
-  SimpleRadialPoseCasparToStacked(nodes__SimpleRadialPose__storage_current_,
-                                  data, SimpleRadialPose_num_max_, offset, num);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      SimpleRadialPoseCasparToStacked(nodes__SimpleRadialPose__storage_current_,
+                            data, SimpleRadialPose_num_max_, offset, num),
+      "SimpleRadialPoseCasparToStacked");
 }
 
 void GraphSolver::SetSimpleRadialPrincipalPointNum(const size_t num) {
@@ -5468,29 +5534,34 @@ void GraphSolver::SetSimpleRadialPrincipalPointNodesFromStackedDevice(
 }
 
 void GraphSolver::GetSimpleRadialPrincipalPointNodesToStackedHost(
-    double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialPrincipalPoint_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialPrincipalPoint_num_");
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 2, 2>(
+      offset, num, SimpleRadialPrincipalPoint_num_, SimpleRadialPrincipalPoint_num_max_, "SimpleRadialPrincipalPoint");
+  if (num == 0) {
+    return;
   }
-  SimpleRadialPrincipalPointCasparToStacked(
-      nodes__SimpleRadialPrincipalPoint__storage_current_,
-      marker__scratch_inout_, SimpleRadialPrincipalPoint_num_max_, offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, 2 * num * sizeof(double),
-             cudaMemcpyDeviceToHost);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      SimpleRadialPrincipalPointCasparToStacked(nodes__SimpleRadialPrincipalPoint__storage_current_,
+                            marker__scratch_inout_, SimpleRadialPrincipalPoint_num_max_, offset, num),
+      "SimpleRadialPrincipalPointCasparToStacked");
+  CheckReadbackCuda(cudaMemcpy(data, marker__scratch_inout_,
+                               2 * num * sizeof(double), cudaMemcpyDeviceToHost),
+                    "cudaMemcpy device-to-host");
 }
 
 void GraphSolver::GetSimpleRadialPrincipalPointNodesToStackedDevice(
-    double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialPrincipalPoint_num_) {
-    throw std::runtime_error(std::to_string(offset + num) +
-                             " > SimpleRadialPrincipalPoint_num_");
+    double* const data, const size_t offset, const size_t num) {
+  CheckReadbackRange<double, 2, 2>(
+      offset, num, SimpleRadialPrincipalPoint_num_, SimpleRadialPrincipalPoint_num_max_, "SimpleRadialPrincipalPoint");
+  if (num == 0) {
+    return;
   }
-  SimpleRadialPrincipalPointCasparToStacked(
-      nodes__SimpleRadialPrincipalPoint__storage_current_, data,
-      SimpleRadialPrincipalPoint_num_max_, offset, num);
+  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckReadbackCuda(
+      SimpleRadialPrincipalPointCasparToStacked(nodes__SimpleRadialPrincipalPoint__storage_current_,
+                            data, SimpleRadialPrincipalPoint_num_max_, offset, num),
+      "SimpleRadialPrincipalPointCasparToStacked");
 }
 
 void GraphSolver::SetSimpleRadialNum(const size_t num) {
@@ -12206,7 +12277,37 @@ size_t GraphSolver::get_nbytes() {
                          4 * SimpleRadialCalib_num_max_,
                          2 * SimpleRadialFocalAndExtra_num_max_,
                          7 * SimpleRadialPose_num_max_,
-                         2 * SimpleRadialPrincipalPoint_num_max_}) *
+                         2 * SimpleRadialPrincipalPoint_num_max_,
+                         7 * simple_radial_num_max_,
+                         7 * simple_radial_fixed_pose_num_max_,
+                         7 * simple_radial_fixed_point_num_max_,
+                         7 * simple_radial_fixed_pose_fixed_point_num_max_,
+                         7 * pinhole_num_max_,
+                         7 * pinhole_fixed_pose_num_max_,
+                         7 * pinhole_fixed_point_num_max_,
+                         7 * pinhole_fixed_pose_fixed_point_num_max_,
+                         7 * simple_radial_split_fixed_focal_and_extra_num_max_,
+                         7 * simple_radial_split_fixed_principal_point_num_max_,
+                         7 * simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_,
+                         7 * simple_radial_split_fixed_pose_fixed_principal_point_num_max_,
+                         7 * simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_,
+                         7 * simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_,
+                         7 * simple_radial_split_fixed_principal_point_fixed_point_num_max_,
+                         7 * simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
+                         7 * simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_,
+                         7 * simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
+                         7 * simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
+                         7 * pinhole_split_fixed_focal_num_max_,
+                         7 * pinhole_split_fixed_principal_point_num_max_,
+                         7 * pinhole_split_fixed_pose_fixed_focal_num_max_,
+                         7 * pinhole_split_fixed_pose_fixed_principal_point_num_max_,
+                         7 * pinhole_split_fixed_focal_fixed_principal_point_num_max_,
+                         7 * pinhole_split_fixed_focal_fixed_point_num_max_,
+                         7 * pinhole_split_fixed_principal_point_fixed_point_num_max_,
+                         7 * pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_,
+                         7 * pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_,
+                         7 * pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
+                         7 * pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_}) *
                    sizeof(double));
   increment_offset<double>(offset, 0 * 0, 4);
   increment_offset<double>(offset, 2 * simple_radial_num_, 4);

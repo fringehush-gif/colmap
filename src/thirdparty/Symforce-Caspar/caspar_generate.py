@@ -8,7 +8,12 @@ from itertools import combinations
 from pathlib import Path
 from typing import Annotated, Any, get_type_hints
 
-from caspar_solver_template import patch_solver_templates
+from caspar_solver_template import (
+    patch_readback_template,
+    patch_solver_templates,
+    patch_solver_tools,
+    write_solver_tools,
+)
 from jinja2 import ChoiceLoader, DictLoader
 
 # Must be set before importing symforce.symbolic
@@ -22,6 +27,7 @@ import symforce  # noqa: E402
 
 symforce.set_epsilon_to_number(1e-15 if precision == "f64" else 1e-6)
 
+import symforce.caspar as caspar  # noqa: E402
 import symforce.symbolic as sf  # noqa: E402
 from symforce import typing as T  # noqa: E402
 from symforce.caspar import CasparLibrary  # noqa: E402
@@ -410,6 +416,9 @@ if original_loader is None:
 source, _, _ = original_loader.get_source(template_env, "solver.cc.jinja")
 header, _, _ = original_loader.get_source(template_env, "solver.h.jinja")
 source, header = patch_solver_templates(source, header)
+source = patch_readback_template(source)
+runtime_path = Path(caspar.__file__).parent / "source/runtime/solver_tools.cu"
+solver_tools = patch_solver_tools(runtime_path.read_text())
 template_env.loader = ChoiceLoader(
     [
         DictLoader(
@@ -423,5 +432,6 @@ template_env.loader = ChoiceLoader(
 )
 try:
     caslib.generate(out_dir, use_symlinks=False, python_bindings=False)
+    write_solver_tools(out_dir / "solver_tools.cu", solver_tools)
 finally:
     template_env.loader = original_loader
