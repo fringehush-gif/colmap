@@ -199,7 +199,7 @@ SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator *
 	return *this;
 }
 template< class T , class IndexType >
-SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator /= ( T s ){ return (*this) * ( (T)1./s ); }
+SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator /= ( T s ){ return (*this) *= ( (T)1./s ); }
 template< class T , class IndexType >
 SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator *= ( const SparseMatrix< T , IndexType , 0 >& B )
 {
@@ -645,12 +645,15 @@ void SparseMatrix< T , IndexType , MaxRowSize >::resetRowSize( size_t row , size
 template< class T , class IndexType , size_t MaxRowSize >
 SparseMatrix< T , IndexType , MaxRowSize >& SparseMatrix< T , IndexType , MaxRowSize >::operator *= ( T s )
 {
-	ThreadPool::ParallelFor( 0 , _rowNum*MaxRowSize , [&]( unsigned int , size_t i ){ _entries[i].Value *= s; } );
+	ThreadPool::ParallelFor( 0 , _rowNum , [&]( unsigned int , size_t i )
+	{
+		for( size_t j=0 ; j<_rowSizes[i] ; j++ ) _entries[ MaxRowSize*i + j ].Value *= s;
+	} );
 	return *this;
 }
 
 template< class T , class IndexType , size_t MaxRowSize >
-SparseMatrix< T , IndexType , MaxRowSize >& SparseMatrix< T , IndexType , MaxRowSize >::operator /= ( T s ){ return (*this) * ( (T)1./s ); }
+SparseMatrix< T , IndexType , MaxRowSize >& SparseMatrix< T , IndexType , MaxRowSize >::operator /= ( T s ){ return (*this) *= ( (T)1./s ); }
 
 template< class T , class IndexType , size_t MaxRowSize >
 SparseMatrix< T , IndexType , MaxRowSize > SparseMatrix< T , IndexType , MaxRowSize >::operator * ( T s ) const

@@ -123,13 +123,13 @@ void FillCopyFixture(MatrixType& matrix) {
 }
 
 template <typename MatrixType>
-void ExpectCopyFixture(const MatrixType& matrix) {
+void ExpectCopyFixture(const MatrixType& matrix, const double scale = 1.0) {
   ASSERT_EQ(matrix.rows(), kCopyRowSizes.size());
   for (size_t row = 0; row < matrix.rows(); ++row) {
     ASSERT_EQ(matrix.rowSize(row), kCopyRowSizes[row]);
     for (size_t entry = 0; entry < matrix.rowSize(row); ++entry) {
       EXPECT_EQ(matrix[row][entry].N, (row + entry) % matrix.rows());
-      EXPECT_EQ(matrix[row][entry].Value, 10 * row + entry + 0.25);
+      EXPECT_EQ(matrix[row][entry].Value, scale * (10 * row + entry + 0.25));
     }
   }
 }
@@ -244,6 +244,36 @@ TEST(SparseMatrixCopyTest, UnboundedNonAliasingCopiesOwnStorage) {
   ExpectCopyFixture(assigned);
   ExpectCopyFixture(converted_assigned);
   ExpectCopyFixture(explicitly_copied);
+}
+
+TEST(SparseMatrixScalarTest, ScalesOnlyActiveBoundedEntries) {
+  Matrix matrix(kCopyRowSizes.size());
+  // Initialize full rows before hiding entries, so the regression also runs
+  // safely against the original implementation that scales reserved storage.
+  FillCopyDestination(matrix);
+  FillCopyFixture(matrix);
+  EXPECT_EQ(&(matrix *= 2.0f), &matrix);
+  ExpectCopyFixture(matrix, 2.0);
+  for (size_t row = 0; row < matrix.rows(); ++row) {
+    matrix.setRowSize(row, 27);
+    for (size_t entry = kCopyRowSizes[row]; entry < matrix.rowSize(row);
+         ++entry) {
+      EXPECT_EQ(matrix[row][entry].N, -1);
+      EXPECT_EQ(matrix[row][entry].Value, -99);
+    }
+  }
+}
+
+template <typename MatrixType>
+class SparseMatrixDivisionTest : public testing::Test {};
+using DivisionMatrices = testing::Types<Matrix, UnboundedMatrix>;
+TYPED_TEST_SUITE(SparseMatrixDivisionTest, DivisionMatrices);
+
+TYPED_TEST(SparseMatrixDivisionTest, DivisionPreservesRowsAndReturnsSelf) {
+  TypeParam matrix(kCopyRowSizes.size());
+  FillCopyFixture(matrix);
+  EXPECT_EQ(&(matrix /= 2.0f), &matrix);
+  ExpectCopyFixture(matrix, 0.5);
 }
 
 }  // namespace
