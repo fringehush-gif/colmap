@@ -61,8 +61,11 @@ namespace PoissonRecon
 		// Output stream types //
 		/////////////////////////
 
-		template< typename Real , unsigned int Dim , typename ... Data > using OutputLevelSetVertexStream = OutputDataStream< Position< Real , Dim > , Gradient< Real , Dim > , Weight< Real > , Data ... >;
-		template< typename Real , unsigned int Dim , typename ... Data > struct TransformedOutputLevelSetVertexStream;
+		// Position precision can differ from the solver and other attributes.
+		template< typename PositionReal , typename Real , unsigned int Dim , typename ... Data > using OutputLevelSetVertexStreamWithPosition = OutputDataStream< Position< PositionReal , Dim > , Gradient< Real , Dim > , Weight< Real > , Data ... >;
+		template< typename Real , unsigned int Dim , typename ... Data > using OutputLevelSetVertexStream = OutputLevelSetVertexStreamWithPosition< Real , Real , Dim , Data ... >;
+		template< typename PositionReal , typename Real , unsigned int Dim , typename ... Data > struct TransformedOutputLevelSetVertexStreamWithPosition;
+		template< typename Real , unsigned int Dim , typename ... Data > using TransformedOutputLevelSetVertexStream = TransformedOutputLevelSetVertexStreamWithPosition< Real , Real , Dim , Data ... >;
 
 		//////////////////
 		// Face streams //
@@ -74,7 +77,8 @@ namespace PoissonRecon
 		//////////////////////////////////////////////
 		// Information about the output vertex type //
 		//////////////////////////////////////////////
-		template< typename Real , unsigned int Dim , bool HasGradients , bool HasDensity , typename ... AxuDataFactories > struct OutputVertexInfo;
+		template< typename PositionReal , typename Real , unsigned int Dim , bool HasGradients , bool HasDensity , typename ... AuxDataFactories > struct OutputVertexInfoWithPosition;
+		template< typename Real , unsigned int Dim , bool HasGradients , bool HasDensity , typename ... AuxDataFactories > using OutputVertexInfo = OutputVertexInfoWithPosition< Real , Real , Dim , HasGradients , HasDensity , AuxDataFactories ... >;
 
 		//////////////////////////////////////////
 		// Transformed Input Sample Data Stream //
@@ -155,23 +159,23 @@ namespace PoissonRecon
 		//////////////////////////////////////
 		// Transformed Output Vertex Stream //
 		//////////////////////////////////////
-		template< typename Real , unsigned int Dim , typename ... Data >
-		struct TransformedOutputLevelSetVertexStream : public OutputLevelSetVertexStream< Real , Dim , Data ... >
+		template< typename PositionReal , typename Real , unsigned int Dim , typename ... Data >
+		struct TransformedOutputLevelSetVertexStreamWithPosition : public OutputLevelSetVertexStream< Real , Dim , Data ... >
 		{
 			// A constructor initialized with the transformation to be applied to the samples, and a sample stream
-			TransformedOutputLevelSetVertexStream( XForm< Real , Dim+1 > xForm , OutputLevelSetVertexStream< Real , Dim , Data ... > &stream ) : _stream(stream) , _positionXForm(xForm)
+			TransformedOutputLevelSetVertexStreamWithPosition( XForm< Real , Dim+1 > xForm , OutputLevelSetVertexStreamWithPosition< PositionReal , Real , Dim , Data ... > &stream ) : _stream(stream) , _positionXForm(xForm)
 			{
 				_gradientXForm = XForm< Real , Dim > ( xForm ).inverse().transpose() * (Real)pow( xForm.determinant() , 1./Dim );
 			}
 
 			// Need to write the union to ensure that the counter gets set
-			size_t write(                       const Position< Real , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > &w , const Data& ... d ){ return _stream.write(          _positionXForm * p , _gradientXForm * g , w , d... ); }
-			size_t write( unsigned int thread , const Position< Real , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > &w , const Data& ... d ){ return _stream.write( thread , _positionXForm * p , _gradientXForm * g , w , d... ); }
+			size_t write(                       const Position< Real , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > &w , const Data& ... d ){ return _stream.write(          _positionXForm * Position< PositionReal , Dim >(p) , _gradientXForm * g , w , d... ); }
+			size_t write( unsigned int thread , const Position< Real , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > &w , const Data& ... d ){ return _stream.write( thread , _positionXForm * Position< PositionReal , Dim >(p) , _gradientXForm * g , w , d... ); }
 			size_t size( void ) const { return _stream.size(); }
 
 		protected:
 			// A reference to the underlying stream
-			OutputLevelSetVertexStream< Real , Dim , Data ... > &_stream;
+			OutputLevelSetVertexStreamWithPosition< PositionReal , Real , Dim , Data ... > &_stream;
 
 			// The affine transformation to be applied to the positions
 			XForm< Real , Dim+1 > _positionXForm;
@@ -319,9 +323,9 @@ namespace PoissonRecon
 		};
 
 
-		template< typename Real , unsigned int Dim , typename Factory , bool InCore , bool Parallel , typename ... Data >
-		struct OutputInputFactoryTypeStream
-			: public OutputDataStream< Position< Real , Dim > , Gradient< Real , Dim > , Weight< Real > , Data ... >
+		template< typename PositionReal , typename Real , unsigned int Dim , typename Factory , bool InCore , bool Parallel , typename ... Data >
+		struct OutputInputFactoryTypeStreamWithPosition
+			: public OutputDataStream< Position< PositionReal , Dim > , Gradient< Real , Dim > , Weight< Real > , Data ... >
 			, public InputDataStream< typename Factory::VertexType >
 		{
 			using Vertex = typename Factory::VertexType;
@@ -333,12 +337,12 @@ namespace PoissonRecon
 			InputStreamType  * inStream;
 
 			void reset( void ){ inStream->reset(); }
-			size_t write( const Position< Real , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > &w , const Data& ... d )
+			size_t write( const Position< PositionReal , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > &w , const Data& ... d )
 			{
 				Vertex v = _converter( p , g , w , d... );
 				return outStream->write( v );
 			}
-			size_t write( unsigned int thread , const Position< Real , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > &w , const Data& ... d )
+			size_t write( unsigned int thread , const Position< PositionReal , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > &w , const Data& ... d )
 			{
 				Vertex v = _converter( p , g , w , d... );
 				return outStream->write( thread , v );
@@ -348,7 +352,7 @@ namespace PoissonRecon
 
 			size_t size( void ) const { return outStream->size(); }
 
-			OutputInputFactoryTypeStream( Factory &factory , std::function< Vertex ( const Position< Real , Dim > & , const Gradient< Real , Dim > & , const Weight< Real > & , const Data & ...  ) > converter )
+			OutputInputFactoryTypeStreamWithPosition( Factory &factory , std::function< Vertex ( const Position< PositionReal , Dim > & , const Gradient< Real , Dim > & , const Weight< Real > & , const Data & ...  ) > converter )
 				: _converter( converter )
 			{
 				size_t sz = ThreadPool::NumThreads();
@@ -397,7 +401,7 @@ namespace PoissonRecon
 				}
 			}
 
-			~OutputInputFactoryTypeStream( void )
+			~OutputInputFactoryTypeStreamWithPosition( void )
 			{
 				size_t sz = ThreadPool::NumThreads();
 
@@ -417,7 +421,7 @@ namespace PoissonRecon
 				delete _inMultiStream;
 			}
 		protected:
-			std::function< Vertex ( const Position< Real , Dim > & , const Gradient< Real , Dim > & , const Weight< Real > & , const Data & ...  ) > _converter;
+			std::function< Vertex ( const Position< PositionReal , Dim > & , const Gradient< Real , Dim > & , const Weight< Real > & , const Data & ...  ) > _converter;
 			std::vector< Vertex > *_backingVector = nullptr;
 			FileBackedReadWriteStream::FileDescription *_backingFile = nullptr;
 			std::vector< std::vector< std::conditional_t< Parallel , std::pair< size_t , Vertex > , Vertex > > * >_backingVectors;
@@ -427,8 +431,11 @@ namespace PoissonRecon
 			MultiInputIndexedDataStream< Vertex > *_inMultiStream = nullptr;
 		};
 
-		template< typename Real , unsigned int Dim , bool HasGradients , bool HasDensity >
-		struct OutputVertexInfo< Real , Dim , HasGradients , HasDensity >
+		template< typename Real , unsigned int Dim , typename Factory , bool InCore , bool Parallel , typename ... Data >
+		using OutputInputFactoryTypeStream = OutputInputFactoryTypeStreamWithPosition< Real , Real , Dim , Factory , InCore , Parallel , Data ... >;
+
+		template< typename PositionReal , typename Real , unsigned int Dim , bool HasGradients , bool HasDensity >
+		struct OutputVertexInfoWithPosition< PositionReal , Real , Dim , HasGradients , HasDensity >
 		{
 			using Factory =
 				typename std::conditional_t
@@ -437,21 +444,21 @@ namespace PoissonRecon
 				typename std::conditional_t
 				<
 				HasDensity ,
-				VertexFactory::Factory< Real , VertexFactory::PositionFactory< Real , Dim > , VertexFactory::NormalFactory< Real , Dim > , VertexFactory::ValueFactory< Real > > ,
-				VertexFactory::Factory< Real , VertexFactory::PositionFactory< Real , Dim > , VertexFactory::NormalFactory< Real , Dim > >
+				VertexFactory::Factory< Real , VertexFactory::PositionFactory< PositionReal , Dim > , VertexFactory::NormalFactory< Real , Dim > , VertexFactory::ValueFactory< Real > > ,
+				VertexFactory::Factory< Real , VertexFactory::PositionFactory< PositionReal , Dim > , VertexFactory::NormalFactory< Real , Dim > >
 				> ,
 				typename std::conditional_t
 				<
 				HasDensity ,
-				VertexFactory::Factory< Real , VertexFactory::PositionFactory< Real , Dim > , VertexFactory::ValueFactory< Real > > ,
-				VertexFactory::PositionFactory< Real , Dim >
+				VertexFactory::Factory< Real , VertexFactory::PositionFactory< PositionReal , Dim > , VertexFactory::ValueFactory< Real > > ,
+				VertexFactory::PositionFactory< PositionReal , Dim >
 				>
 				>;
 			using Vertex = typename Factory::VertexType;
 
 			static Factory GetFactory( void ){ return Factory(); }
 
-			static Vertex Convert( const Position< Real , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > & w )
+			static Vertex Convert( const Position< PositionReal , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > & w )
 			{
 				Vertex v;
 				if constexpr( !HasGradients && !HasDensity ) v = p;
@@ -472,8 +479,8 @@ namespace PoissonRecon
 			}
 		};
 
-		template< typename Real , unsigned int Dim , bool HasGradients , bool HasDensity , typename AuxDataFactory >
-		struct OutputVertexInfo< Real , Dim , HasGradients , HasDensity , AuxDataFactory >
+		template< typename PositionReal , typename Real , unsigned int Dim , bool HasGradients , bool HasDensity , typename AuxDataFactory >
+		struct OutputVertexInfoWithPosition< PositionReal , Real , Dim , HasGradients , HasDensity , AuxDataFactory >
 		{
 			using Factory =
 				typename std::conditional
@@ -482,36 +489,36 @@ namespace PoissonRecon
 				typename std::conditional
 				<
 				HasDensity ,
-				VertexFactory::Factory< Real , VertexFactory::PositionFactory< Real , Dim > , VertexFactory::NormalFactory< Real , Dim > , VertexFactory::ValueFactory< Real > , AuxDataFactory > ,
-				VertexFactory::Factory< Real , VertexFactory::PositionFactory< Real , Dim > , VertexFactory::NormalFactory< Real , Dim > , AuxDataFactory >
+				VertexFactory::Factory< Real , VertexFactory::PositionFactory< PositionReal , Dim > , VertexFactory::NormalFactory< Real , Dim > , VertexFactory::ValueFactory< Real > , AuxDataFactory > ,
+				VertexFactory::Factory< Real , VertexFactory::PositionFactory< PositionReal , Dim > , VertexFactory::NormalFactory< Real , Dim > , AuxDataFactory >
 				>::type ,
 				typename std::conditional
 				<
 				HasDensity ,
-				VertexFactory::Factory< Real , VertexFactory::PositionFactory< Real , Dim > , VertexFactory::ValueFactory< Real > , AuxDataFactory > ,
-				VertexFactory::Factory< Real , VertexFactory::PositionFactory< Real , Dim > , AuxDataFactory >
+				VertexFactory::Factory< Real , VertexFactory::PositionFactory< PositionReal , Dim > , VertexFactory::ValueFactory< Real > , AuxDataFactory > ,
+				VertexFactory::Factory< Real , VertexFactory::PositionFactory< PositionReal , Dim > , AuxDataFactory >
 				>::type
 				>::type;
 			using AuxData = typename AuxDataFactory::VertexType;
 
-			using _Vertex = DirectSum< Real , Point< Real , Dim > , Point< Real , Dim > , Real , typename AuxDataFactory::VertexType >;
+			using _Vertex = DirectSum< Real , Point< PositionReal , Dim > , Point< Real , Dim > , Real , typename AuxDataFactory::VertexType >;
 			using Vertex = typename Factory::VertexType;
 
 			static Factory GetFactory( AuxDataFactory auxDataFactory )
 			{
 				if constexpr( HasGradients )
 				{
-					if constexpr( HasDensity ) return Factory( VertexFactory::PositionFactory< Real , Dim >() , VertexFactory::NormalFactory< Real , Dim >() , VertexFactory::ValueFactory< Real >() , auxDataFactory );
-					else                       return Factory( VertexFactory::PositionFactory< Real , Dim >() , VertexFactory::NormalFactory< Real , Dim >() ,                                         auxDataFactory );
+					if constexpr( HasDensity ) return Factory( VertexFactory::PositionFactory< PositionReal , Dim >() , VertexFactory::NormalFactory< Real , Dim >() , VertexFactory::ValueFactory< Real >() , auxDataFactory );
+					else                       return Factory( VertexFactory::PositionFactory< PositionReal , Dim >() , VertexFactory::NormalFactory< Real , Dim >() ,                                         auxDataFactory );
 				}
 				else
 				{
-					if constexpr( HasDensity ) return Factory( VertexFactory::PositionFactory< Real , Dim >() ,                                                VertexFactory::ValueFactory< Real >() , auxDataFactory );
-					else                       return Factory( VertexFactory::PositionFactory< Real , Dim >() ,                                                                                        auxDataFactory );
+					if constexpr( HasDensity ) return Factory( VertexFactory::PositionFactory< PositionReal , Dim >() ,                                                VertexFactory::ValueFactory< Real >() , auxDataFactory );
+					else                       return Factory( VertexFactory::PositionFactory< PositionReal , Dim >() ,                                                                                        auxDataFactory );
 				}
 			}
 
-			static Vertex Convert( const Position< Real , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > & w , const AuxData &data )
+			static Vertex Convert( const Position< PositionReal , Dim > &p , const Gradient< Real , Dim > &g , const Weight< Real > & w , const AuxData &data )
 			{
 				Vertex v;
 				v.template get<0>() = p;
