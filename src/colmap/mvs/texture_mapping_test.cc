@@ -328,7 +328,7 @@ TEST(MeshTextureMapping, RejectsOffImageProjectionOverflow) {
 
 TEST(MeshTextureMapping, RejectsProjectionExtentOverflow) {
   PlyMesh mesh = MakeAtlasTestMesh(65537, 2);
-  mesh.vertices[2].x = -0.125f;
+  mesh.vertices[2].x = -0.25f;
   const std::vector<Image> images = {
       MakeTestImage(64, 64, BitmapColor<uint8_t>(128), float{1 << 27})};
   MeshTextureMappingOptions options;
