@@ -27,6 +27,7 @@ DAMAGE.
 */
 #ifndef MAT_INCLUDED
 #define MAT_INCLUDED
+#include <limits>
 #include "Geometry.h"
 #include "Array.h"
 
@@ -40,6 +41,7 @@ namespace PoissonRecon
 	class _MinimalAreaTriangulation
 	{
 		Pointer( Real ) _bestTriangulation;
+		Pointer( size_t ) _zeroAreaCount;
 		Pointer( Index ) _midpoint;
 		size_t _vCount;
 		ConstPointer( Point< Real , Dim > ) _vertices;
