@@ -43,6 +43,7 @@ struct MeshTextureMappingOptions {
   // 1.0 = native source-image resolution (default).
   // < 1.0 = lower resolution (e.g. 0.5 = half).
   // > 1.0 = higher resolution (e.g. 2.0 = double).
+  // The factor and its reciprocal must be representable as finite floats.
   double texture_scale_factor = 1.0;
 
   bool Check() const;

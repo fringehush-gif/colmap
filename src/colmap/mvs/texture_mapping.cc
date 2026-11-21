@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <queue>
 #include <variant>
 
@@ -413,6 +414,30 @@ std::vector<FaceRegion> ExtractFaceRegions(
   return regions;
 }
 
+void SetRegionBoundingBox(const float min_x,
+                          const float min_y,
+                          const float max_x,
+                          const float max_y,
+                          RegionProjection* projection) {
+  const double left = std::floor(min_x);
+  const double top = std::floor(min_y);
+  const double right = std::ceil(max_x);
+  const double bottom = std::ceil(max_y);
+  constexpr double kMin = std::numeric_limits<int>::lowest();
+  constexpr double kMax = std::numeric_limits<int>::max();
+  THROW_CHECK(left >= kMin && top >= kMin && right <= kMax && bottom <= kMax)
+      << "Projected texture coordinates exceed integer range";
+
+  const double width = right - left + 1;
+  const double height = bottom - top + 1;
+  THROW_CHECK(width >= 1 && height >= 1 && width <= kMax && height <= kMax)
+      << "Projected texture dimensions exceed integer range";
+  projection->bbox_x = static_cast<int>(left);
+  projection->bbox_y = static_cast<int>(top);
+  projection->bbox_width = static_cast<int>(width);
+  projection->bbox_height = static_cast<int>(height);
+}
+
 std::vector<RegionProjection> ComputeRegionProjections(
     const PlyMesh& mesh,
     const std::vector<FaceRegion>& regions,
@@ -444,10 +469,7 @@ std::vector<RegionProjection> ComputeRegionProjections(
       }
     }
 
-    rp.bbox_x = static_cast<int>(std::floor(min_x));
-    rp.bbox_y = static_cast<int>(std::floor(min_y));
-    rp.bbox_width = static_cast<int>(std::ceil(max_x)) - rp.bbox_x + 1;
-    rp.bbox_height = static_cast<int>(std::ceil(max_y)) - rp.bbox_y + 1;
+    SetRegionBoundingBox(min_x, min_y, max_x, max_y, &rp);
   }
 
   return projections;
@@ -475,15 +497,11 @@ void ScaleRegionProjections(std::vector<RegionProjection>& projections,
         max_y = std::max(max_y, p.y());
       }
     }
-    rp.bbox_x = static_cast<int>(std::floor(min_x));
-    rp.bbox_y = static_cast<int>(std::floor(min_y));
-    rp.bbox_width = static_cast<int>(std::ceil(max_x)) - rp.bbox_x + 1;
-    rp.bbox_height = static_cast<int>(std::ceil(max_y)) - rp.bbox_y + 1;
+    SetRegionBoundingBox(min_x, min_y, max_x, max_y, &rp);
   }
 }
 
 AtlasLayout PackAtlas(const std::vector<RegionProjection>& projections,
-                      const std::vector<FaceRegion>& regions,
                       const int padding) {
   AtlasLayout layout;
 
@@ -497,14 +515,23 @@ AtlasLayout PackAtlas(const std::vector<RegionProjection>& projections,
     size_t region_idx;
   };
   std::vector<RectEntry> rects(projections.size());
+  constexpr int kMaxAtlasDim = 1 << 16;  // 65536
+  // Bitmap's RGB storage and pixel offsets use signed integers.
+  constexpr int64_t kMaxAtlasArea = std::numeric_limits<int>::max() / 3;
   int64_t total_area = 0;
   int max_rect_width = 0;
 
   for (size_t i = 0; i < projections.size(); ++i) {
-    rects[i].width = projections[i].bbox_width + 2 * padding;
-    rects[i].height = projections[i].bbox_height + 2 * padding;
+    const int64_t width = projections[i].bbox_width + 2LL * padding;
+    const int64_t height = projections[i].bbox_height + 2LL * padding;
+    THROW_CHECK(width <= kMaxAtlasDim && height <= kMaxAtlasDim)
+        << "Atlas patch dimensions exceed maximum (" << kMaxAtlasDim << ")";
+    rects[i].width = static_cast<int>(width);
+    rects[i].height = static_cast<int>(height);
     rects[i].region_idx = i;
-    total_area += static_cast<int64_t>(rects[i].width) * rects[i].height;
+    total_area += width * height;
+    THROW_CHECK_LE(total_area, kMaxAtlasArea)
+        << "Atlas area exceeds RGB bitmap storage limit";
     max_rect_width = std::max(max_rect_width, rects[i].width);
   }
 
@@ -515,6 +542,8 @@ AtlasLayout PackAtlas(const std::vector<RegionProjection>& projections,
 
   const int atlas_side = std::max(
       static_cast<int>(std::ceil(std::sqrt(total_area * 1.3))), max_rect_width);
+  THROW_CHECK_LE(atlas_side, kMaxAtlasDim)
+      << "Atlas dimensions exceeded maximum (" << kMaxAtlasDim << ")";
   int atlas_width = 1;
   while (atlas_width < atlas_side) atlas_width *= 2;
   int atlas_height = atlas_width;
@@ -549,9 +578,8 @@ AtlasLayout PackAtlas(const std::vector<RegionProjection>& projections,
   };
 
   std::vector<PackRect> placements;
-  constexpr int kMaxAtlasDim = 1 << 16;  // 65536
   while (!TryPack(atlas_width, atlas_height, placements)) {
-    THROW_CHECK_LE(atlas_width, kMaxAtlasDim)
+    THROW_CHECK_LT(atlas_width, kMaxAtlasDim)
         << "Atlas dimensions exceeded maximum (" << kMaxAtlasDim << ")";
     atlas_width *= 2;
     atlas_height *= 2;
@@ -563,6 +591,9 @@ AtlasLayout PackAtlas(const std::vector<RegionProjection>& projections,
     max_used_y = std::max(max_used_y, p.y + p.height + padding);
   }
   atlas_height = std::max(max_used_y, 1);
+  THROW_CHECK_LE(static_cast<int64_t>(atlas_width) * atlas_height,
+                 kMaxAtlasArea)
+      << "Atlas area exceeds RGB bitmap storage limit";
 
   // Reorder placements by region index.
   layout.placements.resize(projections.size());
@@ -1025,6 +1056,9 @@ bool MeshTextureMappingOptions::Check() const {
   CHECK_OPTION_GE(inpaint_radius, 0);
   CHECK_OPTION_GT(color_correction_regularization, 0.0);
   CHECK_OPTION_GT(texture_scale_factor, 0.0);
+  CHECK_OPTION_LE(texture_scale_factor, std::numeric_limits<float>::max());
+  CHECK_OPTION_LE(1.0 / texture_scale_factor,
+                  std::numeric_limits<float>::max());
   return true;
 }
 
@@ -1103,7 +1137,7 @@ MeshTextureMappingResult MeshTextureMapping(
 
   LOG(INFO) << "Packing texture atlas...";
   const AtlasLayout layout =
-      PackAtlas(projections, regions, options.atlas_patch_padding);
+      PackAtlas(projections, options.atlas_patch_padding);
   result.atlas_width = layout.atlas_width;
   result.atlas_height = layout.atlas_height;
   LOG(INFO) << "Atlas size: " << layout.atlas_width << " x "
