@@ -6,6 +6,7 @@
 #include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/mvs/patch_match_input.h"
+#include "colmap/mvs/patch_match_internal.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/file.h"
@@ -436,7 +437,6 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
     LOG(INFO) << "Reading inputs...";
 
     // Filter by file existence first (fast, no heavy I/O).
-    std::vector<int> src_image_idxs;
     std::vector<int> valid_image_idxs;
     for (const auto image_idx : used_image_idxs) {
       const auto image_path = workspace_->GetBitmapPath(image_idx);
@@ -462,9 +462,6 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
       }
 
       valid_image_idxs.push_back(image_idx);
-      if (image_idx != problem.ref_image_idx) {
-        src_image_idxs.push_back(image_idx);
-      }
     }
 
     // The helper drains all accepted reads before this lock or the local
@@ -478,7 +475,10 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
                                     depth_maps,
                                     normal_maps);
 
-    problem.src_image_idxs = src_image_idxs;
+    problem.src_image_idxs = internal::SelectPatchMatchSources(
+        problem.ref_image_idx,
+        problem.src_image_idxs,
+        FlatHashSet<int>(valid_image_idxs.begin(), valid_image_idxs.end()));
   }
 
   PatchMatch::Problem input_problem = problem;
