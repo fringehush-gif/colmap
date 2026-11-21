@@ -1930,14 +1930,14 @@ void GraphSolver::set_params(const SolverParams<double> &params) {
 size_t GraphSolver::get_allocation_size() { return allocation_size_; }
 
 SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
-  cudaSetDevice(device_id_);
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
   SolveResult result;
   result.exit_reason = ExitReason::MAX_ITERATIONS;
   double score_best;
   double score_best_pcg;
   double diag = params_.diag_init;
-  cudaMemcpy(solver__current_diag_, &diag, sizeof(double),
-             cudaMemcpyHostToDevice);
+  CheckCuda(cudaMemcpy(solver__current_diag_, &diag, sizeof(double), cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
 
   double up_scale = params_.diag_scaling_up;
   double quality;
@@ -2056,8 +2056,8 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
       double scale = std::max(params_.diag_scaling_down,
                               1.0f - quality_tmp * quality_tmp * quality_tmp);
       diag = std::max(params_.diag_min, diag * scale);
-      cudaMemcpy(solver__current_diag_, &diag, sizeof(double),
-                 cudaMemcpyHostToDevice);
+      CheckCuda(cudaMemcpy(solver__current_diag_, &diag, sizeof(double), cudaMemcpyHostToDevice),
+                "cudaMemcpy host-to-device");
       up_scale = params_.diag_scaling_up;
       score_best = score_best_pcg;
       step_accepted = true;
@@ -2087,8 +2087,8 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
         result.exit_reason = ExitReason::CONVERGED_DIAG_EXIT;
         break;
       }
-      cudaMemcpy(solver__current_diag_, &diag, sizeof(double),
-                 cudaMemcpyHostToDevice);
+      CheckCuda(cudaMemcpy(solver__current_diag_, &diag, sizeof(double), cudaMemcpyHostToDevice),
+                "cudaMemcpy host-to-device");
       up_scale *= 2;
     }
     const auto t_now = std::chrono::steady_clock::now();
@@ -4962,7 +4962,6 @@ double GraphSolver::GetPredDecrease() {
 void GraphSolver::finish_indices() { indices_valid_ = true; }
 
 void GraphSolver::SetPinholeCalibNum(const size_t num) {
-  cudaSetDevice(device_id_);
   if (num > PinholeCalib_num_max_) {
     throw std::runtime_error(std::to_string(num) + " > PinholeCalib_num_max_");
   }
@@ -4972,27 +4971,36 @@ void GraphSolver::SetPinholeCalibNum(const size_t num) {
 void GraphSolver::SetPinholeCalibNodesFromStackedHost(const double *const data,
                                                       const size_t offset,
                                                       const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholeCalib_num_) {
+  if (offset > PinholeCalib_num_ || num > PinholeCalib_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > PinholeCalib_num_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 4 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  PinholeCalibStackedToCaspar(marker__scratch_inout_,
-                              nodes__PinholeCalib__storage_current_,
-                              PinholeCalib_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 4 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      PinholeCalibStackedToCaspar(marker__scratch_inout_, nodes__PinholeCalib__storage_current_,
+                                  PinholeCalib_num_max_, offset, num),
+      "PinholeCalibStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeCalibNodesFromStackedDevice(
     const double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholeCalib_num_) {
+  if (offset > PinholeCalib_num_ || num > PinholeCalib_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > PinholeCalib_num_");
   }
-  PinholeCalibStackedToCaspar(data, nodes__PinholeCalib__storage_current_,
-                              PinholeCalib_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(PinholeCalibStackedToCaspar(data, nodes__PinholeCalib__storage_current_,
+                                        PinholeCalib_num_max_, offset, num),
+            "PinholeCalibStackedToCaspar");
 }
 
 void GraphSolver::GetPinholeCalibNodesToStackedHost(
@@ -5027,7 +5035,6 @@ void GraphSolver::GetPinholeCalibNodesToStackedDevice(
 }
 
 void GraphSolver::SetPinholeFocalNum(const size_t num) {
-  cudaSetDevice(device_id_);
   if (num > PinholeFocal_num_max_) {
     throw std::runtime_error(std::to_string(num) + " > PinholeFocal_num_max_");
   }
@@ -5037,27 +5044,36 @@ void GraphSolver::SetPinholeFocalNum(const size_t num) {
 void GraphSolver::SetPinholeFocalNodesFromStackedHost(const double *const data,
                                                       const size_t offset,
                                                       const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholeFocal_num_) {
+  if (offset > PinholeFocal_num_ || num > PinholeFocal_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > PinholeFocal_num_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  PinholeFocalStackedToCaspar(marker__scratch_inout_,
-                              nodes__PinholeFocal__storage_current_,
-                              PinholeFocal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      PinholeFocalStackedToCaspar(marker__scratch_inout_, nodes__PinholeFocal__storage_current_,
+                                  PinholeFocal_num_max_, offset, num),
+      "PinholeFocalStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeFocalNodesFromStackedDevice(
     const double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholeFocal_num_) {
+  if (offset > PinholeFocal_num_ || num > PinholeFocal_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > PinholeFocal_num_");
   }
-  PinholeFocalStackedToCaspar(data, nodes__PinholeFocal__storage_current_,
-                              PinholeFocal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(PinholeFocalStackedToCaspar(data, nodes__PinholeFocal__storage_current_,
+                                        PinholeFocal_num_max_, offset, num),
+            "PinholeFocalStackedToCaspar");
 }
 
 void GraphSolver::GetPinholeFocalNodesToStackedHost(
@@ -5092,7 +5108,6 @@ void GraphSolver::GetPinholeFocalNodesToStackedDevice(
 }
 
 void GraphSolver::SetPinholePoseNum(const size_t num) {
-  cudaSetDevice(device_id_);
   if (num > PinholePose_num_max_) {
     throw std::runtime_error(std::to_string(num) + " > PinholePose_num_max_");
   }
@@ -5102,28 +5117,36 @@ void GraphSolver::SetPinholePoseNum(const size_t num) {
 void GraphSolver::SetPinholePoseNodesFromStackedHost(const double *const data,
                                                      const size_t offset,
                                                      const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholePose_num_) {
+  if (offset > PinholePose_num_ || num > PinholePose_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > PinholePose_num_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  PinholePoseStackedToCaspar(marker__scratch_inout_,
-                             nodes__PinholePose__storage_current_,
-                             PinholePose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(PinholePoseStackedToCaspar(marker__scratch_inout_, nodes__PinholePose__storage_current_,
+                                       PinholePose_num_max_, offset, num),
+            "PinholePoseStackedToCaspar");
 }
 
 void GraphSolver::SetPinholePoseNodesFromStackedDevice(const double *const data,
                                                        const size_t offset,
                                                        const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholePose_num_) {
+  if (offset > PinholePose_num_ || num > PinholePose_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > PinholePose_num_");
   }
-  PinholePoseStackedToCaspar(data, nodes__PinholePose__storage_current_,
-                             PinholePose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(PinholePoseStackedToCaspar(data, nodes__PinholePose__storage_current_,
+                                       PinholePose_num_max_, offset, num),
+            "PinholePoseStackedToCaspar");
 }
 
 void GraphSolver::GetPinholePoseNodesToStackedHost(
@@ -5158,7 +5181,6 @@ void GraphSolver::GetPinholePoseNodesToStackedDevice(
 }
 
 void GraphSolver::SetPinholePrincipalPointNum(const size_t num) {
-  cudaSetDevice(device_id_);
   if (num > PinholePrincipalPoint_num_max_) {
     throw std::runtime_error(std::to_string(num) +
                              " > PinholePrincipalPoint_num_max_");
@@ -5168,28 +5190,37 @@ void GraphSolver::SetPinholePrincipalPointNum(const size_t num) {
 
 void GraphSolver::SetPinholePrincipalPointNodesFromStackedHost(
     const double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholePrincipalPoint_num_) {
+  if (offset > PinholePrincipalPoint_num_ || num > PinholePrincipalPoint_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > PinholePrincipalPoint_num_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  PinholePrincipalPointStackedToCaspar(
-      marker__scratch_inout_, nodes__PinholePrincipalPoint__storage_current_,
-      PinholePrincipalPoint_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(PinholePrincipalPointStackedToCaspar(marker__scratch_inout_,
+                                                 nodes__PinholePrincipalPoint__storage_current_,
+                                                 PinholePrincipalPoint_num_max_, offset, num),
+            "PinholePrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::SetPinholePrincipalPointNodesFromStackedDevice(
     const double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > PinholePrincipalPoint_num_) {
+  if (offset > PinholePrincipalPoint_num_ || num > PinholePrincipalPoint_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > PinholePrincipalPoint_num_");
   }
-  PinholePrincipalPointStackedToCaspar(
-      data, nodes__PinholePrincipalPoint__storage_current_,
-      PinholePrincipalPoint_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      PinholePrincipalPointStackedToCaspar(data, nodes__PinholePrincipalPoint__storage_current_,
+                                           PinholePrincipalPoint_num_max_, offset, num),
+      "PinholePrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::GetPinholePrincipalPointNodesToStackedHost(
@@ -5224,7 +5255,6 @@ void GraphSolver::GetPinholePrincipalPointNodesToStackedDevice(
 }
 
 void GraphSolver::SetPointNum(const size_t num) {
-  cudaSetDevice(device_id_);
   if (num > Point_num_max_) {
     throw std::runtime_error(std::to_string(num) + " > Point_num_max_");
   }
@@ -5234,25 +5264,33 @@ void GraphSolver::SetPointNum(const size_t num) {
 void GraphSolver::SetPointNodesFromStackedHost(const double *const data,
                                                const size_t offset,
                                                const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > Point_num_) {
+  if (offset > Point_num_ || num > Point_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) + " > Point_num_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  PointStackedToCaspar(marker__scratch_inout_, nodes__Point__storage_current_,
-                       Point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(PointStackedToCaspar(marker__scratch_inout_, nodes__Point__storage_current_,
+                                 Point_num_max_, offset, num),
+            "PointStackedToCaspar");
 }
 
 void GraphSolver::SetPointNodesFromStackedDevice(const double *const data,
                                                  const size_t offset,
                                                  const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > Point_num_) {
+  if (offset > Point_num_ || num > Point_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) + " > Point_num_");
   }
-  PointStackedToCaspar(data, nodes__Point__storage_current_, Point_num_max_,
-                       offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(PointStackedToCaspar(data, nodes__Point__storage_current_, Point_num_max_, offset, num),
+            "PointStackedToCaspar");
 }
 
 void GraphSolver::GetPointNodesToStackedHost(
@@ -5287,7 +5325,6 @@ void GraphSolver::GetPointNodesToStackedDevice(
 }
 
 void GraphSolver::SetSimpleRadialCalibNum(const size_t num) {
-  cudaSetDevice(device_id_);
   if (num > SimpleRadialCalib_num_max_) {
     throw std::runtime_error(std::to_string(num) +
                              " > SimpleRadialCalib_num_max_");
@@ -5297,28 +5334,36 @@ void GraphSolver::SetSimpleRadialCalibNum(const size_t num) {
 
 void GraphSolver::SetSimpleRadialCalibNodesFromStackedHost(
     const double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialCalib_num_) {
+  if (offset > SimpleRadialCalib_num_ || num > SimpleRadialCalib_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > SimpleRadialCalib_num_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 4 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  SimpleRadialCalibStackedToCaspar(marker__scratch_inout_,
-                                   nodes__SimpleRadialCalib__storage_current_,
-                                   SimpleRadialCalib_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 4 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(SimpleRadialCalibStackedToCaspar(marker__scratch_inout_,
+                                             nodes__SimpleRadialCalib__storage_current_,
+                                             SimpleRadialCalib_num_max_, offset, num),
+            "SimpleRadialCalibStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialCalibNodesFromStackedDevice(
     const double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialCalib_num_) {
+  if (offset > SimpleRadialCalib_num_ || num > SimpleRadialCalib_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > SimpleRadialCalib_num_");
   }
-  SimpleRadialCalibStackedToCaspar(data,
-                                   nodes__SimpleRadialCalib__storage_current_,
-                                   SimpleRadialCalib_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(SimpleRadialCalibStackedToCaspar(data, nodes__SimpleRadialCalib__storage_current_,
+                                             SimpleRadialCalib_num_max_, offset, num),
+            "SimpleRadialCalibStackedToCaspar");
 }
 
 void GraphSolver::GetSimpleRadialCalibNodesToStackedHost(
@@ -5353,7 +5398,6 @@ void GraphSolver::GetSimpleRadialCalibNodesToStackedDevice(
 }
 
 void GraphSolver::SetSimpleRadialFocalAndExtraNum(const size_t num) {
-  cudaSetDevice(device_id_);
   if (num > SimpleRadialFocalAndExtra_num_max_) {
     throw std::runtime_error(std::to_string(num) +
                              " > SimpleRadialFocalAndExtra_num_max_");
@@ -5363,29 +5407,37 @@ void GraphSolver::SetSimpleRadialFocalAndExtraNum(const size_t num) {
 
 void GraphSolver::SetSimpleRadialFocalAndExtraNodesFromStackedHost(
     const double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialFocalAndExtra_num_) {
+  if (offset > SimpleRadialFocalAndExtra_num_ || num > SimpleRadialFocalAndExtra_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > SimpleRadialFocalAndExtra_num_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  SimpleRadialFocalAndExtraStackedToCaspar(
-      marker__scratch_inout_,
-      nodes__SimpleRadialFocalAndExtra__storage_current_,
-      SimpleRadialFocalAndExtra_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(SimpleRadialFocalAndExtraStackedToCaspar(
+                marker__scratch_inout_, nodes__SimpleRadialFocalAndExtra__storage_current_,
+                SimpleRadialFocalAndExtra_num_max_, offset, num),
+            "SimpleRadialFocalAndExtraStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialFocalAndExtraNodesFromStackedDevice(
     const double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialFocalAndExtra_num_) {
+  if (offset > SimpleRadialFocalAndExtra_num_ || num > SimpleRadialFocalAndExtra_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > SimpleRadialFocalAndExtra_num_");
   }
-  SimpleRadialFocalAndExtraStackedToCaspar(
-      data, nodes__SimpleRadialFocalAndExtra__storage_current_,
-      SimpleRadialFocalAndExtra_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(SimpleRadialFocalAndExtraStackedToCaspar(
+                data, nodes__SimpleRadialFocalAndExtra__storage_current_,
+                SimpleRadialFocalAndExtra_num_max_, offset, num),
+            "SimpleRadialFocalAndExtraStackedToCaspar");
 }
 
 void GraphSolver::GetSimpleRadialFocalAndExtraNodesToStackedHost(
@@ -5420,7 +5472,6 @@ void GraphSolver::GetSimpleRadialFocalAndExtraNodesToStackedDevice(
 }
 
 void GraphSolver::SetSimpleRadialPoseNum(const size_t num) {
-  cudaSetDevice(device_id_);
   if (num > SimpleRadialPose_num_max_) {
     throw std::runtime_error(std::to_string(num) +
                              " > SimpleRadialPose_num_max_");
@@ -5430,28 +5481,36 @@ void GraphSolver::SetSimpleRadialPoseNum(const size_t num) {
 
 void GraphSolver::SetSimpleRadialPoseNodesFromStackedHost(
     const double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialPose_num_) {
+  if (offset > SimpleRadialPose_num_ || num > SimpleRadialPose_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > SimpleRadialPose_num_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  SimpleRadialPoseStackedToCaspar(marker__scratch_inout_,
-                                  nodes__SimpleRadialPose__storage_current_,
-                                  SimpleRadialPose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(SimpleRadialPoseStackedToCaspar(marker__scratch_inout_,
+                                            nodes__SimpleRadialPose__storage_current_,
+                                            SimpleRadialPose_num_max_, offset, num),
+            "SimpleRadialPoseStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialPoseNodesFromStackedDevice(
     const double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialPose_num_) {
+  if (offset > SimpleRadialPose_num_ || num > SimpleRadialPose_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > SimpleRadialPose_num_");
   }
-  SimpleRadialPoseStackedToCaspar(data,
-                                  nodes__SimpleRadialPose__storage_current_,
-                                  SimpleRadialPose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(SimpleRadialPoseStackedToCaspar(data, nodes__SimpleRadialPose__storage_current_,
+                                            SimpleRadialPose_num_max_, offset, num),
+            "SimpleRadialPoseStackedToCaspar");
 }
 
 void GraphSolver::GetSimpleRadialPoseNodesToStackedHost(
@@ -5486,7 +5545,6 @@ void GraphSolver::GetSimpleRadialPoseNodesToStackedDevice(
 }
 
 void GraphSolver::SetSimpleRadialPrincipalPointNum(const size_t num) {
-  cudaSetDevice(device_id_);
   if (num > SimpleRadialPrincipalPoint_num_max_) {
     throw std::runtime_error(std::to_string(num) +
                              " > SimpleRadialPrincipalPoint_num_max_");
@@ -5496,29 +5554,37 @@ void GraphSolver::SetSimpleRadialPrincipalPointNum(const size_t num) {
 
 void GraphSolver::SetSimpleRadialPrincipalPointNodesFromStackedHost(
     const double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialPrincipalPoint_num_) {
+  if (offset > SimpleRadialPrincipalPoint_num_ || num > SimpleRadialPrincipalPoint_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > SimpleRadialPrincipalPoint_num_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  SimpleRadialPrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      nodes__SimpleRadialPrincipalPoint__storage_current_,
-      SimpleRadialPrincipalPoint_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(SimpleRadialPrincipalPointStackedToCaspar(
+                marker__scratch_inout_, nodes__SimpleRadialPrincipalPoint__storage_current_,
+                SimpleRadialPrincipalPoint_num_max_, offset, num),
+            "SimpleRadialPrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialPrincipalPointNodesFromStackedDevice(
     const double *const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > SimpleRadialPrincipalPoint_num_) {
+  if (offset > SimpleRadialPrincipalPoint_num_ || num > SimpleRadialPrincipalPoint_num_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > SimpleRadialPrincipalPoint_num_");
   }
-  SimpleRadialPrincipalPointStackedToCaspar(
-      data, nodes__SimpleRadialPrincipalPoint__storage_current_,
-      SimpleRadialPrincipalPoint_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(SimpleRadialPrincipalPointStackedToCaspar(
+                data, nodes__SimpleRadialPrincipalPoint__storage_current_,
+                SimpleRadialPrincipalPoint_num_max_, offset, num),
+            "SimpleRadialPrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::GetSimpleRadialPrincipalPointNodesToStackedHost(
@@ -5560,14 +5626,18 @@ void GraphSolver::SetSimpleRadialNum(const size_t num) {
 }
 void GraphSolver::SetSimpleRadialPoseIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_num_) {
     throw std::runtime_error(std::to_string(num) +
                              " != simple_radial_num_. Use Setsimple_radialNum "
                              "before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialPoseIndicesFromDevice((unsigned int *)marker__scratch_inout_,
                                        num);
 }
@@ -5575,26 +5645,34 @@ void GraphSolver::SetSimpleRadialPoseIndicesFromHost(
 void GraphSolver::SetSimpleRadialPoseIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_num_) {
     throw std::runtime_error(std::to_string(num) +
                              " != simple_radial_num_. Use Setsimple_radialNum "
                              "before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices, facs__simple_radial__args__pose__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetSimpleRadialCalibIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_num_) {
     throw std::runtime_error(std::to_string(num) +
                              " != simple_radial_num_. Use Setsimple_radialNum "
                              "before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialCalibIndicesFromDevice((unsigned int *)marker__scratch_inout_,
                                         num);
 }
@@ -5602,26 +5680,34 @@ void GraphSolver::SetSimpleRadialCalibIndicesFromHost(
 void GraphSolver::SetSimpleRadialCalibIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_num_) {
     throw std::runtime_error(std::to_string(num) +
                              " != simple_radial_num_. Use Setsimple_radialNum "
                              "before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices, facs__simple_radial__args__calib__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetSimpleRadialPointIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_num_) {
     throw std::runtime_error(std::to_string(num) +
                              " != simple_radial_num_. Use Setsimple_radialNum "
                              "before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialPointIndicesFromDevice((unsigned int *)marker__scratch_inout_,
                                         num);
 }
@@ -5629,64 +5715,86 @@ void GraphSolver::SetSimpleRadialPointIndicesFromHost(
 void GraphSolver::SetSimpleRadialPointIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_num_) {
     throw std::runtime_error(std::to_string(num) +
                              " != simple_radial_num_. Use Setsimple_radialNum "
                              "before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices, facs__simple_radial__args__point__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetSimpleRadialSensorFromRigDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_num_max_) {
+  if (offset > simple_radial_num_max_ || num > simple_radial_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_, facs__simple_radial__args__sensor_from_rig__data_,
-      simple_radial_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstSimpleRadialSensorFromRigStackedToCaspar(
+                marker__scratch_inout_, facs__simple_radial__args__sensor_from_rig__data_,
+                simple_radial_num_max_, offset, num),
+            "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialSensorFromRigDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_num_max_) {
+  if (offset > simple_radial_num_max_ || num > simple_radial_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data, facs__simple_radial__args__sensor_from_rig__data_,
-      simple_radial_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstSimpleRadialSensorFromRigStackedToCaspar(
+                data, facs__simple_radial__args__sensor_from_rig__data_, simple_radial_num_max_,
+                offset, num),
+            "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialPixelDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_num_max_) {
+  if (offset > simple_radial_num_max_ || num > simple_radial_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(marker__scratch_inout_,
-                            facs__simple_radial__args__pixel__data_,
-                            simple_radial_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(marker__scratch_inout_, facs__simple_radial__args__pixel__data_,
+                                simple_radial_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialPixelDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_num_max_) {
+  if (offset > simple_radial_num_max_ || num > simple_radial_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_num_max_");
   }
-  ConstPixelStackedToCaspar(data, facs__simple_radial__args__pixel__data_,
-                            simple_radial_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(data, facs__simple_radial__args__pixel__data_,
+                                      simple_radial_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialFixedPoseNum(const size_t num) {
   if (num > simple_radial_fixed_pose_num_max_) {
@@ -5697,15 +5805,19 @@ void GraphSolver::SetSimpleRadialFixedPoseNum(const size_t num) {
 }
 void GraphSolver::SetSimpleRadialFixedPoseCalibIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_fixed_pose_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != simple_radial_fixed_pose_num_. Use Setsimple_radial_fixed_poseNum "
         "before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialFixedPoseCalibIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -5713,7 +5825,6 @@ void GraphSolver::SetSimpleRadialFixedPoseCalibIndicesFromHost(
 void GraphSolver::SetSimpleRadialFixedPoseCalibIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_fixed_pose_num_) {
     throw std::runtime_error(
@@ -5721,21 +5832,30 @@ void GraphSolver::SetSimpleRadialFixedPoseCalibIndicesFromDevice(
         " != simple_radial_fixed_pose_num_. Use Setsimple_radial_fixed_poseNum "
         "before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices,
                 facs__simple_radial_fixed_pose__args__calib__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetSimpleRadialFixedPosePointIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_fixed_pose_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != simple_radial_fixed_pose_num_. Use Setsimple_radial_fixed_poseNum "
         "before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialFixedPosePointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -5743,7 +5863,6 @@ void GraphSolver::SetSimpleRadialFixedPosePointIndicesFromHost(
 void GraphSolver::SetSimpleRadialFixedPosePointIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_fixed_pose_num_) {
     throw std::runtime_error(
@@ -5751,85 +5870,122 @@ void GraphSolver::SetSimpleRadialFixedPosePointIndicesFromDevice(
         " != simple_radial_fixed_pose_num_. Use Setsimple_radial_fixed_poseNum "
         "before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices,
                 facs__simple_radial_fixed_pose__args__point__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetSimpleRadialFixedPoseSensorFromRigDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_num_max_) {
+  if (offset > simple_radial_fixed_pose_num_max_ ||
+      num > simple_radial_fixed_pose_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_fixed_pose_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_fixed_pose__args__sensor_from_rig__data_,
-      simple_radial_fixed_pose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          marker__scratch_inout_, facs__simple_radial_fixed_pose__args__sensor_from_rig__data_,
+          simple_radial_fixed_pose_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialFixedPoseSensorFromRigDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_num_max_) {
+  if (offset > simple_radial_fixed_pose_num_max_ ||
+      num > simple_radial_fixed_pose_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_fixed_pose_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data, facs__simple_radial_fixed_pose__args__sensor_from_rig__data_,
-      simple_radial_fixed_pose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstSimpleRadialSensorFromRigStackedToCaspar(
+                data, facs__simple_radial_fixed_pose__args__sensor_from_rig__data_,
+                simple_radial_fixed_pose_num_max_, offset, num),
+            "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialFixedPosePixelDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_num_max_) {
+  if (offset > simple_radial_fixed_pose_num_max_ ||
+      num > simple_radial_fixed_pose_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_fixed_pose_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(marker__scratch_inout_,
-                            facs__simple_radial_fixed_pose__args__pixel__data_,
-                            simple_radial_fixed_pose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(marker__scratch_inout_,
+                                      facs__simple_radial_fixed_pose__args__pixel__data_,
+                                      simple_radial_fixed_pose_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialFixedPosePixelDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_num_max_) {
+  if (offset > simple_radial_fixed_pose_num_max_ ||
+      num > simple_radial_fixed_pose_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_fixed_pose_num_max_");
   }
-  ConstPixelStackedToCaspar(data,
-                            facs__simple_radial_fixed_pose__args__pixel__data_,
-                            simple_radial_fixed_pose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(data, facs__simple_radial_fixed_pose__args__pixel__data_,
+                                      simple_radial_fixed_pose_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialFixedPosePoseDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_num_max_) {
+  if (offset > simple_radial_fixed_pose_num_max_ ||
+      num > simple_radial_fixed_pose_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_fixed_pose_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPoseStackedToCaspar(
-      marker__scratch_inout_, facs__simple_radial_fixed_pose__args__pose__data_,
-      simple_radial_fixed_pose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstSimpleRadialPoseStackedToCaspar(marker__scratch_inout_,
+                                                 facs__simple_radial_fixed_pose__args__pose__data_,
+                                                 simple_radial_fixed_pose_num_max_, offset, num),
+            "ConstSimpleRadialPoseStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialFixedPosePoseDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_num_max_) {
+  if (offset > simple_radial_fixed_pose_num_max_ ||
+      num > simple_radial_fixed_pose_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_fixed_pose_num_max_");
   }
-  ConstSimpleRadialPoseStackedToCaspar(
-      data, facs__simple_radial_fixed_pose__args__pose__data_,
-      simple_radial_fixed_pose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialPoseStackedToCaspar(data, facs__simple_radial_fixed_pose__args__pose__data_,
+                                           simple_radial_fixed_pose_num_max_, offset, num),
+      "ConstSimpleRadialPoseStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialFixedPointNum(const size_t num) {
   if (num > simple_radial_fixed_point_num_max_) {
@@ -5840,15 +5996,19 @@ void GraphSolver::SetSimpleRadialFixedPointNum(const size_t num) {
 }
 void GraphSolver::SetSimpleRadialFixedPointPoseIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != simple_radial_fixed_point_num_. Use "
         "Setsimple_radial_fixed_pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialFixedPointPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -5856,7 +6016,6 @@ void GraphSolver::SetSimpleRadialFixedPointPoseIndicesFromHost(
 void GraphSolver::SetSimpleRadialFixedPointPoseIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_fixed_point_num_) {
     throw std::runtime_error(
@@ -5864,21 +6023,30 @@ void GraphSolver::SetSimpleRadialFixedPointPoseIndicesFromDevice(
         " != simple_radial_fixed_point_num_. Use "
         "Setsimple_radial_fixed_pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices,
                 facs__simple_radial_fixed_point__args__pose__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetSimpleRadialFixedPointCalibIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != simple_radial_fixed_point_num_. Use "
         "Setsimple_radial_fixed_pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialFixedPointCalibIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -5886,7 +6054,6 @@ void GraphSolver::SetSimpleRadialFixedPointCalibIndicesFromHost(
 void GraphSolver::SetSimpleRadialFixedPointCalibIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_fixed_point_num_) {
     throw std::runtime_error(
@@ -5894,85 +6061,121 @@ void GraphSolver::SetSimpleRadialFixedPointCalibIndicesFromDevice(
         " != simple_radial_fixed_point_num_. Use "
         "Setsimple_radial_fixed_pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices,
                 facs__simple_radial_fixed_point__args__calib__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetSimpleRadialFixedPointSensorFromRigDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_point_num_max_ ||
+      num > simple_radial_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          marker__scratch_inout_, facs__simple_radial_fixed_point__args__sensor_from_rig__data_,
+          simple_radial_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialFixedPointSensorFromRigDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_point_num_max_ ||
+      num > simple_radial_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_fixed_point_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data, facs__simple_radial_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstSimpleRadialSensorFromRigStackedToCaspar(
+                data, facs__simple_radial_fixed_point__args__sensor_from_rig__data_,
+                simple_radial_fixed_point_num_max_, offset, num),
+            "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialFixedPointPixelDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_point_num_max_ ||
+      num > simple_radial_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(marker__scratch_inout_,
-                            facs__simple_radial_fixed_point__args__pixel__data_,
-                            simple_radial_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(marker__scratch_inout_,
+                                      facs__simple_radial_fixed_point__args__pixel__data_,
+                                      simple_radial_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialFixedPointPixelDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_point_num_max_ ||
+      num > simple_radial_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(data,
-                            facs__simple_radial_fixed_point__args__pixel__data_,
-                            simple_radial_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(data, facs__simple_radial_fixed_point__args__pixel__data_,
+                                      simple_radial_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialFixedPointPointDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_point_num_max_ ||
+      num > simple_radial_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(marker__scratch_inout_,
-                            facs__simple_radial_fixed_point__args__point__data_,
-                            simple_radial_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPointStackedToCaspar(marker__scratch_inout_,
+                                      facs__simple_radial_fixed_point__args__point__data_,
+                                      simple_radial_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialFixedPointPointDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_point_num_max_ ||
+      num > simple_radial_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > simple_radial_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(data,
-                            facs__simple_radial_fixed_point__args__point__data_,
-                            simple_radial_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPointStackedToCaspar(data, facs__simple_radial_fixed_point__args__point__data_,
+                                      simple_radial_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialFixedPoseFixedPointNum(const size_t num) {
   if (num > simple_radial_fixed_pose_fixed_point_num_max_) {
@@ -5984,15 +6187,19 @@ void GraphSolver::SetSimpleRadialFixedPoseFixedPointNum(const size_t num) {
 }
 void GraphSolver::SetSimpleRadialFixedPoseFixedPointCalibIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_fixed_pose_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != simple_radial_fixed_pose_fixed_point_num_. Use "
         "Setsimple_radial_fixed_pose_fixed_pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialFixedPoseFixedPointCalibIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -6000,7 +6207,6 @@ void GraphSolver::SetSimpleRadialFixedPoseFixedPointCalibIndicesFromHost(
 void GraphSolver::SetSimpleRadialFixedPoseFixedPointCalibIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_fixed_pose_fixed_point_num_) {
     throw std::runtime_error(
@@ -6008,126 +6214,174 @@ void GraphSolver::SetSimpleRadialFixedPoseFixedPointCalibIndicesFromDevice(
         " != simple_radial_fixed_pose_fixed_point_num_. Use "
         "Setsimple_radial_fixed_pose_fixed_pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_fixed_pose_fixed_point__args__calib__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialFixedPoseFixedPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_pose_fixed_point_num_max_ ||
+      num > simple_radial_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_fixed_pose_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_fixed_pose_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstSimpleRadialSensorFromRigStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_fixed_pose_fixed_point__args__sensor_from_rig__data_,
+                simple_radial_fixed_pose_fixed_point_num_max_, offset, num),
+            "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialFixedPoseFixedPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_pose_fixed_point_num_max_ ||
+      num > simple_radial_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_fixed_pose_fixed_point_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data,
-      facs__simple_radial_fixed_pose_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstSimpleRadialSensorFromRigStackedToCaspar(
+                data, facs__simple_radial_fixed_pose_fixed_point__args__sensor_from_rig__data_,
+                simple_radial_fixed_pose_fixed_point_num_max_, offset, num),
+            "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialFixedPoseFixedPointPixelDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_pose_fixed_point_num_max_ ||
+      num > simple_radial_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_fixed_pose_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_fixed_pose_fixed_point__args__pixel__data_,
-      simple_radial_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(marker__scratch_inout_,
+                                facs__simple_radial_fixed_pose_fixed_point__args__pixel__data_,
+                                simple_radial_fixed_pose_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialFixedPoseFixedPointPixelDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_pose_fixed_point_num_max_ ||
+      num > simple_radial_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_fixed_pose_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data, facs__simple_radial_fixed_pose_fixed_point__args__pixel__data_,
-      simple_radial_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(
+                data, facs__simple_radial_fixed_pose_fixed_point__args__pixel__data_,
+                simple_radial_fixed_pose_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialFixedPoseFixedPointPoseDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_pose_fixed_point_num_max_ ||
+      num > simple_radial_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_fixed_pose_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPoseStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_fixed_pose_fixed_point__args__pose__data_,
-      simple_radial_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialPoseStackedToCaspar(
+          marker__scratch_inout_, facs__simple_radial_fixed_pose_fixed_point__args__pose__data_,
+          simple_radial_fixed_pose_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialPoseStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialFixedPoseFixedPointPoseDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_pose_fixed_point_num_max_ ||
+      num > simple_radial_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_fixed_pose_fixed_point_num_max_");
   }
-  ConstSimpleRadialPoseStackedToCaspar(
-      data, facs__simple_radial_fixed_pose_fixed_point__args__pose__data_,
-      simple_radial_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstSimpleRadialPoseStackedToCaspar(
+                data, facs__simple_radial_fixed_pose_fixed_point__args__pose__data_,
+                simple_radial_fixed_pose_fixed_point_num_max_, offset, num),
+            "ConstSimpleRadialPoseStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialFixedPoseFixedPointPointDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_pose_fixed_point_num_max_ ||
+      num > simple_radial_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_fixed_pose_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_fixed_pose_fixed_point__args__point__data_,
-      simple_radial_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPointStackedToCaspar(marker__scratch_inout_,
+                                facs__simple_radial_fixed_pose_fixed_point__args__point__data_,
+                                simple_radial_fixed_pose_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::SetSimpleRadialFixedPoseFixedPointPointDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_fixed_pose_fixed_point_num_max_) {
+  if (offset > simple_radial_fixed_pose_fixed_point_num_max_ ||
+      num > simple_radial_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_fixed_pose_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(
-      data, facs__simple_radial_fixed_pose_fixed_point__args__point__data_,
-      simple_radial_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPointStackedToCaspar(
+                data, facs__simple_radial_fixed_pose_fixed_point__args__point__data_,
+                simple_radial_fixed_pose_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 void GraphSolver::SetPinholeNum(const size_t num) {
   if (num > pinhole_num_max_) {
@@ -6137,132 +6391,172 @@ void GraphSolver::SetPinholeNum(const size_t num) {
 }
 void GraphSolver::SetPinholePoseIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_num_. Use SetpinholeNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholePoseIndicesFromDevice((unsigned int *)marker__scratch_inout_, num);
 }
 
 void GraphSolver::SetPinholePoseIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_num_. Use SetpinholeNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices, facs__pinhole__args__pose__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeCalibIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_num_. Use SetpinholeNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeCalibIndicesFromDevice((unsigned int *)marker__scratch_inout_, num);
 }
 
 void GraphSolver::SetPinholeCalibIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_num_. Use SetpinholeNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices, facs__pinhole__args__calib__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholePointIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_num_. Use SetpinholeNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholePointIndicesFromDevice((unsigned int *)marker__scratch_inout_, num);
 }
 
 void GraphSolver::SetPinholePointIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_num_. Use SetpinholeNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices, facs__pinhole__args__point__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeSensorFromRigDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_num_max_) {
+  if (offset > pinhole_num_max_ || num > pinhole_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_, facs__pinhole__args__sensor_from_rig__data_,
-      pinhole_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(marker__scratch_inout_,
+                                                     facs__pinhole__args__sensor_from_rig__data_,
+                                                     pinhole_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeSensorFromRigDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_num_max_) {
+  if (offset > pinhole_num_max_ || num > pinhole_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data, facs__pinhole__args__sensor_from_rig__data_, pinhole_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                data, facs__pinhole__args__sensor_from_rig__data_, pinhole_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::SetPinholePixelDataFromStackedHost(const double *const data,
                                                      size_t offset,
                                                      size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_num_max_) {
+  if (offset > pinhole_num_max_ || num > pinhole_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(marker__scratch_inout_,
-                            facs__pinhole__args__pixel__data_, pinhole_num_max_,
-                            offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(marker__scratch_inout_, facs__pinhole__args__pixel__data_,
+                                      pinhole_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::SetPinholePixelDataFromStackedDevice(const double *const data,
                                                        size_t offset,
                                                        size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_num_max_) {
+  if (offset > pinhole_num_max_ || num > pinhole_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_num_max_");
   }
-  ConstPixelStackedToCaspar(data, facs__pinhole__args__pixel__data_,
-                            pinhole_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(data, facs__pinhole__args__pixel__data_, pinhole_num_max_,
+                                      offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::SetPinholeFixedPoseNum(const size_t num) {
   if (num > pinhole_fixed_pose_num_max_) {
@@ -6273,15 +6567,19 @@ void GraphSolver::SetPinholeFixedPoseNum(const size_t num) {
 }
 void GraphSolver::SetPinholeFixedPoseCalibIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_fixed_pose_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_fixed_pose_num_. Use Setpinhole_fixed_poseNum before "
         "setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeFixedPoseCalibIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -6289,7 +6587,6 @@ void GraphSolver::SetPinholeFixedPoseCalibIndicesFromHost(
 void GraphSolver::SetPinholeFixedPoseCalibIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_fixed_pose_num_) {
     throw std::runtime_error(
@@ -6297,21 +6594,30 @@ void GraphSolver::SetPinholeFixedPoseCalibIndicesFromDevice(
         " != pinhole_fixed_pose_num_. Use Setpinhole_fixed_poseNum before "
         "setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices, facs__pinhole_fixed_pose__args__calib__idx_shared_,
                 num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeFixedPosePointIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_fixed_pose_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_fixed_pose_num_. Use Setpinhole_fixed_poseNum before "
         "setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeFixedPosePointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -6319,7 +6625,6 @@ void GraphSolver::SetPinholeFixedPosePointIndicesFromHost(
 void GraphSolver::SetPinholeFixedPosePointIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_fixed_pose_num_) {
     throw std::runtime_error(
@@ -6327,84 +6632,114 @@ void GraphSolver::SetPinholeFixedPosePointIndicesFromDevice(
         " != pinhole_fixed_pose_num_. Use Setpinhole_fixed_poseNum before "
         "setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices, facs__pinhole_fixed_pose__args__point__idx_shared_,
                 num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeFixedPoseSensorFromRigDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_num_max_) {
+  if (offset > pinhole_fixed_pose_num_max_ || num > pinhole_fixed_pose_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_fixed_pose__args__sensor_from_rig__data_,
-      pinhole_fixed_pose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                marker__scratch_inout_, facs__pinhole_fixed_pose__args__sensor_from_rig__data_,
+                pinhole_fixed_pose_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeFixedPoseSensorFromRigDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_num_max_) {
+  if (offset > pinhole_fixed_pose_num_max_ || num > pinhole_fixed_pose_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data, facs__pinhole_fixed_pose__args__sensor_from_rig__data_,
-      pinhole_fixed_pose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                data, facs__pinhole_fixed_pose__args__sensor_from_rig__data_,
+                pinhole_fixed_pose_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::SetPinholeFixedPosePixelDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_num_max_) {
+  if (offset > pinhole_fixed_pose_num_max_ || num > pinhole_fixed_pose_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(marker__scratch_inout_,
-                            facs__pinhole_fixed_pose__args__pixel__data_,
-                            pinhole_fixed_pose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(marker__scratch_inout_,
+                                      facs__pinhole_fixed_pose__args__pixel__data_,
+                                      pinhole_fixed_pose_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeFixedPosePixelDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_num_max_) {
+  if (offset > pinhole_fixed_pose_num_max_ || num > pinhole_fixed_pose_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_num_max_");
   }
-  ConstPixelStackedToCaspar(data, facs__pinhole_fixed_pose__args__pixel__data_,
-                            pinhole_fixed_pose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(data, facs__pinhole_fixed_pose__args__pixel__data_,
+                                      pinhole_fixed_pose_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::SetPinholeFixedPosePoseDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_num_max_) {
+  if (offset > pinhole_fixed_pose_num_max_ || num > pinhole_fixed_pose_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePoseStackedToCaspar(marker__scratch_inout_,
-                                  facs__pinhole_fixed_pose__args__pose__data_,
-                                  pinhole_fixed_pose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholePoseStackedToCaspar(marker__scratch_inout_,
+                                            facs__pinhole_fixed_pose__args__pose__data_,
+                                            pinhole_fixed_pose_num_max_, offset, num),
+            "ConstPinholePoseStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeFixedPosePoseDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_num_max_) {
+  if (offset > pinhole_fixed_pose_num_max_ || num > pinhole_fixed_pose_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_num_max_");
   }
-  ConstPinholePoseStackedToCaspar(data,
-                                  facs__pinhole_fixed_pose__args__pose__data_,
-                                  pinhole_fixed_pose_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholePoseStackedToCaspar(data, facs__pinhole_fixed_pose__args__pose__data_,
+                                            pinhole_fixed_pose_num_max_, offset, num),
+            "ConstPinholePoseStackedToCaspar");
 }
 void GraphSolver::SetPinholeFixedPointNum(const size_t num) {
   if (num > pinhole_fixed_point_num_max_) {
@@ -6415,15 +6750,19 @@ void GraphSolver::SetPinholeFixedPointNum(const size_t num) {
 }
 void GraphSolver::SetPinholeFixedPointPoseIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_fixed_point_num_. Use Setpinhole_fixed_pointNum before "
         "setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeFixedPointPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -6431,7 +6770,6 @@ void GraphSolver::SetPinholeFixedPointPoseIndicesFromHost(
 void GraphSolver::SetPinholeFixedPointPoseIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_fixed_point_num_) {
     throw std::runtime_error(
@@ -6439,21 +6777,30 @@ void GraphSolver::SetPinholeFixedPointPoseIndicesFromDevice(
         " != pinhole_fixed_point_num_. Use Setpinhole_fixed_pointNum before "
         "setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices, facs__pinhole_fixed_point__args__pose__idx_shared_,
                 num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeFixedPointCalibIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_fixed_point_num_. Use Setpinhole_fixed_pointNum before "
         "setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeFixedPointCalibIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -6461,7 +6808,6 @@ void GraphSolver::SetPinholeFixedPointCalibIndicesFromHost(
 void GraphSolver::SetPinholeFixedPointCalibIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_fixed_point_num_) {
     throw std::runtime_error(
@@ -6469,83 +6815,114 @@ void GraphSolver::SetPinholeFixedPointCalibIndicesFromDevice(
         " != pinhole_fixed_point_num_. Use Setpinhole_fixed_pointNum before "
         "setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices, facs__pinhole_fixed_point__args__calib__idx_shared_,
                 num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeFixedPointSensorFromRigDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_point_num_max_ || num > pinhole_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_fixed_point__args__sensor_from_rig__data_,
-      pinhole_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                marker__scratch_inout_, facs__pinhole_fixed_point__args__sensor_from_rig__data_,
+                pinhole_fixed_point_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeFixedPointSensorFromRigDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_point_num_max_ || num > pinhole_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_point_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data, facs__pinhole_fixed_point__args__sensor_from_rig__data_,
-      pinhole_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                data, facs__pinhole_fixed_point__args__sensor_from_rig__data_,
+                pinhole_fixed_point_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::SetPinholeFixedPointPixelDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_point_num_max_ || num > pinhole_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(marker__scratch_inout_,
-                            facs__pinhole_fixed_point__args__pixel__data_,
-                            pinhole_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(marker__scratch_inout_,
+                                      facs__pinhole_fixed_point__args__pixel__data_,
+                                      pinhole_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeFixedPointPixelDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_point_num_max_ || num > pinhole_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(data, facs__pinhole_fixed_point__args__pixel__data_,
-                            pinhole_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(data, facs__pinhole_fixed_point__args__pixel__data_,
+                                      pinhole_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::SetPinholeFixedPointPointDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_point_num_max_ || num > pinhole_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(marker__scratch_inout_,
-                            facs__pinhole_fixed_point__args__point__data_,
-                            pinhole_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPointStackedToCaspar(marker__scratch_inout_,
+                                      facs__pinhole_fixed_point__args__point__data_,
+                                      pinhole_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeFixedPointPointDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_point_num_max_ || num > pinhole_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(data, facs__pinhole_fixed_point__args__point__data_,
-                            pinhole_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPointStackedToCaspar(data, facs__pinhole_fixed_point__args__point__data_,
+                                      pinhole_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 void GraphSolver::SetPinholeFixedPoseFixedPointNum(const size_t num) {
   if (num > pinhole_fixed_pose_fixed_point_num_max_) {
@@ -6556,15 +6933,19 @@ void GraphSolver::SetPinholeFixedPoseFixedPointNum(const size_t num) {
 }
 void GraphSolver::SetPinholeFixedPoseFixedPointCalibIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_fixed_pose_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_fixed_pose_fixed_point_num_. Use "
         "Setpinhole_fixed_pose_fixed_pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeFixedPoseFixedPointCalibIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -6572,7 +6953,6 @@ void GraphSolver::SetPinholeFixedPoseFixedPointCalibIndicesFromHost(
 void GraphSolver::SetPinholeFixedPoseFixedPointCalibIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_fixed_pose_fixed_point_num_) {
     throw std::runtime_error(
@@ -6580,115 +6960,161 @@ void GraphSolver::SetPinholeFixedPoseFixedPointCalibIndicesFromDevice(
         " != pinhole_fixed_pose_fixed_point_num_. Use "
         "Setpinhole_fixed_pose_fixed_pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices,
                 facs__pinhole_fixed_pose_fixed_point__args__calib__idx_shared_,
                 num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeFixedPoseFixedPointSensorFromRigDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_pose_fixed_point_num_max_ ||
+      num > pinhole_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_fixed_pose_fixed_point__args__sensor_from_rig__data_,
-      pinhole_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_fixed_pose_fixed_point__args__sensor_from_rig__data_,
+                pinhole_fixed_pose_fixed_point_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeFixedPoseFixedPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_pose_fixed_point_num_max_ ||
+      num > pinhole_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_fixed_point_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data, facs__pinhole_fixed_pose_fixed_point__args__sensor_from_rig__data_,
-      pinhole_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                data, facs__pinhole_fixed_pose_fixed_point__args__sensor_from_rig__data_,
+                pinhole_fixed_pose_fixed_point_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::SetPinholeFixedPoseFixedPointPixelDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_pose_fixed_point_num_max_ ||
+      num > pinhole_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_fixed_pose_fixed_point__args__pixel__data_,
-      pinhole_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(marker__scratch_inout_,
+                                      facs__pinhole_fixed_pose_fixed_point__args__pixel__data_,
+                                      pinhole_fixed_pose_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeFixedPoseFixedPointPixelDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_pose_fixed_point_num_max_ ||
+      num > pinhole_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data, facs__pinhole_fixed_pose_fixed_point__args__pixel__data_,
-      pinhole_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(data, facs__pinhole_fixed_pose_fixed_point__args__pixel__data_,
+                                pinhole_fixed_pose_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::SetPinholeFixedPoseFixedPointPoseDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_pose_fixed_point_num_max_ ||
+      num > pinhole_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePoseStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_fixed_pose_fixed_point__args__pose__data_,
-      pinhole_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholePoseStackedToCaspar(marker__scratch_inout_,
+                                            facs__pinhole_fixed_pose_fixed_point__args__pose__data_,
+                                            pinhole_fixed_pose_fixed_point_num_max_, offset, num),
+            "ConstPinholePoseStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeFixedPoseFixedPointPoseDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_pose_fixed_point_num_max_ ||
+      num > pinhole_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_fixed_point_num_max_");
   }
-  ConstPinholePoseStackedToCaspar(
-      data, facs__pinhole_fixed_pose_fixed_point__args__pose__data_,
-      pinhole_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholePoseStackedToCaspar(data, facs__pinhole_fixed_pose_fixed_point__args__pose__data_,
+                                      pinhole_fixed_pose_fixed_point_num_max_, offset, num),
+      "ConstPinholePoseStackedToCaspar");
 }
 void GraphSolver::SetPinholeFixedPoseFixedPointPointDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_pose_fixed_point_num_max_ ||
+      num > pinhole_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_fixed_pose_fixed_point__args__point__data_,
-      pinhole_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPointStackedToCaspar(marker__scratch_inout_,
+                                      facs__pinhole_fixed_pose_fixed_point__args__point__data_,
+                                      pinhole_fixed_pose_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeFixedPoseFixedPointPointDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_fixed_pose_fixed_point_num_max_) {
+  if (offset > pinhole_fixed_pose_fixed_point_num_max_ ||
+      num > pinhole_fixed_pose_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_fixed_pose_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(
-      data, facs__pinhole_fixed_pose_fixed_point__args__point__data_,
-      pinhole_fixed_pose_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPointStackedToCaspar(data, facs__pinhole_fixed_pose_fixed_point__args__point__data_,
+                                pinhole_fixed_pose_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraNum(const size_t num) {
   if (num > simple_radial_split_fixed_focal_and_extra_num_max_) {
@@ -6700,7 +7126,6 @@ void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraNum(const size_t num) {
 }
 void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraPoseIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_focal_and_extra_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -6708,8 +7133,13 @@ void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraPoseIndicesFromHost(
         "Setsimple_radial_split_fixed_focal_and_extraNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedFocalAndExtraPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -6717,7 +7147,6 @@ void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraPoseIndicesFromHost(
 void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraPoseIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_focal_and_extra_num_) {
     throw std::runtime_error(
@@ -6726,16 +7155,20 @@ void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraPoseIndicesFromDevice(
         "Setsimple_radial_split_fixed_focal_and_extraNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra__args__pose__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraPrincipalPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_focal_and_extra_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -6743,8 +7176,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_focal_and_extraNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedFocalAndExtraPrincipalPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -6753,7 +7191,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraPrincipalPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_focal_and_extra_num_) {
     throw std::runtime_error(
@@ -6762,15 +7199,19 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_focal_and_extraNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra__args__principal_point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraPointIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_focal_and_extra_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -6778,8 +7219,13 @@ void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraPointIndicesFromHost(
         "Setsimple_radial_split_fixed_focal_and_extraNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedFocalAndExtraPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -6787,7 +7233,6 @@ void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraPointIndicesFromHost(
 void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraPointIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_focal_and_extra_num_) {
     throw std::runtime_error(
@@ -6796,103 +7241,139 @@ void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraPointIndicesFromDevice(
         "Setsimple_radial_split_fixed_focal_and_extraNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra__args__point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_split_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_focal_and_extra_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstSimpleRadialSensorFromRigStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_split_fixed_focal_and_extra__args__sensor_from_rig__data_,
+                simple_radial_split_fixed_focal_and_extra_num_max_, offset, num),
+            "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_split_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_focal_and_extra_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstSimpleRadialSensorFromRigStackedToCaspar(
+                data, facs__simple_radial_split_fixed_focal_and_extra__args__sensor_from_rig__data_,
+                simple_radial_split_fixed_focal_and_extra_num_max_, offset, num),
+            "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_split_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra__args__pixel__data_,
-      simple_radial_split_fixed_focal_and_extra_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(marker__scratch_inout_,
+                                facs__simple_radial_split_fixed_focal_and_extra__args__pixel__data_,
+                                simple_radial_split_fixed_focal_and_extra_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_split_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data, facs__simple_radial_split_fixed_focal_and_extra__args__pixel__data_,
-      simple_radial_split_fixed_focal_and_extra_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(
+                data, facs__simple_radial_split_fixed_focal_and_extra__args__pixel__data_,
+                simple_radial_split_fixed_focal_and_extra_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFocalAndExtraDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_split_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra__args__focal_and_extra__data_,
-      simple_radial_split_fixed_focal_and_extra_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstSimpleRadialFocalAndExtraStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_split_fixed_focal_and_extra__args__focal_and_extra__data_,
+                simple_radial_split_fixed_focal_and_extra_num_max_, offset, num),
+            "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFocalAndExtraDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_split_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_num_max_");
   }
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra__args__focal_and_extra__data_,
-      simple_radial_split_fixed_focal_and_extra_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstSimpleRadialFocalAndExtraStackedToCaspar(
+                data, facs__simple_radial_split_fixed_focal_and_extra__args__focal_and_extra__data_,
+                simple_radial_split_fixed_focal_and_extra_num_max_, offset, num),
+            "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointNum(const size_t num) {
   if (num > simple_radial_split_fixed_principal_point_num_max_) {
@@ -6904,7 +7385,6 @@ void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointNum(const size_t num) {
 }
 void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointPoseIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -6912,8 +7392,13 @@ void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointPoseIndicesFromHost(
         "Setsimple_radial_split_fixed_principal_pointNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedPrincipalPointPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -6921,7 +7406,6 @@ void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointPoseIndicesFromHost(
 void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointPoseIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -6930,16 +7414,20 @@ void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointPoseIndicesFromDevice(
         "Setsimple_radial_split_fixed_principal_pointNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_principal_point__args__pose__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFocalAndExtraIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -6947,8 +7435,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_principal_pointNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedPrincipalPointFocalAndExtraIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -6957,7 +7450,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFocalAndExtraIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -6966,15 +7458,19 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_principal_pointNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_principal_point__args__focal_and_extra__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointPointIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -6982,8 +7478,13 @@ void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointPointIndicesFromHost(
         "Setsimple_radial_split_fixed_principal_pointNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedPrincipalPointPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -6991,7 +7492,6 @@ void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointPointIndicesFromHost(
 void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointPointIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -7000,103 +7500,139 @@ void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointPointIndicesFromDevice(
         "Setsimple_radial_split_fixed_principal_pointNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_principal_point__args__point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_split_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_principal_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstSimpleRadialSensorFromRigStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_split_fixed_principal_point__args__sensor_from_rig__data_,
+                simple_radial_split_fixed_principal_point_num_max_, offset, num),
+            "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_split_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_principal_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstSimpleRadialSensorFromRigStackedToCaspar(
+                data, facs__simple_radial_split_fixed_principal_point__args__sensor_from_rig__data_,
+                simple_radial_split_fixed_principal_point_num_max_, offset, num),
+            "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_split_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_principal_point__args__pixel__data_,
-      simple_radial_split_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(marker__scratch_inout_,
+                                facs__simple_radial_split_fixed_principal_point__args__pixel__data_,
+                                simple_radial_split_fixed_principal_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_split_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data, facs__simple_radial_split_fixed_principal_point__args__pixel__data_,
-      simple_radial_split_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(
+                data, facs__simple_radial_split_fixed_principal_point__args__pixel__data_,
+                simple_radial_split_fixed_principal_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_split_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_principal_point__args__principal_point__data_,
-      simple_radial_split_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstSimpleRadialPrincipalPointStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_split_fixed_principal_point__args__principal_point__data_,
+                simple_radial_split_fixed_principal_point_num_max_, offset, num),
+            "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > simple_radial_split_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_num_max_");
   }
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_principal_point__args__principal_point__data_,
-      simple_radial_split_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstSimpleRadialPrincipalPointStackedToCaspar(
+                data, facs__simple_radial_split_fixed_principal_point__args__principal_point__data_,
+                simple_radial_split_fixed_principal_point_num_max_, offset, num),
+            "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialSplitFixedPoseFixedFocalAndExtraNum(
     const size_t num) {
@@ -7110,7 +7646,6 @@ void GraphSolver::SetSimpleRadialSplitFixedPoseFixedFocalAndExtraNum(
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraPrincipalPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_pose_fixed_focal_and_extra_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -7118,8 +7653,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_focal_and_extraNum before "
         "setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedPoseFixedFocalAndExtraPrincipalPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -7128,7 +7668,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraPrincipalPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_pose_fixed_focal_and_extra_num_) {
     throw std::runtime_error(
@@ -7137,16 +7676,20 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_focal_and_extraNum before "
         "setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__principal_point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_pose_fixed_focal_and_extra_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -7154,8 +7697,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_focal_and_extraNum before "
         "setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedPoseFixedFocalAndExtraPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -7164,7 +7712,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_pose_fixed_focal_and_extra_num_) {
     throw std::runtime_error(
@@ -7173,151 +7720,187 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_focal_and_extraNum before "
         "setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__pixel__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__pixel__data_,
+                simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__pixel__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          data, facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__pixel__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraPoseDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPoseStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__pose__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstSimpleRadialPoseStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__pose__data_,
+                simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset, num),
+            "ConstSimpleRadialPoseStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraPoseDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_");
   }
-  ConstSimpleRadialPoseStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__pose__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstSimpleRadialPoseStackedToCaspar(
+                data, facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__pose__data_,
+                simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset, num),
+            "ConstSimpleRadialPoseStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFocalAndExtraDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__focal_and_extra__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialFocalAndExtraStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__focal_and_extra__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset, num),
+      "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFocalAndExtraDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_");
   }
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__focal_and_extra__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialFocalAndExtraStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra__args__focal_and_extra__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_num_max_, offset, num),
+      "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialSplitFixedPoseFixedPrincipalPointNum(
     const size_t num) {
@@ -7331,7 +7914,6 @@ void GraphSolver::SetSimpleRadialSplitFixedPoseFixedPrincipalPointNum(
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFocalAndExtraIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_pose_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -7339,8 +7921,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_principal_pointNum before "
         "setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedPoseFixedPrincipalPointFocalAndExtraIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -7349,7 +7936,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFocalAndExtraIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_pose_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -7358,16 +7944,20 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_principal_pointNum before "
         "setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_principal_point__args__focal_and_extra__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_pose_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -7375,8 +7965,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_principal_pointNum before "
         "setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedPoseFixedPrincipalPointPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -7385,7 +7980,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_pose_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -7394,151 +7988,187 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_principal_pointNum before "
         "setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_principal_point__args__point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point__args__pixel__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_split_fixed_pose_fixed_principal_point__args__pixel__data_,
+                simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point__args__pixel__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          data, facs__simple_radial_split_fixed_pose_fixed_principal_point__args__pixel__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointPoseDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPoseStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point__args__pose__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstSimpleRadialPoseStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_split_fixed_pose_fixed_principal_point__args__pose__data_,
+                simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+            "ConstSimpleRadialPoseStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointPoseDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  ConstSimpleRadialPoseStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point__args__pose__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstSimpleRadialPoseStackedToCaspar(
+                data, facs__simple_radial_split_fixed_pose_fixed_principal_point__args__pose__data_,
+                simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+            "ConstSimpleRadialPoseStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point__args__principal_point__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialPrincipalPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point__args__principal_point__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+      "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point__args__principal_point__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialPrincipalPointStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point__args__principal_point__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+      "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointNum(
     const size_t num) {
@@ -7554,9 +8184,7 @@ void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointNum(
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointPoseIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
-  if (num !=
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_) {
+  if (num != simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != "
@@ -7565,8 +8193,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_focal_and_extra_fixed_principal_pointNum "
         "before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -7575,7 +8208,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointPoseIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num !=
       simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_) {
@@ -7587,18 +8219,21 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_focal_and_extra_fixed_principal_pointNum "
         "before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__pose__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
-  if (num !=
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_) {
+  if (num != simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != "
@@ -7607,8 +8242,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_focal_and_extra_fixed_principal_pointNum "
         "before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -7617,7 +8257,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num !=
       simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_) {
@@ -7629,159 +8268,200 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_focal_and_extra_fixed_principal_pointNum "
         "before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__pixel__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__pixel__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__pixel__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__pixel__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFocalAndExtraDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__focal_and_extra__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialFocalAndExtraStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__focal_and_extra__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_, offset, num),
+      "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFocalAndExtraDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_num_max_");
   }
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__focal_and_extra__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialFocalAndExtraStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__focal_and_extra__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_, offset, num),
+      "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__principal_point__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialPrincipalPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__principal_point__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_, offset, num),
+      "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_num_max_");
   }
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__principal_point__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialPrincipalPointStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point__args__principal_point__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_num_max_, offset, num),
+      "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraFixedPointNum(
     const size_t num) {
@@ -7795,7 +8475,6 @@ void GraphSolver::SetSimpleRadialSplitFixedFocalAndExtraFixedPointNum(
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPointPoseIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_focal_and_extra_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -7803,8 +8482,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_focal_and_extra_fixed_pointNum before "
         "setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedFocalAndExtraFixedPointPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -7813,7 +8497,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPointPoseIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_focal_and_extra_fixed_point_num_) {
     throw std::runtime_error(
@@ -7822,16 +8505,20 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_focal_and_extra_fixed_pointNum before "
         "setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__pose__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPointPrincipalPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_focal_and_extra_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -7839,8 +8526,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_focal_and_extra_fixed_pointNum before "
         "setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedFocalAndExtraFixedPointPrincipalPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -7849,7 +8541,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPointPrincipalPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_focal_and_extra_fixed_point_num_) {
     throw std::runtime_error(
@@ -7858,151 +8549,188 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_focal_and_extra_fixed_pointNum before "
         "setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__principal_point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__pixel__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__pixel__data_,
+                simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__pixel__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          data, facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__pixel__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPointFocalAndExtraDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__focal_and_extra__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialFocalAndExtraStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__focal_and_extra__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPointFocalAndExtraDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_");
   }
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__focal_and_extra__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialFocalAndExtraStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__focal_and_extra__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPointPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__point__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPointStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__point__data_,
+                simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPointPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__point__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPointStackedToCaspar(
+          data, facs__simple_radial_split_fixed_focal_and_extra_fixed_point__args__point__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointFixedPointNum(
     const size_t num) {
@@ -8016,7 +8744,6 @@ void GraphSolver::SetSimpleRadialSplitFixedPrincipalPointFixedPointNum(
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFixedPointPoseIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -8024,8 +8751,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_principal_point_fixed_pointNum before "
         "setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedPrincipalPointFixedPointPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -8034,7 +8766,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFixedPointPoseIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
@@ -8043,16 +8774,20 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_principal_point_fixed_pointNum before "
         "setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_principal_point_fixed_point__args__pose__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFixedPointFocalAndExtraIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != simple_radial_split_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -8060,8 +8795,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_principal_point_fixed_pointNum before "
         "setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedPrincipalPointFixedPointFocalAndExtraIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -8070,7 +8810,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFixedPointFocalAndExtraIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != simple_radial_split_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
@@ -8079,151 +8818,188 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_principal_point_fixed_pointNum before "
         "setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_principal_point_fixed_point__args__focal_and_extra__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFixedPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFixedPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFixedPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_principal_point_fixed_point__args__pixel__data_,
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_split_fixed_principal_point_fixed_point__args__pixel__data_,
+                simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFixedPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_principal_point_fixed_point__args__pixel__data_,
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          data, facs__simple_radial_split_fixed_principal_point_fixed_point__args__pixel__data_,
+          simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFixedPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_principal_point_fixed_point__args__principal_point__data_,
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialPrincipalPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_principal_point_fixed_point__args__principal_point__data_,
+          simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFixedPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_principal_point_fixed_point__args__principal_point__data_,
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialPrincipalPointStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_principal_point_fixed_point__args__principal_point__data_,
+          simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFixedPointPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_principal_point_fixed_point__args__point__data_,
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPointStackedToCaspar(
+                marker__scratch_inout_,
+                facs__simple_radial_split_fixed_principal_point_fixed_point__args__point__data_,
+                simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPrincipalPointFixedPointPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > simple_radial_split_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_principal_point_fixed_point__args__point__data_,
-      simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset,
-      num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPointStackedToCaspar(
+          data, facs__simple_radial_split_fixed_principal_point_fixed_point__args__point__data_,
+          simple_radial_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointNum(
@@ -8241,9 +9017,7 @@ void GraphSolver::
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
-  if (num !=
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_) {
+  if (num != simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != "
@@ -8252,8 +9026,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_"
         "principal_pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -8262,7 +9041,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num !=
       simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_) {
@@ -8274,196 +9052,276 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_"
         "principal_pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_principal_point_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__pixel__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__pixel__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
+          offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_principal_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__pixel__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__pixel__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
+          offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPoseDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPoseStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__pose__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialPoseStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__pose__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialPoseStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPoseDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_principal_point_num_max_");
   }
-  ConstSimpleRadialPoseStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__pose__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialPoseStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__pose__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialPoseStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointFocalAndExtraDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__focal_and_extra__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialFocalAndExtraStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__focal_and_extra__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointFocalAndExtraDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_principal_point_num_max_");
   }
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__focal_and_extra__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialFocalAndExtraStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__focal_and_extra__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__principal_point__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialPrincipalPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__principal_point__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_principal_point_num_max_");
   }
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__principal_point__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialPrincipalPointStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point__args__principal_point__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointNum(
     const size_t num) {
@@ -8479,9 +9337,7 @@ void GraphSolver::SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointNum(
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointPrincipalPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
-  if (num !=
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_) {
+  if (num != simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != "
@@ -8490,8 +9346,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_"
         "pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointPrincipalPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -8500,7 +9361,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointPrincipalPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num !=
       simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_) {
@@ -8512,196 +9372,246 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_"
         "pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__principal_point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_point_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__pixel__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__pixel__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__pixel__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__pixel__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointPoseDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPoseStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__pose__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialPoseStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__pose__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialPoseStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointPoseDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_point_num_max_");
   }
-  ConstSimpleRadialPoseStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__pose__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialPoseStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__pose__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialPoseStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointFocalAndExtraDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__focal_and_extra__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialFocalAndExtraStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__focal_and_extra__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointFocalAndExtraDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_point_num_max_");
   }
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__focal_and_extra__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialFocalAndExtraStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__focal_and_extra__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__point__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__point__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedFocalAndExtraFixedPointPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_focal_and_"
                              "extra_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__point__data_,
-      simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPointStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point__args__point__data_,
+          simple_radial_split_fixed_pose_fixed_focal_and_extra_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 void GraphSolver::SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointNum(
     const size_t num) {
@@ -8717,9 +9627,7 @@ void GraphSolver::SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointNum(
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointFocalAndExtraIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
-  if (num !=
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_) {
+  if (num != simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != "
@@ -8728,8 +9636,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_principal_point_fixed_"
         "pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointFocalAndExtraIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -8738,7 +9651,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointFocalAndExtraIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num !=
       simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_) {
@@ -8750,196 +9662,246 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_pose_fixed_principal_point_fixed_"
         "pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__focal_and_extra__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_principal_"
                              "point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_principal_"
                              "point_fixed_point_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_principal_"
                              "point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__pixel__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__pixel__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_principal_"
                              "point_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__pixel__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__pixel__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointPoseDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_principal_"
                              "point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPoseStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__pose__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialPoseStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__pose__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialPoseStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointPoseDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_principal_"
                              "point_fixed_point_num_max_");
   }
-  ConstSimpleRadialPoseStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__pose__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialPoseStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__pose__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialPoseStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_principal_"
                              "point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__principal_point__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialPrincipalPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__principal_point__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_principal_"
                              "point_fixed_point_num_max_");
   }
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__principal_point__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialPrincipalPointStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__principal_point__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_principal_"
                              "point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__point__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__point__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedPoseFixedPrincipalPointFixedPointPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_pose_fixed_principal_"
                              "point_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__point__data_,
-      simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPointStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_pose_fixed_principal_point_fixed_point__args__point__data_,
+          simple_radial_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointNum(
@@ -8957,9 +9919,7 @@ void GraphSolver::
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointPoseIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
-  if (num !=
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_) {
+  if (num != simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != "
@@ -8968,8 +9928,13 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_focal_and_extra_fixed_principal_point_"
         "fixed_pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -8978,7 +9943,6 @@ void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointPoseIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num !=
       simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_) {
@@ -8990,196 +9954,276 @@ void GraphSolver::
         "Setsimple_radial_split_fixed_focal_and_extra_fixed_principal_point_"
         "fixed_pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__pose__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_fixed_point_num_max_");
   }
-  ConstSimpleRadialSensorFromRigStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialSensorFromRigStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__pixel__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__pixel__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
+          offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__pixel__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__pixel__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
+          offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointFocalAndExtraDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__focal_and_extra__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialFocalAndExtraStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__focal_and_extra__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointFocalAndExtraDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_fixed_point_num_max_");
   }
-  ConstSimpleRadialFocalAndExtraStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__focal_and_extra__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialFocalAndExtraStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__focal_and_extra__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialFocalAndExtraStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__principal_point__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstSimpleRadialPrincipalPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__principal_point__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_fixed_point_num_max_");
   }
-  ConstSimpleRadialPrincipalPointStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__principal_point__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstSimpleRadialPrincipalPointStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__principal_point__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
+          offset, num),
+      "ConstSimpleRadialPrincipalPointStackedToCaspar");
 }
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__point__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__point__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
+          offset, num),
+      "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetSimpleRadialSplitFixedFocalAndExtraFixedPrincipalPointFixedPointPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_) {
+  if (offset >
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ ||
+      num > simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_ -
+                offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > "
                              "simple_radial_split_fixed_focal_and_extra_fixed_"
                              "principal_point_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(
-      data,
-      facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__point__data_,
-      simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPointStackedToCaspar(
+          data,
+          facs__simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point__args__point__data_,
+          simple_radial_split_fixed_focal_and_extra_fixed_principal_point_fixed_point_num_max_,
+          offset, num),
+      "ConstPointStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedFocalNum(const size_t num) {
   if (num > pinhole_split_fixed_focal_num_max_) {
@@ -9190,15 +10234,19 @@ void GraphSolver::SetPinholeSplitFixedFocalNum(const size_t num) {
 }
 void GraphSolver::SetPinholeSplitFixedFocalPoseIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_focal_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_split_fixed_focal_num_. Use "
         "Setpinhole_split_fixed_focalNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedFocalPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -9206,7 +10254,6 @@ void GraphSolver::SetPinholeSplitFixedFocalPoseIndicesFromHost(
 void GraphSolver::SetPinholeSplitFixedFocalPoseIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_focal_num_) {
     throw std::runtime_error(
@@ -9214,21 +10261,30 @@ void GraphSolver::SetPinholeSplitFixedFocalPoseIndicesFromDevice(
         " != pinhole_split_fixed_focal_num_. Use "
         "Setpinhole_split_fixed_focalNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices,
                 facs__pinhole_split_fixed_focal__args__pose__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeSplitFixedFocalPrincipalPointIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_focal_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_split_fixed_focal_num_. Use "
         "Setpinhole_split_fixed_focalNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedFocalPrincipalPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -9236,7 +10292,6 @@ void GraphSolver::SetPinholeSplitFixedFocalPrincipalPointIndicesFromHost(
 void GraphSolver::SetPinholeSplitFixedFocalPrincipalPointIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_focal_num_) {
     throw std::runtime_error(
@@ -9244,22 +10299,31 @@ void GraphSolver::SetPinholeSplitFixedFocalPrincipalPointIndicesFromDevice(
         " != pinhole_split_fixed_focal_num_. Use "
         "Setpinhole_split_fixed_focalNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_focal__args__principal_point__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeSplitFixedFocalPointIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_focal_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_split_fixed_focal_num_. Use "
         "Setpinhole_split_fixed_focalNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedFocalPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -9267,7 +10331,6 @@ void GraphSolver::SetPinholeSplitFixedFocalPointIndicesFromHost(
 void GraphSolver::SetPinholeSplitFixedFocalPointIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_focal_num_) {
     throw std::runtime_error(
@@ -9275,86 +10338,122 @@ void GraphSolver::SetPinholeSplitFixedFocalPointIndicesFromDevice(
         " != pinhole_split_fixed_focal_num_. Use "
         "Setpinhole_split_fixed_focalNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(indices,
                 facs__pinhole_split_fixed_focal__args__point__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeSplitFixedFocalSensorFromRigDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_split_fixed_focal_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal__args__sensor_from_rig__data_,
-      pinhole_split_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholeSensorFromRigStackedToCaspar(
+          marker__scratch_inout_, facs__pinhole_split_fixed_focal__args__sensor_from_rig__data_,
+          pinhole_split_fixed_focal_num_max_, offset, num),
+      "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeSplitFixedFocalSensorFromRigDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_split_fixed_focal_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data, facs__pinhole_split_fixed_focal__args__sensor_from_rig__data_,
-      pinhole_split_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                data, facs__pinhole_split_fixed_focal__args__sensor_from_rig__data_,
+                pinhole_split_fixed_focal_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedFocalPixelDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_split_fixed_focal_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(marker__scratch_inout_,
-                            facs__pinhole_split_fixed_focal__args__pixel__data_,
-                            pinhole_split_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(marker__scratch_inout_,
+                                      facs__pinhole_split_fixed_focal__args__pixel__data_,
+                                      pinhole_split_fixed_focal_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeSplitFixedFocalPixelDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_split_fixed_focal_num_max_");
   }
-  ConstPixelStackedToCaspar(data,
-                            facs__pinhole_split_fixed_focal__args__pixel__data_,
-                            pinhole_split_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(data, facs__pinhole_split_fixed_focal__args__pixel__data_,
+                                      pinhole_split_fixed_focal_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedFocalFocalDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_split_fixed_focal_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeFocalStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal__args__focal__data_,
-      pinhole_split_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeFocalStackedToCaspar(marker__scratch_inout_,
+                                             facs__pinhole_split_fixed_focal__args__focal__data_,
+                                             pinhole_split_fixed_focal_num_max_, offset, num),
+            "ConstPinholeFocalStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeSplitFixedFocalFocalDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_split_fixed_focal_num_max_");
   }
-  ConstPinholeFocalStackedToCaspar(
-      data, facs__pinhole_split_fixed_focal__args__focal__data_,
-      pinhole_split_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholeFocalStackedToCaspar(data, facs__pinhole_split_fixed_focal__args__focal__data_,
+                                       pinhole_split_fixed_focal_num_max_, offset, num),
+      "ConstPinholeFocalStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedPrincipalPointNum(const size_t num) {
   if (num > pinhole_split_fixed_principal_point_num_max_) {
@@ -9365,15 +10464,19 @@ void GraphSolver::SetPinholeSplitFixedPrincipalPointNum(const size_t num) {
 }
 void GraphSolver::SetPinholeSplitFixedPrincipalPointPoseIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_split_fixed_principal_point_num_. Use "
         "Setpinhole_split_fixed_principal_pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedPrincipalPointPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -9381,7 +10484,6 @@ void GraphSolver::SetPinholeSplitFixedPrincipalPointPoseIndicesFromHost(
 void GraphSolver::SetPinholeSplitFixedPrincipalPointPoseIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -9389,22 +10491,31 @@ void GraphSolver::SetPinholeSplitFixedPrincipalPointPoseIndicesFromDevice(
         " != pinhole_split_fixed_principal_point_num_. Use "
         "Setpinhole_split_fixed_principal_pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_principal_point__args__pose__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeSplitFixedPrincipalPointFocalIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_split_fixed_principal_point_num_. Use "
         "Setpinhole_split_fixed_principal_pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedPrincipalPointFocalIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -9412,7 +10523,6 @@ void GraphSolver::SetPinholeSplitFixedPrincipalPointFocalIndicesFromHost(
 void GraphSolver::SetPinholeSplitFixedPrincipalPointFocalIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -9420,22 +10530,31 @@ void GraphSolver::SetPinholeSplitFixedPrincipalPointFocalIndicesFromDevice(
         " != pinhole_split_fixed_principal_point_num_. Use "
         "Setpinhole_split_fixed_principal_pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_principal_point__args__focal__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeSplitFixedPrincipalPointPointIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_split_fixed_principal_point_num_. Use "
         "Setpinhole_split_fixed_principal_pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedPrincipalPointPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -9443,7 +10562,6 @@ void GraphSolver::SetPinholeSplitFixedPrincipalPointPointIndicesFromHost(
 void GraphSolver::SetPinholeSplitFixedPrincipalPointPointIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -9451,94 +10569,129 @@ void GraphSolver::SetPinholeSplitFixedPrincipalPointPointIndicesFromDevice(
         " != pinhole_split_fixed_principal_point_num_. Use "
         "Setpinhole_split_fixed_principal_pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_principal_point__args__point__idx_shared_, num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_split_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_principal_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_principal_point__args__sensor_from_rig__data_,
+                pinhole_split_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_split_fixed_principal_point_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_principal_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                data, facs__pinhole_split_fixed_principal_point__args__sensor_from_rig__data_,
+                pinhole_split_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedPrincipalPointPixelDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_split_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_principal_point__args__pixel__data_,
-      pinhole_split_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(marker__scratch_inout_,
+                                      facs__pinhole_split_fixed_principal_point__args__pixel__data_,
+                                      pinhole_split_fixed_principal_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeSplitFixedPrincipalPointPixelDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_split_fixed_principal_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data, facs__pinhole_split_fixed_principal_point__args__pixel__data_,
-      pinhole_split_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(data, facs__pinhole_split_fixed_principal_point__args__pixel__data_,
+                                pinhole_split_fixed_principal_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_split_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_principal_point__args__principal_point__data_,
-      pinhole_split_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholePrincipalPointStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_principal_point__args__principal_point__data_,
+                pinhole_split_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholePrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(std::to_string(offset + num) +
                              " > pinhole_split_fixed_principal_point_num_max_");
   }
-  ConstPinholePrincipalPointStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_principal_point__args__principal_point__data_,
-      pinhole_split_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholePrincipalPointStackedToCaspar(
+                data, facs__pinhole_split_fixed_principal_point__args__principal_point__data_,
+                pinhole_split_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholePrincipalPointStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedPoseFixedFocalNum(const size_t num) {
   if (num > pinhole_split_fixed_pose_fixed_focal_num_max_) {
@@ -9551,15 +10704,19 @@ void GraphSolver::SetPinholeSplitFixedPoseFixedFocalNum(const size_t num) {
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalPrincipalPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_pose_fixed_focal_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_split_fixed_pose_fixed_focal_num_. Use "
         "Setpinhole_split_fixed_pose_fixed_focalNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedPoseFixedFocalPrincipalPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -9568,7 +10725,6 @@ void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalPrincipalPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_pose_fixed_focal_num_) {
     throw std::runtime_error(
@@ -9576,23 +10732,32 @@ void GraphSolver::
         " != pinhole_split_fixed_pose_fixed_focal_num_. Use "
         "Setpinhole_split_fixed_pose_fixed_focalNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_focal__args__principal_point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::SetPinholeSplitFixedPoseFixedFocalPointIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_pose_fixed_focal_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_split_fixed_pose_fixed_focal_num_. Use "
         "Setpinhole_split_fixed_pose_fixed_focalNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedPoseFixedFocalPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -9600,7 +10765,6 @@ void GraphSolver::SetPinholeSplitFixedPoseFixedFocalPointIndicesFromHost(
 void GraphSolver::SetPinholeSplitFixedPoseFixedFocalPointIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_pose_fixed_focal_num_) {
     throw std::runtime_error(
@@ -9608,126 +10772,174 @@ void GraphSolver::SetPinholeSplitFixedPoseFixedFocalPointIndicesFromDevice(
         " != pinhole_split_fixed_pose_fixed_focal_num_. Use "
         "Setpinhole_split_fixed_pose_fixed_focalNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_focal__args__point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal__args__sensor_from_rig__data_,
-      pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_pose_fixed_focal__args__sensor_from_rig__data_,
+                pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_focal__args__sensor_from_rig__data_,
-      pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                data, facs__pinhole_split_fixed_pose_fixed_focal__args__sensor_from_rig__data_,
+                pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedPoseFixedFocalPixelDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal__args__pixel__data_,
-      pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(marker__scratch_inout_,
+                                facs__pinhole_split_fixed_pose_fixed_focal__args__pixel__data_,
+                                pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeSplitFixedPoseFixedFocalPixelDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data, facs__pinhole_split_fixed_pose_fixed_focal__args__pixel__data_,
-      pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(
+                data, facs__pinhole_split_fixed_pose_fixed_focal__args__pixel__data_,
+                pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedPoseFixedFocalPoseDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePoseStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal__args__pose__data_,
-      pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholePoseStackedToCaspar(marker__scratch_inout_,
+                                      facs__pinhole_split_fixed_pose_fixed_focal__args__pose__data_,
+                                      pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num),
+      "ConstPinholePoseStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeSplitFixedPoseFixedFocalPoseDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_num_max_");
   }
-  ConstPinholePoseStackedToCaspar(
-      data, facs__pinhole_split_fixed_pose_fixed_focal__args__pose__data_,
-      pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholePoseStackedToCaspar(
+                data, facs__pinhole_split_fixed_pose_fixed_focal__args__pose__data_,
+                pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num),
+            "ConstPinholePoseStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedPoseFixedFocalFocalDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeFocalStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal__args__focal__data_,
-      pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholeFocalStackedToCaspar(
+          marker__scratch_inout_, facs__pinhole_split_fixed_pose_fixed_focal__args__focal__data_,
+          pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num),
+      "ConstPinholeFocalStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeSplitFixedPoseFixedFocalFocalDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_focal_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_num_max_");
   }
-  ConstPinholeFocalStackedToCaspar(
-      data, facs__pinhole_split_fixed_pose_fixed_focal__args__focal__data_,
-      pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholeFocalStackedToCaspar(
+                data, facs__pinhole_split_fixed_pose_fixed_focal__args__focal__data_,
+                pinhole_split_fixed_pose_fixed_focal_num_max_, offset, num),
+            "ConstPinholeFocalStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedPoseFixedPrincipalPointNum(
     const size_t num) {
@@ -9741,7 +10953,6 @@ void GraphSolver::SetPinholeSplitFixedPoseFixedPrincipalPointNum(
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFocalIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_pose_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -9749,8 +10960,13 @@ void GraphSolver::
         "Setpinhole_split_fixed_pose_fixed_principal_pointNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedPoseFixedPrincipalPointFocalIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -9759,7 +10975,6 @@ void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFocalIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_pose_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -9768,16 +10983,20 @@ void GraphSolver::
         "Setpinhole_split_fixed_pose_fixed_principal_pointNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_principal_point__args__focal__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_pose_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -9785,8 +11004,13 @@ void GraphSolver::
         "Setpinhole_split_fixed_pose_fixed_principal_pointNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedPoseFixedPrincipalPointPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -9795,7 +11019,6 @@ void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_pose_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -9804,135 +11027,182 @@ void GraphSolver::
         "Setpinhole_split_fixed_pose_fixed_principal_pointNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_principal_point__args__point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_principal_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_pose_fixed_principal_point__args__sensor_from_rig__data_,
+                pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_principal_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholeSensorFromRigStackedToCaspar(
+          data, facs__pinhole_split_fixed_pose_fixed_principal_point__args__sensor_from_rig__data_,
+          pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+      "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_principal_point__args__pixel__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_pose_fixed_principal_point__args__pixel__data_,
+                pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_principal_point__args__pixel__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(
+                data, facs__pinhole_split_fixed_pose_fixed_principal_point__args__pixel__data_,
+                pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointPoseDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePoseStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_principal_point__args__pose__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholePoseStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_pose_fixed_principal_point__args__pose__data_,
+                pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholePoseStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointPoseDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  ConstPinholePoseStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_principal_point__args__pose__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholePoseStackedToCaspar(
+                data, facs__pinhole_split_fixed_pose_fixed_principal_point__args__pose__data_,
+                pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholePoseStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_principal_point__args__principal_point__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholePrincipalPointStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_pose_fixed_principal_point__args__principal_point__data_,
+                pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholePrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_pose_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_principal_point_num_max_");
   }
-  ConstPinholePrincipalPointStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_principal_point__args__principal_point__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholePrincipalPointStackedToCaspar(
+          data, facs__pinhole_split_fixed_pose_fixed_principal_point__args__principal_point__data_,
+          pinhole_split_fixed_pose_fixed_principal_point_num_max_, offset, num),
+      "ConstPinholePrincipalPointStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedFocalFixedPrincipalPointNum(
     const size_t num) {
@@ -9946,7 +11216,6 @@ void GraphSolver::SetPinholeSplitFixedFocalFixedPrincipalPointNum(
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointPoseIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_focal_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -9954,8 +11223,13 @@ void GraphSolver::
         "Setpinhole_split_fixed_focal_fixed_principal_pointNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedFocalFixedPrincipalPointPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -9964,7 +11238,6 @@ void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointPoseIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_focal_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -9973,16 +11246,20 @@ void GraphSolver::
         "Setpinhole_split_fixed_focal_fixed_principal_pointNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_focal_fixed_principal_point__args__pose__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_focal_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -9990,8 +11267,13 @@ void GraphSolver::
         "Setpinhole_split_fixed_focal_fixed_principal_pointNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedFocalFixedPrincipalPointPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -10000,7 +11282,6 @@ void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_focal_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -10009,135 +11290,182 @@ void GraphSolver::
         "Setpinhole_split_fixed_focal_fixed_principal_pointNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_focal_fixed_principal_point__args__point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_principal_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_focal_fixed_principal_point__args__sensor_from_rig__data_,
+                pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_principal_point_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_focal_fixed_principal_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholeSensorFromRigStackedToCaspar(
+          data, facs__pinhole_split_fixed_focal_fixed_principal_point__args__sensor_from_rig__data_,
+          pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num),
+      "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_principal_point__args__pixel__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_focal_fixed_principal_point__args__pixel__data_,
+                pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_principal_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_focal_fixed_principal_point__args__pixel__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(
+                data, facs__pinhole_split_fixed_focal_fixed_principal_point__args__pixel__data_,
+                pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFocalDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeFocalStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_principal_point__args__focal__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeFocalStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_focal_fixed_principal_point__args__focal__data_,
+                pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholeFocalStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFocalDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_principal_point_num_max_");
   }
-  ConstPinholeFocalStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_focal_fixed_principal_point__args__focal__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholeFocalStackedToCaspar(
+                data, facs__pinhole_split_fixed_focal_fixed_principal_point__args__focal__data_,
+                pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholeFocalStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_principal_point__args__principal_point__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholePrincipalPointStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_focal_fixed_principal_point__args__principal_point__data_,
+                pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholePrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_principal_point_num_max_");
   }
-  ConstPinholePrincipalPointStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_focal_fixed_principal_point__args__principal_point__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholePrincipalPointStackedToCaspar(
+          data, facs__pinhole_split_fixed_focal_fixed_principal_point__args__principal_point__data_,
+          pinhole_split_fixed_focal_fixed_principal_point_num_max_, offset, num),
+      "ConstPinholePrincipalPointStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedFocalFixedPointNum(const size_t num) {
   if (num > pinhole_split_fixed_focal_fixed_point_num_max_) {
@@ -10149,15 +11477,19 @@ void GraphSolver::SetPinholeSplitFixedFocalFixedPointNum(const size_t num) {
 }
 void GraphSolver::SetPinholeSplitFixedFocalFixedPointPoseIndicesFromHost(
     const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_focal_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_split_fixed_focal_fixed_point_num_. Use "
         "Setpinhole_split_fixed_focal_fixed_pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedFocalFixedPointPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -10165,7 +11497,6 @@ void GraphSolver::SetPinholeSplitFixedFocalFixedPointPoseIndicesFromHost(
 void GraphSolver::SetPinholeSplitFixedFocalFixedPointPoseIndicesFromDevice(
     const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_focal_fixed_point_num_) {
     throw std::runtime_error(
@@ -10173,24 +11504,33 @@ void GraphSolver::SetPinholeSplitFixedFocalFixedPointPoseIndicesFromDevice(
         " != pinhole_split_fixed_focal_fixed_point_num_. Use "
         "Setpinhole_split_fixed_focal_fixed_pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_focal_fixed_point__args__pose__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPointPrincipalPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_focal_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
         " != pinhole_split_fixed_focal_fixed_point_num_. Use "
         "Setpinhole_split_fixed_focal_fixed_pointNum before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedFocalFixedPointPrincipalPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -10199,7 +11539,6 @@ void GraphSolver::
     SetPinholeSplitFixedFocalFixedPointPrincipalPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_focal_fixed_point_num_) {
     throw std::runtime_error(
@@ -10207,126 +11546,174 @@ void GraphSolver::
         " != pinhole_split_fixed_focal_fixed_point_num_. Use "
         "Setpinhole_split_fixed_focal_fixed_pointNum before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_focal_fixed_point__args__principal_point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_focal_fixed_point__args__sensor_from_rig__data_,
+                pinhole_split_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_point_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_focal_fixed_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                data, facs__pinhole_split_fixed_focal_fixed_point__args__sensor_from_rig__data_,
+                pinhole_split_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedFocalFixedPointPixelDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_point__args__pixel__data_,
-      pinhole_split_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(marker__scratch_inout_,
+                                facs__pinhole_split_fixed_focal_fixed_point__args__pixel__data_,
+                                pinhole_split_fixed_focal_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeSplitFixedFocalFixedPointPixelDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data, facs__pinhole_split_fixed_focal_fixed_point__args__pixel__data_,
-      pinhole_split_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(
+                data, facs__pinhole_split_fixed_focal_fixed_point__args__pixel__data_,
+                pinhole_split_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedFocalFixedPointFocalDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeFocalStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_point__args__focal__data_,
-      pinhole_split_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholeFocalStackedToCaspar(
+          marker__scratch_inout_, facs__pinhole_split_fixed_focal_fixed_point__args__focal__data_,
+          pinhole_split_fixed_focal_fixed_point_num_max_, offset, num),
+      "ConstPinholeFocalStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeSplitFixedFocalFixedPointFocalDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_point_num_max_");
   }
-  ConstPinholeFocalStackedToCaspar(
-      data, facs__pinhole_split_fixed_focal_fixed_point__args__focal__data_,
-      pinhole_split_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholeFocalStackedToCaspar(
+                data, facs__pinhole_split_fixed_focal_fixed_point__args__focal__data_,
+                pinhole_split_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPinholeFocalStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedFocalFixedPointPointDataFromStackedHost(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_point__args__point__data_,
-      pinhole_split_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPointStackedToCaspar(marker__scratch_inout_,
+                                facs__pinhole_split_fixed_focal_fixed_point__args__point__data_,
+                                pinhole_split_fixed_focal_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::SetPinholeSplitFixedFocalFixedPointPointDataFromStackedDevice(
     const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_focal_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(
-      data, facs__pinhole_split_fixed_focal_fixed_point__args__point__data_,
-      pinhole_split_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPointStackedToCaspar(
+                data, facs__pinhole_split_fixed_focal_fixed_point__args__point__data_,
+                pinhole_split_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedPrincipalPointFixedPointNum(
     const size_t num) {
@@ -10340,7 +11727,6 @@ void GraphSolver::SetPinholeSplitFixedPrincipalPointFixedPointNum(
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointFixedPointPoseIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -10348,8 +11734,13 @@ void GraphSolver::
         "Setpinhole_split_fixed_principal_point_fixed_pointNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedPrincipalPointFixedPointPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -10358,7 +11749,6 @@ void GraphSolver::
     SetPinholeSplitFixedPrincipalPointFixedPointPoseIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
@@ -10367,16 +11757,20 @@ void GraphSolver::
         "Setpinhole_split_fixed_principal_point_fixed_pointNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_principal_point_fixed_point__args__pose__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointFixedPointFocalIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -10384,8 +11778,13 @@ void GraphSolver::
         "Setpinhole_split_fixed_principal_point_fixed_pointNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedPrincipalPointFixedPointFocalIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -10394,7 +11793,6 @@ void GraphSolver::
     SetPinholeSplitFixedPrincipalPointFixedPointFocalIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
@@ -10403,135 +11801,182 @@ void GraphSolver::
         "Setpinhole_split_fixed_principal_point_fixed_pointNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_principal_point_fixed_point__args__focal__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointFixedPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeSensorFromRigStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
+                pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+            "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointFixedPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholeSensorFromRigStackedToCaspar(
+          data, facs__pinhole_split_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
+          pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointFixedPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_principal_point_fixed_point__args__pixel__data_,
-      pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_principal_point_fixed_point__args__pixel__data_,
+                pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointFixedPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_principal_point_fixed_point__args__pixel__data_,
-      pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(
+                data, facs__pinhole_split_fixed_principal_point_fixed_point__args__pixel__data_,
+                pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointFixedPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_principal_point_fixed_point__args__principal_point__data_,
-      pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholePrincipalPointStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_principal_point_fixed_point__args__principal_point__data_,
+                pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+            "ConstPinholePrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointFixedPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPinholePrincipalPointStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_principal_point_fixed_point__args__principal_point__data_,
-      pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholePrincipalPointStackedToCaspar(
+          data, facs__pinhole_split_fixed_principal_point_fixed_point__args__principal_point__data_,
+          pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholePrincipalPointStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointFixedPointPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_principal_point_fixed_point__args__point__data_,
-      pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPointStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_principal_point_fixed_point__args__point__data_,
+                pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPrincipalPointFixedPointPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > pinhole_split_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_principal_point_fixed_point__args__point__data_,
-      pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPointStackedToCaspar(
+                data, facs__pinhole_split_fixed_principal_point_fixed_point__args__point__data_,
+                pinhole_split_fixed_principal_point_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointNum(
     const size_t num) {
@@ -10547,7 +11992,6 @@ void GraphSolver::SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointNum(
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -10555,8 +11999,13 @@ void GraphSolver::
         "Use Setpinhole_split_fixed_pose_fixed_focal_fixed_principal_pointNum "
         "before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -10565,7 +12014,6 @@ void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_) {
     throw std::runtime_error(
@@ -10574,196 +12022,244 @@ void GraphSolver::
         "Use Setpinhole_split_fixed_pose_fixed_focal_fixed_principal_pointNum "
         "before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholeSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__sensor_from_rig__data_,
+          pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_, offset, num),
+      "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholeSensorFromRigStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__sensor_from_rig__data_,
+          pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_, offset, num),
+      "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__pixel__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__pixel__data_,
+          pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__pixel__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__pixel__data_,
+          pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointPoseDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePoseStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__pose__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholePoseStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__pose__data_,
+                pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_, offset, num),
+            "ConstPinholePoseStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointPoseDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_");
   }
-  ConstPinholePoseStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__pose__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholePoseStackedToCaspar(
+          data, facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__pose__data_,
+          pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_, offset, num),
+      "ConstPinholePoseStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointFocalDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeFocalStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__focal__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholeFocalStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__focal__data_,
+          pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_, offset, num),
+      "ConstPinholeFocalStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointFocalDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_");
   }
-  ConstPinholeFocalStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__focal__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholeFocalStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__focal__data_,
+          pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_, offset, num),
+      "ConstPinholeFocalStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__principal_point__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholePrincipalPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__principal_point__data_,
+          pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_, offset, num),
+      "ConstPinholePrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPrincipalPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_");
   }
-  ConstPinholePrincipalPointStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__principal_point__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholePrincipalPointStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_pose_fixed_focal_fixed_principal_point__args__principal_point__data_,
+          pinhole_split_fixed_pose_fixed_focal_fixed_principal_point_num_max_, offset, num),
+      "ConstPinholePrincipalPointStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedPoseFixedFocalFixedPointNum(
     const size_t num) {
@@ -10777,7 +12273,6 @@ void GraphSolver::SetPinholeSplitFixedPoseFixedFocalFixedPointNum(
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPointPrincipalPointIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_pose_fixed_focal_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -10785,8 +12280,13 @@ void GraphSolver::
         "Setpinhole_split_fixed_pose_fixed_focal_fixed_pointNum before setting "
         "indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedPoseFixedFocalFixedPointPrincipalPointIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -10795,7 +12295,6 @@ void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPointPrincipalPointIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_pose_fixed_focal_fixed_point_num_) {
     throw std::runtime_error(
@@ -10804,176 +12303,224 @@ void GraphSolver::
         "Setpinhole_split_fixed_pose_fixed_focal_fixed_pointNum before setting "
         "indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__principal_point__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholeSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__sensor_from_rig__data_,
+          pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num),
+      "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholeSensorFromRigStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__sensor_from_rig__data_,
+          pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num),
+      "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__pixel__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPixelStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__pixel__data_,
+                pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__pixel__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPixelStackedToCaspar(
+                data, facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__pixel__data_,
+                pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPointPoseDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePoseStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__pose__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholePoseStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__pose__data_,
+                pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPinholePoseStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPointPoseDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_");
   }
-  ConstPinholePoseStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__pose__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholePoseStackedToCaspar(
+                data, facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__pose__data_,
+                pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPinholePoseStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPointFocalDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeFocalStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__focal__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholeFocalStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__focal__data_,
+                pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPinholeFocalStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPointFocalDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_");
   }
-  ConstPinholeFocalStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__focal__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPinholeFocalStackedToCaspar(
+                data, facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__focal__data_,
+                pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPinholeFocalStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPointPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__point__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPointStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__point__data_,
+                pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedFocalFixedPointPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__point__data_,
-      pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(ConstPointStackedToCaspar(
+                data, facs__pinhole_split_fixed_pose_fixed_focal_fixed_point__args__point__data_,
+                pinhole_split_fixed_pose_fixed_focal_fixed_point_num_max_, offset, num),
+            "ConstPointStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointNum(
     const size_t num) {
@@ -10989,7 +12536,6 @@ void GraphSolver::SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointNum(
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointFocalIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -10997,8 +12543,13 @@ void GraphSolver::
         "Use Setpinhole_split_fixed_pose_fixed_principal_point_fixed_pointNum "
         "before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointFocalIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -11007,7 +12558,6 @@ void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointFocalIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
@@ -11016,196 +12566,244 @@ void GraphSolver::
         "Use Setpinhole_split_fixed_pose_fixed_principal_point_fixed_pointNum "
         "before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__focal__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholeSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
+          pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholeSensorFromRigStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
+          pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__pixel__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__pixel__data_,
+          pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__pixel__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__pixel__data_,
+          pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointPoseDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePoseStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__pose__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(ConstPinholePoseStackedToCaspar(
+                marker__scratch_inout_,
+                facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__pose__data_,
+                pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+            "ConstPinholePoseStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointPoseDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPinholePoseStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__pose__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholePoseStackedToCaspar(
+          data, facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__pose__data_,
+          pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholePoseStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__principal_point__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholePrincipalPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__principal_point__data_,
+          pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholePrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPinholePrincipalPointStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__principal_point__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholePrincipalPointStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__principal_point__data_,
+          pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholePrincipalPointStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__point__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__point__data_,
+          pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedPoseFixedPrincipalPointFixedPointPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__point__data_,
-      pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPointStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_pose_fixed_principal_point_fixed_point__args__point__data_,
+          pinhole_split_fixed_pose_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 void GraphSolver::SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointNum(
     const size_t num) {
@@ -11221,7 +12819,6 @@ void GraphSolver::SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointNum(
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointPoseIndicesFromHost(
         const unsigned int *const indices, size_t num) {
-  cudaSetDevice(device_id_);
   if (num != pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
         std::to_string(num) +
@@ -11229,8 +12826,13 @@ void GraphSolver::
         "Use Setpinhole_split_fixed_focal_fixed_principal_point_fixed_pointNum "
         "before setting indices.");
   }
-  cudaMemcpy((unsigned int *)marker__scratch_inout_, indices,
-             num * sizeof(unsigned int), cudaMemcpyHostToDevice);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy((unsigned int*)marker__scratch_inout_, indices, num * sizeof(unsigned int),
+                       cudaMemcpyHostToDevice),
+            "cudaMemcpy host-to-device");
   SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointPoseIndicesFromDevice(
       (unsigned int *)marker__scratch_inout_, num);
 }
@@ -11239,7 +12841,6 @@ void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointPoseIndicesFromDevice(
         const unsigned int *const indices, size_t num) {
   indices_valid_ = false;
-  cudaSetDevice(device_id_);
 
   if (num != pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_) {
     throw std::runtime_error(
@@ -11248,196 +12849,246 @@ void GraphSolver::
         "Use Setpinhole_split_fixed_focal_fixed_principal_point_fixed_pointNum "
         "before setting indices.");
   }
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 
   SharedIndices(
       indices,
       facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__pose__idx_shared_,
       num);
+  CheckCuda(cudaGetLastError(), "SharedIndices");
 }
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointSensorFromRigDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeSensorFromRigStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 7 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholeSensorFromRigStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
+          pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholeSensorFromRigStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointSensorFromRigDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPinholeSensorFromRigStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholeSensorFromRigStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__sensor_from_rig__data_,
+          pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholeSensorFromRigStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointPixelDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPixelStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__pixel__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__pixel__data_,
+          pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointPixelDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPixelStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__pixel__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPixelStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__pixel__data_,
+          pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPixelStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointFocalDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholeFocalStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__focal__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholeFocalStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__focal__data_,
+          pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholeFocalStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointFocalDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPinholeFocalStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__focal__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholeFocalStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__focal__data_,
+          pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholeFocalStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointPrincipalPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPinholePrincipalPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__principal_point__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 2 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPinholePrincipalPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__principal_point__data_,
+          pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholePrincipalPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointPrincipalPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPinholePrincipalPointStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__principal_point__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPinholePrincipalPointStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__principal_point__data_,
+          pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPinholePrincipalPointStackedToCaspar");
 }
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointPointDataFromStackedHost(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_");
   }
-  cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double),
-             cudaMemcpyHostToDevice);
-  ConstPointStackedToCaspar(
-      marker__scratch_inout_,
-      facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__point__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      cudaMemcpy(marker__scratch_inout_, data, 3 * num * sizeof(double), cudaMemcpyHostToDevice),
+      "cudaMemcpy host-to-device");
+  CheckCuda(
+      ConstPointStackedToCaspar(
+          marker__scratch_inout_,
+          facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__point__data_,
+          pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 
 void GraphSolver::
     SetPinholeSplitFixedFocalFixedPrincipalPointFixedPointPointDataFromStackedDevice(
         const double *const data, size_t offset, size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num >
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_) {
+  if (offset > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ ||
+      num > pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_ - offset) {
     throw std::runtime_error(
         std::to_string(offset + num) +
         " > "
         "pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_");
   }
-  ConstPointStackedToCaspar(
-      data,
-      facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__point__data_,
-      pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_,
-      offset, num);
+  if (num == 0) {
+    return;
+  }
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(
+      ConstPointStackedToCaspar(
+          data,
+          facs__pinhole_split_fixed_focal_fixed_principal_point_fixed_point__args__point__data_,
+          pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_, offset, num),
+      "ConstPointStackedToCaspar");
 }
 
 size_t GraphSolver::get_nbytes() {
