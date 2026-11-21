@@ -391,14 +391,15 @@ Ort::Session& ONNXModel::GetOrCreateSession(const int slot) const {
 template <typename RunFn>
 std::vector<Ort::Value> ONNXModel::RunWithLimiter(RunFn&& run_fn) const {
   try {
+    // Do not occupy an inference slot while waiting for the shared session.
+    std::unique_lock<std::mutex> lock(single_session_mutex_, std::defer_lock);
+    if (!allow_session_replicas_ && inference_limiter_ != nullptr &&
+        execution_provider_ == ONNXExecutionProvider::CUDA) {
+      lock.lock();
+    }
     ONNXInferenceLimiter::Permit permit = inference_limiter_ != nullptr
                                               ? inference_limiter_->Acquire()
                                               : ONNXInferenceLimiter::Permit();
-    if (!allow_session_replicas_ && inference_limiter_ != nullptr &&
-        execution_provider_ == ONNXExecutionProvider::CUDA) {
-      std::lock_guard<std::mutex> lock(single_session_mutex_);
-      return run_fn(*primary_session_);
-    }
     return run_fn(GetOrCreateSession(permit.slot()));
   } catch (...) {
     RethrowONNXException();
