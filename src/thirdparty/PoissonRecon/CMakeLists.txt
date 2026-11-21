@@ -33,3 +33,29 @@ if(TESTS_ENABLED AND COVERAGE_ENABLED)
     target_link_options(colmap_thirdparty_ply_scalar_test
         PRIVATE -coverage)
 endif()
+
+COLMAP_ADD_TEST(
+    NAME output_position_precision_test
+    SRCS output_position_precision_test.cc
+    LINK_LIBS colmap_poisson_recon
+)
+COLMAP_ADD_TEST(
+    NAME level_set_position_precision_test
+    SRCS level_set_position_precision_test.cc
+)
+if(TESTS_ENABLED)
+    foreach(test_target
+            colmap_thirdparty_output_position_precision_test
+            colmap_thirdparty_level_set_position_precision_test)
+        target_compile_definitions(${test_target} PRIVATE RELEASE)
+        if(OPENMP_FOUND)
+            target_link_libraries(${test_target} OpenMP::OpenMP_CXX)
+        endif()
+        if(MSVC)
+            target_compile_options(${test_target} PRIVATE /bigobj)
+        endif()
+        if(COVERAGE_ENABLED)
+            target_link_options(${test_target} PRIVATE -coverage)
+        endif()
+    endforeach()
+endif()
