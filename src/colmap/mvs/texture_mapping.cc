@@ -82,8 +82,8 @@ inline uint64_t EdgeKey(size_t a, size_t b) {
   return (static_cast<uint64_t>(a) << 32) | static_cast<uint64_t>(b);
 }
 
-Eigen::Vector3f GetVertex(const PlyMesh& mesh, const size_t idx) {
-  return Eigen::Vector3f(
+Eigen::Vector3d GetVertex(const PlyMesh& mesh, const size_t idx) {
+  return Eigen::Vector3d(
       mesh.vertices[idx].x, mesh.vertices[idx].y, mesh.vertices[idx].z);
 }
 
@@ -91,39 +91,39 @@ std::array<size_t, 3> GetFaceIndices(const PlyMeshFace& face) {
   return {face.vertex_idx1, face.vertex_idx2, face.vertex_idx3};
 }
 
-Eigen::Vector2f ProjectPoint(const float* P, const Eigen::Vector3f& point) {
+Eigen::Vector2f ProjectPoint(const float* P, const Eigen::Vector3d& point) {
   const Eigen::Map<const Eigen::Matrix<float, 3, 4, Eigen::RowMajor>> P_m(P);
-  const Eigen::Vector4f ph(point.x(), point.y(), point.z(), 1.0f);
-  const Eigen::Vector3f proj = P_m * ph;
-  return Eigen::Vector2f(proj(0) / proj(2), proj(1) / proj(2));
+  const Eigen::Vector4d ph(point.x(), point.y(), point.z(), 1.0f);
+  const Eigen::Vector3d proj = P_m.cast<double>() * ph;
+  return (proj.head<2>() / proj.z()).cast<float>();
 }
 
-float ProjectPointDepth(const float* P, const Eigen::Vector3f& point) {
+double ProjectPointDepth(const float* P, const Eigen::Vector3d& point) {
   const Eigen::Map<const Eigen::Matrix<float, 3, 4, Eigen::RowMajor>> P_m(P);
-  const Eigen::Vector4f ph(point.x(), point.y(), point.z(), 1.0f);
-  return (P_m.row(2) * ph)(0, 0);
+  const Eigen::Vector4d ph(point.x(), point.y(), point.z(), 1.0f);
+  return (P_m.row(2).cast<double>() * ph)(0, 0);
 }
 
-Eigen::Vector3f ComputeCameraCenter(const float* R, const float* T) {
+Eigen::Vector3d ComputeCameraCenter(const float* R, const float* T) {
   const Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>> R_m(R);
   const Eigen::Map<const Eigen::Vector3f> T_m(T);
-  return -R_m.transpose() * T_m;
+  return -R_m.cast<double>().transpose() * T_m.cast<double>();
 }
 
-std::vector<Eigen::Vector3f> ComputeFaceNormals(const PlyMesh& mesh) {
+std::vector<Eigen::Vector3d> ComputeFaceNormals(const PlyMesh& mesh) {
   const size_t num_faces = mesh.faces.size();
-  std::vector<Eigen::Vector3f> normals(num_faces);
+  std::vector<Eigen::Vector3d> normals(num_faces);
   for (size_t i = 0; i < num_faces; ++i) {
     const std::array<size_t, 3> idx = GetFaceIndices(mesh.faces[i]);
-    const Eigen::Vector3f v0 = GetVertex(mesh, idx[0]);
-    const Eigen::Vector3f v1 = GetVertex(mesh, idx[1]);
-    const Eigen::Vector3f v2 = GetVertex(mesh, idx[2]);
-    const Eigen::Vector3f n = (v1 - v0).cross(v2 - v0);
-    const float len = n.norm();
+    const Eigen::Vector3d v0 = GetVertex(mesh, idx[0]);
+    const Eigen::Vector3d v1 = GetVertex(mesh, idx[1]);
+    const Eigen::Vector3d v2 = GetVertex(mesh, idx[2]);
+    const Eigen::Vector3d n = (v1 - v0).cross(v2 - v0);
+    const double len = n.norm();
     if (len > 1e-10f) {
       normals[i] = n / len;
     } else {
-      normals[i] = Eigen::Vector3f::Zero();
+      normals[i] = Eigen::Vector3d::Zero();
     }
   }
   return normals;
@@ -161,7 +161,7 @@ FaceAdjacencyMap BuildFaceAdjacency(const PlyMesh& mesh) {
 
 #if defined(COLMAP_CGAL_ENABLED)
 
-using CGALKernel = CGAL::Simple_cartesian<float>;
+using CGALKernel = CGAL::Simple_cartesian<double>;
 using CGALPoint = CGALKernel::Point_3;
 using CGALTriangle = CGALKernel::Triangle_3;
 using CGALSegment = CGALKernel::Segment_3;
@@ -190,12 +190,12 @@ struct OcclusionTester {
     triangle_to_face.reserve(num_faces);
     for (size_t i = 0; i < num_faces; ++i) {
       const std::array<size_t, 3> idx = GetFaceIndices(mesh.faces[i]);
-      const Eigen::Vector3f v0 = GetVertex(mesh, idx[0]);
-      const Eigen::Vector3f v1 = GetVertex(mesh, idx[1]);
-      const Eigen::Vector3f v2 = GetVertex(mesh, idx[2]);
+      const Eigen::Vector3d v0 = GetVertex(mesh, idx[0]);
+      const Eigen::Vector3d v1 = GetVertex(mesh, idx[1]);
+      const Eigen::Vector3d v2 = GetVertex(mesh, idx[2]);
       // Skip degenerate (zero-area) triangles that cause CGAL assertion
       // failures in intersection tests.
-      const Eigen::Vector3f cross = (v1 - v0).cross(v2 - v0);
+      const Eigen::Vector3d cross = (v1 - v0).cross(v2 - v0);
       if (cross.squaredNorm() < 1e-20f) continue;
       triangles.emplace_back(CGALPoint(v0.x(), v0.y(), v0.z()),
                              CGALPoint(v1.x(), v1.y(), v1.z()),
@@ -206,14 +206,14 @@ struct OcclusionTester {
     tree.accelerate_distance_queries();
   }
 
-  bool IsOccluded(const Eigen::Vector3f& camera_center,
-                  const Eigen::Vector3f& vertex,
+  bool IsOccluded(const Eigen::Vector3d& camera_center,
+                  const Eigen::Vector3d& vertex,
                   const size_t face_idx) const {
     constexpr float kEps = 1e-4f;
-    const Eigen::Vector3f dir = vertex - camera_center;
-    const float dist = dir.norm();
+    const Eigen::Vector3d dir = vertex - camera_center;
+    const double dist = dir.norm();
     if (dist < kEps) return false;
-    const Eigen::Vector3f target_offset = vertex - (kEps / dist) * dir;
+    const Eigen::Vector3d target_offset = vertex - (kEps / dist) * dir;
 
     const CGALPoint origin(
         camera_center.x(), camera_center.y(), camera_center.z());
@@ -236,8 +236,8 @@ struct OcclusionTester {
     const auto* hit_point = boost::get<CGALPoint>(&(intersection->first));
 #endif
     if (hit_point) {
-      const Eigen::Vector3f hp(hit_point->x(), hit_point->y(), hit_point->z());
-      const float hit_dist = (hp - camera_center).norm();
+      const Eigen::Vector3d hp(hit_point->x(), hit_point->y(), hit_point->z());
+      const double hit_dist = (hp - camera_center).norm();
       if (hit_dist < dist - kEps) return true;
     }
     return false;
@@ -247,7 +247,7 @@ struct OcclusionTester {
 #endif  // COLMAP_CGAL_ENABLED
 
 std::vector<int> SelectViews(const PlyMesh& mesh,
-                             const std::vector<Eigen::Vector3f>& face_normals,
+                             const std::vector<Eigen::Vector3d>& face_normals,
                              const std::vector<Image>& images,
                              const FaceAdjacencyMap& adjacency,
                              const MeshTextureMappingOptions& options) {
@@ -274,23 +274,23 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
 #pragma omp parallel for schedule(dynamic) num_threads(num_threads)
 #endif
   for (int64_t fi = 0; fi < static_cast<int64_t>(num_faces); ++fi) {
-    const Eigen::Vector3f& normal = face_normals[fi];
+    const Eigen::Vector3d& normal = face_normals[fi];
     if (normal.squaredNorm() < 1e-10f) continue;
 
     const std::array<size_t, 3> idx = GetFaceIndices(mesh.faces[fi]);
-    const Eigen::Vector3f v0 = GetVertex(mesh, idx[0]);
-    const Eigen::Vector3f v1 = GetVertex(mesh, idx[1]);
-    const Eigen::Vector3f v2 = GetVertex(mesh, idx[2]);
-    const Eigen::Vector3f centroid = (v0 + v1 + v2) / 3.0f;
-    const std::array<Eigen::Vector3f, 3> verts = {v0, v1, v2};
+    const Eigen::Vector3d v0 = GetVertex(mesh, idx[0]);
+    const Eigen::Vector3d v1 = GetVertex(mesh, idx[1]);
+    const Eigen::Vector3d v2 = GetVertex(mesh, idx[2]);
+    const Eigen::Vector3d centroid = (v0 + v1 + v2) / 3.0f;
+    const std::array<Eigen::Vector3d, 3> verts = {v0, v1, v2};
 
     for (size_t ii = 0; ii < num_images; ++ii) {
       const Image& img = images[ii];
-      const Eigen::Vector3f cam_center =
+      const Eigen::Vector3d cam_center =
           ComputeCameraCenter(img.GetR(), img.GetT());
 
-      const Eigen::Vector3f view_dir = (cam_center - centroid).normalized();
-      const float cos_angle = normal.dot(view_dir);
+      const Eigen::Vector3d view_dir = (cam_center - centroid).normalized();
+      const double cos_angle = normal.dot(view_dir);
       if (cos_angle < static_cast<float>(options.min_cos_normal_angle)) {
         continue;
       }
@@ -299,7 +299,7 @@ std::vector<int> SelectViews(const PlyMesh& mesh,
       std::array<Eigen::Vector2f, 3> proj;
       bool behind_camera = false;
       for (int vi = 0; vi < 3; ++vi) {
-        const float depth = ProjectPointDepth(img.GetP(), verts[vi]);
+        const double depth = ProjectPointDepth(img.GetP(), verts[vi]);
         if (depth <= 0) {
           behind_camera = true;
           break;
@@ -434,7 +434,7 @@ std::vector<RegionProjection> ComputeRegionProjections(
       const size_t fi = region.face_ids[i];
       const std::array<size_t, 3> idx = GetFaceIndices(mesh.faces[fi]);
       for (int vi = 0; vi < 3; ++vi) {
-        const Eigen::Vector3f v = GetVertex(mesh, idx[vi]);
+        const Eigen::Vector3d v = GetVertex(mesh, idx[vi]);
         const Eigen::Vector2f p = ProjectPoint(img.GetP(), v);
         rp.face_projections[i][vi] = p;
         min_x = std::min(min_x, p.x());
@@ -826,7 +826,7 @@ void ApplyGlobalColorCorrection(
         const size_t var_l = it_l->second;
         const size_t var_r = it_r->second;
 
-        const Eigen::Vector3f vert = GetVertex(mesh, sv);
+        const Eigen::Vector3d vert = GetVertex(mesh, sv);
         const Image& img_l = images[regions[ri_l].view_id];
         const Image& img_r = images[regions[ri_r].view_id];
 
@@ -1064,7 +1064,7 @@ MeshTextureMappingResult MeshTextureMapping(
   }
 
   LOG(INFO) << "Computing face normals...";
-  const std::vector<Eigen::Vector3f> face_normals = ComputeFaceNormals(mesh);
+  const std::vector<Eigen::Vector3d> face_normals = ComputeFaceNormals(mesh);
 
   LOG(INFO) << "Building face adjacency...";
   const FaceAdjacencyMap adjacency = BuildFaceAdjacency(mesh);
