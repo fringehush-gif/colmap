@@ -8,9 +8,28 @@
 #include "colmap/util/hash_containers.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace colmap {
 namespace {
+
+// Recognize the neutral parameter settings supported by the direct pinhole
+// path. Do not use Camera::IsUndistorted's tolerance for an exact crop.
+bool HasNeutralPinholeParameters(const Camera& camera) {
+  if (!camera.IsPerspectivePinhole()) {
+    return false;
+  }
+  if (camera.model_id == EUCMCameraModel::model_id) {
+    // At alpha = 0, any finite positive beta gives the pinhole projection.
+    return camera.params[4] == 0 && camera.params[5] > 0 &&
+           std::isfinite(camera.params[5]);
+  }
+  const auto extra_param_idxs = camera.ExtraParamsIdxs();
+  return std::all_of(
+      extra_param_idxs.begin(),
+      extra_param_idxs.end(),
+      [&camera](const size_t idx) { return camera.params[idx] == 0; });
+}
 
 // Rescale a camera in place so that neither dimension exceeds
 // options.max_image_size, keeping its model. A no-op when no size limit is
@@ -52,6 +71,7 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
 
   Camera undistorted_camera;
   undistorted_camera.model_id = PinholeCameraModel::model_id;
+  undistorted_camera.source = camera.source;
   undistorted_camera.width = camera.width;
   undistorted_camera.height = camera.height;
   undistorted_camera.params.resize(PinholeCameraModel::num_params, 0);
@@ -73,8 +93,7 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
   size_t roi_max_x = camera.width;
   size_t roi_max_y = camera.height;
 
-  const bool roi_enabled = options.roi_min_x > 0.0 || options.roi_min_y > 0.0 ||
-                           options.roi_max_x < 1.0 || options.roi_max_y < 1.0;
+  const bool roi_enabled = options.HasRegionOfInterest();
 
   if (roi_enabled) {
     roi_min_x = static_cast<size_t>(
@@ -102,8 +121,8 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
   }
 
   // Scale in order to match the boundary of the undistorted image.
-  if (roi_enabled || (camera.model_id != SimplePinholeCameraModel::model_id &&
-                      camera.model_id != PinholeCameraModel::model_id)) {
+  // Neutral pinhole parameters need only the crop above; no border warp.
+  if (!HasNeutralPinholeParameters(camera)) {
     // For fisheye camera, CamFromImg returns perspective-normalized coords
     // where |cam_point| = tan(theta). Near theta = pi/2, tan(theta) diverges:
     // border pixels outside the valid fisheye circle (common with off-center
@@ -125,7 +144,7 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
     for (size_t y = roi_min_y; y < roi_max_y; ++y) {
       // Left border.
       if (const std::optional<Eigen::Vector2d> cam_point1 =
-              camera.CamFromImg(Eigen::Vector2d(0.5, y + 0.5));
+              camera.CamFromImg(Eigen::Vector2d(roi_min_x + 0.5, y + 0.5));
           cam_point1.has_value() &&
           cam_point1->squaredNorm() < max_cam_point_norm_sq) {
         if (const std::optional<Eigen::Vector2d> undistorted_point1 =
@@ -137,7 +156,7 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
       }
       // Right border.
       if (const std::optional<Eigen::Vector2d> cam_point2 =
-              camera.CamFromImg(Eigen::Vector2d(camera.width - 0.5, y + 0.5));
+              camera.CamFromImg(Eigen::Vector2d(roi_max_x - 0.5, y + 0.5));
           cam_point2.has_value() &&
           cam_point2->squaredNorm() < max_cam_point_norm_sq) {
         if (const std::optional<Eigen::Vector2d> undistorted_point2 =
@@ -159,7 +178,7 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
     for (size_t x = roi_min_x; x < roi_max_x; ++x) {
       // Top border.
       if (const std::optional<Eigen::Vector2d> cam_point1 =
-              camera.CamFromImg(Eigen::Vector2d(x + 0.5, 0.5));
+              camera.CamFromImg(Eigen::Vector2d(x + 0.5, roi_min_y + 0.5));
           cam_point1.has_value() &&
           cam_point1->squaredNorm() < max_cam_point_norm_sq) {
         if (const std::optional<Eigen::Vector2d> undistorted_point1 =
@@ -171,7 +190,7 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
       }
       // Bottom border.
       if (const std::optional<Eigen::Vector2d> cam_point2 =
-              camera.CamFromImg(Eigen::Vector2d(x + 0.5, camera.height - 0.5));
+              camera.CamFromImg(Eigen::Vector2d(x + 0.5, roi_max_y - 0.5));
           cam_point2.has_value() &&
           cam_point2->squaredNorm() < max_cam_point_norm_sq) {
         if (const std::optional<Eigen::Vector2d> undistorted_point2 =
@@ -266,7 +285,19 @@ void UndistortImage(const UndistortCameraOptions& options,
 
   *undistorted_camera = UndistortCamera(options, distorted_camera);
 
-  WarpImageBetweenCameras(options.warp_options,
+  WarpImageOptions warp_options = options.warp_options;
+  // A pinhole crop changes the field of view but not the pixel scale.
+  // Leave larger or invalid thresholds to the usual warp path.
+  if (options.HasRegionOfInterest() &&
+      HasNeutralPinholeParameters(distorted_camera) &&
+      undistorted_camera->FocalLengthX() == distorted_camera.FocalLengthX() &&
+      undistorted_camera->FocalLengthY() == distorted_camera.FocalLengthY() &&
+      warp_options.direct_warp_min_scale >= 0 &&
+      warp_options.direct_warp_min_scale <= 1) {
+    warp_options.direct_warp_min_scale = 0;
+  }
+
+  WarpImageBetweenCameras(warp_options,
                           distorted_camera,
                           *undistorted_camera,
                           distorted_bitmap,
@@ -283,13 +314,16 @@ void UndistortReconstruction(const UndistortCameraOptions& options,
   // its images through unchanged, so that the reconstruction stays consistent
   // with the output images (see COLMAPUndistorter::Undistort). Both spherical
   // cameras (e.g. EQUIRECTANGULAR, which have no pinhole image plane to
-  // undistort to) and already-undistorted perspective cameras are otherwise
+  // undistort to) and already-undistorted pinhole projections are otherwise
   // copied through as-is. When a max_image_size is requested, they are still
   // resized to match the rescaled output images: perspective cameras through
   // undistortion, spherical cameras by resizing to a smaller image of the same
-  // model.
+  // model. A perspective ROI also requires camera and observation updates.
   const auto keep_unchanged = [&options](const Camera& camera) {
-    return camera.IsUndistorted() && options.max_image_size < 0;
+    return options.max_image_size < 0 &&
+           (camera.IsSpherical() ||
+            (camera.IsPerspectivePinhole() && camera.IsUndistorted() &&
+             !options.HasRegionOfInterest()));
   };
   for (const auto& [camera_id, distorted_camera] : distorted_cameras) {
     if (keep_unchanged(distorted_camera)) {
@@ -303,6 +337,7 @@ void UndistortReconstruction(const UndistortCameraOptions& options,
       RescaleToMaxImageSize(options, &undistorted_camera);
     } else {
       undistorted_camera = UndistortCamera(options, distorted_camera);
+      undistorted_camera.camera_id = camera_id;
     }
   }
 

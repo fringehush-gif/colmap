@@ -30,6 +30,12 @@ struct UndistortCameraOptions {
   double roi_max_x = 1.0;
   double roi_max_y = 1.0;
 
+  // Whether the requested bounds differ from the full original image.
+  bool HasRegionOfInterest() const {
+    return roi_min_x != 0.0 || roi_min_y != 0.0 || roi_max_x != 1.0 ||
+           roi_max_y != 1.0;
+  }
+
   // Maximum norm of the undistorted camera-space point (= tan(theta) where
   // theta is the angle from the optical axis) used when tracing border pixels
   // to compute the output image dimensions. For fisheye cameras with off-center
@@ -39,7 +45,10 @@ struct UndistortCameraOptions {
   // Set to -1 to disable the check (default).
   double max_cam_point_norm = -1;
 
-  // Options controlling image warping during undistortion.
+  // Options controlling image warping during undistortion. A pinhole ROI with
+  // neutral parameters is sampled directly for direct_warp_min_scale in [0, 1].
+  // Larger thresholds retain the usual warp behavior. Actual downscaling
+  // follows the warp options.
   WarpImageOptions warp_options;
 };
 
@@ -58,8 +67,10 @@ struct UndistortCameraOptions {
 // states can be achieved by setting `blank_pixels` between 0 and 1.
 //
 // The relative location of the principal point of the distorted camera is
-// preserved. The scaling of the image dimensions is subject to the `min_scale`,
-// `max_scale`, and `max_image_size` constraints.
+// preserved. Neutral perspective-pinhole parameters retain the source
+// dimensions apart from ROI cropping and `max_image_size`. Otherwise, boundary
+// scaling is subject to the `min_scale`, `max_scale`, and `max_image_size`
+// constraints.
 Camera UndistortCamera(const UndistortCameraOptions& options,
                        const Camera& camera);
 
