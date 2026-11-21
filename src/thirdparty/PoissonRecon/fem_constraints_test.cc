@@ -84,7 +84,8 @@ std::array<double, 2> BasisIntegrals(double test_center,
 template <PoissonRecon::BoundaryType TestBoundary,
           PoissonRecon::BoundaryType CoefficientBoundary>
 void ExpectImpulseConstraints(const std::array<int, 3>& source,
-                              bool reflect_coefficient) {
+                              bool reflect_coefficient,
+                              int source_depth = 3) {
   const SerialThreadPool serial;
   using TestSignatures = PoissonRecon::IsotropicUIntPack<
       3,
@@ -105,7 +106,8 @@ void ExpectImpulseConstraints(const std::array<int, 3>& source,
   tree.tree().processNodes([&](const Tree::FEMTreeNode* node) {
     int depth, offset[3];
     tree.depthAndOffset(node, depth, offset);
-    if (depth == 3 && std::equal(offset, offset + 3, source.begin())) {
+    if (depth == source_depth &&
+        std::equal(offset, offset + 3, source.begin())) {
       field[node] = normal;
       ++assigned;
     }
@@ -134,6 +136,7 @@ void ExpectImpulseConstraints(const std::array<int, 3>& source,
   tree.addFEMConstraints(integrator, field, rhs, 5);
 
   std::vector<std::array<int, 3>> coefficients{source};
+  const double coefficient_width = std::ldexp(1., -source_depth);
   // At the x=0 wall, the Neumann quadratic basis has an equal reflected
   // coefficient at -h/2. Other supports are entirely inside the domain.
   if (reflect_coefficient) coefficients.push_back({-1, source[1], source[2]});
@@ -151,8 +154,11 @@ void ExpectImpulseConstraints(const std::array<int, 3>& source,
     for (const auto& coefficient : coefficients) {
       std::array<std::array<double, 2>, 3> integrals;
       for (int axis = 0; axis < 3; ++axis) {
-        integrals[axis] = BasisIntegrals(
-            offset[axis] * width, width, (coefficient[axis] + 0.5) / 8, 1. / 8);
+        integrals[axis] =
+            BasisIntegrals(offset[axis] * width,
+                           width,
+                           (coefficient[axis] + 0.5) * coefficient_width,
+                           coefficient_width);
       }
       for (int component = 0; component < 3; ++component) {
         expected += normal[component] * integrals[component][1] *
@@ -188,6 +194,9 @@ void ExpectImpulseConstraints(const std::array<int, 3>& source,
 TEST(PoissonFEMConstraints, ProlongsInCoefficientBasis) {
   ExpectImpulseConstraints<PoissonRecon::BOUNDARY_NEUMANN,
                            PoissonRecon::BOUNDARY_DIRICHLET>({3, 3, 3}, false);
+  ExpectImpulseConstraints<PoissonRecon::BOUNDARY_NEUMANN,
+                           PoissonRecon::BOUNDARY_DIRICHLET>(
+      {15, 15, 15}, false, 5);
 }
 
 TEST(PoissonFEMConstraints, UsesCoefficientBoundaryFlags) {
