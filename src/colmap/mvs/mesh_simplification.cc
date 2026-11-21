@@ -251,6 +251,7 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
 
   // Build topology.
   LOG(INFO) << "Building mesh topology...";
+  size_t current_faces = num_faces;
   for (size_t fi = 0; fi < num_faces; ++fi) {
     face_indices[fi] = {mesh.faces[fi].vertex_idx1,
                         mesh.faces[fi].vertex_idx2,
@@ -260,21 +261,17 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
     // Skip degenerate faces.
     if (f[0] == f[1] || f[0] == f[2] || f[1] == f[2]) {
       face_removed[fi] = true;
+      --current_faces;
       continue;
     }
 
     for (int j = 0; j < 3; ++j) {
       const size_t va = f[j];
       const size_t vb = f[(j + 1) % 3];
-      SortedInsert(vertex_data[va].adjacent_faces, fi);
+      vertex_data[va].adjacent_faces.push_back(fi);
       SortedInsert(vertex_data[va].adjacent_vertices, vb);
       SortedInsert(vertex_data[vb].adjacent_vertices, va);
     }
-  }
-
-  size_t current_faces = 0;
-  for (size_t fi = 0; fi < num_faces; ++fi) {
-    if (!face_removed[fi]) ++current_faces;
   }
 
   // Step 1: Compute initial quadrics.
@@ -321,21 +318,24 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
   // Boundary preservation quadrics (Section 6, geometric discontinuity only).
   if (options.boundary_weight > 0) {
     LOG(INFO) << "Computing boundary preservation quadrics...";
-    // Build edge-to-face mapping.
-    NodeHashMap<Edge, std::vector<size_t>, PairHash> edge_faces;
+    // Retain the sole incident face; num_faces marks repeated edges.
+    NodeHashMap<Edge, size_t, PairHash> edge_faces;
     edge_faces.reserve(num_faces * 3 / 2);
     for (size_t fi = 0; fi < num_faces; ++fi) {
       if (face_removed[fi]) continue;
       const auto& f = face_indices[fi];
       for (int j = 0; j < 3; ++j) {
-        edge_faces[MakeEdge(f[j], f[(j + 1) % 3])].push_back(fi);
+        const auto [it, inserted] =
+            edge_faces.try_emplace(MakeEdge(f[j], f[(j + 1) % 3]), fi);
+        if (!inserted) {
+          it->second = num_faces;
+        }
       }
     }
 
-    for (const auto& [edge, faces_list] : edge_faces) {
-      if (faces_list.size() != 1) continue;
+    for (const auto& [edge, fi] : edge_faces) {
+      if (fi == num_faces) continue;
 
-      const size_t fi = faces_list[0];
       const auto& f = face_indices[fi];
       const Eigen::Vector3d& p0 = vertex_data[f[0]].position;
       const Eigen::Vector3d& p1 = vertex_data[f[1]].position;
@@ -390,6 +390,9 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
                                                   options.interpolate_colors);
     }
   }
+
+  // The edge list is no longer needed once all candidates are computed.
+  std::vector<Edge>().swap(unique_edges);
 
   // Step 4: Initialize priority queue from the computed candidates in O(n).
   using MinHeap = std::priority_queue<CollapseCandidate,
@@ -463,23 +466,14 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
         }
         SortedErase(vertex_data[v1].adjacent_faces, fi);
       } else {
-        // Remap v2 -> v1 in this face.
+        // Remap v2 -> v1. Since v1 is absent, indices remain distinct.
         for (int j = 0; j < 3; ++j) {
           if (f[j] == v2) {
             f[j] = v1;
             break;
           }
         }
-        // Check for degenerate face after remapping.
-        if (f[0] == f[1] || f[0] == f[2] || f[1] == f[2]) {
-          face_removed[fi] = true;
-          --current_faces;
-          for (int j = 0; j < 3; ++j) {
-            SortedErase(vertex_data[f[j]].adjacent_faces, fi);
-          }
-        } else {
-          SortedInsert(vertex_data[v1].adjacent_faces, fi);
-        }
+        SortedInsert(vertex_data[v1].adjacent_faces, fi);
       }
     }
 
@@ -517,6 +511,9 @@ PlyMesh SimplifyMesh(const PlyMesh& mesh,
                 << " faces remaining, error=" << candidate.cost << ")";
     }
   }
+
+  // Release queued candidates before allocating the compacted output.
+  pq = MinHeap();
 
   // Compaction — build output mesh with only surviving geometry.
   LOG(INFO) << "Compacting mesh...";
