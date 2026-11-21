@@ -788,16 +788,16 @@ TEST(MeshTextureMapping, ValidatesOcclusionIntersections) {
        {PlyMeshVertex(-19.2763901f, -10.1321306f, 0.624929011f),
         PlyMeshVertex(-19.2370853f, -10.0486422f, 0.598454177f),
         PlyMeshVertex(-19.2776642f, -10.1302834f, 0.595369875f)}},
-      // For the ray to (1/37, -5/41, 0), the shortened endpoint lies inside
-      // the blocker and strictly before the cutoff in exact arithmetic, but
-      // its float distance rounds to the cutoff and must not reject the hit.
+      // The ray to (1/74, -5/82, 0) hits this blocker before the cutoff in
+      // float and double working coordinates. Its float hit distance rounds
+      // to the cutoff and must not reject the exact hit.
       {{0, 0, 0},
-       {PlyMeshVertex(1.0f / 37, -5.0f / 41, 0),
-        PlyMeshVertex(1.0f / 37, -5.0f / 41 - 0.02f, 0),
-        PlyMeshVertex(1.0f / 37, -5.0f / 41, 0.02f)},
-       {PlyMeshVertex(0x1.ba74d2p-6f, -0x1.f31ccp-4f + 0.001f, -0.001f),
-        PlyMeshVertex(0x1.ba74d2p-6f, -0x1.f31ccp-4f - 0.001f, -0.001f),
-        PlyMeshVertex(0x1.ba74d2p-6f, -0x1.f31ccp-4f, 0.001f)},
+       {PlyMeshVertex(1.0f / 74, -5.0f / 82, 0),
+        PlyMeshVertex(1.0f / 74, -5.0f / 82 - 0.02f, 0),
+        PlyMeshVertex(1.0f / 74, -5.0f / 82, 0.02f)},
+       {PlyMeshVertex(0x1.ba1a10p-7f, -0x1.f2b66p-5f + 0.001f, -0.001f),
+        PlyMeshVertex(0x1.ba1a10p-7f, -0x1.f2b66p-5f - 0.001f, -0.001f),
+        PlyMeshVertex(0x1.ba1a10p-7f, -0x1.f2b66p-5f, 0.001f)},
        -1},
   };
   MeshTextureMappingOptions options;
