@@ -153,3 +153,12 @@ if(TESTS_ENABLED)
             OpenMP::OpenMP_CXX)
     endif()
 endif()
+
+COLMAP_ADD_TEST(
+    NAME vertex_factory_test
+    SRCS vertex_factory_test.cc
+)
+if(TESTS_ENABLED AND OPENMP_FOUND)
+    target_link_libraries(colmap_poisson_recon_vertex_factory_test
+        OpenMP::OpenMP_CXX)
+endif()
