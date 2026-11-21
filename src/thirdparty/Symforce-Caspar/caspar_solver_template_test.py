@@ -52,8 +52,8 @@ void GetHost() {
       num > std::numeric_limits<size_t>::max() / sizeof({{solver.storage_t}}) / kDimension) {
     throw std::runtime_error("{{nodetype.__name__}} readback exceeds mapping argument limits");
   }
-  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
-  CheckReadbackCuda(cudaMemcpy(data, marker__scratch_inout_,
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaMemcpy(data, marker__scratch_inout_,
                                kDimension * num * sizeof({{solver.storage_t}}), cudaMemcpyDeviceToHost),
                     "cudaMemcpy device-to-host");
 }
@@ -72,7 +72,7 @@ void GetDevice() {
       num > std::numeric_limits<size_t>::max() / sizeof({{solver.storage_t}}) / kDimension) {
     throw std::runtime_error("{{nodetype.__name__}} readback exceeds mapping argument limits");
   }
-  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
+  CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 }
 """
 HEADER = """  {{solver.linear_t}} DoRetractScore();
@@ -144,8 +144,8 @@ class CasparSolverTemplateTest(unittest.TestCase):
         self.assertEqual(source.count("  CheckReadbackRange<"), 2)
         self.assertNotIn("kDimension", source)
         self.assertEqual(
-            source.count("CheckReadbackCuda("),
-            SOURCE.count("CheckReadbackCuda("),
+            source.count("CheckCuda("),
+            SOURCE.count("CheckCuda("),
         )
         self.assertIn("* predicted_decrease = nullptr", header)
         self.assertEqual(header.count("void LaunchPredDecrease();"), 1)
