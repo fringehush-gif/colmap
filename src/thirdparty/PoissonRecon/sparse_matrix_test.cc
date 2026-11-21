@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstddef>
+#include <limits>
 #include <utility>
 
 #include "MultiThreading.h"
@@ -274,6 +275,107 @@ TYPED_TEST(SparseMatrixDivisionTest, DivisionPreservesRowsAndReturnsSelf) {
   FillCopyFixture(matrix);
   EXPECT_EQ(&(matrix /= 2.0f), &matrix);
   ExpectCopyFixture(matrix, 0.5);
+}
+
+void ExpectTransposedCopyFixture(const UnboundedMatrix& matrix,
+                                 const size_t rows,
+                                 const float scale = 1.0f) {
+  ASSERT_EQ(matrix.rows(), rows);
+  const std::array<size_t, 4> row_sizes{2, 2, 1, 1};
+  const std::array<std::array<int, 2>, 4> indices{
+      {{{0, 3}}, {{0, 3}}, {{2, 0}}, {{3, 0}}}};
+  const std::array<std::array<float, 2>, 4> values{
+      {{{0.25f, 31.25f}}, {{1.25f, 32.25f}}, {{20.25f, 0}}, {{30.25f, 0}}}};
+  for (size_t row = 0; row < rows; ++row) {
+    ASSERT_EQ(matrix.rowSize(row), row < row_sizes.size() ? row_sizes[row] : 0);
+    for (size_t entry = 0; entry < matrix.rowSize(row); ++entry) {
+      EXPECT_EQ(matrix[row][entry].N, indices[row][entry]);
+      EXPECT_EQ(matrix[row][entry].Value, scale * values[row][entry]);
+    }
+  }
+}
+
+TEST(SparseMatrixTransposeTest, PreservesValuesDimensionsAndCallback) {
+  UnboundedMatrix source(4);
+  Matrix bounded(4);
+  FillCopyFixture(source);
+  FillCopyFixture(bounded);
+  for (const bool negate : {false, true}) {
+    const auto function =
+        negate ? +[](const float& value) { return -value; } : nullptr;
+    const float scale = negate ? -1.0f : 1.0f;
+    ExpectTransposedCopyFixture(source.transpose(function), 4, scale);
+    ExpectTransposedCopyFixture(
+        UnboundedMatrix::Transpose(source, function), 4, scale);
+    for (const size_t rows : {4, 6}) {
+      ExpectTransposedCopyFixture(
+          source.transpose(rows, function), rows, scale);
+      ExpectTransposedCopyFixture(
+          UnboundedMatrix::Transpose(source, rows, function), rows, scale);
+      ExpectTransposedCopyFixture(
+          UnboundedMatrix::Transpose(bounded, rows, function), rows, scale);
+    }
+  }
+  ExpectCopyFixture(source);
+  ExpectCopyFixture(bounded);
+  PoissonRecon::SparseMatrix<float, bool> boolean_index(1);
+  boolean_index.setRowSize(0, 1);
+  boolean_index[0][0] = {true, 7.0f};
+  const auto boolean_result =
+      UnboundedMatrix::Transpose(boolean_index, size_t{2});
+  ASSERT_EQ(boolean_result.rows(), 2);
+  EXPECT_EQ(boolean_result.rowSize(0), 0);
+  ASSERT_EQ(boolean_result.rowSize(1), 1);
+  EXPECT_EQ(boolean_result[1][0].N, 0);
+  EXPECT_EQ(boolean_result[1][0].Value, 7.0f);
+  const UnboundedMatrix empty;
+  EXPECT_EQ(empty.transpose().rows(), 0);
+  EXPECT_EQ(UnboundedMatrix::Transpose(empty).rows(), 0);
+  for (const size_t rows : {0, 3}) {
+    const auto member = empty.transpose(rows);
+    const auto generic = UnboundedMatrix::Transpose(empty, rows);
+    ASSERT_EQ(member.rows(), rows);
+    ASSERT_EQ(generic.rows(), rows);
+    for (size_t row = 0; row < rows; ++row) {
+      EXPECT_EQ(member.rowSize(row), 0);
+      EXPECT_EQ(generic.rowSize(row), 0);
+    }
+  }
+}
+
+TEST(SparseMatrixTransposeTest, RejectsInvalidExplicitDimensions) {
+  struct Case {
+    size_t input_rows;
+    size_t output_rows;
+    std::array<int, 2> columns;
+  };
+  const std::array<Case, 6> cases{{{4, 2, {3, 0}},
+                                   {2, 4, {8, 3}},
+                                   {1, 3, {3, 0}},
+                                   {1, 0, {0, 0}},
+                                   {1, 4, {std::numeric_limits<int>::max(), 0}},
+                                   {1, 4, {-1, 0}}}};
+  for (const auto& test : cases) {
+    SCOPED_TRACE(testing::Message()
+                 << test.input_rows << " rows, " << test.output_rows
+                 << " output rows, column " << test.columns[0]);
+    UnboundedMatrix source(test.input_rows);
+    source.setRowSize(0, 2);
+    for (size_t entry = 0; entry < test.columns.size(); ++entry) {
+      source[0][entry] = {test.columns[entry], 1.0f};
+    }
+    EXPECT_THROW(source.transpose(test.output_rows), PoissonRecon::Exception);
+    EXPECT_THROW(UnboundedMatrix::Transpose(source, test.output_rows),
+                 PoissonRecon::Exception);
+  }
+  using UnsignedMatrix = PoissonRecon::SparseMatrix<float, unsigned long long>;
+  UnsignedMatrix source(1);
+  source.setRowSize(0, 1);
+  source[0][0] = {std::numeric_limits<unsigned long long>::max(), 1.0f};
+  EXPECT_THROW(source.transpose(size_t{4}), PoissonRecon::Exception);
+  // The input iterator's index type can differ from the result's index type.
+  EXPECT_THROW(UnboundedMatrix::Transpose(source, size_t{4}),
+               PoissonRecon::Exception);
 }
 
 }  // namespace
