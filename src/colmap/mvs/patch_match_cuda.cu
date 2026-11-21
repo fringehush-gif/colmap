@@ -224,36 +224,30 @@ __device__ inline void ComputePointAtDepth(const RefCamera& camera,
   point[2] = depth;
 }
 
-// Transfer depth on plane from viewing ray at row1 to row2. The returned
-// depth is the intersection of the viewing ray through row2 with the plane
-// at row1 defined by the given depth and normal.
+// Transfer the plane depth between rows of the same image column. Retain
+// depth1 for nearly parallel rays or intersections without finite positive
+// depth; that fallback need not lie on the original plane at row2.
 __device__ inline float PropagateDepth(const RefCamera& camera,
                                        const float depth1,
                                        const float normal1[3],
                                        const float row1,
-                                       const float row2) {
-  // Point along first viewing ray.
-  const float x1 = depth1 * (camera.inv_K[2] * row1 + camera.inv_K[3]);
-  const float y1 = depth1;
-  // Point on plane defined by point along first viewing ray and plane normal1.
-  const float x2 = x1 + normal1[2];
-  const float y2 = y1 - normal1[1];
-
-  // Origin of second viewing ray.
-  // const float x3 = 0.0f;
-  // const float y3 = 0.0f;
-  // Point on second viewing ray.
-  const float x4 = camera.inv_K[2] * row2 + camera.inv_K[3];
-  // const float y4 = 1.0f;
-
-  // Intersection of the lines ((x1, y1), (x2, y2)) and ((x3, y3), (x4, y4)).
-  const float denom = x2 - x1 + x4 * (y1 - y2);
+                                       const float row2,
+                                       const float col) {
+  const float ray_x = camera.inv_K[0] * col + camera.inv_K[1];
+  const float ray_y1 = camera.inv_K[2] * row1 + camera.inv_K[3];
+  const float ray_y2 = camera.inv_K[2] * row2 + camera.inv_K[3];
+  // Along one image column, x = ray_x * z. The plane's effective z
+  // coefficient therefore includes the x component of its normal.
+  const float normal_z = normal1[0] * ray_x + normal1[2];
+  const float denom = normal1[1] * ray_y2 + normal_z;
   constexpr float kEps = 1e-5f;
   if (abs(denom) < kEps) {
     return depth1;
   }
-  const float nom = y1 * x2 - x1 * y2;
-  return nom / denom;
+  const float depth2 = depth1 * ((normal1[1] * ray_y1 + normal_z) / denom);
+  // A plane horizon can put the adjacent intersection behind the camera.
+  // Retain the valid previous hypothesis when no finite forward depth exists.
+  return depth2 > 0.0f && depth2 <= FLT_MAX ? depth2 : depth1;
 }
 
 // First, compute triangulation angle between reference and source image for 3D
@@ -1235,8 +1229,13 @@ __global__ void SweepFromTopToBottom(
 #endif
       for (int row = cost_map.GetHeight() - 1; row >= 0; --row) {
         const float cost = cost_map.Get(row, col, image_idx);
+        if constexpr (!kCheckpointHmm) {
+          // Alpha includes this emission; each pixel needs the strict suffix.
+          sel_prob_map.Set(row, col, image_idx, beta);
+        }
         beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
         if constexpr (kCheckpointHmm) {
+          // Replaying the preceding stripe also needs this boundary emission.
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 610 && !defined(__HIPCC__)
           if (row == checkpoint_row) {
             checkpoint_beta.Set(checkpoint_idx, col, image_idx, beta);
@@ -1248,8 +1247,6 @@ __global__ void SweepFromTopToBottom(
             checkpoint_beta.Set(
                 row / checkpoint_stripe.GetHeight(), col, image_idx, beta);
 #endif
-        } else {
-          sel_prob_map.Set(row, col, image_idx, beta);
         }
       }
 
@@ -1346,8 +1343,8 @@ __global__ void SweepFromTopToBottom(
 #endif
           for (int beta_row = end - 1; beta_row >= row; --beta_row) {
             const float cost = cost_map.Get(beta_row, col, image_idx);
-            beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
             checkpoint_stripe.Set(beta_row - row, col, image_idx, beta);
+            beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
           }
         }
       }
@@ -1400,11 +1397,15 @@ __global__ void SweepFromTopToBottom(
       // of the normal of the previous ray. This helps to better estimate
       // the depth of very oblique structures, i.e. pixels whose normal
       // direction is significantly different from their viewing direction.
-      prev_param_state.depth = PropagateDepth(camera,
-                                              prev_param_state.depth,
-                                              prev_param_state.normal,
-                                              row - 1,
-                                              row);
+      // Row zero is the seed hypothesis, not a preceding row's plane.
+      if (row > 0) {
+        prev_param_state.depth = PropagateDepth(camera,
+                                                prev_param_state.depth,
+                                                prev_param_state.normal,
+                                                row - 1,
+                                                row,
+                                                col);
+      }
 
       // Read parameters for current pixel from previous sweep.
       curr_param_state.depth = depth_map.Get(row, col);
