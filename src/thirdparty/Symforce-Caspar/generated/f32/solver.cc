@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
 
 #include "caspar_mappings.h"
@@ -442,6 +443,10 @@ GraphSolver::GraphSolver(
   if (params.diag_init < 0.0f) {
     throw std::runtime_error("params.diag_init must be positive");
   }
+  if (params.pcg_iter_max < 1) {
+    throw std::runtime_error("params.pcg_iter_max must be at least 1");
+  }
+
   allocation_size_ = get_nbytes();
 
   if (device_id_ < 0) {
@@ -1919,10 +1924,13 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
 
   for (solver_iter_ = 0; solver_iter_ < params_.solver_iter_max;
        solver_iter_++) {
-    if (solver_iter_ != 0 && solver_iter_ < params_.solver_iter_max - 1) {
+    if (solver_iter_ != 0) {
       DoResJac();
     }
     score_best_pcg = score_best;
+    // The inner loop can break before storing a proposal in storage_new_best_.
+    bool have_pcg_proposal = false;
+    float pred_decrease_best_pcg = 0;
     for (pcg_iter_ = 0; pcg_iter_ < params_.pcg_iter_max; pcg_iter_++) {
       DoNormalize();
 
@@ -1943,8 +1951,11 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
       }
       if (params_.pcg_rel_decrease_min != -1.0f ||
           params_.pcg_rel_score_exit != -1.0f) {
-        float score_new_pcg = DoRetractScore();
-        if (!(score_new_pcg <= score_best_pcg * params_.pcg_rel_decrease_min)) {
+        float predicted_decrease_pcg;
+        float score_new_pcg = DoRetractScore(&predicted_decrease_pcg);
+        if (!std::isfinite(score_new_pcg) ||
+            (params_.pcg_rel_decrease_min != -1.0f &&
+             !(score_new_pcg <= score_best_pcg * params_.pcg_rel_decrease_min))) {
           break;
         }
         std::swap(nodes__PinholeCalib__storage_check_,
@@ -1966,6 +1977,8 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
         std::swap(nodes__SimpleRadialPrincipalPoint__storage_check_,
                   nodes__SimpleRadialPrincipalPoint__storage_new_best_);
         score_best_pcg = score_new_pcg;
+        pred_decrease_best_pcg = predicted_decrease_pcg;
+        have_pcg_proposal = true;
         if (params_.pcg_rel_score_exit != -1.0f &&
             score_best_pcg < score_best * params_.pcg_rel_score_exit) {
           break;
@@ -1997,12 +2010,19 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
                 nodes__SimpleRadialPose__storage_new_best_);
       std::swap(nodes__SimpleRadialPrincipalPoint__storage_check_,
                 nodes__SimpleRadialPrincipalPoint__storage_new_best_);
+      have_pcg_proposal = true;
     }
 
     const float diag_current = diag;
     bool step_accepted = false;
-    if (score_best_pcg < score_best * params_.solver_rel_decrease_min) {
-      quality = (score_best - score_best_pcg) / GetPredDecrease();
+    if (have_pcg_proposal &&
+        score_best_pcg < score_best * params_.solver_rel_decrease_min) {
+      const float pred_decrease =
+          params_.pcg_rel_decrease_min == -1.0f &&
+                  params_.pcg_rel_score_exit == -1.0f
+              ? GetPredDecrease()
+              : pred_decrease_best_pcg;
+      quality = (score_best - score_best_pcg) / pred_decrease;
       const float quality_tmp = 2 * quality - 1;
       float scale = std::max(params_.diag_scaling_down,
                              1.0f - quality_tmp * quality_tmp * quality_tmp);
@@ -2011,6 +2031,7 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
                  cudaMemcpyHostToDevice);
       up_scale = params_.diag_scaling_up;
       score_best = score_best_pcg;
+      step_accepted = true;
       std::swap(nodes__PinholeCalib__storage_current_,
                 nodes__PinholeCalib__storage_new_best_);
       std::swap(nodes__PinholeFocal__storage_current_,
@@ -4177,6 +4198,7 @@ void GraphSolver::DoUpdateStep() {
 
 void GraphSolver::DoUpdateRFirst() {
   Zero(solver__r_0_norm2_tot_, solver__r_0_norm2_tot_ + 1);
+  Zero(solver__r_kp1_norm2_tot_, solver__r_kp1_norm2_tot_ + 1);
 
   PinholeCalibUpdateRFirst(nodes__PinholeCalib__r_k_, PinholeCalib_num_,
                            nodes__PinholeCalib__w_, PinholeCalib_num_,
@@ -4287,7 +4309,7 @@ void GraphSolver::DoUpdateR() {
   pcg_r_kp1_norm2_ = ReadCuMem(solver__r_kp1_norm2_tot_);
 }
 
-float GraphSolver::DoRetractScore() {
+float GraphSolver::DoRetractScore(float* predicted_decrease) {
   PinholeCalibRetract(nodes__PinholeCalib__storage_current_,
                       PinholeCalib_num_max_, nodes__PinholeCalib__step_,
                       PinholeCalib_num_, nodes__PinholeCalib__storage_check_,
@@ -4750,6 +4772,20 @@ float GraphSolver::DoRetractScore() {
       pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max_,
       solver__res_tot_,
       pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_);
+  if (predicted_decrease != nullptr) {
+    // These two scratch scalars are allocated consecutively by the generator.
+    if (solver__res_tot_ != solver__pred_decrease_tot_ + 1) {
+      throw std::runtime_error("Caspar score/prediction scratch layout changed");
+    }
+    LaunchPredDecrease();
+    float values[2];
+    if (cudaMemcpy(values, solver__pred_decrease_tot_, sizeof(values),
+                   cudaMemcpyDeviceToHost) != cudaSuccess) {
+      throw std::runtime_error("Caspar score/prediction readback failed");
+    }
+    *predicted_decrease = 0.5 * values[0];
+    return 0.5 * values[1];
+  }
   return 0.5 * ReadCuMem(solver__res_tot_);
 }
 
@@ -4840,7 +4876,7 @@ void GraphSolver::DoUpdateP() {
       SimpleRadialPrincipalPoint_num_, SimpleRadialPrincipalPoint_num_);
 }
 
-float GraphSolver::GetPredDecrease() {
+void GraphSolver::LaunchPredDecrease() {
   Zero(solver__pred_decrease_tot_, solver__pred_decrease_tot_ + 1);
   PinholeCalibPredDecreaseTimesTwo(
       nodes__PinholeCalib__step_, PinholeCalib_num_,
@@ -4890,6 +4926,10 @@ float GraphSolver::GetPredDecrease() {
       SimpleRadialPrincipalPoint_num_, solver__current_diag_,
       nodes__SimpleRadialPrincipalPoint__r_0_, SimpleRadialPrincipalPoint_num_,
       solver__pred_decrease_tot_, SimpleRadialPrincipalPoint_num_);
+}
+
+float GraphSolver::GetPredDecrease() {
+  LaunchPredDecrease();
   return 0.5 * ReadCuMem(solver__pred_decrease_tot_);
 }
 
