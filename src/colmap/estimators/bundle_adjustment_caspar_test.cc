@@ -45,6 +45,7 @@ struct CudaTrace {
   CudaCall fault = CudaCall::kNone;
   bool fired = false;
   cudaError_t real_mapping_status = cudaSuccess;
+  cudaMemcpyKind copy_kind = cudaMemcpyDeviceToHost;
   bool host_allocation = false;
   std::vector<uint8_t> allocation;
   bool freed_expected_pointer = false;
@@ -132,8 +133,7 @@ extern "C" cudaError_t CUDARTAPI __wrap_cudaMemcpy(void* destination,
                                                    cudaMemcpyKind kind) {
   if (cuda_trace != nullptr) {
     cuda_trace->calls.push_back(CudaCall::kCopy);
-    if (cuda_trace->fault == CudaCall::kCopy &&
-        kind == cudaMemcpyDeviceToHost) {
+    if (cuda_trace->fault == CudaCall::kCopy && kind == cuda_trace->copy_kind) {
       cuda_trace->fired = true;
       return kInjectedCudaError;
     }
@@ -534,24 +534,37 @@ TEST(CasparScoredPcg, IndependentCriteriaAcceptTheSameSingleStep) {
   }
   double reference_score = 0;
   double reference_quality = 0;
-  for (const bool decrease_enabled : {false, true}) {
-    for (const bool score_exit_enabled : {false, true}) {
+#if defined(COLMAP_TEST_CASPAR_READBACK_WRAPPING)
+  std::vector<CudaCall> reference_calls;
+#endif
+  for (const double decrease : {-1.0, -0.5, -2.0, 1.0}) {
+    for (const double score_exit : {-1.0, -0.5, -2.0, 0.5}) {
       SCOPED_TRACE(::testing::Message()
-                   << "decrease=" << decrease_enabled
-                   << " score_exit=" << score_exit_enabled);
+                   << "decrease=" << decrease << " score_exit=" << score_exit);
       Reconstruction reconstruction = initial;
       BundleAdjustmentOptions options;
       options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
       options.caspar->solver_iter_max = 1;
       options.caspar->pcg_iter_max = 1;
-      options.caspar->pcg_rel_decrease_min = decrease_enabled ? 1.0 : -1.0;
-      options.caspar->pcg_rel_score_exit = score_exit_enabled ? 0.5 : -1.0;
+      options.caspar->pcg_rel_decrease_min = decrease;
+      options.caspar->pcg_rel_score_exit = score_exit;
       options.caspar->collect_iteration_data = true;
       auto adjuster =
           CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+#if defined(COLMAP_TEST_CASPAR_READBACK_WRAPPING)
+      CudaTrace trace;
+      ScopedCudaFault scope(trace, CudaCall::kNone);
+#endif
       const auto summary =
           std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
               adjuster->Solve());
+#if defined(COLMAP_TEST_CASPAR_READBACK_WRAPPING)
+      if (decrease == -1.0 && score_exit == -1.0) {
+        reference_calls = trace.calls;
+      } else if (decrease < 0.0 && score_exit < 0.0) {
+        EXPECT_EQ(trace.calls, reference_calls);
+      }
+#endif
       ASSERT_NE(summary, nullptr);
       ASSERT_EQ(summary->iterations.size(), 1u);
       const auto& iteration = summary->iterations.front();
@@ -560,7 +573,7 @@ TEST(CasparScoredPcg, IndependentCriteriaAcceptTheSameSingleStep) {
       EXPECT_EQ(iteration.pcg_iter, 0);
       EXPECT_LT(iteration.score_best, summary->initial_score);
       EXPECT_TRUE(std::isfinite(iteration.step_quality));
-      if (!decrease_enabled && !score_exit_enabled) {
+      if (decrease == -1.0 && score_exit == -1.0) {
         reference_score = iteration.score_best;
         reference_quality = iteration.step_quality;
       } else {
@@ -1710,11 +1723,13 @@ TEST(CasparConstruction, StopsOnCudaFailure) {
 }
 
 template <typename F>
-void ExpectReadbackFailure(CudaCall fault,
-                           const char* operation,
-                           const std::vector<CudaCall>& calls,
-                           F&& action) {
+void ExpectCudaFailure(CudaCall fault,
+                       const char* operation,
+                       const std::vector<CudaCall>& calls,
+                       F&& action,
+                       cudaMemcpyKind copy_kind = cudaMemcpyDeviceToHost) {
   CudaTrace trace;
+  trace.copy_kind = copy_kind;
   bool threw = false;
   {
     ScopedCudaFault scope(trace, fault);
@@ -1733,6 +1748,152 @@ void ExpectReadbackFailure(CudaCall fault,
   EXPECT_EQ(trace.calls, calls);
   if (fault == CudaCall::kMap) {
     EXPECT_EQ(trace.real_mapping_status, cudaSuccess);
+  }
+}
+
+TEST(CasparUploadFault, StopsOnCudaFailure) {
+  if (GetNumCudaDevices() == 0) {
+    GTEST_SKIP() << "No CUDA devices available";
+  }
+  ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+  using Real = StorageType;
+  using C = CudaCall;
+  CasparSolverSizing sizing;
+  sizing.num_points = 1;
+  sizing.num_simple_radial_poses = 1;
+  sizing.num_simple_radial_calibs = 1;
+  sizing.num_simple_radial = 1;
+  sizing.num_simple_radial_fixed_pose = 1;
+  auto solver = CreateSolver(caspar::SolverParams<Real>{}, sizing, 0);
+  const std::array<Real, 7> data{
+      Real(1), Real(2), Real(3), Real(1), Real(0), Real(0), Real(0)};
+  const std::array<unsigned, 1> indices{0};
+  CudaDeviceBuffer device_data;
+  CudaDeviceBuffer device_indices;
+  ASSERT_EQ(cudaMalloc(&device_data.ptr, sizeof(data)), cudaSuccess);
+  ASSERT_EQ(cudaMalloc(&device_indices.ptr, sizeof(indices)), cudaSuccess);
+  ASSERT_EQ(
+      cudaMemcpy(
+          device_data.ptr, data.data(), sizeof(data), cudaMemcpyHostToDevice),
+      cudaSuccess);
+  ASSERT_EQ(cudaMemcpy(device_indices.ptr,
+                       indices.data(),
+                       sizeof(indices),
+                       cudaMemcpyHostToDevice),
+            cudaSuccess);
+  solver.SetPointNodesFromStackedHost(data.data(), 0, 1);
+  CudaTrace probe;
+  {
+    ScopedCudaFault scope(probe, C::kNone);
+    std::array<Real, 3> readback{};
+    solver.GetPointNodesToStackedHost(readback.data(), 0, 1);
+  }
+  if (probe.calls != std::vector<C>{C::kSelect, C::kMap, C::kCopy}) {
+    GTEST_SKIP() << "Generated CUDA calls are not fully intercepted";
+  }
+
+  // Node, factor constant, and factor index uploads have distinct generators.
+  for (const int family : {0, 1, 2}) {
+    SCOPED_TRACE(family);
+    const auto host_upload = [&] {
+      if (family == 0) {
+        solver.SetPointNodesFromStackedHost(data.data(), 0, 1);
+      } else if (family == 1) {
+        solver.SetSimpleRadialFixedPosePoseDataFromStackedHost(
+            data.data(), 0, 1);
+      } else {
+        solver.SetSimpleRadialPoseIndicesFromHost(indices.data(), 1);
+      }
+    };
+    const auto device_upload = [&] {
+      if (family == 0) {
+        solver.SetPointNodesFromStackedDevice(
+            static_cast<Real*>(device_data.ptr), 0, 1);
+      } else if (family == 1) {
+        solver.SetSimpleRadialFixedPosePoseDataFromStackedDevice(
+            static_cast<Real*>(device_data.ptr), 0, 1);
+      } else {
+        solver.SetSimpleRadialPoseIndicesFromDevice(
+            static_cast<unsigned*>(device_indices.ptr), 1);
+      }
+    };
+    // Prime the scratch with valid data before any copy-failure control.
+    host_upload();
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    for (const auto fault : {C::kSelect, C::kCopy, C::kMap}) {
+      const char* operation = fault == C::kSelect ? "cudaSetDevice"
+                              : fault == C::kCopy ? "cudaMemcpy host-to-device"
+                              : family == 0       ? "PointStackedToCaspar"
+                              : family == 1
+                                  ? "ConstSimpleRadialPoseStackedToCaspar"
+                                  : "SharedIndices";
+      const std::vector<C> expected =
+          fault == C::kSelect ? std::vector<C>{C::kSelect}
+          : fault == C::kCopy ? std::vector<C>{C::kSelect, C::kCopy}
+          : family == 2
+              ? std::vector<C>{C::kSelect, C::kCopy, C::kSelect, C::kMap}
+              : std::vector<C>{C::kSelect, C::kCopy, C::kMap};
+      ExpectCudaFailure(
+          fault, operation, expected, host_upload, cudaMemcpyHostToDevice);
+      ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    }
+    for (const auto fault : {C::kSelect, C::kMap}) {
+      const char* operation = fault == C::kSelect ? "cudaSetDevice"
+                              : family == 0       ? "PointStackedToCaspar"
+                              : family == 1
+                                  ? "ConstSimpleRadialPoseStackedToCaspar"
+                                  : "SharedIndices";
+      const std::vector<C> expected = fault == C::kSelect
+                                          ? std::vector<C>{C::kSelect}
+                                          : std::vector<C>{C::kSelect, C::kMap};
+      ExpectCudaFailure(fault, operation, expected, device_upload);
+      ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    }
+  }
+
+  CudaTrace host_only;
+  {
+    ScopedCudaFault scope(host_only, C::kNone);
+    solver.SetPointNum(1);
+    solver.SetPointNodesFromStackedHost(data.data(), 1, 0);
+    solver.SetPointNodesFromStackedDevice(
+        static_cast<Real*>(device_data.ptr), 1, 0);
+    solver.SetSimpleRadialFixedPosePoseDataFromStackedHost(data.data(), 0, 0);
+    solver.SetSimpleRadialFixedPosePoseDataFromStackedDevice(
+        static_cast<Real*>(device_data.ptr), 0, 0);
+    solver.SetSimpleRadialNum(0);
+    solver.SetSimpleRadialPoseIndicesFromHost(indices.data(), 0);
+    solver.SetSimpleRadialPoseIndicesFromDevice(
+        static_cast<unsigned*>(device_indices.ptr), 0);
+    solver.SetSimpleRadialNum(1);
+    EXPECT_THROW(solver.SetPointNodesFromStackedHost(data.data(), 2, 0),
+                 std::runtime_error);
+    EXPECT_THROW(solver.SetSimpleRadialFixedPosePoseDataFromStackedHost(
+                     data.data(), std::numeric_limits<size_t>::max(), 0),
+                 std::runtime_error);
+    EXPECT_THROW(solver.SetSimpleRadialPoseIndicesFromHost(indices.data(), 0),
+                 std::runtime_error);
+  }
+  EXPECT_TRUE(host_only.calls.empty());
+  EXPECT_EQ(cudaGetLastError(), cudaSuccess);
+
+  // A zero-factor, zero-iteration control remains safe if an unchecked owner
+  // continues past an injected solve-entry error.
+  caspar::SolverParams<Real> params;
+  params.solver_iter_max = 0;
+  auto empty_solver = CreateSolver(params, {}, 0);
+  EXPECT_NO_THROW(empty_solver.solve(false, false));
+  for (const auto fault : {C::kSelect, C::kCopy}) {
+    const std::vector<C> expected = fault == C::kSelect
+                                        ? std::vector<C>{C::kSelect}
+                                        : std::vector<C>{C::kSelect, C::kCopy};
+    ExpectCudaFailure(
+        fault,
+        fault == C::kSelect ? "cudaSetDevice" : "cudaMemcpy host-to-device",
+        expected,
+        [&] { empty_solver.solve(false, false); },
+        cudaMemcpyHostToDevice);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   }
 }
 
@@ -1788,7 +1949,7 @@ TEST(CasparReadbackFault, GetterStagesAndRealRoundTrips) {
     const char* operation = fault == C::kSelect ? "cudaSetDevice"
                             : fault == C::kMap  ? "PointCasparToStacked"
                                                 : "cudaMemcpy";
-    ExpectReadbackFailure(fault, operation, expected, [&] {
+    ExpectCudaFailure(fault, operation, expected, [&] {
       solver.GetPointNodesToStackedHost(host.data(), 0, 1);
     });
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
@@ -1797,7 +1958,7 @@ TEST(CasparReadbackFault, GetterStagesAndRealRoundTrips) {
     const std::vector<C> expected = fault == C::kSelect
                                         ? std::vector<C>{C::kSelect}
                                         : std::vector<C>{C::kSelect, C::kMap};
-    ExpectReadbackFailure(
+    ExpectCudaFailure(
         fault,
         fault == C::kSelect ? "cudaSetDevice" : "PointCasparToStacked",
         expected,
@@ -1832,7 +1993,7 @@ TEST(CasparReadbackFault, ScalarCopyFailure) {
   if (probe.calls != std::vector<CudaCall>{CudaCall::kCopy}) {
     GTEST_SKIP() << "Generated scalar CUDA copy is not intercepted";
   }
-  ExpectReadbackFailure(CudaCall::kCopy, "ReadCuMem", {CudaCall::kCopy}, [&] {
+  ExpectCudaFailure(CudaCall::kCopy, "ReadCuMem", {CudaCall::kCopy}, [&] {
     (void)caspar::ReadCuMem(static_cast<const Real*>(buffer.ptr));
   });
 }
@@ -1874,6 +2035,10 @@ TEST(CasparConstruction, WrappingUnavailable) {
   GTEST_SKIP()
       << "Constructor fault injection requires a GNU/Linux static test link";
 }
+TEST(CasparUploadFault, WrappingUnavailable) {
+  GTEST_SKIP() << "CUDA fault wrapping unavailable";
+}
+
 TEST(CasparReadbackFault, WrappingUnavailable) {
   GTEST_SKIP()
       << "Readback fault injection requires a GNU/Linux static test link";
