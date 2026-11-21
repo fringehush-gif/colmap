@@ -1,5 +1,11 @@
-# Usage:
-#   python generate_caspar.py <out_dir> [f32|f64]
+# Regeneration requires the reviewed SymForce owner recorded in
+# caspar_solver_template.GENERATOR_OWNER. Check out that revision of
+# https://github.com/fringehush-gif/symforce and follow its source-install
+# instructions before running either precision:
+#   python caspar_generate.py <out_dir> [f32|f64]
+# The source contract is checked before outputs change. Existing generated
+# libraries build without installing SymForce. Review successors before
+# updating the owner and input digests together.
 
 import inspect
 import sys
@@ -9,10 +15,9 @@ from pathlib import Path
 from typing import Annotated, Any, get_type_hints
 
 from caspar_solver_template import (
-    patch_readback_template,
+    buildfile_overrides,
     patch_solver_templates,
-    patch_solver_tools,
-    write_solver_tools,
+    validate_generation_inputs,
 )
 from jinja2 import ChoiceLoader, DictLoader
 
@@ -351,9 +356,9 @@ caslib = CasparLibrary(name="caspar_lib", dtype=dtype)
 #     skipped with a warning because the merged focal_and_extra node
 #     cannot be split)
 #
-# sensor_from_rig is always present as a ConstantShared parameter. For single-
-# camera datasets the host passes identity, making it a no-op. For multi-camera
-# rigs it carries the per-sensor extrinsic calibration.
+# sensor_from_rig always uses ConstantSequential. For single-camera datasets the
+# host passes identity, making it a no-op. For multi-camera rigs it carries the
+# per-sensor extrinsic calibration.
 
 FIXABLE_SIMPLE_RADIAL = {
     "pose": ConstSimpleRadialPose,
@@ -413,25 +418,30 @@ print(f"Generating Caspar kernels with precision {precision}: {out_dir}")
 original_loader = template_env.loader
 if original_loader is None:
     raise RuntimeError("Caspar template loader is unavailable")
-source, _, _ = original_loader.get_source(template_env, "solver.cc.jinja")
-header, _, _ = original_loader.get_source(template_env, "solver.h.jinja")
-source, header = patch_solver_templates(source, header)
-source = patch_readback_template(source)
-runtime_path = Path(caspar.__file__).parent / "source/runtime/solver_tools.cu"
-solver_tools = patch_solver_tools(runtime_path.read_text())
-template_env.loader = ChoiceLoader(
-    [
-        DictLoader(
-            {
-                "solver.cc.jinja": source,
-                "solver.h.jinja": header,
-            }
-        ),
-        original_loader,
-    ]
+caspar_dir = Path(caspar.__file__).parent
+templates = {
+    name: original_loader.get_source(template_env, name)[0]
+    for name in (
+        "solver.cc.jinja",
+        "solver.h.jinja",
+        "buildfiles/CMakeLists.txt.jinja",
+    )
+}
+validate_generation_inputs(caspar_dir, templates)
+source, header = patch_solver_templates(
+    templates["solver.cc.jinja"], templates["solver.h.jinja"]
 )
+overrides = buildfile_overrides(
+    templates["buildfiles/CMakeLists.txt.jinja"], precision
+)
+overrides.update({"solver.cc.jinja": source, "solver.h.jinja": header})
+template_env.loader = ChoiceLoader([DictLoader(overrides), original_loader])
 try:
+    # The runtime copier follows old output symlinks when source bytes differ.
+    for filename in ("memops.cuh", "solver_tools.cu", "shared_indices.cu"):
+        path = out_dir / filename
+        if path.is_symlink():
+            path.unlink()
     caslib.generate(out_dir, use_symlinks=False, python_bindings=False)
-    write_solver_tools(out_dir / "solver_tools.cu", solver_tools)
 finally:
     template_env.loader = original_loader
