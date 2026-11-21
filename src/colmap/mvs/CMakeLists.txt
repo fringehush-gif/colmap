@@ -229,13 +229,16 @@ if(CUDA_ENABLED)
         if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
            AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT BUILD_SHARED_LIBS)
             target_compile_definitions(colmap_mvs_patch_match_cuda_test PRIVATE
-                COLMAP_TEST_CUDA_ALLOCATION_WRAPPING=1)
+                COLMAP_TEST_CUDA_ALLOCATION_WRAPPING=1
+                COLMAP_TEST_CUDA_COMPLETION_WRAPPING=1)
             target_link_options(colmap_mvs_patch_match_cuda_test PRIVATE
                 "LINKER:--wrap=cudaMemGetInfo"
                 "LINKER:--wrap=cudaMalloc"
                 "LINKER:--wrap=cudaMallocPitch"
                 "LINKER:--wrap=cudaMalloc3DArray"
                 "LINKER:--wrap=cudaFree"
+                "LINKER:--wrap=cudaStreamSynchronize"
+                "LINKER:--wrap=cudaStreamSynchronize_ptsz"
                 "LINKER:--wrap=cudaFreeArray"
                 "LINKER:--wrap=cudaStreamCreateWithFlags"
                 "LINKER:--wrap=cudaStreamDestroy"

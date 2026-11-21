@@ -1408,7 +1408,7 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
           *sift_opengl_mutexes_.at(sift_match_gpu_.gpu_index));
     }
 
-    if (prev_image_id1_ == kInvalidImageId || prev_is_guided_ ||
+    if (prev_image_id1_ == kInvalidImageId ||
         prev_image_id1_ != image1.image_id) {
       WarnIfMaxNumMatchesReachedGPU(image1.descriptors->data);
       sift_match_gpu_.SetDescriptors(
@@ -1416,7 +1416,7 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
       prev_image_id1_ = image1.image_id;
     }
 
-    if (prev_image_id2_ == kInvalidImageId || prev_is_guided_ ||
+    if (prev_image_id2_ == kInvalidImageId ||
         prev_image_id2_ != image2.image_id) {
       WarnIfMaxNumMatchesReachedGPU(image2.descriptors->data);
       sift_match_gpu_.SetDescriptors(
@@ -1493,17 +1493,21 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
     // not a function of the image alone: a shared-focal pair carries a focal
     // length estimated per pair, so the same image matched against different
     // partners normalizes differently. The camera is therefore part of the
-    // cache key, alongside the image id and the coordinate space.
+    // cache key, alongside the image id and the coordinate space. Descriptors
+    // depend only on the image id and remain resident when locations change.
     if (prev_image_id1_ == kInvalidImageId || !prev_is_guided_ ||
         prev_image_id1_ != image1.image_id ||
         use_essential_matrix != prev_use_essential_matrix_ ||
         (use_essential_matrix &&
          !SameNormalizationCamera(prev_norm_camera1_, effective_camera1))) {
-      WarnIfMaxNumMatchesReachedGPU(image1.descriptors->data);
       constexpr size_t kIndex = 0;
-      sift_match_gpu_.SetDescriptors(kIndex,
-                                     image1.descriptors->data.rows(),
-                                     image1.descriptors->data.data());
+      if (prev_image_id1_ == kInvalidImageId ||
+          prev_image_id1_ != image1.image_id) {
+        WarnIfMaxNumMatchesReachedGPU(image1.descriptors->data);
+        sift_match_gpu_.SetDescriptors(kIndex,
+                                       image1.descriptors->data.rows(),
+                                       image1.descriptors->data.data());
+      }
       if (use_essential_matrix) {
         const std::vector<float> cam_rays1 =
             PackCamRaysWithJac(effective_camera1, *image1.keypoints);
@@ -1527,11 +1531,14 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
         use_essential_matrix != prev_use_essential_matrix_ ||
         (use_essential_matrix &&
          !SameNormalizationCamera(prev_norm_camera2_, effective_camera2))) {
-      WarnIfMaxNumMatchesReachedGPU(image2.descriptors->data);
       constexpr size_t kIndex = 1;
-      sift_match_gpu_.SetDescriptors(kIndex,
-                                     image2.descriptors->data.rows(),
-                                     image2.descriptors->data.data());
+      if (prev_image_id2_ == kInvalidImageId ||
+          prev_image_id2_ != image2.image_id) {
+        WarnIfMaxNumMatchesReachedGPU(image2.descriptors->data);
+        sift_match_gpu_.SetDescriptors(kIndex,
+                                       image2.descriptors->data.rows(),
+                                       image2.descriptors->data.data());
+      }
       if (use_essential_matrix) {
         const std::vector<float> cam_rays2 =
             PackCamRaysWithJac(effective_camera2, *image2.keypoints);

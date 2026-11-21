@@ -65,6 +65,8 @@ class FeatureMatcherWorker : public Thread {
       bool is_shared_creator = false);
 
  private:
+  friend struct FeatureMatcherControllerTestPeer;
+
   void Run() override;
 
   // Matches the pair (unless it has no descriptors) and stores the result in
@@ -102,6 +104,8 @@ class FeatureMatcherController {
   void Match(const std::vector<std::pair<image_t, image_t>>& image_pairs);
 
  private:
+  friend struct FeatureMatcherControllerTestPeer;
+
   FeatureMatchingOptions matching_options_;
   TwoViewGeometryOptions geometry_options_;
   std::shared_ptr<FeatureMatcherCache> cache_;
