@@ -86,6 +86,7 @@ template< class T , class IndexType >
 template< class T2 , class IndexType2 >
 SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::copy( const SparseMatrix< T2 , IndexType2 , 0 >& M  )
 {
+	if( static_cast< const void* >(this)==static_cast< const void* >(&M) ) return *this;
 	resize( M.rowNum );
 	for ( size_t i=0 ; i<rowNum ; i++)
 	{
@@ -108,6 +109,7 @@ SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator =
 template< class T , class IndexType >
 SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator = ( const SparseMatrix< T , IndexType , 0 >& M )
 {
+	if( this==&M ) return *this;
 	resize( M.rowNum );
 	for( size_t i=0 ; i<rowNum ; i++ )
 	{
@@ -120,6 +122,7 @@ template< class T , class IndexType >
 template< class T2 , class IndexType2 >
 SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator = (const SparseMatrix< T2 , IndexType2 , 0 >& M)
 {
+	if( static_cast< const void* >(this)==static_cast< const void* >(&M) ) return *this;
 	resize( M.rowNum );
 	for( size_t i=0 ; i<rowNum ; i++ )
 	{
@@ -196,7 +199,7 @@ SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator *
 	return *this;
 }
 template< class T , class IndexType >
-SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator /= ( T s ){ return (*this) * ( (T)1./s ); }
+SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator /= ( T s ){ return (*this) *= ( (T)1./s ); }
 template< class T , class IndexType >
 SparseMatrix< T , IndexType , 0 >& SparseMatrix< T , IndexType , 0 >::operator *= ( const SparseMatrix< T , IndexType , 0 >& B )
 {
@@ -540,7 +543,7 @@ SparseMatrix< T , IndexType , MaxRowSize >::SparseMatrix( const SparseMatrix& M 
 	for( size_t i=0 ; i<_rowNum ; i++ )
 	{
 		_rowSizes[i] = M._rowSizes[i];
-		for( size_t j=0 ; j<_rowSizes[i] ; j++ ) _entries[ i + MaxRowSize*j ] = M._rowEntries[ i + MaxRowSize*j ];
+		for( size_t j=0 ; j<_rowSizes[i] ; j++ ) _entries[ MaxRowSize*i + j ] = M._entries[ MaxRowSize*i + j ];
 	}
 }
 template< class T , class IndexType , size_t MaxRowSize >
@@ -552,11 +555,11 @@ template< class T , class IndexType , size_t MaxRowSize >
 template< class T2 , class IndexType2 >
 SparseMatrix< T , IndexType , MaxRowSize >::SparseMatrix( const SparseMatrix< T2 , IndexType2 , MaxRowSize >& M ) : SparseMatrix()
 {
-	resize( M._rowNum );
+	resize( M.rows() );
 	for( size_t i=0 ; i<_rowNum ; i++ )
 	{
-		_rowSizes[i] = M._rowSizes[i];
-		for( size_t j=0 ; j<_rowSizes[i] ; j++ ) _entries[ i + MaxRowSize*j ] = MatrixEntry< T , IndexType >( M._rowEntries[i][j].N , T( M._entries[ i + MaxRowSize*j ].Value ) );
+		_rowSizes[i] = M.rowSize(i);
+		for( size_t j=0 ; j<_rowSizes[i] ; j++ ) _entries[ MaxRowSize*i + j ] = MatrixEntry< T , IndexType >( M[i][j].N , T( M[i][j].Value ) );
 	}
 }
 
@@ -570,11 +573,12 @@ SparseMatrix< T , IndexType , MaxRowSize >& SparseMatrix< T , IndexType , MaxRow
 template< class T , class IndexType , size_t MaxRowSize >
 SparseMatrix< T , IndexType , MaxRowSize >& SparseMatrix< T , IndexType , MaxRowSize >::operator = ( const SparseMatrix< T , IndexType , MaxRowSize >& M )
 {
+	if( this==&M ) return *this;
 	resize( M._rowNum );
 	for( size_t i=0 ; i<_rowNum ; i++ )
 	{
 		_rowSizes[i] = M._rowSizes[i];
-		for( size_t j=0 ; j<_rowSizes[i] ; j++ ) _entries[ i + MaxRowSize*j ] = M._entries[ i + MaxRowSize*j ];
+		for( size_t j=0 ; j<_rowSizes[i] ; j++ ) _entries[ MaxRowSize*i + j ] = M._entries[ MaxRowSize*i + j ];
 	}
 	return *this;
 }
@@ -583,11 +587,12 @@ template< class T , class IndexType , size_t MaxRowSize >
 template< class T2 , class IndexType2 >
 SparseMatrix< T , IndexType , MaxRowSize >& SparseMatrix< T , IndexType , MaxRowSize >::operator = ( const SparseMatrix< T2 , IndexType2 , MaxRowSize >& M )
 {
-	resize( M._rowNum );
+	if( static_cast< const void* >(this)==static_cast< const void* >(&M) ) return *this;
+	resize( M.rows() );
 	for( size_t i=0 ; i<_rowNum ; i++ )
 	{
-		_rowSizes[i] = M._rowSizes[i];
-		for( size_t j=0 ; j<_rowSizes[i] ; j++ ) _entries[ i + MaxRowSize*j ] = MatrixEntry< T , IndexType >( M._entries[ i + MaxRowSize*j ].N , T( M._entries[ i + MaxRowSize*j ].Value ) );
+		_rowSizes[i] = M.rowSize(i);
+		for( size_t j=0 ; j<_rowSizes[i] ; j++ ) _entries[ MaxRowSize*i + j ] = MatrixEntry< T , IndexType >( M[i][j].N , T( M[i][j].Value ) );
 	}
 	return *this;
 }
@@ -640,12 +645,15 @@ void SparseMatrix< T , IndexType , MaxRowSize >::resetRowSize( size_t row , size
 template< class T , class IndexType , size_t MaxRowSize >
 SparseMatrix< T , IndexType , MaxRowSize >& SparseMatrix< T , IndexType , MaxRowSize >::operator *= ( T s )
 {
-	ThreadPool::ParallelFor( 0 , _rowNum*MaxRowSize , [&]( unsigned int , size_t i ){ _entries[i].Value *= s; } );
+	ThreadPool::ParallelFor( 0 , _rowNum , [&]( unsigned int , size_t i )
+	{
+		for( size_t j=0 ; j<_rowSizes[i] ; j++ ) _entries[ MaxRowSize*i + j ].Value *= s;
+	} );
 	return *this;
 }
 
 template< class T , class IndexType , size_t MaxRowSize >
-SparseMatrix< T , IndexType , MaxRowSize >& SparseMatrix< T , IndexType , MaxRowSize >::operator /= ( T s ){ return (*this) * ( (T)1./s ); }
+SparseMatrix< T , IndexType , MaxRowSize >& SparseMatrix< T , IndexType , MaxRowSize >::operator /= ( T s ){ return (*this) *= ( (T)1./s ); }
 
 template< class T , class IndexType , size_t MaxRowSize >
 SparseMatrix< T , IndexType , MaxRowSize > SparseMatrix< T , IndexType , MaxRowSize >::operator * ( T s ) const
