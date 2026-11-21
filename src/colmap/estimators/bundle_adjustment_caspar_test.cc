@@ -197,51 +197,6 @@ constexpr double kConstantPoseVarEps = 1e-9;
 namespace colmap {
 namespace {
 
-caspar::GraphSolver MakeParameterTestSolver(
-    const caspar::SolverParams<double>& params, const int device) {
-  return caspar::GraphSolver(params,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             1,
-                             device);
-}
-
 TEST(CasparTransfers, ReservesFactorScratchWithoutPointNodes) {
   int device_count = 0;
   const cudaError_t status = cudaGetDeviceCount(&device_count);
@@ -278,8 +233,8 @@ TEST(CasparParameters, RejectsInvalidUpdatesWithoutChangingParameters) {
   }
 
   using Access = caspar::GraphSolverTestAccess;
-  const caspar::SolverParams<double> valid;
-  auto solver = MakeParameterTestSolver(valid, 0);
+  const caspar::SolverParams<StorageType> valid;
+  auto solver = CreateSolver(valid, {}, 0);
   const auto original = Access::Params(solver);
   const auto expect_error = [](const auto& action, const char* message) {
     try {
@@ -297,7 +252,7 @@ TEST(CasparParameters, RejectsInvalidUpdatesWithoutChangingParameters) {
     EXPECT_EQ(stored.pcg_rel_error_exit, original.pcg_rel_error_exit);
     EXPECT_EQ(stored.diag_init, original.diag_init);
     EXPECT_EQ(stored.solver_iter_max, original.solver_iter_max);
-    expect_error([&] { MakeParameterTestSolver(invalid, -1); }, message);
+    expect_error([&] { CreateSolver(invalid, {}, device_count); }, message);
   };
   auto invalid = valid;
   for (const int count : {0, -1}) {
@@ -331,16 +286,13 @@ TEST(CasparFirstNorm, ResetsBothAccumulatorsBeforeRealKernelUpdates) {
 
   using Access = caspar::GraphSolverTestAccess;
   using Real = StorageType;
-  auto solver = MakeParameterTestSolver(caspar::SolverParams<double>(), 0);
-  // The constructor allocates one of every node; only these two are
-  // initialized.
+  CasparSolverSizing sizing;
+  sizing.num_pinhole_calibs = 1;
+  sizing.num_points = 1;
+  auto solver = CreateSolver(caspar::SolverParams<StorageType>{}, sizing, 0);
+  // The calibration pool also allocates these two uninitialized node types.
   solver.SetPinholeCalibNum(0);
   solver.SetPinholeFocalNum(0);
-  solver.SetPinholePoseNum(0);
-  solver.SetSimpleRadialCalibNum(0);
-  solver.SetSimpleRadialFocalAndExtraNum(0);
-  solver.SetSimpleRadialPoseNum(0);
-  solver.SetSimpleRadialPrincipalPointNum(0);
   const Real neg_alpha = -0.5;
   const Real principal_r[] = {1, 2}, principal_w[] = {2, 0};
   const Real point_r[] = {3, 0, 0, 0}, point_w[] = {2, 0, 0, 0};
@@ -1294,8 +1246,9 @@ TEST(CasparReadbackFault, GetterStagesAndRealRoundTrips) {
   }
   ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
   using Real = StorageType;
-  auto solver = MakeParameterTestSolver(caspar::SolverParams<double>(), 0);
-  solver.SetPointNum(1);
+  CasparSolverSizing sizing;
+  sizing.num_points = 1;
+  auto solver = CreateSolver(caspar::SolverParams<StorageType>{}, sizing, 0);
   const std::array<Real, 3> input{Real(1), Real(2), Real(3)};
   solver.SetPointNodesFromStackedHost(input.data(), 0, 1);
   std::array<Real, 3> host{};
@@ -1393,7 +1346,9 @@ TEST(CasparReadbackFault, EmptyAndOverflowRange) {
   if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
     GTEST_SKIP() << "CUDA device unavailable";
   }
-  auto solver = MakeParameterTestSolver(caspar::SolverParams<double>(), 0);
+  CasparSolverSizing sizing;
+  sizing.num_points = 1;
+  auto solver = CreateSolver(caspar::SolverParams<StorageType>{}, sizing, 0);
   using Getter = void (caspar::GraphSolver::*)(StorageType*, size_t, size_t);
   for (const Getter getter :
        {&caspar::GraphSolver::GetPointNodesToStackedHost,
