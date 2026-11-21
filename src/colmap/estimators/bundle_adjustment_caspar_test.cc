@@ -405,24 +405,37 @@ TEST(CasparScoredPcg, IndependentCriteriaAcceptTheSameSingleStep) {
   }
   double reference_score = 0;
   double reference_quality = 0;
-  for (const bool decrease_enabled : {false, true}) {
-    for (const bool score_exit_enabled : {false, true}) {
+#if defined(COLMAP_TEST_CASPAR_READBACK_WRAPPING)
+  std::vector<ReadbackCall> reference_calls;
+#endif
+  for (const double decrease : {-1.0, -0.5, -2.0, 1.0}) {
+    for (const double score_exit : {-1.0, -0.5, -2.0, 0.5}) {
       SCOPED_TRACE(::testing::Message()
-                   << "decrease=" << decrease_enabled
-                   << " score_exit=" << score_exit_enabled);
+                   << "decrease=" << decrease << " score_exit=" << score_exit);
       Reconstruction reconstruction = initial;
       BundleAdjustmentOptions options;
       options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
       options.caspar->solver_iter_max = 1;
       options.caspar->pcg_iter_max = 1;
-      options.caspar->pcg_rel_decrease_min = decrease_enabled ? 1.0 : -1.0;
-      options.caspar->pcg_rel_score_exit = score_exit_enabled ? 0.5 : -1.0;
+      options.caspar->pcg_rel_decrease_min = decrease;
+      options.caspar->pcg_rel_score_exit = score_exit;
       options.caspar->collect_iteration_data = true;
       auto adjuster =
           CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+#if defined(COLMAP_TEST_CASPAR_READBACK_WRAPPING)
+      ReadbackTrace trace;
+      ScopedReadbackFault scope(trace, ReadbackCall::kNone);
+#endif
       const auto summary =
           std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
               adjuster->Solve());
+#if defined(COLMAP_TEST_CASPAR_READBACK_WRAPPING)
+      if (decrease == -1.0 && score_exit == -1.0) {
+        reference_calls = trace.calls;
+      } else if (decrease < 0.0 && score_exit < 0.0) {
+        EXPECT_EQ(trace.calls, reference_calls);
+      }
+#endif
       ASSERT_NE(summary, nullptr);
       ASSERT_EQ(summary->iterations.size(), 1u);
       const auto& iteration = summary->iterations.front();
@@ -431,7 +444,7 @@ TEST(CasparScoredPcg, IndependentCriteriaAcceptTheSameSingleStep) {
       EXPECT_EQ(iteration.pcg_iter, 0);
       EXPECT_LT(iteration.score_best, summary->initial_score);
       EXPECT_TRUE(std::isfinite(iteration.step_quality));
-      if (!decrease_enabled && !score_exit_enabled) {
+      if (decrease == -1.0 && score_exit == -1.0) {
         reference_score = iteration.score_best;
         reference_quality = iteration.step_quality;
       } else {
