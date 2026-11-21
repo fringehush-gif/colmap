@@ -149,8 +149,9 @@ std::shared_ptr<const Bitmap> BitmapOwner(const PatchMatch::Problem& p,
   const auto& lease = p.source_bitmap_leases->at(id);
   const auto& image = p.images->at(id);
   if (!lease || lease.use_count() == 0 || &p.InputBitmap(id) != lease.get() ||
-      !lease->IsGrey() || lease->Width() != image.GetWidth() ||
-      lease->Height() != image.GetHeight())
+      !lease->IsGrey() ||
+      static_cast<size_t>(lease->Width()) != image.GetWidth() ||
+      static_cast<size_t>(lease->Height()) != image.GetHeight())
     return {};
   return lease;
 }
