@@ -23,19 +23,20 @@ struct PlyPoint {
 
 struct PlyMeshVertex {
   PlyMeshVertex() : x(0), y(0), z(0) {}
-  PlyMeshVertex(const float x, const float y, const float z)
+  PlyMeshVertex(const double x, const double y, const double z)
       : x(x), y(y), z(z) {}
-  PlyMeshVertex(const float x,
-                const float y,
-                const float z,
+  PlyMeshVertex(const double x,
+                const double y,
+                const double z,
                 const uint8_t r,
                 const uint8_t g,
                 const uint8_t b)
       : x(x), y(y), z(z), r(r), g(g), b(b) {}
 
-  float x = 0.0f;
-  float y = 0.0f;
-  float z = 0.0f;
+  // Preserve close mesh vertices when reading and rewriting double PLY data.
+  double x = 0.0;
+  double y = 0.0;
+  double z = 0.0;
 
   // Default color is gray.
   uint8_t r = 200;
@@ -87,8 +88,9 @@ void WriteBinaryPlyPoints(const std::filesystem::path& path,
 // meshes (with per-face UV coordinates and "comment TextureFile" header).
 PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path);
 
-// Write PLY mesh to text or binary file. Writes texture coordinates and
-// TextureFile comment when present in the mesh.
+// Write PLY mesh positions and vertex colors to text or binary file. Writes
+// texture coordinates and TextureFile comment when present in the mesh.
+// Positions use double precision.
 void WriteTextPlyMesh(const std::filesystem::path& path,
                       const PlyTexturedMesh& mesh);
 void WriteBinaryPlyMesh(const std::filesystem::path& path,

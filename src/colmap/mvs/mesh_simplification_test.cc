@@ -2,6 +2,8 @@
 
 #include "colmap/mvs/mesh_simplification.h"
 
+#include "colmap/util/testing.h"
+
 #include <cmath>
 #include <limits>
 
@@ -161,6 +163,50 @@ TEST(SimplifyMesh, PreservesColorsAtRatioOne) {
   }
 }
 
+TEST(SimplifyMesh, PreservesResultThroughPlyRoundTrip) {
+  const auto mesh = CreateGridMesh(4);
+  const auto path = CreateTestDir() / "simplified.ply";
+  for (const double ratio : {1.0, 0.5}) {
+    for (const bool interpolate_colors : {false, true}) {
+      MeshSimplificationOptions options;
+      options.target_face_ratio = ratio;
+      options.interpolate_colors = interpolate_colors;
+      const auto result = SimplifyMesh(mesh, options);
+      ASSERT_FALSE(result.vertices.empty());
+      ASSERT_FALSE(result.faces.empty());
+      if (ratio < 1) {
+        EXPECT_LT(result.faces.size(), mesh.faces.size());
+      } else {
+        EXPECT_EQ(result.faces.size(), mesh.faces.size());
+      }
+      for (const bool binary : {false, true}) {
+        SCOPED_TRACE(testing::Message()
+                     << ratio << ", " << interpolate_colors << ", " << binary);
+        binary ? WriteBinaryPlyMesh(path, PlyTexturedMesh{result})
+               : WriteTextPlyMesh(path, PlyTexturedMesh{result});
+        const auto loaded = ReadPlyMesh(path).mesh;
+        ASSERT_EQ(loaded.vertices.size(), result.vertices.size());
+        ASSERT_EQ(loaded.faces.size(), result.faces.size());
+        for (size_t i = 0; i < result.vertices.size(); ++i) {
+          const auto& expected = result.vertices[i];
+          const auto& actual = loaded.vertices[i];
+          EXPECT_EQ(actual.x, expected.x);
+          EXPECT_EQ(actual.y, expected.y);
+          EXPECT_EQ(actual.z, expected.z);
+          EXPECT_EQ(actual.r, expected.r);
+          EXPECT_EQ(actual.g, expected.g);
+          EXPECT_EQ(actual.b, expected.b);
+        }
+        for (size_t i = 0; i < result.faces.size(); ++i) {
+          EXPECT_EQ(loaded.faces[i].vertex_idx1, result.faces[i].vertex_idx1);
+          EXPECT_EQ(loaded.faces[i].vertex_idx2, result.faces[i].vertex_idx2);
+          EXPECT_EQ(loaded.faces[i].vertex_idx3, result.faces[i].vertex_idx3);
+        }
+      }
+    }
+  }
+}
+
 TEST(SimplifyMesh, OutputMeshIsValid) {
   const auto mesh = CreateGridMesh(10);
 
@@ -196,10 +242,11 @@ TEST(SimplifyMesh, BoundaryPreservation) {
   const auto result_high = SimplifyMesh(mesh, options);
 
   // Verify that the bounding box is approximately preserved.
-  float min_x = std::numeric_limits<float>::max();
-  float max_x = std::numeric_limits<float>::lowest();
-  float min_y = std::numeric_limits<float>::max();
-  float max_y = std::numeric_limits<float>::lowest();
+  using Coordinate = decltype(PlyMeshVertex::x);
+  Coordinate min_x = std::numeric_limits<Coordinate>::max();
+  Coordinate max_x = std::numeric_limits<Coordinate>::lowest();
+  Coordinate min_y = std::numeric_limits<Coordinate>::max();
+  Coordinate max_y = std::numeric_limits<Coordinate>::lowest();
   for (const auto& v : result_high.vertices) {
     min_x = std::min(min_x, v.x);
     max_x = std::max(max_x, v.x);

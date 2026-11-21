@@ -581,14 +581,9 @@ typename FEMTree< Dim , Real >::LocalDepth FEMTree< Dim , Real >::_getFullDepth(
 			bool childrenSupported = false;
 			for( unsigned int c=0 ; c<(1<<Dim) ; c++ )
 			{
-				for( int dim=0 ; dim<Dim ; dim++ )
-#ifdef SANITIZED_PR
-					if( c&(1<<dim) ) _off[dim] = off[dim]*2 + 1;
-					else             _off[dim] = off[dim]*2 + 0;
-#else // !SANITIZED_PR
-					if( c&(1<<dim) ) _off[dim] = (off[dim]<<1) | 1;
-					else             _off[dim] = (off[dim]<<1);
-#endif // SANITIZED_PR
+				// Padding can give negative offsets, which cannot be left-shifted.
+				for( unsigned int dim=0 ; dim<Dim ; dim++ )
+					_off[dim] = off[dim]*2 + int( (c>>dim)&1u );
 				childrenSupported |= IsSupported( _d , _off );
 			}
 			if( childrenSupported ) return d;

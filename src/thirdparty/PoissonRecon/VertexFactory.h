@@ -191,9 +191,9 @@ namespace PoissonRecon
 
 			PositionFactory( TypeOnDisk typeOnDisk=GetTypeOnDisk< Real >() ) : _typeOnDisk( typeOnDisk ) { _realTypeOnDisk = GetTypeOnDisk< Real >()==_typeOnDisk; }
 
-			size_t bufferSize( void ) const { return sizeof( VertexType ); }
-			void toBuffer( const VertexType &dt , Pointer( char ) buffer ) const { memcpy( buffer , &dt , sizeof( VertexType ) ); }
-			void fromBuffer( ConstPointer( char ) buffer , VertexType &dt ) const { memcpy( &dt , buffer , sizeof( VertexType ) ); }
+			size_t bufferSize( void ) const { return sizeof(Real)*Dim; }
+			void toBuffer( const VertexType &dt , Pointer( char ) buffer ) const { memcpy( buffer , dt.coords , sizeof(Real)*Dim ); }
+			void fromBuffer( ConstPointer( char ) buffer , VertexType &dt ) const { memcpy( dt.coords , buffer , sizeof(Real)*Dim ); }
 
 			bool operator == ( const PositionFactory &factory ) const { return _typeOnDisk==factory._typeOnDisk; }
 		protected:
@@ -290,7 +290,7 @@ namespace PoissonRecon
 			void writeBinary( FILE *fp , const VertexType &dt ) const
 			{
 				if( _realTypeOnDisk ) fwrite( &dt[0] , sizeof(Real) , Dim , fp );
-				VertexIO< Real >::WriteBinary( fp , _typeOnDisk , Dim , &dt[0] );
+				else VertexIO< Real >::WriteBinary( fp , _typeOnDisk , Dim , &dt[0] );
 			}
 
 			static constexpr bool IsStaticallyAllocated( void ){ return true; } 
@@ -342,7 +342,7 @@ namespace PoissonRecon
 			void writeBinary( FILE *fp , const VertexType &dt ) const
 			{
 				if( _realTypeOnDisk ) fwrite( &dt[0] , sizeof(Real) , 3 , fp );
-				VertexIO< Real >::WriteBinary( fp , _typeOnDisk , 3 , &dt[0] );
+				else VertexIO< Real >::WriteBinary( fp , _typeOnDisk , 3 , &dt[0] );
 			}
 
 			static constexpr bool IsStaticallyAllocated( void ){ return true; } 
@@ -393,7 +393,7 @@ namespace PoissonRecon
 			void writeBinary( FILE *fp , const VertexType &dt ) const
 			{
 				if( _realTypeOnDisk ) fwrite( &dt[0] , sizeof(Real) , 4 , fp );
-				VertexIO< Real >::WriteBinary( fp , _typeOnDisk , 4 , &dt[0] );
+				else VertexIO< Real >::WriteBinary( fp , _typeOnDisk , 4 , &dt[0] );
 			}
 
 			static constexpr bool IsStaticallyAllocated( void ){ return true; } 

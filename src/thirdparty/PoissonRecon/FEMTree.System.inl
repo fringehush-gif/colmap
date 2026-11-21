@@ -2346,7 +2346,7 @@ DenseNodeData< Real , UIntPack< FEMSigs ... > > FEMTree< Dim , Real >::prolongat
 }
 
 template< unsigned int Dim , class Real >
-template< class C , typename ArrayWrapper , unsigned int ... Degrees , unsigned int ... FEMSigs >
+template< class C , bool CoefficientSpace , typename ArrayWrapper , unsigned int ... Degrees , unsigned int ... FEMSigs >
 void FEMTree< Dim , Real >::_upSample( UIntPack< FEMSigs ... > , typename BaseFEMIntegrator::template RestrictionProlongation< UIntPack< Degrees ... > >& rp , LocalDepth highDepth , ArrayWrapper coarserCoefficients , Pointer( C ) finerCoefficients ) const
 {
 	LocalDepth lowDepth = highDepth-1;
@@ -2374,10 +2374,16 @@ void FEMTree< Dim , Real >::_upSample( UIntPack< FEMSigs ... > , typename BaseFE
 		for( int d=0 ; d<Dim ; d++ ) start[d] = Start[(c>>d)&1][d] - Start[0][d] , end[d] = - Start[0][d] + End[(c>>d)&1][d] + 1;
 	} 
 	);
+	// The two spaces can have different boundary validity flags.
+	auto isValidNode = [&]( const FEMTreeNode *node )
+	{
+		if constexpr( CoefficientSpace ) return _isValidFEM2Node( node );
+		else                             return _isValidFEM1Node( node );
+	};
 	// For Dirichlet constraints, can't get to all children from parents because boundary nodes are invalid
 	ThreadPool::ParallelFor( _sNodesBegin(highDepth) , _sNodesEnd(highDepth) , [&]( unsigned int thread , size_t i )
 	{
-		if( _isValidFEM1Node( _sNodes.treeNodes[i] ) )
+		if( isValidNode( _sNodes.treeNodes[i] ) )
 		{
 			FEMTreeNode *cNode = _sNodes.treeNodes[i];
 			int c = (int)( cNode-cNode->parent->children );
@@ -2405,7 +2411,7 @@ void FEMTree< Dim , Real >::_upSample( UIntPack< FEMSigs ... > , typename BaseFE
 				for( unsigned int i=0 ; i<size ; i++ )
 				{
 					unsigned int idx = indices[i];
-					if( _isValidFEM1Node( nodes[idx] ) ) fineCoefficient += (C)( coarserCoefficients[ nodes[idx]->nodeData.nodeIndex - _sNodesBegin(lowDepth) ] * (Real)downSampleValues[idx] );
+					if( isValidNode( nodes[idx] ) ) fineCoefficient += (C)( coarserCoefficients[ nodes[idx]->nodeData.nodeIndex - _sNodesBegin(lowDepth) ] * (Real)downSampleValues[idx] );
 				}
 			}
 			else
@@ -2415,7 +2421,7 @@ void FEMTree< Dim , Real >::_upSample( UIntPack< FEMSigs ... > , typename BaseFE
 				for( unsigned int i=0 ; i<size ; i++ )
 				{
 					unsigned int idx = indices[i];
-					if( _isValidFEM1Node( nodes[idx] ) )
+					if( isValidNode( nodes[idx] ) )
 					{
 						LocalDepth _d ; LocalOffset _off;
 						_localDepthAndOffset( nodes[idx] , _d , _off );
@@ -2937,7 +2943,7 @@ void FEMTree< Dim , Real >::_addFEMConstraints( UIntPack< FEMSigs ... > , UIntPa
 	static const WindowLoopData< UIntPack< BSplineOverlapSizes< CDegrees , FEMDegrees >::OverlapSize ... > > cfemLoopData( []( int c , int* start , int* end ){ BaseFEMIntegrator::ParentOverlapBounds( UIntPack< CDegrees ... >() , UIntPack< FEMDegrees ... >() , c , start , end ); } );
 	static const WindowLoopData< UIntPack< BSplineOverlapSizes< FEMDegrees , CDegrees >::OverlapSize ... > > femcLoopData( []( int c , int* start , int* end ){ BaseFEMIntegrator::ParentOverlapBounds( UIntPack< FEMDegrees ... >() , UIntPack< CDegrees ... >() , c , start , end ); } );
 
-	std::atomic< bool > hasCoarserCoefficients = true;
+	std::atomic< bool > hasCoarserCoefficients = false;
 	// Iterate from fine to coarse, setting the constraints @(depth) and the cumulative constraints @(depth-1)
 	for( LocalDepth d=maxDepth ; d>=0 ; d-- )
 	{
@@ -3069,7 +3075,7 @@ void FEMTree< Dim , Real >::_addFEMConstraints( UIntPack< FEMSigs ... > , UIntPa
 		}
 
 		// Coarse-to-fine up-sampling of coefficients
-		for( LocalDepth d=1 ; d<maxDepth ; d++ ) _upSample< D >( UIntPack< FEMSigs ... >() , F.tRestrictionProlongation() , d , ( ConstPointer(D) )_coefficients+_sNodesBegin(d-1) , _coefficients+_sNodesBegin(d) );
+		for( LocalDepth d=1 ; d<maxDepth ; d++ ) _upSample< D , true >( UIntPack< CSigs ... >() , F.cRestrictionProlongation() , d , ( ConstPointer(D) )_coefficients+_sNodesBegin(d-1) , _coefficients+_sNodesBegin(d) );
 		// Compute the contribution from all coarser depths
 		for( LocalDepth d=1 ; d<=maxDepth ; d++ )
 		{

@@ -14,6 +14,7 @@
 #include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
 
+#include <fstream>
 #include <sstream>
 
 #include <gmock/gmock.h>
@@ -1365,6 +1366,36 @@ TEST(Reconstruction, ImportPLYFromVector) {
   EXPECT_EQ(it_p2->second.color(0), 50);
   EXPECT_EQ(it_p2->second.color(1), 60);
   EXPECT_EQ(it_p2->second.color(2), 70);
+}
+
+TEST(Reconstruction, FailedPLYImportPreservesReconstruction) {
+  const auto path = CreateTestDir() / "invalid.ply";
+  Reconstruction reconstruction;
+  GenerateReconstruction(2, &reconstruction);
+  Track track;
+  track.AddElement(1, 0);
+  track.AddElement(2, 1);
+  reconstruction.AddPoint3D(
+      Eigen::Vector3d(1, 2, 3), track, Eigen::Vector3ub(17, 109, 233));
+  ASSERT_TRUE(reconstruction.IsValid());
+  const Reconstruction original = reconstruction;
+  const std::string properties =
+      "property float x\nproperty float y\nproperty float z\n";
+  for (const std::string& bytes :
+       {"format ascii 1.0\nelement vertex 0\n" + properties + "end_header\n",
+        "ply\nformat binary_little_endian 1.0\nelement vertex 1\n" +
+            properties + "end_header\n12",
+        "ply\nformat ascii 1.0\nelement vertex 1\n" + properties +
+            "end_header\n1 2"}) {
+    std::ofstream output(path, std::ios::binary);
+    output << bytes;
+    output.close();
+    ASSERT_TRUE(output.good());
+    EXPECT_THROW(reconstruction.ImportPLY(path), std::exception);
+    EXPECT_THAT(reconstruction, ReconstructionEq(original));
+    EXPECT_TRUE(reconstruction.IsValid());
+    ExpectValidPtrs(reconstruction);
+  }
 }
 
 enum class ImportPLYSource { kVector, kBinaryFile, kTextFile };
