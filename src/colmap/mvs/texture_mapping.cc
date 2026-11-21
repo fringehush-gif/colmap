@@ -219,7 +219,7 @@ bool IsValidOcclusion(const CGALSegment& segment,
   const auto squared_distance =
       CGAL::squared_distance(exact_segment.source(), *point);
   // Shortening can round back to the original vertex. Contact with that vertex
-  // must not occlude its face, even when the float distance test accepts it.
+  // must not occlude its face.
   if (squared_distance >=
       CGAL::squared_distance(exact_segment.source(), convert(vertex))) {
     return false;
@@ -253,7 +253,6 @@ struct OcclusionTester {
       triangle_to_face.push_back(i);
     }
     tree.rebuild(triangles.begin(), triangles.end());
-    tree.accelerate_distance_queries();
   }
 
   bool IsOccluded(const Eigen::Vector3f& camera_center,
@@ -285,10 +284,7 @@ struct OcclusionTester {
       const auto* hit_point = boost::get<CGALPoint>(&hit.first);
 #endif
       if (!hit_point) return false;
-      const Eigen::Vector3f hp(hit_point->x(), hit_point->y(), hit_point->z());
-      const float hit_dist = (hp - camera_center).norm();
-      return hit_dist < cutoff &&
-             IsValidOcclusion(segment,
+      return IsValidOcclusion(segment,
                               triangles[tri_idx],
                               CGALPoint(vertex.x(), vertex.y(), vertex.z()),
                               cutoff);

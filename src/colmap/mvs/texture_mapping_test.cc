@@ -764,13 +764,14 @@ TEST(MeshTextureMapping, OcclusionSearchesPastRejectedHits) {
   }
 }
 
-TEST(MeshTextureMapping, RejectsInexactOcclusionIntersections) {
+TEST(MeshTextureMapping, ValidatesOcclusionIntersections) {
   struct Fixture {
     std::array<float, 3> center;
     std::array<PlyMeshVertex, 3> target;
     std::array<PlyMeshVertex, 3> blocker;
+    int target_view = 0;
   };
-  // Each candidate blocker is exactly clear of all three target rays before
+  // The first two blockers are exactly clear of all three target rays before
   // their endpoints, despite a float intersection outside the triangle.
   const Fixture fixtures[] = {
       {{-7.28137064f, -7.57667017f, 0.204446003f},
@@ -787,6 +788,17 @@ TEST(MeshTextureMapping, RejectsInexactOcclusionIntersections) {
        {PlyMeshVertex(-19.2763901f, -10.1321306f, 0.624929011f),
         PlyMeshVertex(-19.2370853f, -10.0486422f, 0.598454177f),
         PlyMeshVertex(-19.2776642f, -10.1302834f, 0.595369875f)}},
+      // For the ray to (1/37, -5/41, 0), the shortened endpoint lies inside
+      // the blocker and strictly before the cutoff in exact arithmetic, but
+      // its float distance rounds to the cutoff and must not reject the hit.
+      {{0, 0, 0},
+       {PlyMeshVertex(1.0f / 37, -5.0f / 41, 0),
+        PlyMeshVertex(1.0f / 37, -5.0f / 41 - 0.02f, 0),
+        PlyMeshVertex(1.0f / 37, -5.0f / 41, 0.02f)},
+       {PlyMeshVertex(0x1.ba74d2p-6f, -0x1.f31ccp-4f + 0.001f, -0.001f),
+        PlyMeshVertex(0x1.ba74d2p-6f, -0x1.f31ccp-4f - 0.001f, -0.001f),
+        PlyMeshVertex(0x1.ba74d2p-6f, -0x1.f31ccp-4f, 0.001f)},
+       -1},
   };
   MeshTextureMappingOptions options;
   options.apply_color_correction = false;
@@ -830,7 +842,8 @@ TEST(MeshTextureMapping, RejectsInexactOcclusionIntersections) {
             ASSERT_EQ(result.face_view_ids.size(), 3u);
             for (size_t i = 0; i < order.size(); ++i) {
               if (order[i] == 0 || order[i] == 2) {
-                EXPECT_EQ(result.face_view_ids[i], 0);
+                EXPECT_EQ(result.face_view_ids[i],
+                          order[i] == 0 ? fixture.target_view : 0);
               }
             }
             EXPECT_EQ(result.face_uvs.size(), 18u);
