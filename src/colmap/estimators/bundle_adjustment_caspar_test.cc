@@ -17,6 +17,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <cuda_runtime_api.h>
@@ -485,16 +486,22 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
   // Require a retained step followed by rejection on a fixed synthetic scene.
   for (double diag : {1.0, 1e-3, 1e-6}) {
     for (double decrease : {0.5, 0.8, 0.95}) {
-      const auto solve = [&](int pcg_limit) {
-        Reconstruction reconstruction = initial;
+      SCOPED_TRACE(::testing::Message()
+                   << "diag=" << diag << " decrease=" << decrease);
+      constexpr double kDiagMin = 1e-12;
+      const auto solve = [&](int pcg_limit,
+                             int solver_limit,
+                             double criterion,
+                             Reconstruction& reconstruction) {
         BundleAdjustmentOptions options;
         options.refine_principal_point = true;
         options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
-        options.caspar->solver_iter_max = 2;
+        options.caspar->solver_iter_max = solver_limit;
         options.caspar->pcg_iter_max = pcg_limit;
         options.caspar->diag_init = diag;
+        options.caspar->diag_min = kDiagMin;
         options.caspar->diag_scaling_down = 0;
-        options.caspar->pcg_rel_decrease_min = decrease;
+        options.caspar->pcg_rel_decrease_min = criterion;
         options.caspar->pcg_rel_score_exit = -1;
         options.caspar->pcg_rel_error_exit = 1e-12;
         options.caspar->collect_iteration_data = true;
@@ -504,8 +511,10 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
         return std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
             adjuster->Solve());
       };
-      const auto first = solve(1);
-      const auto second = solve(2);
+      Reconstruction first_reconstruction = initial;
+      Reconstruction second_reconstruction = initial;
+      const auto first = solve(1, 2, decrease, first_reconstruction);
+      const auto second = solve(2, 2, decrease, second_reconstruction);
       ASSERT_NE(first, nullptr);
       ASSERT_NE(second, nullptr);
       if (first->iterations.size() < 2 || second->iterations.size() < 2) {
@@ -523,9 +532,110 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
       EXPECT_NEAR(a.step_quality,
                   b.step_quality,
                   1e-5 * std::max(1.0, std::abs(a.step_quality)));
-      EXPECT_NEAR(first->iterations[1].diag,
-                  second->iterations[1].diag,
-                  2e-5 * std::max(1e-9, std::abs(first->iterations[1].diag)));
+      for (const auto& summary : {first, second}) {
+        const auto& step = summary->iterations[0];
+        ASSERT_GE(step.step_quality, 0.5);
+        ASSERT_LE(step.step_quality, 1.0);
+        const double quality_term = 2.0 * step.step_quality - 1.0;
+        const double expected = std::max(
+            double(StorageType(kDiagMin)),
+            step.diag *
+                std::max(0.0, 1.0 - quality_term * quality_term * quality_term));
+        // In this interval 2*q and 2*q-1 are exact; the remaining operations
+        // and clamps are bounded by four storage-type rounding errors.
+        const double rounding_bound =
+            4.0 * std::numeric_limits<StorageType>::epsilon() * step.diag;
+        EXPECT_NEAR(summary->iterations[1].diag, expected, rounding_bound);
+      }
+
+      // Compare accepted state after one outer step, before later damping can
+      // produce legitimately different trajectories.
+      Reconstruction short_state = initial;
+      Reconstruction strict_state = initial;
+      Reconstruction relaxed_state = initial;
+      const auto short_run = solve(1, 1, decrease, short_state);
+      const auto strict_run = solve(2, 1, decrease, strict_state);
+      const auto relaxed_run = solve(2, 1, 1.0, relaxed_state);
+      ASSERT_NE(short_run, nullptr);
+      ASSERT_NE(strict_run, nullptr);
+      ASSERT_NE(relaxed_run, nullptr);
+      ASSERT_EQ(short_run->iterations.size(), 1u);
+      ASSERT_EQ(strict_run->iterations.size(), 1u);
+      ASSERT_EQ(relaxed_run->iterations.size(), 1u);
+      ASSERT_TRUE(short_run->iterations[0].step_accepted);
+      ASSERT_TRUE(strict_run->iterations[0].step_accepted);
+      ASSERT_TRUE(relaxed_run->iterations[0].step_accepted);
+      ASSERT_EQ(strict_run->iterations[0].pcg_iter, 1);
+      ASSERT_EQ(relaxed_run->iterations[0].pcg_iter, 1);
+      for (const auto& pair : {std::make_pair(short_run, first),
+                               std::make_pair(strict_run, second)}) {
+        EXPECT_NEAR(pair.first->iterations[0].score_best,
+                    pair.second->iterations[0].score_best,
+                    1e-6 *
+                        std::max(1.0, std::abs(pair.second->iterations[0].score_best)));
+        EXPECT_NEAR(pair.first->iterations[0].step_quality,
+                    pair.second->iterations[0].step_quality,
+                    1e-5 * std::max(
+                               1.0, std::abs(pair.second->iterations[0].step_quality)));
+      }
+      // The relaxed second candidate improves but fails the strict criterion.
+      EXPECT_LT(relaxed_run->iterations[0].score_best,
+                strict_run->iterations[0].score_best);
+      EXPECT_GT(relaxed_run->iterations[0].score_best,
+                strict_run->iterations[0].score_best * decrease);
+      double max_state_ratio = 0;
+      const auto near_state = [&](double lhs, double rhs) {
+        ASSERT_TRUE(std::isfinite(lhs));
+        ASSERT_TRUE(std::isfinite(rhs));
+        // A prospective fixture budget, not a solver-wide error bound.
+        const double budget =
+            64.0 * std::numeric_limits<StorageType>::epsilon() *
+            std::max({1.0, std::abs(lhs), std::abs(rhs)});
+        max_state_ratio =
+            std::max(max_state_ratio, std::abs(lhs - rhs) / budget);
+        EXPECT_NEAR(lhs, rhs, budget);
+      };
+      for (const auto& [id, camera] : short_state.Cameras()) {
+        const auto& other = strict_state.Camera(id);
+        ASSERT_EQ(camera.params.size(), other.params.size());
+        for (size_t i = 0; i < camera.params.size(); ++i) {
+          near_state(camera.params[i], other.params[i]);
+        }
+      }
+      for (const auto& [id, image] : short_state.Images()) {
+        const auto& a_pose = image.CamFromWorld();
+        const auto& b_pose = strict_state.Image(id).CamFromWorld();
+        const double sign = a_pose.rotation().coeffs().dot(
+                                b_pose.rotation().coeffs()) < 0
+                                ? -1.0
+                                : 1.0;
+        for (int i = 0; i < 4; ++i) {
+          near_state(a_pose.rotation().coeffs()[i],
+                     sign * b_pose.rotation().coeffs()[i]);
+        }
+        for (int i = 0; i < 3; ++i) {
+          near_state(a_pose.translation()[i], b_pose.translation()[i]);
+        }
+      }
+      bool changed_from_initial = false;
+      bool relaxed_outside_budget = false;
+      for (const auto& [id, point] : short_state.Points3D()) {
+        for (int i = 0; i < 3; ++i) {
+          const double strict = strict_state.Point3D(id).xyz[i];
+          const double relaxed = relaxed_state.Point3D(id).xyz[i];
+          ASSERT_TRUE(std::isfinite(strict));
+          ASSERT_TRUE(std::isfinite(relaxed));
+          const double budget =
+              64.0 * std::numeric_limits<StorageType>::epsilon() *
+              std::max({1.0, std::abs(strict), std::abs(relaxed)});
+          changed_from_initial |= point.xyz[i] != initial.Point3D(id).xyz[i];
+          relaxed_outside_budget |= std::abs(strict - relaxed) > budget;
+          near_state(point.xyz[i], strict);
+        }
+      }
+      EXPECT_TRUE(changed_from_initial);
+      EXPECT_TRUE(relaxed_outside_budget);
+      RecordProperty("max_state_error_budget_ratio", max_state_ratio);
       return;
     }
   }
