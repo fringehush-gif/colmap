@@ -27,6 +27,8 @@ class DepthMap : public Mat<float> {
   Bitmap ToBitmap(float min_percentile, float max_percentile) const;
 
  private:
+  void RescaleToDimensions(size_t new_width, size_t new_height);
+
   float depth_min_ = -1.0f;
   float depth_max_ = -1.0f;
 };

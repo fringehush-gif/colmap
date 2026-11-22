@@ -2,10 +2,13 @@
 
 #include "colmap/mvs/image.h"
 
+#include "colmap/mvs/image_size.h"
 #include "colmap/util/eigen_alignment.h"
 #include "colmap/util/logging.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <utility>
 
 #include <Eigen/Core>
@@ -41,13 +44,28 @@ void Image::Rescale(const float factor) { Rescale(factor, factor); }
 void Image::Rescale(const float factor_x, const float factor_y) {
   const size_t new_width = std::max(1.0f, std::round(width_ * factor_x));
   const size_t new_height = std::max(1.0f, std::round(height_ * factor_y));
+  RescaleToDimensions(new_width, new_height);
+}
 
+void Image::RescaleToDimensions(const size_t new_width,
+                                const size_t new_height) {
   if (!bitmap_.IsEmpty()) {
     bitmap_.Rescale(new_width, new_height);
   }
 
-  const float scale_x = new_width / static_cast<float>(width_);
-  const float scale_y = new_height / static_cast<float>(height_);
+  const auto compute_scale = [](const size_t new_dimension,
+                                const size_t old_dimension) {
+    constexpr size_t kMaxExactFloatInteger =
+        size_t{1} << std::numeric_limits<float>::digits;
+    if (new_dimension <= kMaxExactFloatInteger &&
+        old_dimension <= kMaxExactFloatInteger) {
+      return new_dimension / static_cast<float>(old_dimension);
+    }
+    return static_cast<float>(static_cast<double>(new_dimension) /
+                              static_cast<double>(old_dimension));
+  };
+  const float scale_x = compute_scale(new_width, width_);
+  const float scale_y = compute_scale(new_height, height_);
   K_[0] *= scale_x;
   K_[2] *= scale_x;
   K_[4] *= scale_y;
@@ -63,9 +81,9 @@ void Image::Downsize(const size_t max_width, const size_t max_height) {
   if (width_ <= max_width && height_ <= max_height) {
     return;
   }
-  const float factor_x = static_cast<float>(max_width) / width_;
-  const float factor_y = static_cast<float>(max_height) / height_;
-  Rescale(std::min(factor_x, factor_y));
+  const auto [new_width, new_height] = internal::ComputeDownsizeDimensions(
+      width_, height_, max_width, max_height);
+  RescaleToDimensions(new_width, new_height);
 }
 
 void ComputeRelativePose(const float R1[9],
