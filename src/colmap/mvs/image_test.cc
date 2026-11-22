@@ -3,7 +3,12 @@
 #include "colmap/mvs/image.h"
 
 #include "colmap/mvs/depth_map.h"
+#include "colmap/mvs/image_size.h"
 #include "colmap/mvs/normal_map.h"
+
+#include <cmath>
+#include <limits>
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -171,6 +176,84 @@ TEST(Image, DownsizeThinWorkspaceData) {
         EXPECT_FLOAT_EQ(normal.Get(y, x, 2), -1);
       }
     }
+  }
+}
+
+TEST(Image, DownsizeRespectsLargeIntegerBounds) {
+  const struct {
+    size_t width, height, max_width, max_height, expected_width,
+        expected_height;
+  } cases[] = {
+      {16777220, 1, 16777219, 1, 16777219, 1},
+      {1, 16777220, 1, 16777219, 1, 16777219},
+      {16777219, 16777220, 16777221, 16777219, 16777219, 16777219},
+      {16777220, 16777219, 16777219, 16777221, 16777219, 16777219},
+  };
+  const float K[9] = {1, 0, 1, 0, 1, 1, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const float T[3] = {0, 0, 0};
+  for (const auto& c : cases) {
+    SCOPED_TRACE(::testing::Message() << c.width << "x" << c.height << " -> "
+                                      << c.max_width << "x" << c.max_height);
+    Image image("dimensions-only", c.width, c.height, K, R, T);
+    ASSERT_TRUE(image.GetBitmap().IsEmpty());
+    image.Downsize(c.max_width, c.max_height);
+    EXPECT_EQ(image.GetWidth(), c.expected_width);
+    EXPECT_EQ(image.GetHeight(), c.expected_height);
+    EXPECT_LE(image.GetWidth(), c.width);
+    EXPECT_LE(image.GetHeight(), c.height);
+    EXPECT_LE(image.GetWidth(), c.max_width);
+    EXPECT_LE(image.GetHeight(), c.max_height);
+    EXPECT_TRUE(image.GetBitmap().IsEmpty());
+
+    // Each changed axis loses one pixel out of 16777220. Its ratio rounds
+    // to the float immediately below one; the unchanged axis stays at one.
+    const float sx =
+        c.expected_width == c.width ? 1.0f : std::nextafter(1.0f, 0.0f);
+    const float sy =
+        c.expected_height == c.height ? 1.0f : std::nextafter(1.0f, 0.0f);
+    EXPECT_EQ(image.GetK()[0], sx);
+    EXPECT_EQ(image.GetK()[2], sx);
+    EXPECT_EQ(image.GetK()[4], sy);
+    EXPECT_EQ(image.GetK()[5], sy);
+    const float expected_P[12] = {sx, 0, sx, 0, 0, sy, sy, 0, 0, 0, 1, 0};
+    const float expected_inv_P[12] = {
+        1 / sx, 0, -1, 0, 0, 1 / sy, -1, 0, 0, 0, 1, 0};
+    for (int i = 0; i < 12; ++i) {
+      EXPECT_EQ(image.GetP()[i], expected_P[i]);
+      EXPECT_FLOAT_EQ(image.GetInvP()[i], expected_inv_P[i]);
+    }
+  }
+}
+
+TEST(Image, DownsizeDimensionsBoundBeforeIntegerConversion) {
+  // Keep the actual helper's conversion live in the instrumented test.
+  volatile size_t largest_dimension = std::numeric_limits<size_t>::max();
+  const size_t kMax = largest_dimension;
+  EXPECT_EQ(internal::ComputeDownsizeDimensions(kMax, 1, kMax - 1, 1),
+            std::make_pair(kMax - 1, size_t{1}));
+  EXPECT_EQ(internal::ComputeDownsizeDimensions(1, kMax, 1, kMax - 1),
+            std::make_pair(size_t{1}, kMax - 1));
+  // A zero bound keeps the legacy one-pixel floor.
+  EXPECT_EQ(internal::ComputeDownsizeDimensions(7, 5, 0, 0),
+            std::make_pair(size_t{1}, size_t{1}));
+}
+
+TEST(Image, DownsizePreservesEmptyWorkspaceMaps) {
+  for (const auto [width, height] :
+       {std::pair<size_t, size_t>{0, 0}, {0, 7}, {7, 0}}) {
+    DepthMap depth(width, height, 1, 3);
+    NormalMap normal(width, height);
+    depth.Downsize(1, 1);
+    normal.Downsize(1, 1);
+    depth.Rescale(0.5f);
+    normal.Rescale(0.5f);
+    EXPECT_EQ(depth.GetWidth(), width);
+    EXPECT_EQ(depth.GetHeight(), height);
+    EXPECT_EQ(normal.GetWidth(), width);
+    EXPECT_EQ(normal.GetHeight(), height);
+    EXPECT_TRUE(depth.GetData().empty());
+    EXPECT_TRUE(normal.GetData().empty());
   }
 }
 

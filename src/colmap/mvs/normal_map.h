@@ -19,6 +19,9 @@ class NormalMap : public Mat<float> {
   void Downsize(size_t max_width, size_t max_height);
 
   Bitmap ToBitmap() const;
+
+ private:
+  void RescaleToDimensions(size_t new_width, size_t new_height);
 };
 
 }  // namespace mvs

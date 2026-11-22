@@ -38,6 +38,8 @@ class Image {
   void Downsize(size_t max_width, size_t max_height);
 
  private:
+  void RescaleToDimensions(size_t new_width, size_t new_height);
+
   std::filesystem::path path_;
   size_t width_ = 0;
   size_t height_ = 0;
