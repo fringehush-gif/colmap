@@ -33,6 +33,7 @@ void solve() {
 }
 
 void {{ solver.struct_name }}::DoBeta() {
+    BetaFromNumDenom({{solver_key(\"beta_numerator\")}}, {{solver_key(\"alpha_numerator\")}}, {{solver_key(\"beta\")}});
 }
 {{solver.linear_t}} {{ solver.struct_name }}::GetPredDecrease() {
     return 0.5 * ReadCuMem({{solver_key("pred_decrease_tot")}});
@@ -130,6 +131,8 @@ class CasparSolverTemplateTest(unittest.TestCase):
         source, header = template.patch_solver_templates(SOURCE, HEADER)
         for expected in (
             "pred_decrease_best_pcg = predicted_decrease_pcg;",
+            "cudaMemcpyDeviceToDevice",
+            "cudaMemcpy PCG residual product",
             "DoRetractScore(&predicted_decrease_pcg)",
             "if (predicted_decrease != nullptr)",
             "Caspar score/prediction scratch layout changed",
@@ -145,7 +148,7 @@ class CasparSolverTemplateTest(unittest.TestCase):
         self.assertNotIn("kDimension", source)
         self.assertEqual(
             source.count("CheckCuda("),
-            SOURCE.count("CheckCuda("),
+            SOURCE.count("CheckCuda(") + 1,
         )
         self.assertIn("* predicted_decrease = nullptr", header)
         self.assertEqual(header.count("void LaunchPredDecrease();"), 1)

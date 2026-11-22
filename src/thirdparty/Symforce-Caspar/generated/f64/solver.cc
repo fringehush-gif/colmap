@@ -4868,6 +4868,12 @@ void GraphSolver::DoBeta() {
       solver__beta_numerator_, SimpleRadialPrincipalPoint_num_);
   BetaFromNumDenom(solver__beta_numerator_, solver__alpha_numerator_,
                    solver__beta_);
+  // Carry the current residual product to the next PCG iteration.
+  CheckCuda(cudaMemcpy(solver__alpha_numerator_,
+                       solver__beta_numerator_,
+                       sizeof(*solver__alpha_numerator_),
+                       cudaMemcpyDeviceToDevice),
+            "cudaMemcpy PCG residual product");
 }
 
 void GraphSolver::DoUpdateP() {

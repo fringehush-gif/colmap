@@ -181,6 +181,14 @@ struct GraphSolverTestAccess {
   }
   static Real* PointW(GraphSolver& solver) { return solver.nodes__Point__w_; }
   static void Update(GraphSolver& solver) { solver.DoUpdateRFirst(); }
+  static Real* PointPreconditionedResidual(GraphSolver& solver) {
+    return solver.nodes__Point__z_;
+  }
+  static Real* PreviousResidualProduct(GraphSolver& solver) {
+    return solver.solver__alpha_numerator_;
+  }
+  static Real* Beta(GraphSolver& solver) { return solver.solver__beta_; }
+  static void ComputeBeta(GraphSolver& solver) { solver.DoBeta(); }
   static Real InitialHost(const GraphSolver& solver) {
     return solver.pcg_r_0_norm2_;
   }
@@ -405,6 +413,53 @@ TEST(CasparParameters, RejectsInvalidUpdatesWithoutChangingParameters) {
   EXPECT_NO_THROW(solver.set_params(boundary));
   EXPECT_EQ(Access::Params(solver).diag_init, 0.0);
   EXPECT_EQ(Access::Params(solver).pcg_iter_max, 1);
+}
+
+TEST(CasparPcg, CarriesResidualProductBetweenBetaUpdates) {
+  if (GetNumCudaDevices() == 0) {
+    GTEST_SKIP() << "CUDA device unavailable";
+  }
+
+  using Access = caspar::GraphSolverTestAccess;
+  using Real = StorageType;
+  CasparSolverSizing sizing;
+  sizing.num_points = 1;
+  auto solver = CreateSolver(caspar::SolverParams<Real>{}, sizing, 0);
+  solver.SetPointNum(1);
+
+  const Real initial_product = 12;
+  const Real residual[] = {2, 1, -1, 0};
+  // Float kernels read a padded float4. Double kernels read three values.
+  constexpr size_t point_bytes =
+      sizeof(Real) * (sizeof(Real) == sizeof(float) ? 4 : 3);
+  ASSERT_EQ(cudaMemcpy(Access::PreviousResidualProduct(solver),
+                       &initial_product,
+                       sizeof(initial_product),
+                       cudaMemcpyHostToDevice),
+            cudaSuccess);
+  ASSERT_EQ(cudaMemcpy(Access::PointResidual(solver),
+                       residual,
+                       point_bytes,
+                       cudaMemcpyHostToDevice),
+            cudaSuccess);
+
+  const Real preconditioned[][4] = {{2, 3, 1, 0}, {3, 4, 1, 0}};
+  const Real expected_beta[] = {0.5, 1.5};  // 6 / 12, then 9 / 6.
+  for (int update = 0; update < 2; ++update) {
+    SCOPED_TRACE(update);
+    ASSERT_EQ(cudaMemcpy(Access::PointPreconditionedResidual(solver),
+                         preconditioned[update],
+                         point_bytes,
+                         cudaMemcpyHostToDevice),
+              cudaSuccess);
+    Access::ComputeBeta(solver);
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+    Real beta = 0;
+    ASSERT_EQ(cudaMemcpy(
+                  &beta, Access::Beta(solver), sizeof(beta), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    EXPECT_EQ(beta, expected_beta[update]);
+  }
 }
 
 TEST(CasparFirstNorm, ResetsBothAccumulatorsBeforeRealKernelUpdates) {
