@@ -1567,7 +1567,7 @@ vl_covdet_new (VlCovDetMethod method)
                             (double)s / (VL_COVDET_LAP_NUM_LEVELS - 1)) ;
       double const sigmaImage = 1.0 / sqrt(2.0) ;
       double const step = 0.5 * sigmaImage ;
-      double const sigmaDelta = sqrt(sigmaLap*sigmaLap - sigmaImage*sigmaImage) ;
+      double const sigmaDelta = sqrt(VL_MAX(0.0, sigmaLap*sigmaLap - sigmaImage*sigmaImage)) ;
       vl_size const w = VL_COVDET_LAP_PATCH_RESOLUTION ;
       vl_size const num = 2 * w + 1  ;
       float * pt = self->laplacians + s * (num * num) ;
