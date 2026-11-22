@@ -60,12 +60,14 @@ else()
             PATHS ${onnxruntime_LIBRARY_DIR_HINTS})
     endif()
 
+    # Shared providers are loaded by ORT; retain their paths for DLL staging.
+    set(_onnxruntime_runtime_libraries ${onnxruntime_LIBRARIES})
     if(onnxruntime_INCLUDE_DIRS AND onnxruntime_LIBRARIES)
         if(onnxruntime_PROVIDERS_SHARED_LIBRARY)
-            list(APPEND onnxruntime_LIBRARIES ${onnxruntime_PROVIDERS_SHARED_LIBRARY})
+            list(APPEND _onnxruntime_runtime_libraries ${onnxruntime_PROVIDERS_SHARED_LIBRARY})
         endif()
         if(onnxruntime_PROVIDERS_CUDA_LIBRARY)
-            list(APPEND onnxruntime_LIBRARIES ${onnxruntime_PROVIDERS_CUDA_LIBRARY})
+            list(APPEND _onnxruntime_runtime_libraries ${onnxruntime_PROVIDERS_CUDA_LIBRARY})
         endif()
         set(onnxruntime_FOUND TRUE)
         message(STATUS "Found onnxruntime")
@@ -85,7 +87,7 @@ else()
     # installed directory to the output directory.
     # See: https://github.com/microsoft/vcpkg/blob/fb7ba3b89b0d8e3e56b0508a144fe85015edfab6/scripts/buildsystems/vcpkg.cmake#L607
     if(IS_WINDOWS AND VCPKG_INSTALLED_DIR)
-        foreach(_lib ${onnxruntime_LIBRARIES})
+        foreach(_lib ${_onnxruntime_runtime_libraries})
             get_filename_component(_lib_dir "${_lib}" DIRECTORY)
             get_filename_component(_lib_name "${_lib}" NAME_WE)
             set(_dlls
@@ -98,6 +100,7 @@ else()
             endforeach()
         endforeach()
     endif()
+    unset(_onnxruntime_runtime_libraries)
 endif()
 
 if(NOT onnxruntime_FOUND AND onnxruntime_FIND_REQUIRED)
