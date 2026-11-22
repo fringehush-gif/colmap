@@ -948,6 +948,9 @@ void WriteTextPlyMesh(const std::filesystem::path& path,
   file << "property float x\n";
   file << "property float y\n";
   file << "property float z\n";
+  file << "property uchar red\n";
+  file << "property uchar green\n";
+  file << "property uchar blue\n";
   file << "element face " << mesh.mesh.faces.size() << '\n';
   if (has_texcoords) {
     file << "property list uchar int vertex_indices\n";
@@ -958,7 +961,9 @@ void WriteTextPlyMesh(const std::filesystem::path& path,
   file << "end_header\n";
 
   for (const auto& vertex : mesh.mesh.vertices) {
-    file << vertex.x << " " << vertex.y << " " << vertex.z << '\n';
+    file << vertex.x << " " << vertex.y << " " << vertex.z << " "
+         << static_cast<int>(vertex.r) << " " << static_cast<int>(vertex.g)
+         << " " << static_cast<int>(vertex.b) << '\n';
   }
 
   for (size_t i = 0; i < mesh.mesh.faces.size(); ++i) {
@@ -997,6 +1002,9 @@ void WriteBinaryPlyMesh(const std::filesystem::path& path,
   text_file << "property float x\n";
   text_file << "property float y\n";
   text_file << "property float z\n";
+  text_file << "property uchar red\n";
+  text_file << "property uchar green\n";
+  text_file << "property uchar blue\n";
   text_file << "element face " << mesh.mesh.faces.size() << '\n';
   if (has_texcoords) {
     text_file << "property list uchar int vertex_indices\n";
@@ -1016,6 +1024,9 @@ void WriteBinaryPlyMesh(const std::filesystem::path& path,
     WriteBinaryLittleEndian<float>(&binary_file, vertex.x);
     WriteBinaryLittleEndian<float>(&binary_file, vertex.y);
     WriteBinaryLittleEndian<float>(&binary_file, vertex.z);
+    WriteBinaryLittleEndian<uint8_t>(&binary_file, vertex.r);
+    WriteBinaryLittleEndian<uint8_t>(&binary_file, vertex.g);
+    WriteBinaryLittleEndian<uint8_t>(&binary_file, vertex.b);
   }
 
   for (size_t i = 0; i < mesh.mesh.faces.size(); ++i) {
