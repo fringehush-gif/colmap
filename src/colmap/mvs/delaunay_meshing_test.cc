@@ -8,13 +8,84 @@
 #include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <fstream>
+#include <iterator>
+#include <limits>
+#include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace mvs {
 namespace {
+
+TEST(DelaunayMeshingProbability, StandardDeviationScaling) {
+  // The old squared-input comparison against 5 * sigma saturates too early
+  // for sigma > 0.2 and too late below it. Test both visibility and scene
+  // scales.
+  for (const double sigma : {0.125, 0.5, 1.0, 3.0, 8.0}) {
+    const double normalization = -0.5 / (sigma * sigma);
+    for (const double factor : {0.0, 0.25, 1.0, 2.0, 4.0, 4.999, 5.0, 8.0}) {
+      SCOPED_TRACE(testing::Message()
+                   << "sigma=" << sigma << " factor=" << factor);
+      const double value = factor * sigma;
+      const double probability = internal::ComputeDelaunayMeshingProbability(
+          value * value, normalization);
+      const long double normalized = factor;
+      const double expected =
+          factor >= 5.0 ? 1.0
+                        : static_cast<double>(
+                              -std::expm1(-0.5L * normalized * normalized));
+      EXPECT_NEAR(probability, expected, 1e-15);
+    }
+  }
+  // Four observations at the default sigma must not already saturate.
+  EXPECT_NEAR(internal::ComputeDelaunayMeshingProbability(16.0, -0.5 / 9.0),
+              0.5888877094928125,
+              1e-15);
+}
+
+TEST(DelaunayMeshingProbability, SaturationBoundaryAndZero) {
+  EXPECT_LT(internal::ComputeDelaunayMeshingProbability(
+                std::nextafter(25.0, 0.0), -0.5),
+            1.0);
+  EXPECT_EQ(internal::ComputeDelaunayMeshingProbability(25.0, -0.5), 1.0);
+  EXPECT_EQ(internal::ComputeDelaunayMeshingProbability(
+                std::nextafter(25.0, 26.0), -0.5),
+            1.0);
+  // Positive subnormal sigma can produce negative infinite normalization.
+  EXPECT_EQ(internal::ComputeDelaunayMeshingProbability(
+                0.0, -std::numeric_limits<double>::infinity()),
+            0.0);
+  EXPECT_EQ(internal::ComputeDelaunayMeshingProbability(
+                1.0, -std::numeric_limits<double>::infinity()),
+            1.0);
+}
+
+TEST(DelaunayMeshingProbability, VisibilityCountDoesNotOverflow) {
+  const double normalization = -0.5 / 9.0;
+  EXPECT_EQ(
+      internal::ComputeDelaunayMeshingVisibilityProbability(0, normalization),
+      0.0);
+  EXPECT_NEAR(
+      internal::ComputeDelaunayMeshingVisibilityProbability(4, normalization),
+      0.5888877094928125,
+      1e-15);
+  for (const uint32_t count : {uint32_t{65535},
+                               uint32_t{65536},
+                               std::numeric_limits<uint32_t>::max()}) {
+    SCOPED_TRACE(count);
+    EXPECT_EQ(internal::ComputeDelaunayMeshingVisibilityProbability(
+                  count, normalization),
+              1.0);
+  }
+}
+
+#if defined(COLMAP_CGAL_ENABLED)
 
 Reconstruction CreateAndWriteSyntheticReconstruction(
     const std::filesystem::path& sparse_path,
@@ -32,7 +103,86 @@ Reconstruction CreateAndWriteSyntheticReconstruction(
   return reconstruction;
 }
 
-#if defined(COLMAP_CGAL_ENABLED)
+TEST(SparseDelaunayMeshing, VisibilityProbabilityBalancesEvidence) {
+  const auto test_dir = CreateTestDir();
+  const auto sparse_path = test_dir / "sparse";
+  const auto output_path = test_dir / "mesh.ply";
+  CreateDirIfNotExists(sparse_path);
+
+  Reconstruction reconstruction;
+  const Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kSimplePinhole, 1, 1, 1);
+  reconstruction.AddCameraWithTrivialRig(camera);
+  Track track;
+  for (image_t image_id = 1; image_id <= 4; ++image_id) {
+    Image image;
+    image.SetImageId(image_id);
+    image.SetCameraId(camera.camera_id);
+    image.SetName(std::to_string(image_id) + ".png");
+    image.SetPoints2D(std::vector<Eigen::Vector2d>{{0.5, 0.5}});
+    const Eigen::Quaterniond rotation =
+        image_id < 4 ? Eigen::Quaterniond(0, 1, 0, 0)
+                     : Eigen::Quaterniond(0.5, 0.5, 0.5, -0.5);
+    reconstruction.AddImageWithTrivialFrame(
+        image, Rigid3d(rotation, Eigen::Vector3d(-0.25, 0.25, 2)));
+    track.AddElement(image_id, 0);
+  }
+
+  // Only the interior point P is observed. The four corners retain a finite
+  // tetrahedron behind every observation, without adding observation weights.
+  const std::array<Eigen::Vector3d, 5> points = {
+      Eigen::Vector3d(0, 0, 0),
+      Eigen::Vector3d(1, 0, 0),
+      Eigen::Vector3d(0, 1, 0),
+      Eigen::Vector3d(0, 0, 1),
+      Eigen::Vector3d(0.25, 0.25, 0.25)};
+  for (size_t i = 0; i < points.size(); ++i) {
+    reconstruction.AddPoint3D(points[i], i == 4 ? track : Track());
+  }
+  reconstruction.Write(sparse_path);
+
+  // Four-view confidence is 1-exp(-8/9), not 1. These three upper views and
+  // one side view balance the shape prior so the side view alone cannot add
+  // a second inside cell. Both distance probabilities saturate to 1.
+  DelaunayMeshingOptions options;
+  options.max_proj_dist = 0;
+  options.num_threads = 1;
+  options.visibility_sigma = 3;
+  options.distance_sigma_factor = 0.01;
+  options.quality_regularization = 1.75;
+  options.max_side_length_percentile = 100;
+  options.max_side_length_factor = 2;
+  SparseDelaunayMeshing(options, sparse_path, output_path);
+
+  const PlyMesh mesh = ReadPlyMesh(output_path).mesh;
+  ASSERT_EQ(mesh.vertices.size(), 4);
+  ASSERT_EQ(mesh.faces.size(), 3);
+
+  // Compare every oriented triangle by input coordinates. Cyclic rotation and
+  // serialization order may vary, but winding and multiplicity must not.
+  std::vector<std::array<size_t, 3>> faces;
+  for (const auto& face : mesh.faces) {
+    std::array<size_t, 3> indices = {
+        face.vertex_idx1, face.vertex_idx2, face.vertex_idx3};
+    for (size_t& index : indices) {
+      ASSERT_LT(index, mesh.vertices.size());
+      const auto& vertex = mesh.vertices[index];
+      const auto it = std::find(points.begin(),
+                                points.end(),
+                                Eigen::Vector3d(vertex.x, vertex.y, vertex.z));
+      ASSERT_NE(it, points.end());
+      index = static_cast<size_t>(std::distance(points.begin(), it));
+    }
+    std::rotate(indices.begin(),
+                std::min_element(indices.begin(), indices.end()),
+                indices.end());
+    faces.push_back(indices);
+  }
+  std::sort(faces.begin(), faces.end());
+  const std::vector<std::array<size_t, 3>> expected = {
+      {0, 1, 4}, {0, 4, 2}, {1, 2, 4}};
+  EXPECT_EQ(faces, expected);
+}
 
 TEST(SparseDelaunayMeshing, Integration) {
   const auto test_dir = CreateTestDir();

@@ -310,8 +310,7 @@ struct DelaunayMeshingEdgeWeightComputer {
   DelaunayMeshingEdgeWeightComputer(const Delaunay& triangulation,
                                     const double visibility_sigma,
                                     const double distance_sigma_factor)
-      : visibility_threshold_(5 * visibility_sigma),
-        visibility_normalization_(-0.5 /
+      : visibility_normalization_(-0.5 /
                                   (visibility_sigma * visibility_sigma)) {
     std::vector<float> edge_lengths;
     edge_lengths.reserve(triangulation.number_of_finite_edges());
@@ -326,35 +325,24 @@ struct DelaunayMeshingEdgeWeightComputer {
 
     distance_sigma_ = distance_sigma_factor *
                       std::max(std::sqrt(Percentile(edge_lengths, 25)), 1e-7);
-    distance_threshold_ = 5 * distance_sigma_;
     distance_normalization_ = -0.5 / (distance_sigma_ * distance_sigma_);
   }
 
   double DistanceSigma() const { return distance_sigma_; }
 
-  double ComputeVisibilityProb(const double visibility_squared) const {
-    if (visibility_squared < visibility_threshold_) {
-      return std::max(
-          0.0, 1.0 - std::exp(visibility_squared * visibility_normalization_));
-    } else {
-      return 1.0;
-    }
+  double ComputeVisibilityProb(const uint32_t num_visible_images) const {
+    return internal::ComputeDelaunayMeshingVisibilityProbability(
+        num_visible_images, visibility_normalization_);
   }
 
   double ComputeDistanceProb(const double distance_squared) const {
-    if (distance_squared < distance_threshold_) {
-      return std::max(
-          0.0, 1.0 - std::exp(distance_squared * distance_normalization_));
-    } else {
-      return 1.0;
-    }
+    return internal::ComputeDelaunayMeshingProbability(distance_squared,
+                                                       distance_normalization_);
   }
 
  private:
-  double visibility_threshold_;
   double visibility_normalization_;
   double distance_sigma_;
-  double distance_threshold_;
   double distance_normalization_;
 };
 
@@ -650,8 +638,8 @@ PlyMesh DelaunayMeshing(const DelaunayMeshingOptions& options,
       const auto& point = input_data.points[point_idx];
 
       // Likelihood of the point observation.
-      const double alpha = edge_weight_computer.ComputeVisibilityProb(
-          point.num_visible_images * point.num_visible_images);
+      const double alpha =
+          edge_weight_computer.ComputeVisibilityProb(point.num_visible_images);
 
       const K::Point_3 point_position = EigenToCGAL(point.position);
       const K::Vector_3 viewing_direction = point_position - image_position;

@@ -2,6 +2,9 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
 
 namespace colmap {
@@ -41,6 +44,33 @@ struct DelaunayMeshingOptions {
 
   bool Check() const;
 };
+
+namespace internal {
+
+// Shared visibility/distance probability. The input is squared and nonnegative;
+// normalization is -0.5 / sigma^2 for a positive standard deviation.
+inline double ComputeDelaunayMeshingProbability(const double squared,
+                                                const double normalization) {
+  // Preserve zero probability even if sigma squared underflows and the
+  // normalization becomes negative infinity.
+  if (squared == 0.0) return 0.0;
+  const double exponent = squared * normalization;
+  // Saturate beyond five standard deviations in dimensionless units.
+  constexpr double kSaturationExponent = -0.5 * 5.0 * 5.0;
+  if (exponent > kSaturationExponent) {
+    return std::max(0.0, 1.0 - std::exp(exponent));
+  }
+  return 1.0;
+}
+
+inline double ComputeDelaunayMeshingVisibilityProbability(
+    const uint32_t num_visible_images, const double normalization) {
+  const double visibility = static_cast<double>(num_visible_images);
+  return ComputeDelaunayMeshingProbability(visibility * visibility,
+                                           normalization);
+}
+
+}  // namespace internal
 
 #if defined(COLMAP_CGAL_ENABLED)
 
