@@ -66,6 +66,25 @@ TEST(DelaunayMeshingProbability, SaturationBoundaryAndZero) {
             1.0);
 }
 
+TEST(DelaunayMeshingProbability, VisibilityCountDoesNotOverflow) {
+  const double normalization = -0.5 / 9.0;
+  EXPECT_EQ(
+      internal::ComputeDelaunayMeshingVisibilityProbability(0, normalization),
+      0.0);
+  EXPECT_NEAR(
+      internal::ComputeDelaunayMeshingVisibilityProbability(4, normalization),
+      0.5888877094928125,
+      1e-15);
+  for (const uint32_t count : {uint32_t{65535},
+                               uint32_t{65536},
+                               std::numeric_limits<uint32_t>::max()}) {
+    SCOPED_TRACE(count);
+    EXPECT_EQ(internal::ComputeDelaunayMeshingVisibilityProbability(
+                  count, normalization),
+              1.0);
+  }
+}
+
 #if defined(COLMAP_CGAL_ENABLED)
 
 Reconstruction CreateAndWriteSyntheticReconstruction(

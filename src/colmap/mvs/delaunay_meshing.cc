@@ -330,9 +330,9 @@ struct DelaunayMeshingEdgeWeightComputer {
 
   double DistanceSigma() const { return distance_sigma_; }
 
-  double ComputeVisibilityProb(const double visibility_squared) const {
-    return internal::ComputeDelaunayMeshingProbability(
-        visibility_squared, visibility_normalization_);
+  double ComputeVisibilityProb(const uint32_t num_visible_images) const {
+    return internal::ComputeDelaunayMeshingVisibilityProbability(
+        num_visible_images, visibility_normalization_);
   }
 
   double ComputeDistanceProb(const double distance_squared) const {
@@ -638,8 +638,8 @@ PlyMesh DelaunayMeshing(const DelaunayMeshingOptions& options,
       const auto& point = input_data.points[point_idx];
 
       // Likelihood of the point observation.
-      const double alpha = edge_weight_computer.ComputeVisibilityProb(
-          point.num_visible_images * point.num_visible_images);
+      const double alpha =
+          edge_weight_computer.ComputeVisibilityProb(point.num_visible_images);
 
       const K::Point_3 point_position = EigenToCGAL(point.position);
       const K::Vector_3 viewing_direction = point_position - image_position;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 
 namespace colmap {
@@ -60,6 +61,13 @@ inline double ComputeDelaunayMeshingProbability(const double squared,
     return std::max(0.0, 1.0 - std::exp(exponent));
   }
   return 1.0;
+}
+
+inline double ComputeDelaunayMeshingVisibilityProbability(
+    const uint32_t num_visible_images, const double normalization) {
+  const double visibility = static_cast<double>(num_visible_images);
+  return ComputeDelaunayMeshingProbability(visibility * visibility,
+                                           normalization);
 }
 
 }  // namespace internal
