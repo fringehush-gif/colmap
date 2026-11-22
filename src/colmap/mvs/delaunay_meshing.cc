@@ -526,6 +526,14 @@ double ComputeCosFacetCellAngle(const Delaunay& triangulation,
     return 0.5;
   }
 
+  // Below this bound, the product of squared norms is at most 2^1022.
+  if (facet_normal_length_squared > 0x1p511 ||
+      co_tangent_length_squared > 0x1p511) {
+    return (facet_normal * co_tangent) /
+           (std::sqrt(facet_normal_length_squared) *
+            std::sqrt(co_tangent_length_squared));
+  }
+
   return (facet_normal * co_tangent) /
          std::sqrt(facet_normal_length_squared * co_tangent_length_squared);
 }

@@ -10,12 +10,29 @@
 #include "colmap/util/testing.h"
 
 #include <algorithm>
+#include <cfenv>
+#include <cmath>
 #include <fstream>
 
 #include <gtest/gtest.h>
 
+#if defined(COLMAP_CGAL_ENABLED)
+#include <CGAL/Delaunay_triangulation_3.h>
+#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
+#endif
+
 namespace colmap {
 namespace mvs {
+
+#if defined(COLMAP_CGAL_ENABLED)
+using FacetAngleKernel = CGAL::Exact_predicates_inexact_constructions_kernel;
+using FacetAngleDelaunay =
+    CGAL::Delaunay_triangulation_3<FacetAngleKernel, CGAL::Fast_location>;
+
+double ComputeCosFacetCellAngle(const FacetAngleDelaunay& triangulation,
+                                const FacetAngleDelaunay::Facet& facet);
+#endif
+
 namespace {
 
 Reconstruction CreateAndWriteSyntheticReconstruction(
@@ -35,6 +52,45 @@ Reconstruction CreateAndWriteSyntheticReconstruction(
 }
 
 #if defined(COLMAP_CGAL_ENABLED)
+
+TEST(DelaunayMeshingFacetAngle, LargeFiniteSquaredNorms) {
+  std::fenv_t environment;
+  ASSERT_EQ(std::fegetenv(&environment), 0);
+  struct RestoreEnvironment {
+    const std::fenv_t& environment;
+    ~RestoreEnvironment() { std::fesetenv(&environment); }
+  } restore{environment};
+  ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+  for (const int exponent : {0, 104}) {
+    SCOPED_TRACE(exponent);
+    const double length = std::ldexp(1.0, exponent);
+    const double height = std::ldexp(1.0, -exponent);
+    FacetAngleDelaunay triangulation;
+    triangulation.insert(FacetAngleKernel::Point_3(0, 0, 0));
+    triangulation.insert(FacetAngleKernel::Point_3(length, 0, 0));
+    triangulation.insert(FacetAngleKernel::Point_3(0, length, 0));
+    const FacetAngleKernel::Point_3 top(2 * length, 2 * length, height);
+    const auto top_vertex = triangulation.insert(top);
+    ASSERT_EQ(triangulation.dimension(), 3);
+    const FacetAngleDelaunay::Cell_handle cell =
+        triangulation.finite_cells_begin();
+    const FacetAngleDelaunay::Facet facet(cell, cell->index(top_vertex));
+    const auto triangle = triangulation.triangle(facet);
+    const auto orientation =
+        CGAL::orientation(triangle[0], triangle[1], triangle[2], top);
+    ASSERT_NE(orientation, CGAL::COPLANAR);
+    // The analytic center is (L/2,L/2,2L^2/H+H/2). Its cosine rounds to
+    // one in the large case; the ordinary L=H=1 cosine is 5/sqrt(27).
+    const double magnitude = exponent == 0 ? 5 / std::sqrt(27.0) : 1.0;
+    const double expected =
+        orientation == CGAL::POSITIVE ? magnitude : -magnitude;
+    ASSERT_EQ(std::feclearexcept(FE_ALL_EXCEPT), 0);
+    const double cosine = ComputeCosFacetCellAngle(triangulation, facet);
+    EXPECT_EQ(std::fetestexcept(FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW), 0);
+    ASSERT_TRUE(std::isfinite(cosine));
+    EXPECT_NEAR(cosine, expected, 1e-15);
+  }
+}
 
 TEST(SparseDelaunayMeshing, Integration) {
   const auto test_dir = CreateTestDir();
