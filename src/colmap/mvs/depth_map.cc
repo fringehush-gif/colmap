@@ -5,6 +5,8 @@
 #include "colmap/image/warp.h"
 #include "colmap/math/math.h"
 
+#include <utility>
+
 namespace colmap {
 namespace mvs {
 
@@ -26,6 +28,13 @@ DepthMap::DepthMap(const Mat<float>& mat,
       depth_max_(depth_max) {
   THROW_CHECK_EQ(mat.GetDepth(), 1);
   data_ = mat.GetData();
+}
+
+void DepthMap::Read(const std::filesystem::path& path) {
+  Mat<float> mat;
+  mat.Read(path);
+  THROW_CHECK_EQ(mat.GetDepth(), 1) << path;
+  Mat<float>::operator=(std::move(mat));
 }
 
 void DepthMap::Rescale(const float factor) {

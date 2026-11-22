@@ -4,6 +4,8 @@
 
 #include "colmap/image/warp.h"
 
+#include <utility>
+
 namespace colmap {
 namespace mvs {
 
@@ -16,6 +18,13 @@ NormalMap::NormalMap(const Mat<float>& mat)
     : Mat<float>(mat.GetWidth(), mat.GetHeight(), mat.GetDepth()) {
   THROW_CHECK_EQ(mat.GetDepth(), 3);
   data_ = mat.GetData();
+}
+
+void NormalMap::Read(const std::filesystem::path& path) {
+  Mat<float> mat;
+  mat.Read(path);
+  THROW_CHECK_EQ(mat.GetDepth(), 3) << path;
+  Mat<float>::operator=(std::move(mat));
 }
 
 void NormalMap::Rescale(const float factor) {
