@@ -18,6 +18,9 @@
 #include "colmap/util/cuda.h"
 #endif
 
+#include "thirdparty/VLFeat/mathop.h"
+
+#include <cmath>
 #include <functional>
 #include <set>
 #include <utility>
@@ -156,6 +159,63 @@ TEST_P(SiftCpuExtractionTest, Nominal) {
   ValidateKeypoints(keypoints, bitmap);
   EXPECT_EQ(descriptors.data.rows(), p.expected_keypoints);
   ValidateDescriptorNorms(descriptors);
+}
+
+TEST(VLFeatSvd2, ZeroFirstColumnAndRegularInputs) {
+  struct TestCase {
+    double matrix[4];
+    double singular_values[2];
+  };
+  const TestCase test_cases[] = {
+      {{0, 0, 0, 0}, {0, 0}},
+      {{0, 0, 3, 4}, {5, 0}},
+      {{0, 0, 3, 0}, {3, 0}},
+      {{0, 0, 0, 4}, {4, 0}},
+      {{0, 0, -3, -4}, {5, 0}},
+      {{-0.0, 0, 3, -4}, {5, 0}},
+      {{3, 4, -4, 3}, {5, 5}},
+      {{3, 0, 0, -2}, {3, 2}},
+      {{1e-20, 0, 3, 2e-20}, {3, 2e-40 / 3}},
+  };
+  constexpr double kTolerance = 1e-12;
+  for (const auto& test_case : test_cases) {
+    SCOPED_TRACE(::testing::PrintToString(test_case.matrix));
+    double s[4], u[4], v[4];
+    vl_svd2(s, u, v, test_case.matrix);
+    for (int i = 0; i < 4; ++i) {
+      EXPECT_TRUE(std::isfinite(s[i]));
+      EXPECT_TRUE(std::isfinite(u[i]));
+      EXPECT_TRUE(std::isfinite(v[i]));
+    }
+    EXPECT_EQ(s[1], 0);
+    EXPECT_EQ(s[2], 0);
+    EXPECT_NEAR(std::abs(s[0]), test_case.singular_values[0], kTolerance);
+    EXPECT_NEAR(std::abs(s[3]),
+                test_case.singular_values[1],
+                kTolerance * test_case.singular_values[1]);
+    for (int row = 0; row < 2; ++row) {
+      for (int col = 0; col < 2; ++col) {
+        const double identity = row == col ? 1 : 0;
+        EXPECT_NEAR(u[2 * row] * u[2 * col] +
+                        u[2 * row + 1] * u[2 * col + 1],
+                    identity,
+                    kTolerance);
+        EXPECT_NEAR(v[2 * row] * v[2 * col] +
+                        v[2 * row + 1] * v[2 * col + 1],
+                    identity,
+                    kTolerance);
+        EXPECT_NEAR(u[row] * s[0] * v[col] +
+                        u[row + 2] * s[3] * v[col + 2],
+                    test_case.matrix[row + 2 * col],
+                    kTolerance);
+      }
+    }
+    double singular_values_only[4];
+    vl_svd2(singular_values_only, nullptr, nullptr, test_case.matrix);
+    for (int i = 0; i < 4; ++i) {
+      EXPECT_DOUBLE_EQ(singular_values_only[i], s[i]);
+    }
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(

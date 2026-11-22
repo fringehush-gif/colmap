@@ -126,6 +126,7 @@ COLMAP_ADD_TEST(
     LINK_LIBS
         colmap_feature
         colmap_util
+        colmap_vlfeat
 )
 if(TESTS_ENABLED AND GUI_ENABLED)
     target_link_libraries(colmap_feature_sift_test Qt${QT_VERSION_MAJOR}::Widgets)

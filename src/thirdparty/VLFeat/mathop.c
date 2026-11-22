@@ -650,8 +650,14 @@ vl_svd2 (double* S, double *U, double *V, double const *M)
   double cu2, su2, cv2, sv2 ;
   double f, g, h ;
   double smin, smax ;
-  cu1 /= norm ;
-  su1 /= norm ;
+  if (cu1 == 0 && su1 == 0) {
+    /* The zero first column needs no rotation. */
+    cu1 = 1 ;
+    su1 = 0 ;
+  } else {
+    cu1 /= norm ;
+    su1 /= norm ;
+  }
 
   f = cu1 * m11 + su1 * m21 ;
   g = cu1 * m12 + su1 * m22 ;
@@ -767,7 +773,7 @@ vl_lapack_dlasv2 (double *smin,
           *smin = (fa / ga) * ha ; /* 2 ulps */
         }
         cut = 1.0 ; sut = ht / gt ;
-        cvt = 1.0 ; svt = ft / gt ;
+        cvt = ft / gt ; svt = 1.0 ;
       }
     }
 
