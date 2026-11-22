@@ -20,8 +20,12 @@
 
 #include "thirdparty/VLFeat/mathop.h"
 
+#include <algorithm>
+#include <array>
+#include <cfenv>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <set>
 #include <utility>
 
@@ -215,6 +219,100 @@ TEST(VLFeatSvd2, ZeroFirstColumnAndRegularInputs) {
     for (int i = 0; i < 4; ++i) {
       EXPECT_DOUBLE_EQ(singular_values_only[i], s[i]);
     }
+  }
+}
+
+void ExpectVlFeatScaledSvd2(const std::array<double, 4>& matrix,
+                           const std::array<double, 2>& spectrum,
+                           const bool exact_spectrum) {
+  constexpr double kTolerance = 1e-12;
+  const double quantum = std::numeric_limits<double>::denorm_min();
+  double s[4], u[4], v[4];
+  ASSERT_EQ(std::feclearexcept(FE_ALL_EXCEPT), 0);
+  vl_svd2(s, u, v, matrix.data());
+  EXPECT_EQ(std::fetestexcept(FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW), 0);
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(std::isfinite(s[i]));
+    ASSERT_TRUE(std::isfinite(u[i]));
+    ASSERT_TRUE(std::isfinite(v[i]));
+  }
+  EXPECT_GT(std::abs(s[0]), 0.0);
+  EXPECT_EQ(s[1], 0.0);
+  EXPECT_EQ(s[2], 0.0);
+  for (int i = 0; i < 2; ++i) {
+    const double value = std::abs(s[3 * i]);
+    if (spectrum[i] > 0) EXPECT_GT(value, 0.0);
+    if (exact_spectrum || spectrum[i] == 0) {
+      EXPECT_EQ(value, spectrum[i]);
+    } else {
+      EXPECT_NEAR(value, spectrum[i], kTolerance * spectrum[i] + quantum);
+    }
+  }
+  double scale = 0;
+  for (const double x : matrix) scale = std::max(scale, std::abs(x));
+  const double residual_tolerance = kTolerance + 2 * quantum / scale;
+  for (int row = 0; row < 2; ++row) {
+    for (int col = 0; col < 2; ++col) {
+      const double identity = row == col ? 1 : 0;
+      EXPECT_NEAR(u[2 * row] * u[2 * col] +
+                      u[2 * row + 1] * u[2 * col + 1],
+                  identity, kTolerance);
+      EXPECT_NEAR(v[2 * row] * v[2 * col] +
+                      v[2 * row + 1] * v[2 * col + 1],
+                  identity, kTolerance);
+      EXPECT_NEAR(u[row] * (s[0] / scale) * v[col] +
+                      u[row + 2] * (s[3] / scale) * v[col + 2],
+                  matrix[row + 2 * col] / scale, residual_tolerance);
+    }
+  }
+  double values_only[4];
+  vl_svd2(values_only, nullptr, nullptr, matrix.data());
+  for (int i = 0; i < 4; ++i) EXPECT_DOUBLE_EQ(values_only[i], s[i]);
+}
+
+TEST(VLFeatSvd2, FirstColumnNormAcrossFiniteScales) {
+  std::fenv_t environment;
+  ASSERT_EQ(std::fegetenv(&environment), 0);
+  struct RestoreEnvironment {
+    const std::fenv_t& environment;
+    ~RestoreEnvironment() { std::fesetenv(&environment); }
+  } restore{environment};
+  const double tiny = std::numeric_limits<double>::denorm_min();
+  const double low = std::ldexp(1.0, -511);
+  const double high = std::ldexp(1.0, 511);
+  const double boundaries[] = {std::nextafter(low, 0.0), low,
+                              std::nextafter(low, 1.0),
+                              std::nextafter(high, 0.0), high,
+                              std::nextafter(high, INFINITY)};
+  for (const int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    SCOPED_TRACE(mode);
+    ASSERT_EQ(std::fesetround(mode), 0);
+    for (const double x : boundaries) {
+      SCOPED_TRACE(x);
+      ExpectVlFeatScaledSvd2({x, 0, 0, 2 * x}, {2 * x, x},
+                            x == low || x == high);
+    }
+    for (const int exponent : {-600, 600}) {
+      SCOPED_TRACE(exponent);
+      const double x = std::ldexp(1.0, exponent);
+      ExpectVlFeatScaledSvd2({-x, 0, 0, 2 * x}, {2 * x, x}, true);
+    }
+    const double a = std::ldexp(1.0, -538);
+    ExpectVlFeatScaledSvd2({a, 2 * a, -2 * a, a},
+                          {std::sqrt(5.0) * a, std::sqrt(5.0) * a}, false);
+    for (const int exponent : {-600, 600, 1020}) {
+      SCOPED_TRACE(exponent);
+      const double x = std::ldexp(1.0, exponent);
+      ExpectVlFeatScaledSvd2({3 * x, 4 * x, -4 * x, 3 * x},
+                            {5 * x, 5 * x}, false);
+    }
+    ExpectVlFeatScaledSvd2({tiny, 0, 0, 2 * tiny}, {2 * tiny, tiny}, true);
+    ExpectVlFeatScaledSvd2({tiny, tiny, 0, 0},
+                          {std::sqrt(2.0) * tiny, 0}, false);
+    const double small = std::ldexp(1.0, -600);
+    const double large = std::ldexp(1.0, 600);
+    ExpectVlFeatScaledSvd2({small, 0, 0, large}, {large, small}, true);
+    ExpectVlFeatScaledSvd2({large, 0, 0, small}, {large, small}, true);
   }
 }
 
