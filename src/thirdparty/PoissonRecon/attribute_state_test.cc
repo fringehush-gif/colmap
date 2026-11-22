@@ -62,4 +62,24 @@ TYPED_TEST(PoissonAttributeCopyTest, NonemptyDimensionMismatchPreservesState) {
   EXPECT_EQ(destination[1], TypeParam(-5));
   EXPECT_EQ(source.dim(), 3);
 }
+TYPED_TEST(PoissonAttributeCopyTest, DotAndSquareNorm) {
+  using Point = PoissonRecon::Point<TypeParam>;
+  const Point empty;
+  EXPECT_EQ(Point::Dot(empty, empty), TypeParam(0));
+  EXPECT_EQ(Point::SquareNorm(empty), TypeParam(0));
+  Point first(3);
+  first[0] = TypeParam(-2);
+  first[1] = TypeParam(3);
+  first[2] = TypeParam(0.5);
+  Point second(3);
+  second[0] = TypeParam(4);
+  second[1] = TypeParam(-1);
+  second[2] = TypeParam(2);
+  EXPECT_EQ(Point::Dot(first, second), TypeParam(-10));
+  EXPECT_EQ(Point::Dot(second, first), TypeParam(-10));
+  EXPECT_EQ(Point::SquareNorm(first), TypeParam(13.25));
+  EXPECT_EQ(Point::SquareNorm(second), TypeParam(21));
+  EXPECT_THROW(Point::Dot(first, empty), PoissonRecon::Exception);
+  EXPECT_THROW(Point::Dot(empty, first), PoissonRecon::Exception);
+}
 }  // namespace
