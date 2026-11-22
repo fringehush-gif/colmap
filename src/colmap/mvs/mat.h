@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <stdexcept>
 #include <vector>
 
 namespace colmap {
@@ -53,6 +54,13 @@ Mat<T>::Mat() : Mat(0, 0, 0) {}
 template <typename T>
 Mat<T>::Mat(const size_t width, const size_t height, const size_t depth)
     : width_(width), height_(height), depth_(depth) {
+  if (width_ == 0 || height_ == 0 || depth_ == 0) {
+    return;
+  }
+  // Bound the element count before multiplying the dimensions.
+  if (width_ > data_.max_size() / height_ / depth_) {
+    throw std::length_error("Matrix dimensions exceed maximum storage size");
+  }
   data_.resize(width_ * height_ * depth_, 0);
 }
 
