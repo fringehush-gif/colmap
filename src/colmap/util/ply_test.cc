@@ -372,9 +372,9 @@ TEST(Ply, RoundTripTextPlyMesh) {
   const auto test_file = test_dir / "mesh.ply";
 
   PlyMesh original_mesh;
-  original_mesh.vertices.emplace_back(0.0f, 0.0f, 0.0f);
-  original_mesh.vertices.emplace_back(1.0f, 0.0f, 0.0f);
-  original_mesh.vertices.emplace_back(0.0f, 1.0f, 0.0f);
+  original_mesh.vertices.emplace_back(0.0f, 0.0f, 0.0f, 0, 17, 255);
+  original_mesh.vertices.emplace_back(1.0f, 0.0f, 0.0f, 109, 233, 1);
+  original_mesh.vertices.emplace_back(0.0f, 1.0f, 0.0f, 255, 0, 128);
   original_mesh.vertices.emplace_back(1.0f, 1.0f, 1.0f);
 
   original_mesh.faces.emplace_back(0, 1, 2);
@@ -392,8 +392,10 @@ TEST(Ply, RoundTripTextPlyMesh) {
                      original_mesh.vertices[i].x,
                      original_mesh.vertices[i].y,
                      original_mesh.vertices[i].z);
-    // No colors in file, should get defaults.
-    ExpectColorEq(loaded_mesh.vertices[i], 200, 200, 200);
+    ExpectColorEq(loaded_mesh.vertices[i],
+                  original_mesh.vertices[i].r,
+                  original_mesh.vertices[i].g,
+                  original_mesh.vertices[i].b);
   }
 
   for (size_t i = 0; i < original_mesh.faces.size(); ++i) {
@@ -411,9 +413,9 @@ TEST(Ply, RoundTripBinaryPlyMesh) {
   const auto test_file = test_dir / "mesh.ply";
 
   PlyMesh original_mesh;
-  original_mesh.vertices.emplace_back(0.0f, 0.0f, 0.0f);
-  original_mesh.vertices.emplace_back(1.0f, 0.0f, 0.0f);
-  original_mesh.vertices.emplace_back(0.0f, 1.0f, 0.0f);
+  original_mesh.vertices.emplace_back(0.0f, 0.0f, 0.0f, 0, 17, 255);
+  original_mesh.vertices.emplace_back(1.0f, 0.0f, 0.0f, 109, 233, 1);
+  original_mesh.vertices.emplace_back(0.0f, 1.0f, 0.0f, 255, 0, 128);
   original_mesh.vertices.emplace_back(1.0f, 1.0f, 1.0f);
 
   original_mesh.faces.emplace_back(0, 1, 2);
@@ -431,8 +433,10 @@ TEST(Ply, RoundTripBinaryPlyMesh) {
                      original_mesh.vertices[i].x,
                      original_mesh.vertices[i].y,
                      original_mesh.vertices[i].z);
-    // No colors in file, should get defaults.
-    ExpectColorEq(loaded_mesh.vertices[i], 200, 200, 200);
+    ExpectColorEq(loaded_mesh.vertices[i],
+                  original_mesh.vertices[i].r,
+                  original_mesh.vertices[i].g,
+                  original_mesh.vertices[i].b);
   }
 
   for (size_t i = 0; i < original_mesh.faces.size(); ++i) {
@@ -489,6 +493,10 @@ void VerifyTexturedMesh(const PlyTexturedMesh& loaded,
                      original.mesh.vertices[i].x,
                      original.mesh.vertices[i].y,
                      original.mesh.vertices[i].z);
+    ExpectColorEq(loaded.mesh.vertices[i],
+                  original.mesh.vertices[i].r,
+                  original.mesh.vertices[i].g,
+                  original.mesh.vertices[i].b);
   }
 
   for (size_t i = 0; i < original.mesh.faces.size(); ++i) {
@@ -510,6 +518,9 @@ TEST(Ply, RoundTripTextTexturedPlyMesh) {
   const auto test_file = test_dir / "textured_mesh.ply";
 
   PlyTexturedMesh original = CreateTestTexturedMesh();
+  original.mesh.vertices[0].r = 0;
+  original.mesh.vertices[0].g = 17;
+  original.mesh.vertices[0].b = 255;
   WriteTextPlyMesh(test_file, original);
   PlyTexturedMesh loaded = ReadPlyMesh(test_file);
   VerifyTexturedMesh(loaded, original);
@@ -520,6 +531,9 @@ TEST(Ply, RoundTripBinaryTexturedPlyMesh) {
   const auto test_file = test_dir / "textured_mesh.ply";
 
   PlyTexturedMesh original = CreateTestTexturedMesh();
+  original.mesh.vertices[0].r = 0;
+  original.mesh.vertices[0].g = 17;
+  original.mesh.vertices[0].b = 255;
   WriteBinaryPlyMesh(test_file, original);
   PlyTexturedMesh loaded = ReadPlyMesh(test_file);
   VerifyTexturedMesh(loaded, original);
@@ -1070,7 +1084,7 @@ TEST(Ply, MeshRejectsInvalidInputBeforeOpeningOutput) {
   ExpectRefusal(mesh, "Expected 6 UV coordinates");
 }
 
-TEST(Ply, MeshWriterPayloadAndColorOmission) {
+TEST(Ply, MeshWriterPayloadAndColorRetention) {
   const auto p = CreateTestDir() / "mesh.ply";
   PlyTexturedMesh mesh;
   mesh.mesh.vertices = {
@@ -1089,11 +1103,10 @@ TEST(Ply, MeshWriterPayloadAndColorOmission) {
       EXPECT_EQ(loaded.mesh.vertices[i].x, mesh.mesh.vertices[i].x);
       EXPECT_EQ(loaded.mesh.vertices[i].y, mesh.mesh.vertices[i].y);
       EXPECT_EQ(loaded.mesh.vertices[i].z, mesh.mesh.vertices[i].z);
-      // Existing mesh exporters omit vertex colors.
-      EXPECT_EQ(loaded.mesh.vertices[i].r, 200);
-      EXPECT_EQ(loaded.mesh.vertices[i].g, 200);
-      EXPECT_EQ(loaded.mesh.vertices[i].b, 200);
-      EXPECT_EQ(mesh.mesh.vertices[i].r, i == 0 ? 17 : (i == 1 ? 0 : 255));
+      ExpectColorEq(loaded.mesh.vertices[i],
+                    mesh.mesh.vertices[i].r,
+                    mesh.mesh.vertices[i].g,
+                    mesh.mesh.vertices[i].b);
     }
     for (size_t i = 0; i < mesh.mesh.faces.size(); ++i) {
       EXPECT_EQ(loaded.mesh.faces[i].vertex_idx1,
@@ -1110,6 +1123,9 @@ TEST(Ply, MeshWriterPayloadAndColorOmission) {
       EXPECT_EQ(points[i].x, mesh.mesh.vertices[i].x);
       EXPECT_EQ(points[i].y, mesh.mesh.vertices[i].y);
       EXPECT_EQ(points[i].z, mesh.mesh.vertices[i].z);
+      EXPECT_EQ(points[i].r, mesh.mesh.vertices[i].r);
+      EXPECT_EQ(points[i].g, mesh.mesh.vertices[i].g);
+      EXPECT_EQ(points[i].b, mesh.mesh.vertices[i].b);
     }
   }
 }
