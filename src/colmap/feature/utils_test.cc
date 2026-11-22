@@ -7,6 +7,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <cstring>
+
 namespace colmap {
 namespace {
 
@@ -27,6 +30,49 @@ TEST(L2NormalizeFeatureDescriptors, Nominal) {
   for (Eigen::MatrixXf::Index r = 0; r < descriptors.rows(); ++r) {
     EXPECT_NEAR(descriptors.row(r).norm(), 1, 1e-6);
   }
+}
+
+TEST(L2NormalizeFeatureDescriptors, ZeroRows) {
+  FeatureDescriptorsFloatData descriptors =
+      FeatureDescriptorsFloatData::Zero(3, 128);
+  descriptors.row(1).setOnes();
+
+  L2NormalizeFeatureDescriptors(&descriptors);
+
+  EXPECT_TRUE(descriptors.allFinite());
+  EXPECT_TRUE(descriptors.row(0).isZero(0.0f));
+  EXPECT_TRUE(descriptors.row(2).isZero(0.0f));
+  EXPECT_TRUE(descriptors.row(1).isApprox(
+      FeatureDescriptorsFloatData::Constant(1, 128, 1.0f / std::sqrt(128.0f))));
+}
+
+TEST(L2NormalizeFeatureDescriptors, Empty) {
+  FeatureDescriptorsFloatData descriptors(0, 128);
+
+  L2NormalizeFeatureDescriptors(&descriptors);
+
+  EXPECT_EQ(descriptors.rows(), 0);
+  EXPECT_EQ(descriptors.cols(), 128);
+}
+
+TEST(L2NormalizeFeatureDescriptors, FixedNonzeroRowsPreserveBits) {
+  FeatureDescriptorsFloatData descriptors(4, 128);
+  for (Eigen::Index r = 0; r < descriptors.rows(); ++r) {
+    for (Eigen::Index c = 0; c < descriptors.cols(); ++c) {
+      descriptors(r, c) =
+          static_cast<float>((r + 1) * (c % 13 + 1)) / 16.0f;
+    }
+  }
+  FeatureDescriptorsFloatData expected = descriptors;
+  expected.rowwise().normalize();
+
+  L2NormalizeFeatureDescriptors(&descriptors);
+
+  EXPECT_TRUE(descriptors.allFinite());
+  EXPECT_EQ(std::memcmp(descriptors.data(),
+                        expected.data(),
+                        descriptors.size() * sizeof(float)),
+            0);
 }
 
 TEST(L1RootNormalizeFeatureDescriptors, Nominal) {

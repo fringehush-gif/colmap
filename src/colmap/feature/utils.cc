@@ -17,7 +17,9 @@ std::vector<Eigen::Vector2d> FeatureKeypointsToPointsVector(
 }
 
 void L2NormalizeFeatureDescriptors(FeatureDescriptorsFloatData* descriptors) {
-  descriptors->rowwise().normalize();
+  for (Eigen::Index r = 0; r < descriptors->rows(); ++r) {
+    descriptors->row(r).normalize();
+  }
 }
 
 void L1RootNormalizeFeatureDescriptors(
