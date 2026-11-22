@@ -218,6 +218,21 @@ TEST(VLFeatSvd2, ZeroFirstColumnAndRegularInputs) {
   }
 }
 
+TEST(VLFeatMath, FastSqrtDoublePreservesBoundaryPrecision) {
+  constexpr double kBoundary = 1e-8;
+  EXPECT_EQ(vl_fast_sqrt_d(0.0), 0.0);
+  EXPECT_EQ(vl_fast_sqrt_d(std::nextafter(kBoundary, 0.0)), 0.0);
+  const double inputs[] = {
+      kBoundary, std::nextafter(kBoundary, 1.0), 1.0, 4.0, 9.0};
+  for (const double x : inputs) {
+    SCOPED_TRACE(x);
+    const double expected = std::sqrt(x);
+    EXPECT_NEAR(vl_fast_sqrt_d(x), expected, 1e-5 * expected);
+  }
+  EXPECT_EQ(vl_fast_sqrt_d(1e-8f), 0.0);
+  EXPECT_DOUBLE_EQ(vl_fast_sqrt_d(4.0f), vl_fast_sqrt_d(4.0));
+}
+
 INSTANTIATE_TEST_SUITE_P(
     SiftCpuExtraction,
     SiftCpuExtractionTest,
