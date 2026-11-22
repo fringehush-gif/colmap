@@ -646,14 +646,29 @@ vl_svd2 (double* S, double *U, double *V, double const *M)
   double m22 = M[3] ;
   double cu1 = m11 ;
   double su1 = m21 ;
-  double norm = sqrt(cu1*cu1 + su1*su1) ;
+  double const scale = VL_MAX(fabs(cu1), fabs(su1)) ;
+  /* Keep the dominant square normal and the sum finite. */
+  vl_bool const rescale =
+    scale > 0 && (scale < 0x1p-511 || scale > 0x1p511) ;
+  double norm ;
   double cu2, su2, cv2, sv2 ;
   double f, g, h ;
   double smin, smax ;
-  cu1 /= norm ;
-  su1 /= norm ;
+  if (rescale) {
+    cu1 /= scale ;
+    su1 /= scale ;
+  }
+  norm = sqrt(cu1*cu1 + su1*su1) ;
+  if (cu1 == 0 && su1 == 0) {
+    /* The zero first column needs no rotation. */
+    cu1 = 1 ;
+    su1 = 0 ;
+  } else {
+    cu1 /= norm ;
+    su1 /= norm ;
+  }
 
-  f = cu1 * m11 + su1 * m21 ;
+  f = rescale ? norm * scale : cu1 * m11 + su1 * m21 ;
   g = cu1 * m12 + su1 * m22 ;
   h = - su1 * m12 + cu1 * m22 ;
 
@@ -767,7 +782,7 @@ vl_lapack_dlasv2 (double *smin,
           *smin = (fa / ga) * ha ; /* 2 ulps */
         }
         cut = 1.0 ; sut = ht / gt ;
-        cvt = 1.0 ; svt = ft / gt ;
+        cvt = ft / gt ; svt = 1.0 ;
       }
     }
 

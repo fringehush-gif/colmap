@@ -1567,7 +1567,7 @@ vl_covdet_new (VlCovDetMethod method)
                             (double)s / (VL_COVDET_LAP_NUM_LEVELS - 1)) ;
       double const sigmaImage = 1.0 / sqrt(2.0) ;
       double const step = 0.5 * sigmaImage ;
-      double const sigmaDelta = sqrt(sigmaLap*sigmaLap - sigmaImage*sigmaImage) ;
+      double const sigmaDelta = sqrt(VL_MAX(0.0, sigmaLap*sigmaLap - sigmaImage*sigmaImage)) ;
       vl_size const w = VL_COVDET_LAP_PATCH_RESOLUTION ;
       vl_size const num = 2 * w + 1  ;
       float * pt = self->laplacians + s * (num * num) ;
@@ -2437,9 +2437,9 @@ vl_covdet_extract_patch_for_frame (VlCovDet * self,
 {
   double A[2*2] = {frame.a11, frame.a21, frame.a12, frame.a22} ;
   double T[2] = {frame.x, frame.y} ;
-  double D[4], U[4], V[4] ;
+  double D[4] ;
 
-  vl_svd2(D, U, V, A) ;
+  vl_svd2(D, NULL, NULL, A) ;
 
   return vl_covdet_extract_patch_helper
   (self, NULL, NULL, patch, resolution, extent, sigma, A, T, D[0], D[3]) ;

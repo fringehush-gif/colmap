@@ -552,7 +552,7 @@ vl_fast_sqrt_f (float x)
  **/
 
 VL_INLINE double
-vl_fast_sqrt_d (float x)
+vl_fast_sqrt_d (double x)
 {
   return (x < 1e-8) ? 0 : x * vl_fast_resqrt_d (x) ;
 }
