@@ -215,6 +215,17 @@ int VoteAndVerify(const VoteAndVerifyOptions& options,
   THROW_CHECK_LE(options.confidence, 1);
   THROW_CHECK_GT(options.num_eff_inlier_bins, 0);
 
+  // Every sparse histogram key must fit without wrapping or colliding.
+  size_t max_bin_index = options.num_trans_bins - 1;
+  for (const int radix : {options.num_trans_bins,
+                          options.num_scale_bins,
+                          options.num_angle_bins}) {
+    const size_t last_bin = radix - 1;
+    THROW_CHECK_LE(max_bin_index,
+                   (std::numeric_limits<size_t>::max() - last_bin) / radix);
+    max_bin_index = max_bin_index * radix + last_bin;
+  }
+
   const size_t num_matches = matches.size();
   if (num_matches < AffineTransformEstimator::kMinNumSamples) {
     return 0;
@@ -255,20 +266,21 @@ int VoteAndVerify(const VoteAndVerifyOptions& options,
     const float s = (log_scale + max_log_scale) * scale_norm;
     const float a = (T.angle + static_cast<float>(EIGEN_PI)) * angle_norm;
 
-    int n_x = std::min(static_cast<int>(x * options.num_trans_bins),
-                       static_cast<int>(options.num_trans_bins - 1));
-    int n_y = std::min(static_cast<int>(y * options.num_trans_bins),
-                       static_cast<int>(options.num_trans_bins - 1));
-    int n_s = std::min(static_cast<int>(s * options.num_scale_bins),
-                       static_cast<int>(options.num_scale_bins - 1));
-    int n_a = std::min(static_cast<int>(a * options.num_angle_bins),
-                       static_cast<int>(options.num_angle_bins - 1));
+    int n_x = static_cast<int>(std::min<double>(x * options.num_trans_bins,
+                                                options.num_trans_bins - 1));
+    int n_y = static_cast<int>(std::min<double>(y * options.num_trans_bins,
+                                                options.num_trans_bins - 1));
+    int n_s = static_cast<int>(std::min<double>(s * options.num_scale_bins,
+                                                options.num_scale_bins - 1));
+    int n_a = static_cast<int>(std::min<double>(a * options.num_angle_bins,
+                                                options.num_angle_bins - 1));
 
     for (int level = 0; level < options.num_levels; ++level) {
       const size_t index =
           n_a + options.num_angle_bins *
                     (n_s + options.num_scale_bins *
-                               (n_x + options.num_trans_bins * n_y));
+                               (n_x + options.num_trans_bins *
+                                          static_cast<size_t>(n_y)));
 
       if (level == 0) {
         bins[level][index].SetCoord(Eigen::Vector4i(n_a, n_s, n_x, n_y));
@@ -287,7 +299,7 @@ int VoteAndVerify(const VoteAndVerifyOptions& options,
   // Compute the multi-resolution scores for all occupied bins.
   //////////////////////////////////////////////////////////////////////////////
 
-  std::vector<std::pair<int, float>> bin_scores;
+  std::vector<std::pair<size_t, float>> bin_scores;
   bin_scores.reserve(bins[0].size());
   for (const auto& bin : bins[0]) {
     if (bin.second.GetNumVotes() >= options.min_num_votes) {
@@ -303,10 +315,11 @@ int VoteAndVerify(const VoteAndVerifyOptions& options,
         n_y >>= 1;
         n_s >>= 1;
         n_a >>= 1;
-        const uint64_t index =
+        const size_t index =
             n_a + options.num_angle_bins *
                       (n_s + options.num_scale_bins *
-                                 (n_x + options.num_trans_bins * n_y));
+                                 (n_x + options.num_trans_bins *
+                                            static_cast<size_t>(n_y)));
         score += bins[level][index].GetNumVotes() * level_weight;
         level_weight *= 0.5f;
       }
@@ -324,8 +337,8 @@ int VoteAndVerify(const VoteAndVerifyOptions& options,
   std::partial_sort(bin_scores.begin(),
                     bin_scores.begin() + num_transformations,
                     bin_scores.end(),
-                    [](const std::pair<int, float>& score1,
-                       const std::pair<int, float>& score2) {
+                    [](const std::pair<size_t, float>& score1,
+                       const std::pair<size_t, float>& score2) {
                       return score1.second > score2.second;
                     });
 

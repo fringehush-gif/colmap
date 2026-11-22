@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 #include <gtest/gtest.h>
 
@@ -175,6 +176,104 @@ TEST(VoteAndVerify, EffectiveInliersWithExtremeCoordinateSpan) {
       EXPECT_EQ(VoteAndVerify(options, matches), 3);
     }
   }
+}
+
+TEST(VoteAndVerify, VotingPreservesWideHistogramKeys) {
+  std::vector<FeatureGeometryMatch> matches;
+  for (const float translation_y : {0.0f, 2048.0f}) {
+    for (const float y : {100.0f, 200.0f}) {
+      for (const float x : {100.0f, 200.0f}) {
+        FeatureGeometryMatch match;
+        match.geometry1.x = x;
+        match.geometry1.y = y;
+        match.geometry1.scale = 1;
+        match.geometry2 = match.geometry1;
+        match.geometry2.y += translation_y;
+        matches.push_back(match);
+      }
+    }
+  }
+  for (const int num_bins : {4096, 8192}) {
+    SCOPED_TRACE(num_bins);
+    VoteAndVerifyOptions options;
+    options.num_trans_bins = num_bins;
+    options.local_optimization = false;
+    options.eff_inlier_count = false;
+    if (num_bins == 8192 && std::numeric_limits<size_t>::digits < 64) {
+      EXPECT_THROW(VoteAndVerify(options, matches), std::invalid_argument);
+    } else {
+      EXPECT_EQ(VoteAndVerify(options, matches), 4);
+    }
+  }
+}
+
+TEST(VoteAndVerify, VotingClampsLargeBinEndpointsBeforeConversion) {
+  constexpr int kLargeBins = std::numeric_limits<int>::max() - 1;
+  struct TestCase {
+    int trans_bins;
+    int scale_bins;
+    int angle_bins;
+    float tx;
+    float ty;
+    float scale;
+    float angle;
+  };
+  const TestCase test_cases[] = {
+      {kLargeBins, 2, 2, 4096, 0, 1, 0},
+      {kLargeBins, 2, 2, 0, 4096, 1, 0},
+      {2, kLargeBins, 2, 0, 0, 10, 0},
+      {2, 2, kLargeBins, 0, 0, 1, static_cast<float>(EIGEN_PI)},
+  };
+  for (const auto& test_case : test_cases) {
+    SCOPED_TRACE(::testing::Message()
+                 << test_case.trans_bins << ", " << test_case.scale_bins << ", "
+                 << test_case.angle_bins << ", " << test_case.tx << ", "
+                 << test_case.ty);
+    VoteAndVerifyOptions options;
+    options.num_trans_bins = test_case.trans_bins;
+    options.num_scale_bins = test_case.scale_bins;
+    options.num_angle_bins = test_case.angle_bins;
+    options.local_optimization = false;
+    options.eff_inlier_count = false;
+    // These sparse grids fit 64-bit keys but exceed the 32-bit key domain.
+    if (std::numeric_limits<size_t>::digits < 64) {
+      EXPECT_THROW(VoteAndVerify(options, {}), std::invalid_argument);
+      continue;
+    }
+    std::vector<FeatureGeometryMatch> matches;
+    const float cosine = std::cos(test_case.angle);
+    const float sine = std::sin(test_case.angle);
+    for (const float y : {0.0f, 1.0f}) {
+      for (const float x : {0.0f, 1.0f}) {
+        FeatureGeometryMatch match;
+        match.geometry1.x = x;
+        match.geometry1.y = y;
+        match.geometry1.scale = 1;
+        match.geometry2.x =
+            test_case.scale * (cosine * x - sine * y) + test_case.tx;
+        match.geometry2.y =
+            test_case.scale * (sine * x + cosine * y) + test_case.ty;
+        match.geometry2.scale = test_case.scale;
+        match.geometry2.orientation = test_case.angle;
+        matches.push_back(match);
+      }
+    }
+    EXPECT_EQ(VoteAndVerify(options, matches), 4);
+  }
+}
+
+TEST(VoteAndVerify, VotingValidatesMaximumHistogramKey) {
+  constexpr int kRadix =
+      static_cast<int>(size_t{1} << (std::numeric_limits<size_t>::digits / 4));
+  VoteAndVerifyOptions options;
+  options.num_trans_bins = kRadix;
+  options.num_scale_bins = kRadix;
+  options.num_angle_bins = kRadix;
+  // Empty input exercises the option contract without allocating histogram
+  // bins.
+  EXPECT_EQ(VoteAndVerify(options, {}), 0);
+  options.num_angle_bins += 2;
+  EXPECT_THROW(VoteAndVerify(options, {}), std::invalid_argument);
 }
 
 }  // namespace
