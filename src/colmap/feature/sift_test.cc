@@ -18,7 +18,11 @@
 #include "colmap/util/cuda.h"
 #endif
 
+#include "thirdparty/VLFeat/covdet.h"
+
+#include <cfenv>
 #include <functional>
+#include <memory>
 #include <set>
 #include <utility>
 
@@ -156,6 +160,28 @@ TEST_P(SiftCpuExtractionTest, Nominal) {
   ValidateKeypoints(keypoints, bitmap);
   EXPECT_EQ(descriptors.data.rows(), p.expected_keypoints);
   ValidateDescriptorNorms(descriptors);
+}
+
+TEST(SiftCPUFeatureExtractor, CovariantDetectorWithDownwardRounding) {
+#if defined(FE_DOWNWARD) && defined(FE_INVALID)
+  std::fenv_t previous_environment;
+  ASSERT_EQ(std::fegetenv(&previous_environment), 0);
+  struct RestoreEnvironment {
+    const std::fenv_t& environment;
+    ~RestoreEnvironment() { std::fesetenv(&environment); }
+  } restore{previous_environment};
+  ASSERT_EQ(std::fesetround(FE_DOWNWARD), 0);
+  ASSERT_EQ(std::feclearexcept(FE_ALL_EXCEPT), 0);
+
+  // The first Laplacian level has zero variance. Directed rounding must not
+  // turn its square root into an invalid floating-point operation.
+  const std::unique_ptr<VlCovDet, decltype(&vl_covdet_delete)> detector(
+      vl_covdet_new(VL_COVDET_METHOD_DOG), &vl_covdet_delete);
+  ASSERT_NE(detector, nullptr);
+  EXPECT_EQ(std::fetestexcept(FE_INVALID), 0);
+#else
+  GTEST_SKIP() << "Downward rounding or invalid-operation flags are unavailable";
+#endif
 }
 
 INSTANTIATE_TEST_SUITE_P(
