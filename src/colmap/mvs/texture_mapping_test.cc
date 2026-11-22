@@ -861,6 +861,109 @@ TEST(MeshTextureMapping, ValidatesOcclusionIntersections) {
   }
 }
 
+TEST(MeshTextureMapping, IndependentPlaneProjectionAndRaster) {
+  const float K[9] = {16, 0, 32, 0, 16, 32, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, -1, 0, 0, 0, -1};
+  const float T[3] = {0, 0, 4};
+  Image image("plane_oracle.png", 64, 64, K, R, T);
+  Bitmap bitmap(64, 64, /*as_rgb=*/true);
+  for (int y = 0; y < 64; ++y) {
+    for (int x = 0; x < 64; ++x) {
+      bitmap.SetPixel(x, y, BitmapColor<uint8_t>(2 * x, 2 * y, 96));
+    }
+  }
+  image.SetBitmap(std::move(bitmap));
+  const std::vector<Image> images = {image};
+  MeshTextureMappingOptions options;
+  options.apply_color_correction = false;
+  options.view_selection_smoothing_iterations = 0;
+  options.inpaint_radius = 0;
+  options.num_threads = 1;
+
+  // Projected source centers are independently specified as
+  // (28.5,28.5), (28.5,36.5), (36.5,28.5).
+  // C=(0,0,4): each front-plane ray intersection is at t=(4-z)/4.
+  // The wide triangle contains all three intersections strictly inside.
+  // 2^-12 is farther than the declared 1e-4 exclusion from the target;
+  // 2^-16 is inside it, even for the longest ray (<4.4 world units).
+  struct Case {
+    std::vector<float> planes;
+    int expected_view;
+  };
+  const Case cases[] = {{{}, 0},
+                        {{2}, -1},
+                        {{-2}, 0},
+                        {{0x1p-16f}, 0},
+                        {{0x1p-12f}, -1},
+                        {{0x1p-16f, 2}, -1}};
+  const std::array<BitmapColor<uint8_t>, 3> expected = {
+      BitmapColor<uint8_t>(56, 56, 96),
+      BitmapColor<uint8_t>(56, 72, 96),
+      BitmapColor<uint8_t>(72, 56, 96)};
+  for (const auto& test : cases) {
+    PlyMesh mesh;
+    mesh.vertices = {PlyMeshVertex(-7.0f / 8, 7.0f / 8, 0),
+                     PlyMeshVertex(-7.0f / 8, -9.0f / 8, 0),
+                     PlyMeshVertex(9.0f / 8, 7.0f / 8, 0)};
+    std::vector<PlyMeshFace> faces = {PlyMeshFace(0, 1, 2)};
+    for (const float z : test.planes) {
+      const size_t first = mesh.vertices.size();
+      mesh.vertices.insert(mesh.vertices.end(),
+                           {PlyMeshVertex(-4, 4, z),
+                            PlyMeshVertex(-4, -8, z),
+                            PlyMeshVertex(8, 4, z)});
+      faces.emplace_back(first, first + 1, first + 2);
+    }
+    std::vector<size_t> order;
+    for (size_t i = 0; i < faces.size(); ++i) order.push_back(i);
+    do {
+      SCOPED_TRACE(::testing::PrintToString(test.planes));
+      SCOPED_TRACE(::testing::PrintToString(order));
+      mesh.faces.clear();
+      for (const size_t i : order) mesh.faces.push_back(faces[i]);
+      const auto result = MeshTextureMapping(mesh, images, options);
+      const size_t target =
+          std::find(order.begin(), order.end(), 0) - order.begin();
+      ASSERT_EQ(result.face_view_ids.size(), faces.size());
+      ASSERT_EQ(result.face_view_ids[target], test.expected_view);
+      ASSERT_EQ(result.face_uvs.size(), mesh.faces.size() * 6);
+      if (test.expected_view < 0) continue;
+      ASSERT_GT(result.atlas_width, 0);
+      ASSERT_GT(result.atlas_height, 0);
+      for (size_t i = 0; i < 3; ++i) {
+        const size_t uv = target * 6 + i * 2;
+        const float u = result.face_uvs[uv];
+        const float v = result.face_uvs[uv + 1];
+        ASSERT_TRUE(std::isfinite(u));
+        ASSERT_TRUE(std::isfinite(v));
+        ASSERT_GE(u, 0);
+        ASSERT_LE(u, 1);
+        ASSERT_GE(v, 0);
+        ASSERT_LE(v, 1);
+        const double atlas_x =
+            static_cast<double>(u) * result.atlas_width - 0.5;
+        const double atlas_y =
+            (1 - static_cast<double>(v)) * result.atlas_height - 0.5;
+        const double rounded_x = std::round(atlas_x);
+        const double rounded_y = std::round(atlas_y);
+        ASSERT_NEAR(atlas_x, rounded_x, 1e-4);
+        ASSERT_NEAR(atlas_y, rounded_y, 1e-4);
+        ASSERT_GE(rounded_x, 0);
+        ASSERT_LT(rounded_x, result.atlas_width);
+        ASSERT_GE(rounded_y, 0);
+        ASSERT_LT(rounded_y, result.atlas_height);
+        const int x = static_cast<int>(rounded_x);
+        const int y = static_cast<int>(rounded_y);
+        const auto pixel = result.texture_atlas.GetPixel(x, y);
+        ASSERT_TRUE(pixel.has_value());
+        EXPECT_EQ(pixel->r, expected[i].r);
+        EXPECT_EQ(pixel->g, expected[i].g);
+        EXPECT_EQ(pixel->b, expected[i].b);
+      }
+    } while (std::next_permutation(order.begin(), order.end()));
+  }
+}
+
 #endif  // COLMAP_CGAL_ENABLED
 
 }  // namespace
