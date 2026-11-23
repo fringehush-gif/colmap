@@ -1924,7 +1924,7 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
   result.exit_reason = ExitReason::MAX_ITERATIONS;
   float score_best;
   float score_best_pcg;
-  float diag = params_.diag_init;
+  float diag = std::max(params_.diag_init, params_.diag_min);
   CheckCuda(cudaMemcpy(solver__current_diag_, &diag, sizeof(float), cudaMemcpyHostToDevice),
             "cudaMemcpy host-to-device");
 
