@@ -123,6 +123,177 @@ TEST(StereoFusion, Integration) {
   EXPECT_TRUE(cancelled_fusion.GetFusedPoints().empty());
 }
 
+TEST(StereoFusion, OverlappingRowTasksTouchSameProjectedMaskPixel) {
+  constexpr int kWidth = 80;
+  constexpr int kHeight = 100;
+  const auto temp_dir = CreateTestDir();
+  for (const char* name : {"sparse", "images", "stereo/depth_maps",
+                           "stereo/normal_maps"}) {
+    CreateDirIfNotExists(temp_dir / name, true);
+  }
+
+  Reconstruction reconstruction;
+  SyntheticDatasetOptions synth;
+  synth.num_rigs = 2;
+  synth.num_cameras_per_rig = 1;
+  synth.num_frames_per_rig = 1;
+  synth.num_points3D = 20;
+  synth.camera_width = kWidth;
+  synth.camera_height = kHeight;
+  synth.camera_model_id = CameraModelId::kPinhole;
+  synth.camera_params = {50.0, 50.0, 40.5, 50.5};
+  SynthesizeDataset(synth, &reconstruction);
+  ASSERT_EQ(reconstruction.NumRegImages(), 2);
+  // Read back registration order as used by the MVS model.
+  reconstruction.Write(temp_dir / "sparse");
+  Reconstruction ordered;
+  ordered.Read(temp_dir / "sparse");
+  const auto ids = ordered.RegImageIds();
+  ASSERT_EQ(ids.size(), 2);
+  ASSERT_NE(ordered.Image(ids[0]).CameraId(), ordered.Image(ids[1]).CameraId());
+  for (int i = 0; i < 2; ++i) {
+    const auto& image = ordered.Image(ids[i]);
+    ordered.Frame(image.FrameId()).SetRigFromWorld(Rigid3d());
+    auto& camera = ordered.Camera(image.CameraId());
+    camera.model_id = CameraModelId::kPinhole;
+    const double focal = i == 0 ? 500.0 : 1.0;
+    camera.params = {focal, focal, 40.5, 50.5};
+  }
+  bool has_shared_track = false;
+  for (const auto& [id, point] : ordered.Points3D()) {
+    has_shared_track |= point.track.Length() == 2;
+  }
+  ASSERT_TRUE(has_shared_track);
+
+  // Under identity poses the second camera projects all roots into
+  // its center pixel. Roots in disjoint row strips therefore compete
+  // for one target flag even with no traversal back to the root.
+  ordered.Write(temp_dir / "sparse");
+  Reconstruction verified;
+  verified.Read(temp_dir / "sparse");
+  ASSERT_EQ(verified.RegImageIds(), ids);
+  Model mvs_model;
+  mvs_model.ReadFromCOLMAP(temp_dir);
+  const auto neighbors = mvs_model.GetMaxOverlappingImages(2, 0.0);
+  ASSERT_EQ(neighbors.size(), 2);
+  ASSERT_EQ(neighbors[0], std::vector<int>{1});
+  ASSERT_EQ(neighbors[1], std::vector<int>{0});
+  std::ofstream fusion_cfg(temp_dir / "stereo/fusion.cfg");
+  for (const auto id : ids) {
+    const std::string name = ordered.Image(id).Name();
+    Mat<float> depth(kWidth, kHeight, 1);
+    depth.Fill(1.0f);
+    depth.Write(temp_dir / "stereo/depth_maps" / (name + ".geometric.bin"));
+    Mat<float> normal(kWidth, kHeight, 3);
+    for (int y = 0; y < kHeight; ++y) {
+      for (int x = 0; x < kWidth; ++x) {
+        normal.Set(y, x, 2, 1.0f);
+      }
+    }
+    normal.Write(temp_dir / "stereo/normal_maps" / (name + ".geometric.bin"));
+    Bitmap bitmap(kWidth, kHeight, true);
+    bitmap.Fill(BitmapColor<uint8_t>(31, 85, 127));
+    ASSERT_TRUE(bitmap.Write(temp_dir / "images" / name));
+    fusion_cfg << name << "\n";
+  }
+  fusion_cfg.close();
+  StereoFusionOptions options;
+  options.num_threads = 2;
+  options.min_num_pixels = 1;
+  options.max_traversal_depth = 2;
+  options.use_cache = false;
+  StereoFusion fusion(options, temp_dir, "COLMAP", "", "geometric");
+  fusion.Run();
+  EXPECT_FALSE(fusion.GetFusedPoints().empty());
+  EXPECT_EQ(fusion.GetFusedPoints().size(),
+            fusion.GetFusedPointsVisibility().size());
+}
+
+TEST(StereoFusion, RowStripsPreserveMasksAndTail) {
+  constexpr int kWidth = 4;
+  constexpr int kHeight = 23;
+  const auto temp_dir = CreateTestDir();
+  for (const char* subdir : {"sparse",
+                             "images",
+                             "stereo/depth_maps",
+                             "stereo/normal_maps",
+                             "masks"}) {
+    CreateDirIfNotExists(temp_dir / subdir, true);
+  }
+
+  Reconstruction reconstruction;
+  colmap::Camera camera;
+  camera.camera_id = 1;
+  camera.model_id = CameraModelId::kPinhole;
+  camera.width = kWidth;
+  camera.height = kHeight;
+  camera.params = {1.0, 1.0, 0.5, 0.5};
+  reconstruction.AddCameraWithTrivialRig(camera);
+  colmap::Image image;
+  image.SetImageId(1);
+  image.SetName("image.png");
+  image.SetCameraId(1);
+  reconstruction.AddImageWithTrivialFrame(image, Rigid3d());
+  reconstruction.Write(temp_dir / "sparse");
+
+  Mat<float> depths(kWidth, kHeight, 1);
+  Mat<float> normals(kWidth, kHeight, 3);
+  Bitmap bitmap(kWidth, kHeight, true);
+  Bitmap mask(kWidth, kHeight, false);
+  std::vector<std::pair<int, int>> expected_pixels;
+  for (int row = 0; row < kHeight; ++row) {
+    for (int col = 0; col < kWidth; ++col) {
+      const bool masked = (row + 2 * col) % 7 == 0 || row == 10;
+      const bool valid_depth = (row + col) % 11 != 0;
+      depths.Set(row, col, valid_depth ? 1.0f : 0.0f);
+      // Reject one seed after collecting its samples. The next seed still
+      // needs to start with empty scratch buffers.
+      const bool valid_normal = row != 0 || col != 1;
+      normals.Set(row, col, 2, valid_normal ? 1.0f : 0.0f);
+      bitmap.SetPixel(col, row, BitmapColor<uint8_t>(col + 1, row + 1, 17));
+      mask.SetPixel(col, row, BitmapColor<uint8_t>(masked ? 0 : 255));
+      if (!masked && valid_depth && valid_normal) {
+        expected_pixels.emplace_back(row, col);
+      }
+    }
+  }
+  depths.Write(temp_dir / "stereo/depth_maps/image.png.geometric.bin");
+  normals.Write(temp_dir / "stereo/normal_maps/image.png.geometric.bin");
+  ASSERT_TRUE(bitmap.Write(temp_dir / "images/image.png"));
+  ASSERT_TRUE(mask.Write(temp_dir / "masks/image.png"));
+  std::ofstream(temp_dir / "stereo/fusion.cfg") << "image.png\n";
+  ASSERT_EQ(expected_pixels.size(), 68);
+  ASSERT_EQ(expected_pixels.back().first, kHeight - 1);
+
+  for (const bool use_cache : {false, true}) {
+    SCOPED_TRACE(use_cache);
+    StereoFusionOptions options;
+    options.num_threads = 1;
+    options.min_num_pixels = 1;
+    options.mask_path = temp_dir / "masks";
+    options.use_cache = use_cache;
+    StereoFusion fusion(options, temp_dir, "COLMAP", "", "geometric");
+    fusion.Run();
+    const auto& points = fusion.GetFusedPoints();
+    const auto& visibility = fusion.GetFusedPointsVisibility();
+    ASSERT_EQ(points.size(), expected_pixels.size());
+    ASSERT_EQ(visibility.size(), expected_pixels.size());
+    for (size_t i = 0; i < points.size(); ++i) {
+      const auto [row, col] = expected_pixels[i];
+      EXPECT_FLOAT_EQ(points[i].x, col);
+      EXPECT_FLOAT_EQ(points[i].y, row);
+      EXPECT_FLOAT_EQ(points[i].z, 1.0f);
+      EXPECT_FLOAT_EQ(points[i].nx, 0.0f);
+      EXPECT_FLOAT_EQ(points[i].ny, 0.0f);
+      EXPECT_FLOAT_EQ(points[i].nz, 1.0f);
+      EXPECT_EQ(points[i].r, col + 1);
+      EXPECT_EQ(points[i].g, row + 1);
+      EXPECT_EQ(points[i].b, 17);
+      EXPECT_EQ(visibility[i], std::vector<int>{0});
+    }
+  }
+}
+
 TEST(ReadPointsVisibility, RoundTrip) {
   const auto test_dir = CreateTestDir();
   const auto vis_path = test_dir / "test.vis";

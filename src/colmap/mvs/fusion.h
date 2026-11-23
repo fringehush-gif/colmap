@@ -2,12 +2,12 @@
 
 #pragma once
 
-#include "colmap/mvs/mat.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/base_controller.h"
 #include "colmap/util/eigen_alignment.h"
 #include "colmap/util/ply.h"
 
+#include <atomic>
 #include <cfloat>
 #include <filesystem>
 #include <vector>
@@ -87,8 +87,11 @@ class StereoFusion : public BaseController {
   void Run();
 
  private:
+  struct FusionBuffers;
+
   void InitFusedPixelMask(int image_idx, size_t width, size_t height);
-  void Fuse(int thread_id, int image_idx, int row, int col);
+  void Fuse(
+      int thread_id, int image_idx, int row, int col, FusionBuffers& buffers);
 
   const StereoFusionOptions options_;
   const std::filesystem::path workspace_path_;
@@ -104,7 +107,8 @@ class StereoFusion : public BaseController {
   std::vector<std::vector<int>> overlapping_images_;
   // Contains image masks of pre-masked and already fused pixels.
   // Initialized from image masks if provided in StereoFusionOptions.
-  std::vector<Mat<char>> fused_pixel_masks_;
+  // Tasks read and mark these flags concurrently, including during snapshots.
+  std::vector<std::vector<std::atomic<char>>> fused_pixel_masks_;
   std::vector<std::pair<int, int>> depth_map_sizes_;
   std::vector<std::pair<float, float>> bitmap_scales_;
   std::vector<Eigen::Matrix<float, 3, 4, Eigen::RowMajor>> P_;
