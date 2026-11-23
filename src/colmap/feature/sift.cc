@@ -1408,23 +1408,32 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
           *sift_opengl_mutexes_.at(sift_match_gpu_.gpu_index));
     }
 
-    if (prev_image_id1_ == kInvalidImageId || prev_is_guided_ ||
-        prev_image_id1_ != image1.image_id) {
-      WarnIfMaxNumMatchesReachedGPU(image1.descriptors->data);
-      sift_match_gpu_.SetDescriptors(
-          0, image1.descriptors->data.rows(), image1.descriptors->data.data());
-      prev_image_id1_ = image1.image_id;
-    }
+    try {
+      if (prev_image_id1_ == kInvalidImageId ||
+          prev_image_id1_ != image1.image_id) {
+        WarnIfMaxNumMatchesReachedGPU(image1.descriptors->data);
+        sift_match_gpu_.SetDescriptors(0,
+                                       image1.descriptors->data.rows(),
+                                       image1.descriptors->data.data());
+        prev_image_id1_ = image1.image_id;
+      }
 
-    if (prev_image_id2_ == kInvalidImageId || prev_is_guided_ ||
-        prev_image_id2_ != image2.image_id) {
-      WarnIfMaxNumMatchesReachedGPU(image2.descriptors->data);
-      sift_match_gpu_.SetDescriptors(
-          1, image2.descriptors->data.rows(), image2.descriptors->data.data());
-      prev_image_id2_ = image2.image_id;
-    }
+      if (prev_image_id2_ == kInvalidImageId ||
+          prev_image_id2_ != image2.image_id) {
+        WarnIfMaxNumMatchesReachedGPU(image2.descriptors->data);
+        sift_match_gpu_.SetDescriptors(1,
+                                       image2.descriptors->data.rows(),
+                                       image2.descriptors->data.data());
+        prev_image_id2_ = image2.image_id;
+      }
 
-    prev_is_guided_ = false;
+      prev_is_guided_ = false;
+    } catch (...) {
+      // A partial update can invalidate either slot and the shared mode key.
+      prev_image_id1_ = kInvalidImageId;
+      prev_image_id2_ = kInvalidImageId;
+      throw;
+    }
 
     matches->resize(static_cast<size_t>(options_.max_num_matches));
 
@@ -1493,65 +1502,79 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
     // not a function of the image alone: a shared-focal pair carries a focal
     // length estimated per pair, so the same image matched against different
     // partners normalizes differently. The camera is therefore part of the
-    // cache key, alongside the image id and the coordinate space.
-    if (prev_image_id1_ == kInvalidImageId || !prev_is_guided_ ||
-        prev_image_id1_ != image1.image_id ||
-        use_essential_matrix != prev_use_essential_matrix_ ||
-        (use_essential_matrix &&
-         !SameNormalizationCamera(prev_norm_camera1_, effective_camera1))) {
-      WarnIfMaxNumMatchesReachedGPU(image1.descriptors->data);
-      constexpr size_t kIndex = 0;
-      sift_match_gpu_.SetDescriptors(kIndex,
-                                     image1.descriptors->data.rows(),
-                                     image1.descriptors->data.data());
-      if (use_essential_matrix) {
-        const std::vector<float> cam_rays1 =
-            PackCamRaysWithJac(effective_camera1, *image1.keypoints);
-        sift_match_gpu_.SetFeatureLocation(kIndex,
-                                           cam_rays1.data(),
-                                           /*gap=*/0,
-                                           kNumCamRayWithJacElems);
-        prev_norm_camera1_ = effective_camera1;
-      } else {
-        sift_match_gpu_.SetFeatureLocation(
-            kIndex,
-            reinterpret_cast<const float*>(image1.keypoints->data()),
-            kFeatureShapeNumElems);
-        prev_norm_camera1_.reset();
+    // cache key, alongside the image id and the coordinate space. Descriptors
+    // depend only on the image id and remain resident when locations change.
+    try {
+      if (prev_image_id1_ == kInvalidImageId || !prev_is_guided_ ||
+          prev_image_id1_ != image1.image_id ||
+          use_essential_matrix != prev_use_essential_matrix_ ||
+          (use_essential_matrix &&
+           !SameNormalizationCamera(prev_norm_camera1_, effective_camera1))) {
+        constexpr size_t kIndex = 0;
+        if (prev_image_id1_ == kInvalidImageId ||
+            prev_image_id1_ != image1.image_id) {
+          WarnIfMaxNumMatchesReachedGPU(image1.descriptors->data);
+          sift_match_gpu_.SetDescriptors(kIndex,
+                                         image1.descriptors->data.rows(),
+                                         image1.descriptors->data.data());
+        }
+        if (use_essential_matrix) {
+          const std::vector<float> cam_rays1 =
+              PackCamRaysWithJac(effective_camera1, *image1.keypoints);
+          sift_match_gpu_.SetFeatureLocation(kIndex,
+                                             cam_rays1.data(),
+                                             /*gap=*/0,
+                                             kNumCamRayWithJacElems);
+          prev_norm_camera1_ = effective_camera1;
+        } else {
+          sift_match_gpu_.SetFeatureLocation(
+              kIndex,
+              reinterpret_cast<const float*>(image1.keypoints->data()),
+              kFeatureShapeNumElems);
+          prev_norm_camera1_.reset();
+        }
+        prev_image_id1_ = image1.image_id;
       }
-      prev_image_id1_ = image1.image_id;
-    }
 
-    if (prev_image_id2_ == kInvalidImageId || !prev_is_guided_ ||
-        prev_image_id2_ != image2.image_id ||
-        use_essential_matrix != prev_use_essential_matrix_ ||
-        (use_essential_matrix &&
-         !SameNormalizationCamera(prev_norm_camera2_, effective_camera2))) {
-      WarnIfMaxNumMatchesReachedGPU(image2.descriptors->data);
-      constexpr size_t kIndex = 1;
-      sift_match_gpu_.SetDescriptors(kIndex,
-                                     image2.descriptors->data.rows(),
-                                     image2.descriptors->data.data());
-      if (use_essential_matrix) {
-        const std::vector<float> cam_rays2 =
-            PackCamRaysWithJac(effective_camera2, *image2.keypoints);
-        sift_match_gpu_.SetFeatureLocation(kIndex,
-                                           cam_rays2.data(),
-                                           /*gap=*/0,
-                                           kNumCamRayWithJacElems);
-        prev_norm_camera2_ = effective_camera2;
-      } else {
-        sift_match_gpu_.SetFeatureLocation(
-            kIndex,
-            reinterpret_cast<const float*>(image2.keypoints->data()),
-            kFeatureShapeNumElems);
-        prev_norm_camera2_.reset();
+      if (prev_image_id2_ == kInvalidImageId || !prev_is_guided_ ||
+          prev_image_id2_ != image2.image_id ||
+          use_essential_matrix != prev_use_essential_matrix_ ||
+          (use_essential_matrix &&
+           !SameNormalizationCamera(prev_norm_camera2_, effective_camera2))) {
+        constexpr size_t kIndex = 1;
+        if (prev_image_id2_ == kInvalidImageId ||
+            prev_image_id2_ != image2.image_id) {
+          WarnIfMaxNumMatchesReachedGPU(image2.descriptors->data);
+          sift_match_gpu_.SetDescriptors(kIndex,
+                                         image2.descriptors->data.rows(),
+                                         image2.descriptors->data.data());
+        }
+        if (use_essential_matrix) {
+          const std::vector<float> cam_rays2 =
+              PackCamRaysWithJac(effective_camera2, *image2.keypoints);
+          sift_match_gpu_.SetFeatureLocation(kIndex,
+                                             cam_rays2.data(),
+                                             /*gap=*/0,
+                                             kNumCamRayWithJacElems);
+          prev_norm_camera2_ = effective_camera2;
+        } else {
+          sift_match_gpu_.SetFeatureLocation(
+              kIndex,
+              reinterpret_cast<const float*>(image2.keypoints->data()),
+              kFeatureShapeNumElems);
+          prev_norm_camera2_.reset();
+        }
+        prev_image_id2_ = image2.image_id;
       }
-      prev_image_id2_ = image2.image_id;
-    }
 
-    prev_is_guided_ = true;
-    prev_use_essential_matrix_ = use_essential_matrix;
+      prev_is_guided_ = true;
+      prev_use_essential_matrix_ = use_essential_matrix;
+    } catch (...) {
+      // A partial update can invalidate either slot and the shared mode key.
+      prev_image_id1_ = kInvalidImageId;
+      prev_image_id2_ = kInvalidImageId;
+      throw;
+    }
 
     Eigen::Matrix<float, 3, 3, Eigen::RowMajor> E_or_F;
     Eigen::Matrix<float, 3, 3, Eigen::RowMajor> H;

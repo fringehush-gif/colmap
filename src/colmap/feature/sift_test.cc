@@ -34,6 +34,7 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -2395,6 +2396,55 @@ TEST(MatchGuidedSiftFeaturesGPU, Nominal) {
     EXPECT_EQ(two_view_geometry.inlier_matches.size(), 0);
     matcher->MatchGuided(kMaxError, image0, image0, &two_view_geometry);
     EXPECT_EQ(two_view_geometry.inlier_matches.size(), 0);
+  });
+}
+
+TEST(MatchGuidedSiftFeaturesGPU, RetryAfterCameraNormalizationFailure) {
+  RunGpuTest([] {
+    const Camera camera = Camera::CreateFromModelId(
+        1, CameraModelId::kSimpleRadial, 100.0, 100, 200);
+    const FeatureMatcher::Image image1 = {
+        /*image_id=*/1,
+        /*camera=*/&camera,
+        std::make_shared<FeatureKeypoints>(
+            std::vector<FeatureKeypoint>{{1, 0}, {2, 0}}),
+        std::make_shared<FeatureDescriptors>(
+            CreateRandomFeatureDescriptors(2))};
+    const FeatureMatcher::Image image2 = {
+        /*image_id=*/2,
+        /*camera=*/&camera,
+        std::make_shared<FeatureKeypoints>(
+            std::vector<FeatureKeypoint>{{2, 0}, {1, 0}}),
+        std::make_shared<FeatureDescriptors>(
+            CreateReversedDescriptors(*image1.descriptors))};
+    FeatureMatcher::Image replacement = image1;
+    replacement.image_id = 3;
+
+    FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+    options.use_gpu = true;
+    options.max_num_matches = 1000;
+    auto matcher = THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+
+    constexpr double kMaxError = 4.0;
+    TwoViewGeometry geometry = CreatePlanarTwoViewGeometry();
+    matcher->MatchGuided(kMaxError, image1, image2, &geometry);
+    ASSERT_EQ(geometry.inlier_matches.size(), 2);
+    ExpectReversedInlierMatches(geometry);
+
+    // The replacement's descriptors are uploaded before normalizing its rays.
+    TwoViewGeometry failed_geometry;
+    failed_geometry.config = TwoViewGeometry::CALIBRATED;
+    failed_geometry.E = EssentialMatrixFromPose(
+        Rigid3d(Eigen::Quaterniond::Identity(), Eigen::Vector3d::UnitX()));
+    failed_geometry.camera2 = Camera();
+    ASSERT_THROW(
+        matcher->MatchGuided(kMaxError, image1, replacement, &failed_geometry),
+        std::domain_error);
+
+    FeatureMatches matches;
+    matcher->Match(image1, image2, &matches);
+    ASSERT_EQ(matches.size(), 2);
+    ExpectReversedMatches(matches);
   });
 }
 
