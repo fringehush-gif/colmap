@@ -160,10 +160,13 @@ TEST(StereoFusion, RowStripsPreserveMasksAndTail) {
       const bool masked = (row + 2 * col) % 7 == 0 || row == 10;
       const bool valid_depth = (row + col) % 11 != 0;
       depths.Set(row, col, valid_depth ? 1.0f : 0.0f);
-      normals.Set(row, col, 2, 1.0f);
+      // Reject one seed after collecting its samples. The next seed still
+      // needs to start with empty scratch buffers.
+      const bool valid_normal = row != 0 || col != 1;
+      normals.Set(row, col, 2, valid_normal ? 1.0f : 0.0f);
       bitmap.SetPixel(col, row, BitmapColor<uint8_t>(col + 1, row + 1, 17));
       mask.SetPixel(col, row, BitmapColor<uint8_t>(masked ? 0 : 255));
-      if (!masked && valid_depth) {
+      if (!masked && valid_depth && valid_normal) {
         expected_pixels.emplace_back(row, col);
       }
     }
@@ -173,7 +176,7 @@ TEST(StereoFusion, RowStripsPreserveMasksAndTail) {
   ASSERT_TRUE(bitmap.Write(temp_dir / "images/image.png"));
   ASSERT_TRUE(mask.Write(temp_dir / "masks/image.png"));
   std::ofstream(temp_dir / "stereo/fusion.cfg") << "image.png\n";
-  ASSERT_FALSE(expected_pixels.empty());
+  ASSERT_EQ(expected_pixels.size(), 68);
   ASSERT_EQ(expected_pixels.back().first, kHeight - 1);
 
   for (const bool use_cache : {false, true}) {
