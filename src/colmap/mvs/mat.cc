@@ -7,6 +7,7 @@
 #include "colmap/util/string.h"
 
 #include <fstream>
+#include <limits>
 #include <vector>
 
 namespace colmap {
@@ -26,7 +27,15 @@ void Mat<float>::Read(const std::filesystem::path& path) {
   THROW_CHECK_GT(depth_, 0) << path;
   data_.resize(width_ * height_ * depth_);
 
-  ReadBinaryLittleEndian<float>(&file, &data_);
+  if (IsLittleEndian() &&
+      data_.size() <=
+          static_cast<size_t>(std::numeric_limits<std::streamsize>::max()) /
+              sizeof(float)) {
+    file.read(reinterpret_cast<char*>(data_.data()),
+              static_cast<std::streamsize>(data_.size() * sizeof(float)));
+  } else {
+    ReadBinaryLittleEndian<float>(&file, &data_);
+  }
   file.close();
 }
 
