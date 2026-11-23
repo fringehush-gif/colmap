@@ -2136,9 +2136,9 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
       printf("diag: % 6.3e  ", diag_current);
       printf("dt_inc: % 10.6f  ", dt_inc);
       printf("dt_tot: % 10.6f  ", dt_tot);
-      t_prev = t_now;
       printf("\n");
     }
+    t_prev = t_now;
     if (result.exit_reason == ExitReason::CONVERGED_DIAG_EXIT) {
       break;
     }

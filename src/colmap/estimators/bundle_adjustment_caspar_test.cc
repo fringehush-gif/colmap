@@ -542,6 +542,13 @@ TEST(CasparOptions, ReportsCompletedAndTerminalAttempts) {
       for (size_t i = 0; i < summary->iterations.size(); ++i) {
         EXPECT_EQ(summary->iterations[i].solver_iter, static_cast<int>(i));
         EXPECT_FALSE(summary->iterations[i].step_accepted);
+        const auto& row = summary->iterations[i];
+        const double previous_time =
+            i == 0 ? 0.0 : summary->iterations[i - 1].dt_tot;
+        EXPECT_NEAR(row.dt_inc,
+                    row.dt_tot - previous_time,
+                    8 * std::numeric_limits<double>::epsilon() *
+                        std::max(1.0, row.dt_tot));
       }
       if (!summary->iterations.empty()) {
         EXPECT_EQ(summary->iterations.front().diag, 1.0);
