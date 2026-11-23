@@ -290,7 +290,7 @@ namespace PoissonRecon
 			void writeBinary( FILE *fp , const VertexType &dt ) const
 			{
 				if( _realTypeOnDisk ) fwrite( &dt[0] , sizeof(Real) , Dim , fp );
-				VertexIO< Real >::WriteBinary( fp , _typeOnDisk , Dim , &dt[0] );
+				else VertexIO< Real >::WriteBinary( fp , _typeOnDisk , Dim , &dt[0] );
 			}
 
 			static constexpr bool IsStaticallyAllocated( void ){ return true; } 
@@ -342,7 +342,7 @@ namespace PoissonRecon
 			void writeBinary( FILE *fp , const VertexType &dt ) const
 			{
 				if( _realTypeOnDisk ) fwrite( &dt[0] , sizeof(Real) , 3 , fp );
-				VertexIO< Real >::WriteBinary( fp , _typeOnDisk , 3 , &dt[0] );
+				else VertexIO< Real >::WriteBinary( fp , _typeOnDisk , 3 , &dt[0] );
 			}
 
 			static constexpr bool IsStaticallyAllocated( void ){ return true; } 
@@ -393,7 +393,7 @@ namespace PoissonRecon
 			void writeBinary( FILE *fp , const VertexType &dt ) const
 			{
 				if( _realTypeOnDisk ) fwrite( &dt[0] , sizeof(Real) , 4 , fp );
-				VertexIO< Real >::WriteBinary( fp , _typeOnDisk , 4 , &dt[0] );
+				else VertexIO< Real >::WriteBinary( fp , _typeOnDisk , 4 , &dt[0] );
 			}
 
 			static constexpr bool IsStaticallyAllocated( void ){ return true; } 
