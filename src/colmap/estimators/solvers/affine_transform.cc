@@ -41,8 +41,8 @@ void AffineTransformEstimator::Estimate(const std::vector<X_t>& src,
       return;
     }
   } else {
-    Eigen::JacobiSVD<Eigen::Matrix<double, Eigen::Dynamic, 6>> svd(
-        A, Eigen::ComputeFullU | Eigen::ComputeFullV);
+    Eigen::JacobiSVD<Eigen::MatrixXd> svd(
+        A, Eigen::ComputeThinU | Eigen::ComputeFullV);
     if (svd.rank() < 6) {
       return;
     }
