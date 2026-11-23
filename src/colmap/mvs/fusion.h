@@ -87,8 +87,11 @@ class StereoFusion : public BaseController {
   void Run();
 
  private:
+  struct FusionBuffers;
+
   void InitFusedPixelMask(int image_idx, size_t width, size_t height);
-  void Fuse(int thread_id, int image_idx, int row, int col);
+  void Fuse(
+      int thread_id, int image_idx, int row, int col, FusionBuffers& buffers);
 
   const StereoFusionOptions options_;
   const std::filesystem::path workspace_path_;
