@@ -913,6 +913,8 @@ TEST(CasparRejectedStep, RetriesMatchFreshLinearizations) {
       initial.Image(initial.RegImageIds().front()).FrameId());
   config.AddConstantPoint(initial.Points3D().begin()->first);
 
+  constexpr double kDiagMin = 0.125;
+
   // Reject every proposal while keeping a coupled pose/point linear system.
   // Each retry must match a fresh solve at the same state and damping.
   for (const int pcg_limit : {1, 3}) {
@@ -927,6 +929,7 @@ TEST(CasparRejectedStep, RetriesMatchFreshLinearizations) {
         options.caspar->solver_iter_max = iterations;
         options.caspar->pcg_iter_max = pcg_limit;
         options.caspar->diag_init = diag;
+        options.caspar->diag_min = kDiagMin;
         options.caspar->solver_rel_decrease_min = 0;
         options.caspar->pcg_rel_decrease_min = score_pcg ? 1 : -1;
         options.caspar->pcg_rel_score_exit = -1;
@@ -943,6 +946,9 @@ TEST(CasparRejectedStep, RetriesMatchFreshLinearizations) {
       ASSERT_NE(retries, nullptr);
       ASSERT_GT(retries->initial_score, 0);
       ASSERT_EQ(retries->iterations.size(), 3u);
+      EXPECT_EQ(retries->iterations[0].diag, 1.0);
+      EXPECT_EQ(retries->iterations[1].diag, 2.0);
+      EXPECT_EQ(retries->iterations[2].diag, 8.0);
       for (const auto& retry : retries->iterations) {
         SCOPED_TRACE(retry.solver_iter);
         Reconstruction fresh = initial;
@@ -968,6 +974,21 @@ TEST(CasparRejectedStep, RetriesMatchFreshLinearizations) {
                     tolerance * std::max(1.0, std::abs(expected.score_current)));
         for (const auto& [point_id, point] : retried.Points3D()) {
           EXPECT_EQ(point.xyz, fresh.Point3D(point_id).xyz);
+        }
+      }
+
+      for (const double initial_diag : {0.0, kDiagMin / 2}) {
+        SCOPED_TRACE(initial_diag);
+        Reconstruction from_floor = initial;
+        const auto summary = solve(3, initial_diag, from_floor);
+        ASSERT_NE(summary, nullptr);
+        ASSERT_EQ(summary->iterations.size(), 3u);
+        EXPECT_EQ(summary->iterations[0].diag, kDiagMin);
+        EXPECT_EQ(summary->iterations[1].diag, 2 * kDiagMin);
+        EXPECT_EQ(summary->iterations[2].diag, 8 * kDiagMin);
+        for (const auto& step : summary->iterations) {
+          EXPECT_FALSE(step.step_accepted);
+          EXPECT_TRUE(std::isfinite(step.score_current));
         }
       }
     }

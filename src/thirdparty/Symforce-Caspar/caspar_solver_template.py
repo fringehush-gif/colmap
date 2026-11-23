@@ -117,6 +117,10 @@ def patch_solver_templates(source: str, header: str) -> tuple[str, str]:
     )
     replacements = (
         (
+            "  {{solver.linear_t}} diag = params_.diag_init;",
+            "  {{solver.linear_t}} diag = std::max(params_.diag_init, params_.diag_min);",
+        ),
+        (
             "  result.initial_score = score_best;",
             """  result.initial_score = score_best;
   if (!std::isfinite(score_best)) {

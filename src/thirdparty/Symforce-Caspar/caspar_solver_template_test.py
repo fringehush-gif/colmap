@@ -22,6 +22,7 @@ SOURCE = """namespace {
 
 }
 void solve() {
+  {{solver.linear_t}} diag = params_.diag_init;
   result.initial_score = score_best;
         {{solver.linear_t}} score_new_pcg = DoRetractScore();
         score_best_pcg = score_new_pcg;
@@ -132,6 +133,10 @@ def generation_namespace(installed, output, precision):
 
 
 class CasparSolverTemplateTest(unittest.TestCase):
+    def test_initial_damping_uses_configured_minimum(self) -> None:
+        source, _ = template.patch_solver_templates(SOURCE, HEADER)
+        self.assertIn("diag = std::max(params_.diag_init, params_.diag_min);", source)
+
     def test_paired_score_prediction_and_mapping_bounds(self) -> None:
         source, header = template.patch_solver_templates(SOURCE, HEADER)
         for expected in (
