@@ -7,6 +7,8 @@
 #include "colmap/scene/reconstruction.h"
 #include "colmap/sensor/bitmap.h"
 
+#include <optional>
+
 namespace colmap {
 
 struct UndistortCameraOptions {
@@ -45,11 +47,18 @@ struct UndistortCameraOptions {
   // Set to -1 to disable the check (default).
   double max_cam_point_norm = -1;
 
-  // Options controlling image warping during undistortion. A pinhole ROI with
-  // neutral parameters is sampled directly for direct_warp_min_scale in [0, 1].
-  // Larger thresholds retain the usual warp behavior. Actual downscaling
-  // follows the warp options.
+  // Options controlling image warping during undistortion. A derived pinhole
+  // ROI with neutral parameters is sampled directly for direct_warp_min_scale
+  // in [0, 1]. Larger thresholds and actual downscaling follow the warp
+  // options.
   WarpImageOptions warp_options;
+
+  // If set, all perspective cameras are undistorted to this camera instead of
+  // a camera derived from each distorted camera, e.g., to undistort images of
+  // different cameras to the same camera. It must be a PINHOLE camera. The
+  // other camera options, except for the warp options, are then ignored for
+  // perspective cameras (but must still be valid).
+  std::optional<Camera> target_camera;
 };
 
 // Undistort camera by resizing the image and shifting the principal point.
@@ -73,6 +82,16 @@ struct UndistortCameraOptions {
 // constraints.
 Camera UndistortCamera(const UndistortCameraOptions& options,
                        const Camera& camera);
+
+// Whether undistortion leaves the camera and its images unchanged, so that the
+// images can be copied through as-is: no max_image_size is requested and the
+// camera is either spherical (no pinhole image plane to undistort to) or an
+// undistorted pinhole camera without a target camera or ROI. Fisheye cameras
+// always need conversion to pinhole, even with zero distortion. The undistorted
+// reconstruction and the undistorted images must make the same decision to
+// stay consistent.
+bool IsUndistortionNoOp(const UndistortCameraOptions& options,
+                        const Camera& camera);
 
 // Undistort image such that the viewing geometry of the undistorted image
 // follows a pinhole camera model. See `UndistortCamera` for more details

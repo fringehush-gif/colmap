@@ -8,7 +8,6 @@
 #include "colmap/util/string.h"
 #include "colmap/util/testing.h"
 
-#include <cmath>
 #include <filesystem>
 #include <fstream>
 
@@ -23,13 +22,17 @@ Reconstruction CreateSyntheticReconstructionWithBitmaps(
     int num_images = 2,
     int image_width = 100,
     int image_height = 100,
-    const std::string& image_extension = ".png") {
+    const std::string& image_extension = ".png",
+    CameraModelId camera_model_id = SimpleRadialCameraModel::model_id,
+    const std::vector<double>& camera_params = {1280, 512, 384, 0.05}) {
   SyntheticDatasetOptions synthetic_dataset_options;
   synthetic_dataset_options.num_rigs = 1;
   synthetic_dataset_options.num_cameras_per_rig = 1;
   synthetic_dataset_options.num_frames_per_rig = num_images;
   synthetic_dataset_options.camera_width = image_width;
   synthetic_dataset_options.camera_height = image_height;
+  synthetic_dataset_options.camera_model_id = camera_model_id;
+  synthetic_dataset_options.camera_params = camera_params;
   synthetic_dataset_options.image_extension = image_extension;
 
   Reconstruction reconstruction;
@@ -43,279 +46,6 @@ Reconstruction CreateSyntheticReconstructionWithBitmaps(
   }
 
   return reconstruction;
-}
-
-TEST(ImageUndistorters, ApplyRegionOfInterestToPinhole) {
-  const auto temp_dir = CreateTestDir();
-  const auto image_path = temp_dir / "input_images";
-  CreateDirIfNotExists(image_path);
-  Reconstruction reconstruction =
-      CreateSyntheticReconstructionWithBitmaps(image_path, /*num_images=*/1);
-  for (const auto& [camera_id, _] : reconstruction.Cameras()) {
-    reconstruction.Camera(camera_id) = Camera::CreateFromModelId(
-        camera_id, CameraModelId::kPinhole, 100, 100, 100);
-  }
-  const Image& image = reconstruction.Images().begin()->second;
-  Bitmap input(100, 100, true);
-  for (int y = 0; y < 100; ++y) {
-    for (int x = 0; x < 100; ++x) {
-      input.SetPixel(x,
-                     y,
-                     BitmapColor<uint8_t>(
-                         10 * (x / 5), 10 * (y / 5), 10 * ((x + y) / 10)));
-    }
-  }
-  ASSERT_TRUE(input.Write(image_path / image.Name()));
-  {
-    // These bytes survive copying, but not decoding and writing the image.
-    std::ofstream file(image_path / image.Name(),
-                       std::ios::binary | std::ios::app);
-    file << "copy-through-marker";
-  }
-  std::vector<char> input_bytes;
-  ReadBinaryBlob(image_path / image.Name(), &input_bytes);
-
-  for (const bool crop : {false, true}) {
-    for (const auto copy_type : {FileCopyType::COPY,
-                                 FileCopyType::HARD_LINK,
-                                 FileCopyType::SOFT_LINK}) {
-      // The unchanged control needs no symlink privileges on Windows.
-      if (!crop && copy_type != FileCopyType::COPY) {
-        continue;
-      }
-      SCOPED_TRACE(crop);
-      SCOPED_TRACE(static_cast<int>(copy_type));
-      const auto output_path =
-          temp_dir / StringPrintf("output_%d_%d", crop, int(copy_type));
-      const auto standalone_path =
-          temp_dir / StringPrintf("standalone_%d_%d", crop, int(copy_type));
-      CreateDirIfNotExists(output_path);
-      UndistortCameraOptions camera_options;
-      if (crop) {
-        camera_options.roi_min_x = 0.1;
-        camera_options.roi_min_y = 0.2;
-        camera_options.roi_max_x = 0.9;
-        camera_options.roi_max_y = 0.8;
-      }
-      COLMAPUndistorter::Options options;
-      options.num_threads = 1;
-      options.copy_type = copy_type;
-      COLMAPUndistorter undistorter(
-          options, camera_options, reconstruction, image_path, output_path);
-      undistorter.Run();
-      StandaloneImageUndistorter::Options standalone_options;
-      standalone_options.num_threads = 1;
-      standalone_options.copy_type = copy_type;
-      standalone_options.image_names_and_cameras.emplace_back(
-          image.Name(), *image.CameraPtr());
-      StandaloneImageUndistorter standalone(
-          standalone_options, camera_options, image_path, standalone_path);
-      standalone.Run();
-
-      for (const auto& path : {output_path / "images", standalone_path}) {
-        if (crop) {
-          Bitmap bitmap;
-          ASSERT_TRUE(bitmap.Read(path / image.Name()));
-          EXPECT_EQ(bitmap.Width(), 80);
-          EXPECT_EQ(bitmap.Height(), 60);
-          const auto pixel = bitmap.GetPixel(22, 22);
-          ASSERT_TRUE(pixel.has_value());
-          // Output (22, 22) comes from input (32, 42), not (22, 22).
-          EXPECT_EQ(*pixel, BitmapColor<uint8_t>(60, 80, 70));
-          EXPECT_FALSE(std::filesystem::equivalent(image_path / image.Name(),
-                                                   path / image.Name()));
-        } else {
-          std::vector<char> output_bytes;
-          ReadBinaryBlob(path / image.Name(), &output_bytes);
-          EXPECT_EQ(output_bytes, input_bytes);
-        }
-      }
-      Reconstruction output_reconstruction;
-      output_reconstruction.Read(output_path / "sparse");
-      const Camera& camera = output_reconstruction.Camera(image.CameraId());
-      EXPECT_EQ(camera.width, crop ? 80 : 100);
-      EXPECT_EQ(camera.height, crop ? 60 : 100);
-      EXPECT_EQ(camera.PrincipalPointX(), crop ? 40 : 50);
-      EXPECT_EQ(camera.PrincipalPointY(), crop ? 30 : 50);
-      std::vector<char> remaining_input_bytes;
-      ReadBinaryBlob(image_path / image.Name(), &remaining_input_bytes);
-      EXPECT_EQ(remaining_input_bytes, input_bytes);
-    }
-  }
-}
-
-TEST(ImageUndistorters, ThinRegionOfInterestWithMaxImageSize) {
-  const auto temp_dir = CreateTestDir();
-  const auto image_path = temp_dir / "input_images";
-  CreateDirIfNotExists(image_path);
-  Reconstruction reconstruction =
-      CreateSyntheticReconstructionWithBitmaps(image_path, /*num_images=*/1);
-  for (const auto& [camera_id, _] : reconstruction.Cameras()) {
-    reconstruction.Camera(camera_id) = Camera::CreateFromModelId(
-        camera_id, CameraModelId::kPinhole, 100, 100, 100);
-  }
-  Image& image = reconstruction.Image(reconstruction.Images().begin()->first);
-  ASSERT_GT(image.NumPoints2D(), 0);
-  image.Point2D(0).xy = Eigen::Vector2d(50.5, 50.5);
-
-  for (const bool horizontal : {false, true}) {
-    SCOPED_TRACE(horizontal);
-    UndistortCameraOptions camera_options;
-    camera_options.max_image_size = 40;
-    if (horizontal) {
-      camera_options.roi_min_y = 0.501;
-      camera_options.roi_max_y = 0.502;
-    } else {
-      camera_options.roi_min_x = 0.501;
-      camera_options.roi_max_x = 0.502;
-    }
-    const auto output_path = temp_dir / StringPrintf("output_%d", horizontal);
-    const auto standalone_path =
-        temp_dir / StringPrintf("standalone_%d", horizontal);
-    CreateDirIfNotExists(output_path);
-    COLMAPUndistorter::Options options;
-    options.num_threads = 1;
-    COLMAPUndistorter undistorter(
-        options, camera_options, reconstruction, image_path, output_path);
-    ASSERT_NO_THROW(undistorter.Run());
-
-    StandaloneImageUndistorter::Options standalone_options;
-    standalone_options.num_threads = 1;
-    standalone_options.image_names_and_cameras.emplace_back(image.Name(),
-                                                            *image.CameraPtr());
-    StandaloneImageUndistorter standalone(
-        standalone_options, camera_options, image_path, standalone_path);
-    ASSERT_NO_THROW(standalone.Run());
-
-    for (const auto& path : {output_path / "images", standalone_path}) {
-      Bitmap bitmap;
-      ASSERT_TRUE(bitmap.Read(path / image.Name()));
-      EXPECT_EQ(bitmap.Width(), horizontal ? 40 : 1);
-      EXPECT_EQ(bitmap.Height(), horizontal ? 1 : 40);
-      for (const uint8_t pixel : bitmap.RowMajorData()) {
-        EXPECT_GT(pixel, 0);
-      }
-    }
-
-    Reconstruction output_reconstruction;
-    output_reconstruction.Read(output_path / "sparse");
-    const Camera& camera = output_reconstruction.Camera(image.CameraId());
-    EXPECT_EQ(camera.width, horizontal ? 40 : 1);
-    EXPECT_EQ(camera.height, horizontal ? 1 : 40);
-    EXPECT_EQ(camera.FocalLengthX(), horizontal ? 40 : 100);
-    EXPECT_EQ(camera.FocalLengthY(), horizontal ? 100 : 40);
-    EXPECT_EQ(camera.PrincipalPointX(), horizontal ? 20 : 0);
-    EXPECT_EQ(camera.PrincipalPointY(), horizontal ? 0 : 20);
-    const Image& output_image = output_reconstruction.Image(image.ImageId());
-    ASSERT_EQ(output_image.NumPoints2D(), image.NumPoints2D());
-    EXPECT_NEAR(output_image.Point2D(0).xy.x(), horizontal ? 20.2 : 0.5, 1e-12);
-    EXPECT_NEAR(output_image.Point2D(0).xy.y(), horizontal ? 0.5 : 20.2, 1e-12);
-  }
-}
-
-TEST(ImageUndistorters, ConvertFisheyeWithoutDistortionCoefficients) {
-  const auto temp_dir = CreateTestDir();
-  const auto image_path = temp_dir / "input_images";
-  CreateDirIfNotExists(image_path);
-  Reconstruction reconstruction = CreateSyntheticReconstructionWithBitmaps(
-      image_path, /*num_images=*/1, /*image_width=*/128, /*image_height=*/64);
-  ASSERT_EQ(reconstruction.NumImages(), 1);
-  Image& image = reconstruction.Image(reconstruction.Images().begin()->first);
-  ASSERT_GT(image.NumPoints2D(), 0);
-  Camera& camera = reconstruction.Camera(image.CameraId());
-
-  Bitmap input(128, 64, true);
-  for (int y = 0; y < input.Height(); ++y) {
-    for (int x = 0; x < input.Width(); ++x) {
-      input.SetPixel(x,
-                     y,
-                     BitmapColor<uint8_t>(static_cast<uint8_t>(2 * x),
-                                          static_cast<uint8_t>(4 * y),
-                                          static_cast<uint8_t>(x + y)));
-    }
-  }
-  ASSERT_TRUE(input.Write(image_path / image.Name()));
-
-  struct TestCase {
-    CameraModelId model;
-    bool convert;
-  };
-  const TestCase test_cases[] = {{CameraModelId::kSimpleFisheye, true},
-                                 {CameraModelId::kFisheye, true},
-                                 {CameraModelId::kOpenCVFisheye, true},
-                                 {CameraModelId::kPinhole, false},
-                                 {CameraModelId::kEquirectangular, false}};
-  for (const auto& test_case : test_cases) {
-    SCOPED_TRACE(static_cast<int>(test_case.model));
-    camera = Camera::CreateFromModelId(
-        image.CameraId(), test_case.model, 64, 128, 64);
-    ASSERT_TRUE(camera.IsUndistorted());
-    // For the equidistant models, x = cx + f * theta with theta = 0.25.
-    image.Point2D(0).xy = Eigen::Vector2d(80, 32);
-    const UndistortCameraOptions camera_options;
-    Bitmap expected;
-    Camera expected_camera;
-    if (test_case.convert) {
-      UndistortImage(
-          camera_options, input, camera, &expected, &expected_camera);
-      ASSERT_EQ(expected_camera.model_id, CameraModelId::kPinhole);
-      ASSERT_NE(expected.RowMajorData(), input.RowMajorData());
-    } else {
-      expected = input.Clone();
-      expected_camera = camera;
-    }
-
-    const auto output_path =
-        temp_dir / StringPrintf("output_%d", int(test_case.model));
-    const auto standalone_path =
-        temp_dir / StringPrintf("standalone_%d", int(test_case.model));
-    CreateDirIfNotExists(output_path);
-    COLMAPUndistorter::Options options;
-    options.num_threads = 1;
-    COLMAPUndistorter undistorter(
-        options, camera_options, reconstruction, image_path, output_path);
-    undistorter.Run();
-    StandaloneImageUndistorter::Options standalone_options;
-    standalone_options.num_threads = 1;
-    standalone_options.image_names_and_cameras.emplace_back(image.Name(),
-                                                            camera);
-    StandaloneImageUndistorter standalone(
-        standalone_options, camera_options, image_path, standalone_path);
-    standalone.Run();
-
-    for (const auto& path : {output_path / "images", standalone_path}) {
-      Bitmap actual;
-      ASSERT_TRUE(actual.Read(path / image.Name()));
-      EXPECT_EQ(actual.Width(), expected.Width());
-      EXPECT_EQ(actual.Height(), expected.Height());
-      EXPECT_EQ(actual.RowMajorData(), expected.RowMajorData());
-    }
-
-    Reconstruction output_reconstruction;
-    output_reconstruction.Read(output_path / "sparse");
-    const Image& output_image = output_reconstruction.Image(image.ImageId());
-    EXPECT_EQ(output_image.CameraId(), image.CameraId());
-    const Camera& output_camera =
-        output_reconstruction.Camera(image.CameraId());
-    EXPECT_EQ(output_camera.camera_id, image.CameraId());
-    EXPECT_EQ(output_camera.model_id, expected_camera.model_id);
-    EXPECT_EQ(output_camera.width, expected_camera.width);
-    EXPECT_EQ(output_camera.height, expected_camera.height);
-    EXPECT_EQ(output_camera.params, expected_camera.params);
-    ASSERT_EQ(output_image.NumPoints2D(), image.NumPoints2D());
-    const Eigen::Vector2d& xy = output_image.Point2D(0).xy;
-    if (test_case.convert) {
-      // Independent equidistant-to-pinhole projection for a noncentral ray.
-      EXPECT_NEAR(xy.x(),
-                  output_camera.PrincipalPointX() +
-                      output_camera.FocalLengthX() * std::tan(0.25),
-                  1e-12);
-      EXPECT_NEAR(xy.y(), output_camera.PrincipalPointY(), 1e-12);
-    } else {
-      EXPECT_EQ(xy.x(), 80);
-      EXPECT_EQ(xy.y(), 32);
-    }
-  }
 }
 
 TEST(COLMAPUndistorter, Integration) {
@@ -350,6 +80,128 @@ TEST(COLMAPUndistorter, Integration) {
   // Expect dense reconstruction files to be written.
   EXPECT_TRUE(ExistsFile(output_path / "stereo/patch-match.cfg"));
   EXPECT_TRUE(ExistsFile(output_path / "stereo/fusion.cfg"));
+}
+
+TEST(ImageUndistorters, RegionOfInterestKeepsPixelsAndObservationsAligned) {
+  const auto temp_dir = CreateTestDir();
+  const auto image_path = temp_dir / "input_images";
+  CreateDirIfNotExists(image_path);
+  Reconstruction reconstruction;
+  const Camera camera = Camera::CreateFromModelId(
+      7, CameraModelId::kPinhole, 128, 128, 128, CameraSource::EXIF);
+  reconstruction.AddCameraWithTrivialRig(camera);
+  Image image;
+  image.SetImageId(3);
+  image.SetCameraId(7);
+  image.SetName("image.png");
+  image.SetPoints2D({Eigen::Vector2d(60.5, 70.5), Eigen::Vector2d(5, 10)});
+  reconstruction.AddImageWithTrivialFrame(image, Rigid3d());
+  Bitmap input(128, 128, true);
+  for (int y = 0; y < 128; ++y) {
+    for (int x = 0; x < 128; ++x) {
+      input.SetPixel(x, y, BitmapColor<uint8_t>(x, y, x + y));
+    }
+  }
+  ASSERT_TRUE(input.Write(image_path / image.Name()));
+  {
+    std::ofstream file(image_path / image.Name(),
+                       std::ios::binary | std::ios::app);
+    file << "copy-through-marker";
+  }
+  std::vector<char> input_bytes;
+  ReadBinaryBlob(image_path / image.Name(), &input_bytes);
+
+  for (const int mode : {0, 1, 2}) {
+    SCOPED_TRACE(mode);
+    UndistortCameraOptions camera_options;
+    camera_options.warp_options.direct_warp_min_scale = 0;
+    if (mode > 0) {
+      camera_options.roi_min_x = camera_options.roi_min_y = 0.375;
+      camera_options.roi_max_x = camera_options.roi_max_y = 0.625;
+    }
+    if (mode == 2) {
+      camera_options.target_camera =
+          Camera::CreateFromModelId(9, CameraModelId::kPinhole, 128, 32, 32);
+      camera_options.roi_min_x = camera_options.roi_min_y = 0.125;
+    }
+    Reconstruction in_memory = reconstruction;
+    UndistortReconstruction(camera_options, &in_memory);
+    EXPECT_EQ(in_memory.Camera(7).camera_id, 7);
+    EXPECT_EQ(in_memory.Camera(7).source,
+              mode == 2 ? camera_options.target_camera->source : camera.source);
+
+    const auto output_path = temp_dir / StringPrintf("output_%d", mode);
+    const auto standalone_path = temp_dir / StringPrintf("standalone_%d", mode);
+    CreateDirIfNotExists(output_path);
+    COLMAPUndistorter::Options options;
+    options.num_threads = 1;
+    COLMAPUndistorter(
+        options, camera_options, reconstruction, image_path, output_path)
+        .Run();
+    StandaloneImageUndistorter::Options standalone_options;
+    standalone_options.num_threads = 1;
+    standalone_options.image_names_and_cameras.emplace_back(image.Name(),
+                                                            camera);
+    StandaloneImageUndistorter(
+        standalone_options, camera_options, image_path, standalone_path)
+        .Run();
+    Bitmap expected = input.Clone();
+    if (mode > 0) {
+      expected.Crop(48, 48, 32, 32);
+    }
+    for (const auto& path : {output_path / "images", standalone_path}) {
+      Bitmap output;
+      ASSERT_TRUE(output.Read(path / image.Name()));
+      EXPECT_EQ(output.Width(), expected.Width());
+      EXPECT_EQ(output.Height(), expected.Height());
+      EXPECT_EQ(output.RowMajorData(), expected.RowMajorData());
+      if (mode == 0) {
+        std::vector<char> output_bytes;
+        ReadBinaryBlob(path / image.Name(), &output_bytes);
+        EXPECT_EQ(output_bytes, input_bytes);
+      }
+    }
+    Reconstruction output;
+    output.Read(output_path / "sparse");
+    EXPECT_EQ(output.Camera(7).camera_id, 7);
+    EXPECT_EQ(output.Camera(7).params, in_memory.Camera(7).params);
+    for (point2D_t idx = 0; idx < image.NumPoints2D(); ++idx) {
+      const Eigen::Vector2d expected_xy =
+          image.Point2D(idx).xy - Eigen::Vector2d::Constant(mode > 0 ? 48 : 0);
+      EXPECT_TRUE(output.Image(3).Point2D(idx).xy.isApprox(expected_xy, 1e-12));
+    }
+  }
+}
+
+TEST(COLMAPUndistorter, UndistortsZeroDistortionFisheyeCameras) {
+  const auto temp_dir = CreateTestDir();
+  const auto image_path = temp_dir / "input_images";
+  const auto output_path = temp_dir / "output";
+  CreateDirIfNotExists(image_path);
+  CreateDirIfNotExists(output_path);
+
+  // SIMPLE_FISHEYE has no distortion parameters, but MVS needs pinhole cameras.
+  const Reconstruction reconstruction =
+      CreateSyntheticReconstructionWithBitmaps(
+          image_path,
+          /*num_images=*/1,
+          /*image_width=*/100,
+          /*image_height=*/100,
+          /*image_extension=*/".png",
+          SimpleFisheyeCameraModel::model_id,
+          /*camera_params=*/{50, 50, 50});
+
+  COLMAPUndistorter undistorter(COLMAPUndistorter::Options(),
+                                UndistortCameraOptions(),
+                                reconstruction,
+                                image_path,
+                                output_path);
+  undistorter.Run();
+
+  Reconstruction undistorted_reconstruction;
+  undistorted_reconstruction.Read(output_path / "sparse");
+  EXPECT_EQ(undistorted_reconstruction.Camera(1).model_id,
+            PinholeCameraModel::model_id);
 }
 
 TEST(COLMAPUndistorter, StopsPendingWork) {
@@ -439,6 +291,50 @@ TEST(COLMAPUndistorter, JpegQuality) {
   // Verify undistorted images were written.
   for (const auto& [image_id, image] : reconstruction.Images()) {
     EXPECT_TRUE(ExistsFile(output_path / "images" / image.Name()));
+  }
+}
+
+TEST(COLMAPUndistorter, TargetCamera) {
+  const auto temp_dir = CreateTestDir();
+  const auto image_path = temp_dir / "input_images";
+  const auto output_path = temp_dir / "output";
+  CreateDirIfNotExists(image_path);
+  CreateDirIfNotExists(output_path);
+
+  // Already-undistorted images are also undistorted to the target camera
+  // instead of being copied.
+  Reconstruction reconstruction =
+      CreateSyntheticReconstructionWithBitmaps(image_path);
+  for (const auto& [camera_id, _] : reconstruction.Cameras()) {
+    reconstruction.Camera(camera_id) = Camera::CreateFromModelId(
+        camera_id, CameraModelId::kPinhole, 100, 100, 100);
+  }
+
+  UndistortCameraOptions camera_options;
+  camera_options.target_camera =
+      Camera::CreateFromModelId(2, CameraModelId::kPinhole, 50, 60, 40);
+  COLMAPUndistorter undistorter(COLMAPUndistorter::Options(),
+                                camera_options,
+                                reconstruction,
+                                image_path,
+                                output_path);
+  undistorter.Run();
+
+  for (const auto& [image_id, image] : reconstruction.Images()) {
+    Bitmap bitmap;
+    ASSERT_TRUE(bitmap.Read(output_path / "images" / image.Name()));
+    EXPECT_EQ(bitmap.Width(), 60);
+    EXPECT_EQ(bitmap.Height(), 40);
+  }
+  Reconstruction undistorted_reconstruction;
+  undistorted_reconstruction.Read(output_path / "sparse");
+  EXPECT_EQ(undistorted_reconstruction.NumCameras(),
+            reconstruction.NumCameras());
+  for (const auto& [camera_id, camera] : undistorted_reconstruction.Cameras()) {
+    EXPECT_TRUE(reconstruction.ExistsCamera(camera_id));
+    EXPECT_EQ(camera.width, 60);
+    EXPECT_EQ(camera.height, 40);
+    EXPECT_EQ(camera.params, camera_options.target_camera->params);
   }
 }
 
@@ -534,6 +430,64 @@ TEST(StandaloneImageUndistorter, Integration) {
   // Verify undistorted images were written.
   for (const auto& [image_name, camera] : options.image_names_and_cameras) {
     EXPECT_TRUE(ExistsFile(output_path / image_name));
+  }
+}
+
+TEST(StandaloneImageUndistorter, TargetCamera) {
+  const auto temp_dir = CreateTestDir();
+  const auto image_path = temp_dir / "input_images";
+  const auto output_path = temp_dir / "pure_output";
+  CreateDirIfNotExists(image_path);
+
+  // Already-undistorted images are also undistorted to the target camera
+  // instead of being copied.
+  const Reconstruction reconstruction =
+      CreateSyntheticReconstructionWithBitmaps(image_path);
+  StandaloneImageUndistorter::Options options;
+  for (const auto& [_, image] : reconstruction.Images()) {
+    options.image_names_and_cameras.emplace_back(
+        image.Name(),
+        Camera::CreateFromModelId(
+            image.CameraId(), CameraModelId::kPinhole, 100, 100, 100));
+  }
+  // Spherical images are still copied, since the target camera only applies to
+  // perspective cameras. Trailing bytes, which image readers ignore, are only
+  // kept by copying.
+  auto& [spherical_image_name, spherical_camera] =
+      options.image_names_and_cameras.back();
+  Bitmap spherical_bitmap;
+  ASSERT_TRUE(spherical_bitmap.Read(image_path / spherical_image_name));
+  {
+    std::ofstream file(image_path / spherical_image_name,
+                       std::ios::binary | std::ios::app);
+    file << "trailing";
+  }
+  spherical_camera = Camera::CreateFromModelId(spherical_camera.camera_id,
+                                               CameraModelId::kEquirectangular,
+                                               /*focal_length=*/0.0,
+                                               spherical_bitmap.Width(),
+                                               spherical_bitmap.Height());
+
+  UndistortCameraOptions camera_options;
+  camera_options.target_camera =
+      Camera::CreateFromModelId(1, CameraModelId::kPinhole, 50, 60, 40);
+  StandaloneImageUndistorter undistorter(
+      options, camera_options, image_path, output_path);
+  undistorter.Run();
+
+  for (const auto& [image_name, camera] : options.image_names_and_cameras) {
+    if (camera.IsSpherical()) {
+      std::vector<char> output_data;
+      ReadBinaryBlob(output_path / image_name, &output_data);
+      std::vector<char> input_data;
+      ReadBinaryBlob(image_path / image_name, &input_data);
+      EXPECT_EQ(output_data, input_data);
+      continue;
+    }
+    Bitmap bitmap;
+    ASSERT_TRUE(bitmap.Read(output_path / image_name));
+    EXPECT_EQ(bitmap.Width(), 60);
+    EXPECT_EQ(bitmap.Height(), 40);
   }
 }
 
