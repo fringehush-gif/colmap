@@ -476,6 +476,81 @@ TEST(CasparOptions, NonfiniteInitialObjectiveReturnsFailureWithoutWriteback) {
   }
 }
 
+TEST(CasparOptions, ReportsCompletedAndTerminalAttempts) {
+  if (GetNumCudaDevices() == 0) {
+    GTEST_SKIP() << "CUDA device unavailable";
+  }
+
+  SetPRNGSeed(0);
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 3;
+  dataset.num_points3D = 8;
+  Reconstruction initial;
+  SynthesizeDataset(dataset, &initial);
+  SyntheticNoiseOptions noise;
+  noise.point3D_stddev = 0.02;
+  SynthesizeNoise(noise, &initial);
+  BundleAdjustmentConfig config;
+  for (const image_t image_id : initial.RegImageIds()) {
+    config.AddImage(image_id);
+  }
+
+  struct TestCase {
+    const char* name;
+    int iteration_limit;
+    double score_limit;
+    double damping_limit;
+    int completed;
+  };
+  constexpr TestCase cases[] = {
+      {"exhaustion", 3, 0.0, 1000.0, 3},
+      {"score stop", 3, 1e6, 1000.0, 1},
+      {"damping stop", 3, 0.0, 1.5, 1},
+      {"zero attempts", 0, 0.0, 1000.0, 0},
+  };
+  for (const TestCase& test : cases) {
+    for (const bool collect : {true, false}) {
+      SCOPED_TRACE(::testing::Message() << test.name << " collect=" << collect);
+      BundleAdjustmentOptions options;
+      options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
+      options.caspar->gpu_index = "0";
+      options.caspar->solver_iter_max = test.iteration_limit;
+      options.caspar->pcg_iter_max = 1;
+      options.caspar->solver_rel_decrease_min = 0;
+      options.caspar->score_exit_value = test.score_limit;
+      options.caspar->diag_init = 1.0;
+      options.caspar->diag_scaling_up = 2.0;
+      options.caspar->diag_exit_value = test.damping_limit;
+      options.caspar->collect_iteration_data = collect;
+      Reconstruction reconstruction = initial;
+      const auto adjuster =
+          CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+      const auto summary =
+          std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
+              adjuster->Solve());
+      ASSERT_NE(summary, nullptr);
+      ASSERT_GT(summary->initial_score, 0.0);
+      ASSERT_LT(summary->initial_score, 1e6);
+      const bool exhausted = test.completed == test.iteration_limit;
+      EXPECT_EQ(summary->termination_type,
+                exhausted ? BundleAdjustmentTerminationType::NO_CONVERGENCE
+                          : BundleAdjustmentTerminationType::CONVERGENCE);
+      EXPECT_EQ(summary->iteration_count, test.completed);
+      ASSERT_EQ(summary->iterations.size(),
+                collect ? static_cast<size_t>(test.completed) : 0u);
+      for (size_t i = 0; i < summary->iterations.size(); ++i) {
+        EXPECT_EQ(summary->iterations[i].solver_iter, static_cast<int>(i));
+        EXPECT_FALSE(summary->iterations[i].step_accepted);
+      }
+      if (!summary->iterations.empty()) {
+        EXPECT_EQ(summary->iterations.front().diag, 1.0);
+      }
+    }
+  }
+}
+
 TEST(CasparPcg, CarriesResidualProductBetweenBetaUpdates) {
   if (GetNumCudaDevices() == 0) {
     GTEST_SKIP() << "CUDA device unavailable";

@@ -9,12 +9,12 @@ from pathlib import Path
 # SymForce cfff699b with the reviewed shared-index follow-ups. Keeping
 # one source contract removes legacy repair paths and prevents regeneration
 # from silently restoring an older numerical or readback implementation.
-GENERATOR_OWNER = "4649030fdf95e76563ae3a80c56dfcbb3cf00c5f"
+GENERATOR_OWNER = "20eab6c75b900b36096898e512f07d946fb5b30c"
 _GENERATION_INPUTS = {
     "source/runtime/memops.cuh": "2e5cbedb7f9c5a66f6ffd123c050e00546a2f951546627f42a4197b4ad22ce11",
     "source/templates/__init__.py": "17540509eb4673ded9977429c29b7841915a499e27ba6ed3669ba0d8b6322d1b",
     "code_generation/library.py": "251bd162ab85975c812a7e46991c83d91d9e52ff08953e8e7e067711b64154b4",
-    "source/templates/solver.cc.jinja": "d17b859ed4a254a5c0150a0349f8b50a97f385ffdb875864276de134f393f9e0",
+    "source/templates/solver.cc.jinja": "229d9f58bba212a76fb4f3b83356bf7585435cc300b3e530e5121af5ca6ea445",
     "source/templates/solver.h.jinja": "d9b1eb9db48105dbf426da503a4bd8c098f2cb3b4b0ee96987b20af02fde3f5c",
     "source/templates/buildfiles/CMakeLists.txt.jinja": "724402194513c78f776609344c8d77368253346a0124f67aa92d18dd60609831",
     "source/runtime/solver_tools.cu": "6e55cfcecabe8a1f8e33493e215e16c2962451ce416912006032dad6a4399b2b",
@@ -126,7 +126,6 @@ def patch_solver_templates(source: str, header: str) -> tuple[str, str]:
   if (!std::isfinite(score_best)) {
     result.exit_reason = ExitReason::FAILURE_NONFINITE_INITIAL_SCORE;
     result.final_score = score_best;
-    result.iteration_count = 0;
     result.runtime =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
             .count();
