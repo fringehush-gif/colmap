@@ -11,6 +11,7 @@ COLMAP_ADD_LIBRARY(
         depth_map.h depth_map.cc
         fusion.h fusion.cc
         image.h image.cc
+        image_size.h
         mat.h mat.cc
         mesh_simplification.h mesh_simplification.cc
         model.h model.cc

@@ -4,6 +4,10 @@
 
 #include "colmap/image/warp.h"
 #include "colmap/math/math.h"
+#include "colmap/mvs/image_size.h"
+
+#include <algorithm>
+#include <cmath>
 
 namespace colmap {
 namespace mvs {
@@ -33,8 +37,13 @@ void DepthMap::Rescale(const float factor) {
     return;
   }
 
-  const size_t new_width = std::round(width_ * factor);
-  const size_t new_height = std::round(height_ * factor);
+  const size_t new_width = std::max(1.0f, std::round(width_ * factor));
+  const size_t new_height = std::max(1.0f, std::round(height_ * factor));
+  RescaleToDimensions(new_width, new_height);
+}
+
+void DepthMap::RescaleToDimensions(const size_t new_width,
+                                   const size_t new_height) {
   std::vector<float> new_data(new_width * new_height);
   DownsampleImage(
       data_.data(), height_, width_, new_height, new_width, new_data.data());
@@ -47,12 +56,13 @@ void DepthMap::Rescale(const float factor) {
 }
 
 void DepthMap::Downsize(const size_t max_width, const size_t max_height) {
-  if (height_ <= max_height && width_ <= max_width) {
+  if (width_ == 0 || height_ == 0 ||
+      (height_ <= max_height && width_ <= max_width)) {
     return;
   }
-  const float factor_x = static_cast<float>(max_width) / width_;
-  const float factor_y = static_cast<float>(max_height) / height_;
-  Rescale(std::min(factor_x, factor_y));
+  const auto [new_width, new_height] = internal::ComputeDownsizeDimensions(
+      width_, height_, max_width, max_height);
+  RescaleToDimensions(new_width, new_height);
 }
 
 Bitmap DepthMap::ToBitmap(const float min_percentile,
