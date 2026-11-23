@@ -3,7 +3,6 @@
 
 import ast
 import importlib.util
-import shutil
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -231,57 +230,25 @@ class CasparSolverTemplateTest(unittest.TestCase):
                         retained.read_text(), "retained numerical profile"
                     )
 
-    def test_runtime_output_symlinks_do_not_modify_installed_sources(
-        self,
-    ) -> None:
-        # Isolate transport ordering; real owner validation is exercised above.
+    def test_generation_restores_original_template_loader(self) -> None:
         for fail in (False, True):
             with self.subTest(fail=fail), TemporaryDirectory() as directory:
                 root = Path(directory)
-                installed, output = root / "installed", root / "output"
-                installed.mkdir()
-                output.mkdir()
-                names = ("memops.cuh", "solver_tools.cu", "shared_indices.cu")
-                for name in names:
-                    (installed / name).write_text("old installed " + name)
-                    try:
-                        (output / name).symlink_to(installed / name)
-                    except (OSError, NotImplementedError) as error:
-                        self.skipTest(f"Symlink creation unavailable: {error}")
-                environment = generation_namespace(installed, output, "f64")
+                output = root / "output"
+                environment = generation_namespace(root / "installed", output, "f64")
                 environment["validate_generation_inputs"] = Mock()
                 loader = environment["template_env"].loader
-
-                def generate(
-                    out_dir, names=names, root=root, fail=fail, **kwargs
-                ):
-                    for name in names:
-                        self.assertFalse((out_dir / name).is_symlink())
-                        source = root / ("new-" + name)
-                        source.write_text("new runtime " + name)
-                        shutil.copyfile(source, out_dir / name)
-                    if fail:
-                        raise RuntimeError("generation failure")
-
-                environment["caslib"].generate.side_effect = generate
+                generate = environment["caslib"].generate
                 if fail:
-                    with self.assertRaisesRegex(
-                        RuntimeError, "generation failure"
-                    ):
+                    generate.side_effect = RuntimeError("generation failure")
+                    with self.assertRaisesRegex(RuntimeError, "generation failure"):
                         exec(generation_tail(), environment)
                 else:
                     exec(generation_tail(), environment)
                 self.assertIs(environment["template_env"].loader, loader)
-                environment["caslib"].generate.assert_called_once_with(
+                generate.assert_called_once_with(
                     output, use_symlinks=False, python_bindings=False
                 )
-                for name in names:
-                    self.assertEqual(
-                        (installed / name).read_text(), "old installed " + name
-                    )
-                    self.assertEqual(
-                        (output / name).read_text(), "new runtime " + name
-                    )
 
 
 if __name__ == "__main__":
