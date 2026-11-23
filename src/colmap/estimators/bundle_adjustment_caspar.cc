@@ -531,8 +531,29 @@ class CasparBundleAdjuster : public BundleAdjuster {
     }
 
     // Sort image IDs for deterministic selection (matches Ceres BA behavior).
-    std::vector<image_t> sorted_image_ids(config_.Images().begin(),
-                                          config_.Images().end());
+    FlatHashSet<frame_t> active_frame_ids;
+    for (const image_t image_id : config_.Images()) {
+      const Image& image = reconstruction_.Image(image_id);
+      if (!adapters_.count(image.CameraPtr()->model_id)) continue;
+      const bool pose_var = IsPoseVariable(image.FrameId());
+      const bool has_observation =
+          std::any_of(image.Points2D().begin(),
+                      image.Points2D().end(),
+                      [this, pose_var](const Point2D& point2D) {
+                        return point2D.HasPoint3D() &&
+                               point3D_num_observations_.count(
+                                   point2D.point3D_id) &&
+                               (pose_var ||
+                                IsPointVariable(point2D.point3D_id));
+                      });
+      if (has_observation) active_frame_ids.insert(image.FrameId());
+    }
+    std::vector<image_t> sorted_image_ids;
+    for (const image_t image_id : config_.Images()) {
+      if (active_frame_ids.count(reconstruction_.Image(image_id).FrameId())) {
+        sorted_image_ids.push_back(image_id);
+      }
+    }
     std::sort(sorted_image_ids.begin(), sorted_image_ids.end());
 
     for (const image_t image_id : sorted_image_ids) {

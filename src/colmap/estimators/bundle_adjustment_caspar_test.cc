@@ -1755,6 +1755,82 @@ TEST_F(DefaultBundleAdjuster, GaugeFixingWithOneFrameFromWorld) {
   EXPECT_EQ(n_fixed, 1);
 }
 
+TEST_F(DefaultBundleAdjuster, PoseGaugeRequiresAnActiveFrame) {
+  SetPRNGSeed(0);
+  SyntheticDatasetOptions options;
+  options.num_rigs = 1;
+  options.num_cameras_per_rig = 2;
+  options.num_frames_per_rig = 3;
+  options.num_points3D = 64;
+  Reconstruction pristine;
+  SynthesizeDataset(options, &pristine);
+  SyntheticNoiseOptions noise;
+  noise.point3D_stddev = 0.05;
+  noise.rig_from_world_rotation_stddev = 0.3;
+  noise.rig_from_world_translation_stddev = 0.05;
+  SynthesizeNoise(noise, &pristine);
+
+  auto images = pristine.RegImageIds();
+  std::sort(images.begin(), images.end());
+  ASSERT_EQ(images.size(), 6);
+  const frame_t first = pristine.Image(images[0]).FrameId();
+  const frame_t second = pristine.Image(images[2]).FrameId();
+  const frame_t third = pristine.Image(images[4]).FrameId();
+  ASSERT_EQ(pristine.Image(images[1]).FrameId(), first);
+  ASSERT_TRUE(pristine.Image(images[0]).IsRefInFrame());
+  ASSERT_NE(first, second);
+  ASSERT_NE(second, third);
+
+  for (const bool keep_second_sensor : {false, true}) {
+    for (const bool explicitly_constant : {false, true}) {
+      SCOPED_TRACE(testing::Message()
+                   << "keep_second_sensor=" << keep_second_sensor
+                   << " explicitly_constant=" << explicitly_constant);
+      Reconstruction reconstruction = pristine;
+      for (const image_t image_id : {images[0], images[1]}) {
+        if (image_id == images[1] && keep_second_sensor) continue;
+        const Image& image = reconstruction.Image(image_id);
+        for (point2D_t idx = 0; idx < image.NumPoints2D(); ++idx) {
+          if (image.Point2D(idx).HasPoint3D()) {
+            reconstruction.DeleteObservation(image_id, idx);
+          }
+        }
+      }
+
+      BundleAdjustmentConfig config;
+      for (const image_t image_id : images) {
+        config.AddImage(image_id);
+      }
+      if (explicitly_constant) {
+        config.SetConstantRigFromWorldPose(first);
+      }
+      config.FixGauge(BundleAdjustmentGauge::TWO_CAMS_FROM_WORLD);
+      BundleAdjustmentOptions ba;
+      ba.refine_sensor_from_rig = false;
+      ba.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
+      ba.caspar->gpu_index = "0";
+      auto adjuster =
+          CreateDefaultCasparBundleAdjuster(ba, config, reconstruction);
+      auto summary = adjuster->Solve();
+      ASSERT_TRUE(summary->IsSolutionUsable());
+      ASSERT_GT(summary->num_residuals, 0);
+
+      const auto unchanged = [&](const frame_t id) {
+        return reconstruction.Frame(id).RigFromWorld().params ==
+               pristine.Frame(id).RigFromWorld().params;
+      };
+      if (keep_second_sensor) {
+        // The empty reference still represents a frame observed by its rig mate.
+        EXPECT_TRUE(unchanged(first));
+        EXPECT_FALSE(unchanged(second));
+      } else {
+        EXPECT_TRUE(unchanged(second));
+      }
+      EXPECT_FALSE(unchanged(third));
+    }
+  }
+}
+
 TEST_F(DefaultBundleAdjuster,
        GaugeFixingWithOneFrameFromWorld_SkipsWhenAlreadyFixed) {
   Reconstruction reconstruction;
