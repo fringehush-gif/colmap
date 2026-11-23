@@ -82,6 +82,97 @@ TEST(COLMAPUndistorter, Integration) {
   EXPECT_TRUE(ExistsFile(output_path / "stereo/fusion.cfg"));
 }
 
+TEST(ImageUndistorters, RegionOfInterestKeepsPixelsAndObservationsAligned) {
+  const auto temp_dir = CreateTestDir();
+  const auto image_path = temp_dir / "input_images";
+  CreateDirIfNotExists(image_path);
+  Reconstruction reconstruction;
+  const Camera camera = Camera::CreateFromModelId(
+      7, CameraModelId::kPinhole, 128, 128, 128, CameraSource::EXIF);
+  reconstruction.AddCameraWithTrivialRig(camera);
+  Image image;
+  image.SetImageId(3);
+  image.SetCameraId(7);
+  image.SetName("image.png");
+  image.SetPoints2D({Eigen::Vector2d(60.5, 70.5), Eigen::Vector2d(5, 10)});
+  reconstruction.AddImageWithTrivialFrame(image, Rigid3d());
+  Bitmap input(128, 128, true);
+  for (int y = 0; y < 128; ++y) {
+    for (int x = 0; x < 128; ++x) {
+      input.SetPixel(x, y, BitmapColor<uint8_t>(x, y, x + y));
+    }
+  }
+  ASSERT_TRUE(input.Write(image_path / image.Name()));
+  {
+    std::ofstream file(image_path / image.Name(),
+                       std::ios::binary | std::ios::app);
+    file << "copy-through-marker";
+  }
+  std::vector<char> input_bytes;
+  ReadBinaryBlob(image_path / image.Name(), &input_bytes);
+
+  for (const int mode : {0, 1, 2}) {
+    SCOPED_TRACE(mode);
+    UndistortCameraOptions camera_options;
+    camera_options.warp_options.direct_warp_min_scale = 0;
+    if (mode > 0) {
+      camera_options.roi_min_x = camera_options.roi_min_y = 0.375;
+      camera_options.roi_max_x = camera_options.roi_max_y = 0.625;
+    }
+    if (mode == 2) {
+      camera_options.target_camera =
+          Camera::CreateFromModelId(9, CameraModelId::kPinhole, 128, 32, 32);
+      camera_options.roi_min_x = camera_options.roi_min_y = 0.125;
+    }
+    Reconstruction in_memory = reconstruction;
+    UndistortReconstruction(camera_options, &in_memory);
+    EXPECT_EQ(in_memory.Camera(7).camera_id, 7);
+    EXPECT_EQ(in_memory.Camera(7).source,
+              mode == 2 ? camera_options.target_camera->source : camera.source);
+
+    const auto output_path = temp_dir / StringPrintf("output_%d", mode);
+    const auto standalone_path = temp_dir / StringPrintf("standalone_%d", mode);
+    CreateDirIfNotExists(output_path);
+    COLMAPUndistorter::Options options;
+    options.num_threads = 1;
+    COLMAPUndistorter(
+        options, camera_options, reconstruction, image_path, output_path)
+        .Run();
+    StandaloneImageUndistorter::Options standalone_options;
+    standalone_options.num_threads = 1;
+    standalone_options.image_names_and_cameras.emplace_back(image.Name(),
+                                                            camera);
+    StandaloneImageUndistorter(
+        standalone_options, camera_options, image_path, standalone_path)
+        .Run();
+    Bitmap expected = input.Clone();
+    if (mode > 0) {
+      expected.Crop(48, 48, 32, 32);
+    }
+    for (const auto& path : {output_path / "images", standalone_path}) {
+      Bitmap output;
+      ASSERT_TRUE(output.Read(path / image.Name()));
+      EXPECT_EQ(output.Width(), expected.Width());
+      EXPECT_EQ(output.Height(), expected.Height());
+      EXPECT_EQ(output.RowMajorData(), expected.RowMajorData());
+      if (mode == 0) {
+        std::vector<char> output_bytes;
+        ReadBinaryBlob(path / image.Name(), &output_bytes);
+        EXPECT_EQ(output_bytes, input_bytes);
+      }
+    }
+    Reconstruction output;
+    output.Read(output_path / "sparse");
+    EXPECT_EQ(output.Camera(7).camera_id, 7);
+    EXPECT_EQ(output.Camera(7).params, in_memory.Camera(7).params);
+    for (point2D_t idx = 0; idx < image.NumPoints2D(); ++idx) {
+      const Eigen::Vector2d expected_xy =
+          image.Point2D(idx).xy - Eigen::Vector2d::Constant(mode > 0 ? 48 : 0);
+      EXPECT_TRUE(output.Image(3).Point2D(idx).xy.isApprox(expected_xy, 1e-12));
+    }
+  }
+}
+
 TEST(COLMAPUndistorter, UndistortsZeroDistortionFisheyeCameras) {
   const auto temp_dir = CreateTestDir();
   const auto image_path = temp_dir / "input_images";
