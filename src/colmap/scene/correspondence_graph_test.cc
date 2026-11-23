@@ -272,6 +272,37 @@ TEST_P(CorrespondenceGraphFinalizeTest, ThreeView) {
             2);
 }
 
+TEST_P(CorrespondenceGraphFinalizeTest, OrderedMatchExtraction) {
+  CorrespondenceGraph graph;
+  graph.AddImage(3, 6);
+  graph.AddImage(7, 0);
+  graph.AddImage(11, 6);
+
+  TwoViewGeometry geometry;
+  geometry.inlier_matches = {{4, 2}, {1, 3}, {1, 0}, {2, 2}, {7, 1}};
+  graph.AddTwoViewGeometry(11, 3, geometry);
+  graph.AddTwoViewGeometry(11, 7, TwoViewGeometry());
+  if (GetParam()) {
+    graph.Finalize();
+  }
+
+  FeatureMatches matches;
+  const FeatureMatches forward = {{1, 3}, {1, 0}, {2, 2}, {4, 2}};
+  graph.ExtractMatchesBetweenImages(11, 3, matches);
+  EXPECT_EQ(matches, forward);
+
+  const FeatureMatches reverse = {{0, 1}, {2, 4}, {2, 2}, {3, 1}};
+  graph.ExtractMatchesBetweenImages(3, 11, matches);
+  EXPECT_EQ(matches, reverse);
+
+  graph.ExtractMatchesBetweenImages(11, 7, matches);
+  EXPECT_TRUE(matches.empty());
+
+  matches = {{0, 0}};
+  graph.ExtractMatchesBetweenImages(23, 11, matches);
+  EXPECT_TRUE(matches.empty());
+}
+
 INSTANTIATE_TEST_SUITE_P(CorrespondenceGraph,
                          CorrespondenceGraphFinalizeTest,
                          testing::Bool(),
