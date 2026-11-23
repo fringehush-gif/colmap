@@ -150,6 +150,9 @@ class CorrespondenceGraph {
     std::vector<point2D_t> flat_corr_begs;
   };
 
+  inline CorrespondenceRange FindCorrespondencesInImage(
+      const Image& image, point2D_t point2D_idx) const;
+
   struct ImagePair {
     // The number of inlier matches between pairs of images.
     point2D_t num_matches = 0;
