@@ -9,10 +9,10 @@ from pathlib import Path
 # SymForce cfff699b with the reviewed shared-index follow-ups. Keeping
 # one source contract removes legacy repair paths and prevents regeneration
 # from silently restoring an older numerical or readback implementation.
-GENERATOR_OWNER = "13e5f09187d7604bf11e7c909d5971d758ee9449"
+GENERATOR_OWNER = "4649030fdf95e76563ae3a80c56dfcbb3cf00c5f"
 _GENERATION_INPUTS = {
     "source/runtime/memops.cuh": "2e5cbedb7f9c5a66f6ffd123c050e00546a2f951546627f42a4197b4ad22ce11",
-    "source/templates/__init__.py": "fb4b26de0f6bf7d9eaeef928b4256e51159d2fb88e42685a239fabb2df4d736e",
+    "source/templates/__init__.py": "17540509eb4673ded9977429c29b7841915a499e27ba6ed3669ba0d8b6322d1b",
     "code_generation/library.py": "251bd162ab85975c812a7e46991c83d91d9e52ff08953e8e7e067711b64154b4",
     "source/templates/solver.cc.jinja": "d17b859ed4a254a5c0150a0349f8b50a97f385ffdb875864276de134f393f9e0",
     "source/templates/solver.h.jinja": "d9b1eb9db48105dbf426da503a4bd8c098f2cb3b4b0ee96987b20af02fde3f5c",

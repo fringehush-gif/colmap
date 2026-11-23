@@ -437,11 +437,6 @@ overrides = buildfile_overrides(
 overrides.update({"solver.cc.jinja": source, "solver.h.jinja": header})
 template_env.loader = ChoiceLoader([DictLoader(overrides), original_loader])
 try:
-    # The runtime copier follows old output symlinks when source bytes differ.
-    for filename in ("memops.cuh", "solver_tools.cu", "shared_indices.cu"):
-        path = out_dir / filename
-        if path.is_symlink():
-            path.unlink()
     caslib.generate(out_dir, use_symlinks=False, python_bindings=False)
 finally:
     template_env.loader = original_loader
