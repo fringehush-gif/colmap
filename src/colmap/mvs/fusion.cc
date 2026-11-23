@@ -229,14 +229,15 @@ void StereoFusion::Run() {
                                     const int height,
                                     const int width,
                                     const int image_idx,
-                                    const Mat<char>& fused_pixel_mask) {
+                                    const std::vector<char>& fused_row_mask) {
+    const int thread_id = thread_pool.GetThreadIndex();
     const int row_end = std::min(height, row_start + kRowStride);
     for (int row = row_start; row < row_end; ++row) {
       for (int col = 0; col < width; ++col) {
-        if (fused_pixel_mask.Get(row, col) > 0) {
+        if (fused_row_mask.at(static_cast<size_t>(row - row_start) * width +
+                              col) > 0) {
           continue;
         }
-        const int thread_id = thread_pool.GetThreadIndex();
         Fuse(thread_id, image_idx, row, col);
       }
     }
@@ -265,12 +266,18 @@ void StereoFusion::Run() {
     const auto& fused_pixel_mask = fused_pixel_masks_.at(image_idx);
 
     for (int row_start = 0; row_start < height; row_start += kRowStride) {
-      thread_pool.AddTask(ProcessImageRows,
-                          row_start,
-                          height,
-                          width,
-                          image_idx,
-                          fused_pixel_mask);
+      // Snapshot only the rows read by this task. AddTask owns its arguments.
+      const auto row_begin = fused_pixel_mask.GetData().begin() +
+                             static_cast<size_t>(row_start) * width;
+      const size_t num_row_pixels =
+          static_cast<size_t>(std::min(kRowStride, height - row_start)) * width;
+      thread_pool.AddTask(
+          ProcessImageRows,
+          row_start,
+          height,
+          width,
+          image_idx,
+          std::vector<char>(row_begin, row_begin + num_row_pixels));
     }
     thread_pool.Wait();
 
