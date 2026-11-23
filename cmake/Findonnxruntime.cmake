@@ -86,19 +86,28 @@ else()
     # since vcpkg's custom add_library/add_executable macros copy any dependencies from vcpkg's
     # installed directory to the output directory.
     # See: https://github.com/microsoft/vcpkg/blob/fb7ba3b89b0d8e3e56b0508a144fe85015edfab6/scripts/buildsystems/vcpkg.cmake#L607
-    if(IS_WINDOWS AND VCPKG_INSTALLED_DIR)
+    if(IS_WINDOWS AND VCPKG_INSTALLED_DIR AND onnxruntime_FOUND)
+        set(_onnxruntime_runtime_dlls)
         foreach(_lib ${_onnxruntime_runtime_libraries})
             get_filename_component(_lib_dir "${_lib}" DIRECTORY)
             get_filename_component(_lib_name "${_lib}" NAME_WE)
-            set(_dlls
+            list(APPEND _onnxruntime_runtime_dlls
                 "${_lib_dir}/${_lib_name}.dll"
                 "${_lib_dir}/../bin/${_lib_name}.dll")
-            foreach(_dll ${_dlls})
-                if( EXISTS "${_dll}" )
-                    file(COPY "${_dll}" DESTINATION "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin")
-                endif()
-            endforeach()
         endforeach()
+        if(CUDA_ENABLED AND NOT EXISTS "${onnxruntime_PROVIDERS_CUDA_LIBRARY}")
+            # Recent packages ship the dynamically loaded provider without an import library.
+            get_filename_component(_core_dir "${onnxruntime_LIBRARIES}" DIRECTORY)
+            list(APPEND _onnxruntime_runtime_dlls
+                "${_core_dir}/onnxruntime_providers_cuda.dll"
+                "${_core_dir}/../bin/onnxruntime_providers_cuda.dll")
+        endif()
+        foreach(_dll IN LISTS _onnxruntime_runtime_dlls)
+            if(EXISTS "${_dll}")
+                file(COPY "${_dll}" DESTINATION "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin")
+            endif()
+        endforeach()
+        unset(_onnxruntime_runtime_dlls)
     endif()
     unset(_onnxruntime_runtime_libraries)
 endif()
