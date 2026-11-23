@@ -23,6 +23,7 @@ SOURCE = """namespace {
 
 }
 void solve() {
+  result.initial_score = score_best;
         {{solver.linear_t}} score_new_pcg = DoRetractScore();
         score_best_pcg = score_new_pcg;
         // Retain the prediction before the next PCG update overwrites the step.
@@ -76,7 +77,12 @@ void GetDevice() {
   CheckCuda(cudaSetDevice(device_id_), "cudaSetDevice");
 }
 """
-HEADER = """  {{solver.linear_t}} DoRetractScore();
+HEADER = """enum class ExitReason {
+  MAX_ITERATIONS,
+  CONVERGED_SCORE_THRESHOLD,
+  CONVERGED_DIAG_EXIT
+};
+  {{solver.linear_t}} DoRetractScore();
   {{solver.linear_t}} GetPredDecrease();
 """
 BUILDFILE = (
@@ -133,6 +139,8 @@ class CasparSolverTemplateTest(unittest.TestCase):
             "pred_decrease_best_pcg = predicted_decrease_pcg;",
             "cudaMemcpyDeviceToDevice",
             "cudaMemcpy PCG residual product",
+            "if (!std::isfinite(score_best))",
+            "ExitReason::FAILURE_NONFINITE_INITIAL_SCORE",
             "DoRetractScore(&predicted_decrease_pcg)",
             "if (predicted_decrease != nullptr)",
             "Caspar score/prediction scratch layout changed",
@@ -150,6 +158,7 @@ class CasparSolverTemplateTest(unittest.TestCase):
             source.count("CheckCuda("),
             SOURCE.count("CheckCuda(") + 1,
         )
+        self.assertIn("FAILURE_NONFINITE_INITIAL_SCORE", header)
         self.assertIn("* predicted_decrease = nullptr", header)
         self.assertEqual(header.count("void LaunchPredDecrease();"), 1)
 

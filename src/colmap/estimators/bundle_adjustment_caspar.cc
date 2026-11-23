@@ -964,10 +964,11 @@ class CasparBundleAdjuster : public BundleAdjuster {
         options_.caspar && options_.caspar->collect_iteration_data;
     caspar::SolveResult result = solver.solve(
         /*print_progress=*/VLOG_IS_ON(2), /*verbose_logging=*/collect_iters);
-    ReadSolverResults(solver);
-    WriteResultsToReconstruction();
-
     auto summary = CasparBundleAdjustmentSummary::Create(result);
+    if (summary->IsSolutionUsable()) {
+      ReadSolverResults(solver);
+      WriteResultsToReconstruction();
+    }
     summary->num_residuals = ComputeTotalResiduals();
     return summary;
   }
@@ -1029,6 +1030,10 @@ CasparBundleAdjustmentSummary::Create(
               << ")";
       summary->termination_type =
           BundleAdjustmentTerminationType::NO_CONVERGENCE;
+      break;
+    case caspar::ExitReason::FAILURE_NONFINITE_INITIAL_SCORE:
+      VLOG(1) << "Caspar: nonfinite initial objective";
+      summary->termination_type = BundleAdjustmentTerminationType::FAILURE;
       break;
     default:
       summary->termination_type = BundleAdjustmentTerminationType::FAILURE;

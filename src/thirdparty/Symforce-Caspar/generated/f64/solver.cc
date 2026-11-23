@@ -1947,6 +1947,15 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
   std::chrono::time_point<std::chrono::steady_clock> t_prev = t0;
   score_best = DoResJacFirst();
   result.initial_score = score_best;
+  if (!std::isfinite(score_best)) {
+    result.exit_reason = ExitReason::FAILURE_NONFINITE_INITIAL_SCORE;
+    result.final_score = score_best;
+    result.iteration_count = 0;
+    result.runtime =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+            .count();
+    return result;
+  }
   if (print_progress) {
     printf("                                 score_init: % .6e\n", score_best);
   }

@@ -414,6 +414,67 @@ TEST(CasparParameters, RejectsInvalidUpdatesWithoutChangingParameters) {
   EXPECT_EQ(Access::Params(solver).pcg_iter_max, 1);
 }
 
+TEST(CasparOptions, NonfiniteInitialObjectiveReturnsFailureWithoutWriteback) {
+  if (GetNumCudaDevices() == 0) {
+    GTEST_SKIP() << "CUDA device unavailable";
+  }
+
+  SetPRNGSeed(0);
+  SyntheticDatasetOptions dataset;
+  dataset.num_rigs = 1;
+  dataset.num_cameras_per_rig = 1;
+  dataset.num_frames_per_rig = 3;
+  dataset.num_points3D = 8;
+  Reconstruction reconstruction;
+  SynthesizeDataset(dataset, &reconstruction);
+  ASSERT_FALSE(reconstruction.Points3D().empty());
+  const auto& track =
+      reconstruction.Points3D().begin()->second.track.Elements();
+  ASSERT_FALSE(track.empty());
+  const auto observation = track.front();
+  reconstruction.Image(observation.image_id)
+      .Point2D(observation.point2D_idx)
+      .xy.x() = std::numeric_limits<double>::quiet_NaN();
+  const Reconstruction before = reconstruction;
+
+  BundleAdjustmentConfig config;
+  for (const image_t image_id : reconstruction.RegImageIds()) {
+    config.AddImage(image_id);
+  }
+  BundleAdjustmentOptions options;
+  options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
+  options.caspar->gpu_index = "0";
+  options.caspar->solver_iter_max = 2;
+  options.caspar->pcg_iter_max = 1;
+  // One rejection would exceed the damping limit in the old solver.
+  options.caspar->diag_init = 1.0;
+  options.caspar->diag_exit_value = 1.5;
+  options.caspar->diag_scaling_up = 2.0;
+  options.caspar->collect_iteration_data = true;
+  auto adjuster =
+      CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+  auto summary =
+      std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(adjuster->Solve());
+  ASSERT_NE(summary, nullptr);
+  EXPECT_FALSE(std::isfinite(summary->initial_score));
+  EXPECT_FALSE(summary->IsSolutionUsable());
+  EXPECT_EQ(summary->termination_type, BundleAdjustmentTerminationType::FAILURE);
+  EXPECT_EQ(summary->iteration_count, 0);
+  EXPECT_TRUE(summary->iterations.empty());
+  EXPECT_GT(summary->num_residuals, 0);
+
+  for (const auto& [id, point] : before.Points3D()) {
+    EXPECT_EQ(reconstruction.Point3D(id).xyz, point.xyz);
+  }
+  for (const auto& [id, camera] : before.Cameras()) {
+    EXPECT_EQ(reconstruction.Camera(id).params, camera.params);
+  }
+  for (const auto& [id, frame] : before.Frames()) {
+    EXPECT_EQ(reconstruction.Frame(id).RigFromWorld().params,
+              frame.RigFromWorld().params);
+  }
+}
+
 TEST(CasparPcg, CarriesResidualProductBetweenBetaUpdates) {
   if (GetNumCudaDevices() == 0) {
     GTEST_SKIP() << "CUDA device unavailable";

@@ -14,7 +14,8 @@ namespace caspar {
 enum class ExitReason {
   MAX_ITERATIONS,
   CONVERGED_SCORE_THRESHOLD,
-  CONVERGED_DIAG_EXIT
+  CONVERGED_DIAG_EXIT,
+  FAILURE_NONFINITE_INITIAL_SCORE
 };
 
 struct IterationData {

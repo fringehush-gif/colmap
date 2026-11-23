@@ -117,6 +117,19 @@ def patch_solver_templates(source: str, header: str) -> tuple[str, str]:
     )
     replacements = (
         (
+            "  result.initial_score = score_best;",
+            """  result.initial_score = score_best;
+  if (!std::isfinite(score_best)) {
+    result.exit_reason = ExitReason::FAILURE_NONFINITE_INITIAL_SCORE;
+    result.final_score = score_best;
+    result.iteration_count = 0;
+    result.runtime =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+            .count();
+    return result;
+  }""",
+        ),
+        (
             '''    BetaFromNumDenom({{solver_key("beta_numerator")}}, {{solver_key("alpha_numerator")}}, {{solver_key("beta")}});''',
             '''    BetaFromNumDenom({{solver_key("beta_numerator")}}, {{solver_key("alpha_numerator")}}, {{solver_key("beta")}});
     // Carry the current residual product to the next PCG iteration.
@@ -175,6 +188,10 @@ void {{ solver.struct_name }}::DoBeta() {""",
     for old, new in replacements:
         source = _replace_once(source, old, new)
     for old, new in (
+        (
+            "  CONVERGED_DIAG_EXIT",
+            "  CONVERGED_DIAG_EXIT,\n  FAILURE_NONFINITE_INITIAL_SCORE",
+        ),
         (
             "  {{solver.linear_t}} DoRetractScore();",
             "  {{solver.linear_t}} DoRetractScore({{solver.linear_t}}* predicted_decrease = nullptr);",
