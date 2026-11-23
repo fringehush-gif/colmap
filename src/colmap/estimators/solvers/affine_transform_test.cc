@@ -54,6 +54,28 @@ TEST(Affine2d, EstimateOverDetermined) {
   TestEstimateAffine2dWithNumCoords(100);
 }
 
+TEST(Affine2d, EstimateNonMinimalNoisyLeastSquares) {
+  const std::vector<Eigen::Vector2d> src = {{-1, -1}, {-1, 1}, {1, -1}, {1, 1}};
+  const std::vector<Eigen::Vector2d> tgt = {
+      {0.25, -5.5}, {5.75, 3.5}, {3.75, -6.5}, {10.25, 0.5}};
+  Eigen::Matrix2x3d expected_tgt_from_src;
+  expected_tgt_from_src << 2, 3, 5, -1, 4, -2;
+
+  // Four points exercise the smallest nonminimal system. The added noise
+  // (0.25, -0.5) * x * y is orthogonal to the columns x, y, and 1, so the
+  // least-squares solution is the known affine model despite nonzero residuals.
+  Eigen::Matrix2x3d tgt_from_src;
+  ASSERT_TRUE(EstimateAffine2d(src, tgt, tgt_from_src));
+  EXPECT_THAT(tgt_from_src, EigenMatrixNear(expected_tgt_from_src, 1e-12));
+
+  std::vector<double> residuals;
+  AffineTransformEstimator::Residuals(src, tgt, tgt_from_src, &residuals);
+  ASSERT_EQ(residuals.size(), src.size());
+  for (const double residual : residuals) {
+    EXPECT_NEAR(residual, 0.25 * 0.25 + 0.5 * 0.5, 1e-12);
+  }
+}
+
 TEST(Affine2d, EstimateMinimalDegenerate) {
   std::vector<Eigen::Vector2d> degenerate_src_tgt(3, Eigen::Vector2d::Zero());
   Eigen::Matrix2x3d tgt_from_src;
@@ -66,6 +88,17 @@ TEST(Affine2d, EstimateNonMinimalDegenerate) {
   Eigen::Matrix2x3d tgt_from_src;
   EXPECT_FALSE(
       EstimateAffine2d(degenerate_src_tgt, degenerate_src_tgt, tgt_from_src));
+}
+
+TEST(Affine2d, EstimateNonMinimalCollinearLeavesModelUnchanged) {
+  const std::vector<Eigen::Vector2d> src_tgt = {
+      {-2, -3}, {-1, -1}, {0, 1}, {1, 3}, {2, 5}};
+  Eigen::Matrix2x3d tgt_from_src;
+  tgt_from_src << 17, -4, 0.25, 9, 13, -11;
+  const Eigen::Matrix2x3d initial_tgt_from_src = tgt_from_src;
+
+  EXPECT_FALSE(EstimateAffine2d(src_tgt, src_tgt, tgt_from_src));
+  EXPECT_THAT(tgt_from_src, EigenMatrixEq(initial_tgt_from_src));
 }
 
 TEST(Affine2d, EstimateRobust) {
