@@ -126,7 +126,7 @@ namespace VertexFactory
 	template< typename Real >
 	bool VertexIO< Real >::ReadBinary( FILE *fp , TypeOnDisk typeOnDisk , Real &s )
 	{
-		if( TypeOnDisk()==typeOnDisk ) return fread( &s , sizeof(Real) , 1 , fp )==1;
+		if( GetTypeOnDisk< Real >()==typeOnDisk ) return fread( &s , sizeof(Real) , 1 , fp )==1;
 		switch( typeOnDisk )
 		{
 			case TypeOnDisk::CHAR:    return _ReadBinary<          char >( fp , s );
@@ -173,7 +173,7 @@ namespace VertexFactory
 	template< typename Real >
 	void VertexIO< Real >::WriteBinary( FILE *fp , TypeOnDisk typeOnDisk , const Real &s )
 	{
-		if( TypeOnDisk()==typeOnDisk ) fwrite( &s , sizeof(Real) , 1 , fp );
+		if( GetTypeOnDisk< Real >()==typeOnDisk ){ fwrite( &s , sizeof(Real) , 1 , fp ) ; return; }
 		switch( typeOnDisk )
 		{
 			case TypeOnDisk::CHAR:    _WriteBinary<          char >( fp , s ) ; break;
@@ -204,7 +204,7 @@ namespace VertexFactory
 	template< typename Real >
 	bool VertexIO< Real >::ReadBinary( FILE *fp , TypeOnDisk typeOnDisk , size_t sz , Real *s )
 	{
-		if( TypeOnDisk()==typeOnDisk ) return fread( s , sizeof(Real) , sz , fp )==sz;
+		if( GetTypeOnDisk< Real >()==typeOnDisk ) return fread( s , sizeof(Real) , sz , fp )==sz;
 		else for( size_t i=0 ; i<sz ; i++ ) if( !ReadBinary( fp , typeOnDisk , s[i] ) ) return false;
 		return true;
 	}
@@ -217,7 +217,7 @@ namespace VertexFactory
 	template< typename Real >
 	void VertexIO< Real >::WriteBinary( FILE *fp , TypeOnDisk typeOnDisk , size_t sz , const Real *s )
 	{
-		if( TypeOnDisk()==typeOnDisk ) fwrite( s , sizeof(Real) , sz , fp );
+		if( GetTypeOnDisk< Real >()==typeOnDisk ) fwrite( s , sizeof(Real) , sz , fp );
 		else for( size_t i=0 ; i<sz ; i++ ) WriteBinary( fp , typeOnDisk , s[i] );
 	}
 
@@ -447,8 +447,8 @@ namespace VertexFactory
 	template< typename Real >
 	DynamicFactory< Real >::DynamicFactory( const std::vector< std::pair< std::string , TypeOnDisk > > &namesAndTypesOnDisk ) : _namesAndTypesOnDisk(namesAndTypesOnDisk)
 	{
-		_realTypeOnDisk = true;
-		for( unsigned int i=0 ; i<_namesAndTypesOnDisk.size() ; i++ ) _realTypeOnDisk &= GetTypeOnDisk< Real>()!=_namesAndTypesOnDisk[i].second;
+		_realTypeOnDisk = !_namesAndTypesOnDisk.empty();
+		for( unsigned int i=0 ; i<_namesAndTypesOnDisk.size() ; i++ ) _realTypeOnDisk &= GetTypeOnDisk< Real>()==_namesAndTypesOnDisk[i].second;
 	}
 	template< typename Real >
 	DynamicFactory< Real >::DynamicFactory( const std::vector< PlyProperty > &plyProperties )
@@ -456,8 +456,8 @@ namespace VertexFactory
 		for( int i=0 ; i<plyProperties.size() ; i++ )
 			if( !plyProperties[i].is_list ) _namesAndTypesOnDisk.push_back( std::pair< std::string , TypeOnDisk >( plyProperties[i].name , FromPlyType( plyProperties[i].external_type ) ) );
 			else MK_WARN( "List property not supported: " , plyProperties[i].name );
-		_realTypeOnDisk = true;
-		for( unsigned int i=0 ; i<_namesAndTypesOnDisk.size() ; i++ ) _realTypeOnDisk &= GetTypeOnDisk< Real>()!=_namesAndTypesOnDisk[i].second;
+		_realTypeOnDisk = !_namesAndTypesOnDisk.empty();
+		for( unsigned int i=0 ; i<_namesAndTypesOnDisk.size() ; i++ ) _realTypeOnDisk &= GetTypeOnDisk< Real>()==_namesAndTypesOnDisk[i].second;
 	}
 
 	template< typename Real >

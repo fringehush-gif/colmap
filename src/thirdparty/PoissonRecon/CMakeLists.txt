@@ -18,6 +18,18 @@ if(MSVC)
 endif()
 
 COLMAP_ADD_TEST(
+    NAME vertex_factory_test
+    SRCS vertex_factory_test.cc
+)
+if(TESTS_ENABLED AND OPENMP_FOUND)
+    target_link_libraries(colmap_thirdparty_vertex_factory_test
+        OpenMP::OpenMP_CXX)
+endif()
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    target_link_options(colmap_thirdparty_vertex_factory_test PRIVATE -coverage)
+endif()
+
+COLMAP_ADD_TEST(
     NAME ply_scalar_test
     SRCS ply_scalar_test.cc
 )
