@@ -26,6 +26,7 @@
 #ifndef COLMAP_HIP_ENABLED
 #include "colmap/mvs/cuda_texture.h"
 #include "colmap/mvs/patch_match_cuda.h"
+#include "colmap/mvs/patch_match_cuda_test_peer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1339,6 +1340,101 @@ void ExpectPairedDefaultSweepOutputs(const bool reuse,
   }
 }
 
+TEST_F(CudaTest, CompactDomainFailureWithholdsResultMaps) {
+  for (const int cost_bits : {0}) {
+    SCOPED_TRACE(cost_bits);
+    Inputs inputs = MakeInputs(0);
+    PatchMatch::Problem problem;
+    problem.ref_image_idx = 0;
+    problem.src_image_idxs = {1, 2};
+    problem.images = &inputs.images;
+    problem.depth_maps = &inputs.depths;
+    problem.normal_maps = &inputs.normals;
+    auto options = MakeOptions(false, false, false);
+    options.checkpoint_hmm = true;
+    options.window_radius = 5;
+    options.num_iterations = 5;
+    options.probability_unorm16 = cost_bits == 0;
+    PatchMatchCuda owner(options, problem);
+    ASSERT_NO_THROW(owner.Run());
+    EXPECT_NO_THROW(owner.GetDepthMap());
+    EXPECT_NO_THROW(owner.GetNormalMap());
+    EXPECT_NO_THROW(owner.GetSelProbMap());
+
+    PatchMatchCudaTestPeer::SetCompactDomainError(owner, cost_bits);
+    ASSERT_ANY_THROW(owner.Run());
+    EXPECT_ANY_THROW(owner.GetDepthMap());
+    EXPECT_ANY_THROW(owner.GetNormalMap());
+    EXPECT_ANY_THROW(owner.GetSelProbMap());
+    EXPECT_TRUE(owner.GetConsistentImageIdxs().empty());
+  }
+}
+
+TEST_F(CudaTest, PairAdmissionRefusalPreservesCompletedCompactResults) {
+  // A long, thin image needs enough grid blocks to exceed the two-view
+  // resident-wave limit without allocating a large image.
+  constexpr int kHeight = 25;
+  int width = 257;
+  while (width <= 8193 &&
+         CanPairPatchMatchViews(
+             width, kHeight, width, kHeight, true, true, true)) {
+    width = 2 * width - 1;
+  }
+  if (width > 8193) {
+    GTEST_SKIP() << "No bounded input exceeded this device's paired limit";
+  }
+
+  auto options = MakeOptions(true, true, false);
+  options.window_radius = 5;
+  options.num_iterations = 5;
+  options.checkpoint_hmm = true;
+  options.probability_unorm16 = true;
+  const auto problem_for = [](Inputs& inputs) {
+    PatchMatch::Problem problem;
+    problem.ref_image_idx = 0;
+    problem.src_image_idxs = {1, 2};
+    problem.images = &inputs.images;
+    problem.depth_maps = &inputs.depths;
+    problem.normal_maps = &inputs.normals;
+    return problem;
+  };
+  Inputs a = MakeInputs(0, 2, kHeight, width),
+         b = MakeInputs(1, 2, kHeight, width);
+  const auto pa = problem_for(a), pb = problem_for(b);
+  PatchMatchCuda first(options, pa), second(options, pb);
+  struct Streams {
+    std::array<cudaStream_t, 2> values{};
+    ~Streams() {
+      for (const auto stream : values) {
+        if (stream) (void)cudaStreamDestroy(stream);
+      }
+    }
+  } streams;
+  for (auto& stream : streams.values) {
+    ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
+              cudaSuccess);
+  }
+  ASSERT_NO_THROW(first.Run());
+  ASSERT_NO_THROW(second.Run());
+  const auto snapshot = [](const PatchMatchCuda& owner) {
+    return std::make_tuple(owner.GetDepthMap(),
+                           owner.GetNormalMap(),
+                           owner.GetSelProbMap(),
+                           owner.GetConsistentImageIdxs());
+  };
+  const auto before_first = snapshot(first), before_second = snapshot(second);
+  EXPECT_ANY_THROW(
+      RunPatchMatchPair(first, second, streams.values[0], streams.values[1]));
+  const auto check = [](const auto& before, const auto& after) {
+    ExpectExactlyEqual(std::get<0>(before), std::get<0>(after));
+    ExpectExactlyEqual(std::get<1>(before), std::get<1>(after));
+    ExpectExactlyEqual(std::get<2>(before), std::get<2>(after));
+    EXPECT_EQ(std::get<3>(before), std::get<3>(after));
+  };
+  check(before_first, snapshot(first));
+  check(before_second, snapshot(second));
+}
+
 TEST_F(CudaTest, PairedDefaultSweepsPreserveIndependentOutputs) {
   ExpectPairedDefaultSweepOutputs(false);
 }
@@ -1354,7 +1450,8 @@ TEST_F(CudaTest, PairedTallInitialCostStripeTailsPreserveOutputs) {
 void ExpectReferenceBatchOutputs(const size_t count,
                                  const bool geometry,
                                  const bool reuse,
-                                 const bool checkpoint = false) {
+                                 const bool checkpoint = false,
+                                 const bool unorm16 = false) {
   const auto make_problem = [](Inputs& images) {
     PatchMatch::Problem problem;
     problem.ref_image_idx = 0;
@@ -1372,16 +1469,20 @@ void ExpectReferenceBatchOutputs(const size_t count,
   options.num_samples = defaults.num_samples;
   options.num_iterations = defaults.num_iterations;
   options.sigma_spatial = options.window_radius;
+  if (unorm16) {
+    options.checkpoint_hmm = true;
+    options.probability_unorm16 = true;
+  }
   std::vector<std::unique_ptr<Inputs>> inputs;
   std::vector<PatchMatch::Problem> problems;
   inputs.reserve(count);
   problems.reserve(count);
   for (size_t i = 0; i < count; ++i) {
     inputs.push_back(std::make_unique<Inputs>(
-        MakeInputs(static_cast<int>(i % 2),
+        MakeInputs(unorm16 ? 0 : static_cast<int>(i % 2),
                    9,
-                   checkpoint ? 129 : (i % 2 ? 153 : 149),
-                   checkpoint ? 257 : 0)));
+                   unorm16 ? 25 : (checkpoint ? 129 : (i % 2 ? 153 : 149)),
+                   unorm16 ? 33 : (checkpoint ? 257 : 0))));
     problems.push_back(make_problem(*inputs.back()));
   }
   const auto construct = [&]() {
@@ -1428,7 +1529,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
   if (!checkpoint) incumbent.clear();
   options.checkpoint_hmm = checkpoint;
   auto batch = construct();
-  if (checkpoint) {
+  if (checkpoint && !unorm16) {
     for (size_t i = 0; i < count; ++i)
       EXPECT_LT(batch[i]->PairPeakBytes(), incumbent[i]->PairPeakBytes());
   }
@@ -1486,6 +1587,28 @@ TEST_F(CudaTest, ThreeViewCheckpointGeometricBatchPreservesFullStorageOutputs) {
 
 TEST_F(CudaTest, FiveViewCheckpointGeometricBatchPreservesFullStorageOutputs) {
   ExpectReferenceBatchOutputs(5, true, true, true);
+}
+
+TEST_F(CudaTest, Unorm16CheckpointPhotoPairAndFiveRefPreserveOutputs) {
+  EXPECT_TRUE(CanPairPatchMatchViews(33, 25, 33, 25, false, true, true));
+  EXPECT_TRUE(CanBatchPatchMatchViews(
+      std::vector<std::pair<size_t, size_t>>(5, {33, 25}), false, true, true));
+  for (const bool reuse : {false, true}) {
+    SCOPED_TRACE(::testing::Message() << "rotation_reuse=" << reuse);
+    ExpectReferenceBatchOutputs(3, false, reuse, true, true);
+    ExpectReferenceBatchOutputs(5, false, reuse, true, true);
+  }
+}
+
+TEST_F(CudaTest, Unorm16CheckpointGeometricPairAndFiveRefPreserveOutputs) {
+  EXPECT_TRUE(CanPairPatchMatchViews(33, 25, 33, 25, true, true, true));
+  EXPECT_TRUE(CanBatchPatchMatchViews(
+      std::vector<std::pair<size_t, size_t>>(5, {33, 25}), true, true, true));
+  for (const bool reuse : {false, true}) {
+    SCOPED_TRACE(::testing::Message() << "rotation_reuse=" << reuse);
+    ExpectReferenceBatchOutputs(3, true, reuse, true, true);
+    ExpectReferenceBatchOutputs(5, true, reuse, true, true);
+  }
 }
 
 TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {

@@ -213,7 +213,7 @@ if(CUDA_ENABLED)
 
         COLMAP_ADD_TEST(
             NAME patch_match_cuda_test
-            SRCS patch_match_cuda_test.cc
+            SRCS patch_match_cuda_test.cc patch_match_probability_unorm16_test.cu patch_match_cuda_test_peer.cu
             LINK_LIBS colmap_mvs_cuda
         )
         COLMAP_ADD_TEST(
