@@ -131,4 +131,4 @@ def test_patch_match_ncc_cost_unorm16_option() -> None:
     options.window_step = 2
     assert not options.check()
     options.window_step = 1
-    assert options.check() == pycolmap.has_cuda
+    assert options.check() == pycolmap.COLMAP_build.endswith("with CUDA")

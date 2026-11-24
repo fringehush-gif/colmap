@@ -2807,6 +2807,63 @@ TEST_F(CudaTest, ProbabilityUnorm16DestructorCleanupObservation) {
       "");
 }
 
+TEST_F(CudaTest, NccUnorm16AllocationRefusals) {
+  struct ResetOnExit {
+    ~ResetOnExit() { ResetAllocationInjection(0, cudaSuccess); }
+  } reset;
+  for (const size_t ordinal : {1u, 2u}) {
+    SCOPED_TRACE(ordinal);
+    const CudaCleanupScope cleanup;
+    ResetAllocationInjection(ordinal, cudaErrorMemoryAllocation);
+    EXPECT_THROW((PackedNccCostMap(8, 8, 2)), CudaAllocationRefused);
+    EXPECT_TRUE(wrapped_fired.load());
+    EXPECT_EQ(wrapped_eligible.load(), ordinal);
+    EXPECT_NO_THROW(cleanup.Check());
+  }
+
+  const CudaCleanupScope cleanup;
+  ResetAllocationInjection(0, cudaSuccess);
+  { const PackedNccCostMap map(8, 8, 2); }
+  EXPECT_EQ(wrapped_eligible.load(), 2u);
+  EXPECT_FALSE(wrapped_fired.load());
+  EXPECT_NO_THROW(cleanup.Check());
+}
+
+TEST_F(CudaTest, NccUnorm16CleanupFailuresAreObserved) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  for (const bool partial : {false, true}) {
+    SCOPED_TRACE(partial);
+    EXPECT_EXIT(
+        ([partial]() {
+          const CudaCleanupScope cleanup;
+          ResetAllocationInjection(
+              partial ? 2 : 0, cudaErrorMemoryAllocation, true);
+          bool refused = false;
+          try {
+            const PackedNccCostMap map(8, 8, 2);
+            // Normal destruction and status-word allocation unwind must both
+            // report a failed free. The wrapper releases real memory first.
+            wrapped_fired = true;
+          } catch (const CudaAllocationRefused&) {
+            refused = true;
+          }
+          if (refused != partial) std::_Exit(1);
+          try {
+            cleanup.Check();
+          } catch (const std::runtime_error& error) {
+            const bool observed =
+                std::string(error.what()).find("cleanup cudaFree failed") !=
+                std::string::npos;
+            std::_Exit(observed && wrapped_cleanup_injected.load() == 1 ? 0
+                                                                        : 2);
+          }
+          std::_Exit(3);
+        }()),
+        testing::ExitedWithCode(0),
+        "");
+  }
+}
+
 TEST_F(CudaTest, ControllerPairAllocationRefusals) {
   auto options = ControllerWorkspaceFixture::Options();
   const auto [width, height] =
