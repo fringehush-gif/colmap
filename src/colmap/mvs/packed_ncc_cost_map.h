@@ -4,6 +4,7 @@
 
 #include "colmap/mvs/cuda_rotate.h"
 #include "colmap/mvs/gpu_mat.h"
+#include "colmap/mvs/packed_ncc20_cost_map.h"
 #include "colmap/mvs/unorm16.h"
 
 #include <algorithm>
