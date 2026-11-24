@@ -58,22 +58,23 @@ class PackedNccCostMap {
     THROW_CHECK_LE(capacity_,
                    std::numeric_limits<size_t>::max() - sizeof(uint32_t));
     try {
-      CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_));
-      CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&domain_error_),
-                                sizeof(uint32_t)));
+      CUDA_SAFE_ALLOCATE(
+          "cudaMalloc",
+          ptr_,
+          cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_));
+      CUDA_SAFE_ALLOCATE("cudaMalloc",
+                         domain_error_,
+                         cudaMalloc(reinterpret_cast<void**>(&domain_error_),
+                                    sizeof(uint32_t)));
       CUDA_SAFE_CALL(cudaMemset(domain_error_, 0, sizeof(uint32_t)));
+      Reorient(width, height);
     } catch (...) {
-      (void)cudaFree(domain_error_);
-      (void)cudaFree(ptr_);
+      Release();
       throw;
     }
-    Reorient(width, height);
   }
 
-  ~PackedNccCostMap() {
-    (void)cudaFree(domain_error_);
-    (void)cudaFree(ptr_);
-  }
+  ~PackedNccCostMap() { Release(); }
   PackedNccCostMap(const PackedNccCostMap&) = delete;
   PackedNccCostMap& operator=(const PackedNccCostMap&) = delete;
 
@@ -151,6 +152,19 @@ class PackedNccCostMap {
 #endif
 
  private:
+  void Release() noexcept {
+    if (domain_error_ != nullptr) {
+      const auto status = cudaFree(domain_error_);
+      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                             static_cast<int>(status));
+    }
+    if (ptr_ != nullptr) {
+      const auto status = cudaFree(ptr_);
+      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                             static_cast<int>(status));
+    }
+  }
+
   static size_t CheckedMultiply(size_t a, size_t b) {
     THROW_CHECK(b == 0 || a <= std::numeric_limits<size_t>::max() / b);
     return a * b;
