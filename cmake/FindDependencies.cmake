@@ -15,6 +15,7 @@ else()
     message(STATUS "Disabling LSD support")
 endif()
 
+find_package(Threads REQUIRED)
 find_package(OpenMP REQUIRED COMPONENTS C CXX)
 
 # The scene/SfM containers in src/colmap/util/hash_containers.h are

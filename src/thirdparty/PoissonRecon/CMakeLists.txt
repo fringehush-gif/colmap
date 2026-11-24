@@ -2,8 +2,6 @@ if(NOT IS_MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -funroll-loops -ffast-math")
 endif()
 
-find_package(Threads REQUIRED)
-
 COLMAP_ADD_LIBRARY(
     NAME colmap_poisson_recon
     SRCS
