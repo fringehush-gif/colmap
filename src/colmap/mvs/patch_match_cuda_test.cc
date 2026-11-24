@@ -2945,6 +2945,14 @@ TEST_F(CudaTest, NccFixed24CleanupFailuresAreObserved) {
   ExpectCodecCleanupObservation([] { return Fixed24NccCostMap(8, 8, 2); });
 }
 
+TEST_F(CudaTest, NccFixed20AllocationRefusals) {
+  ExpectCodecAllocationRefusals([] { return Fixed20NccCostMap(8, 8, 2); });
+}
+
+TEST_F(CudaTest, NccFixed20CleanupFailuresAreObserved) {
+  ExpectCodecCleanupObservation([] { return Fixed20NccCostMap(8, 8, 2); });
+}
+
 TEST_F(CudaTest, ControllerPairAllocationRefusals) {
   auto options = ControllerWorkspaceFixture::Options();
   const auto [width, height] =

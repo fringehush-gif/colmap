@@ -167,19 +167,23 @@ class Fixed20NccCostMap {
                        sizeof(unsigned));
     capacity_bytes_ = high_bytes + low_capacity_ / 2;
     try {
-      CUDA_SAFE_CALL(
+      CUDA_SAFE_ALLOCATE(
+          "cudaMalloc",
+          ptr_,
           cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_bytes_));
       THROW_CHECK_EQ(
           reinterpret_cast<uintptr_t>(LowWords()) % alignof(uint32_t), 0);
       CUDA_SAFE_CALL(cudaMemset(LowWords(), 0, low_capacity_ / 2));
-      CUDA_SAFE_CALL(
+      CUDA_SAFE_ALLOCATE(
+          "cudaMalloc",
+          error_,
           cudaMalloc(reinterpret_cast<void**>(&error_), sizeof(unsigned)));
       CUDA_SAFE_CALL(cudaMemset(error_, 0, sizeof(unsigned)));
+      Reorient(width, height);
     } catch (...) {
       Release();
       throw;
     }
-    Reorient(width, height);
   }
   ~Fixed20NccCostMap() { Release(); }
   Fixed20NccCostMap(const Fixed20NccCostMap&) = delete;
@@ -291,8 +295,16 @@ class Fixed20NccCostMap {
 #endif
  private:
   void Release() noexcept {
-    (void)cudaFree(error_);
-    (void)cudaFree(ptr_);
+    if (error_ != nullptr) {
+      const auto status = cudaFree(error_);
+      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                             static_cast<int>(status));
+    }
+    if (ptr_ != nullptr) {
+      const auto status = cudaFree(ptr_);
+      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                             static_cast<int>(status));
+    }
     error_ = nullptr;
     ptr_ = nullptr;
   }
