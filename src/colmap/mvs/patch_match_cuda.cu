@@ -656,7 +656,7 @@ class LikelihoodComputer {
                                          const float prev_weight) const {
     const float zn0 = (1.0f - alpha) * (1.0f - beta);
     const float zn1 = alpha * beta;
-    const float curr = zn1 / (zn0 + zn1);
+    const float curr = __fdiv_rn(zn1, zn0 + zn1);
     return prev_weight * prev + (1.0f - prev_weight) * curr;
   }
 
