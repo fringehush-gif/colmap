@@ -11,6 +11,7 @@
 #include "colmap/mvs/patch_match_hmm_checkpoint.h"
 #include "colmap/mvs/patch_match_sampling.cuh"
 #include "colmap/mvs/patch_match_state_map.h"
+#include "colmap/util/testing_cuda.h"
 
 #include <algorithm>
 #include <array>
@@ -25,23 +26,6 @@
 
 namespace colmap {
 namespace mvs {
-namespace {
-
-class CudaTest : public ::testing::Test {
- protected:
-  void SetUp() override {
-    int num_devices = 0;
-    const cudaError_t status = cudaGetDeviceCount(&num_devices);
-    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver ||
-        (status == cudaSuccess && num_devices == 0)) {
-      GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
-    }
-    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
-  }
-};
-
-}  // namespace
-
 namespace {
 __global__ void CheckSourceSampling(int* errors) {
   int failures = 0;
@@ -438,7 +422,7 @@ std::vector<uint16_t> NccCodes(const PackedNccCostMap& map) {
 }
 }  // namespace
 
-TEST(PackedNccCostMap, ScalarErrorBoundAndExactEndpoints) {
+TEST_F(CudaTest, NccUnorm16ScalarErrorBoundAndExactEndpoints) {
   PackedNccCostMap map(1, 1, 1);
   GpuMat<float> output(1, 1);
   for (const float cost : {0.0f, 2.0f, 0.5f, 1.0f, 1.5f, 0.1234567f}) {
@@ -455,7 +439,7 @@ TEST(PackedNccCostMap, ScalarErrorBoundAndExactEndpoints) {
     }
   }
 }
-TEST(PackedNccCostMap, AllCodesRoundTripAndEndpoints) {
+TEST_F(CudaTest, NccUnorm16AllCodesRoundTripAndEndpoints) {
   PackedNccCostMap map(256, 256, 1);
   RoundTripNccCodes<<<256, 256>>>(map.View());
   CUDA_SYNC_AND_CHECK();
@@ -464,7 +448,7 @@ TEST(PackedNccCostMap, AllCodesRoundTripAndEndpoints) {
   for (size_t i = 0; i < codes.size(); ++i) ASSERT_EQ(codes[i], i) << i;
 }
 
-TEST(PackedNccCostMap, RejectsEachInvalidDomain) {
+TEST_F(CudaTest, NccUnorm16RejectsEachInvalidDomain) {
   for (const float invalid : {-0.1f,
                               2.1f,
                               std::numeric_limits<float>::infinity(),
@@ -477,7 +461,7 @@ TEST(PackedNccCostMap, RejectsEachInvalidDomain) {
   }
 }
 
-TEST(PackedNccCostMap, RotatesOddPlanesWithBoundedScratch) {
+TEST_F(CudaTest, NccUnorm16RotatesOddPlanesWithBoundedScratch) {
   for (const auto [width, height] :
        {std::pair<size_t, size_t>{7, 5}, {257, 3}, {3, 257}}) {
     for (const size_t kSources : {size_t{1}, size_t{2}, size_t{3}}) {
