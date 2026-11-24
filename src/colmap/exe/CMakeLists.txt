@@ -99,3 +99,12 @@ if(HIP_ENABLED)
     target_link_libraries(colmap_main hip::host hip::hiprand roc::rocrand)
 endif()
 set_target_properties(colmap_main PROPERTIES OUTPUT_NAME colmap)
+
+# ONNX Runtime loads its providers dynamically, outside app-local import scanning.
+if(IS_WINDOWS AND ONNX_ENABLED AND onnxruntime_RUNTIME_DLLS)
+    set_property(TARGET colmap_main APPEND PROPERTY LINK_DEPENDS ${onnxruntime_RUNTIME_DLLS})
+    add_custom_command(TARGET colmap_main POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            ${onnxruntime_RUNTIME_DLLS} "$<TARGET_FILE_DIR:colmap_main>"
+        VERBATIM)
+endif()
