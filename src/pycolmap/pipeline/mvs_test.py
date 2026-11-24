@@ -111,3 +111,24 @@ def test_patch_match_probability_unorm16_option() -> None:
     assert not copied.check()
     copied.checkpoint_hmm = True
     assert copied.check() == pycolmap.has_cuda
+
+
+def test_patch_match_ncc_cost_unorm16_option() -> None:
+    options = pycolmap.PatchMatchOptions()
+    assert options.ncc_cost_unorm16 is False
+    assert options.todict()["ncc_cost_unorm16"] is False
+    options.ncc_cost_unorm16 = True
+    options.checkpoint_hmm = False
+    assert not options.check()
+    copied = pycolmap.PatchMatchOptions(options.todict())
+    assert copied.ncc_cost_unorm16 is True
+    assert copied.checkpoint_hmm is False
+    assert not copied.check()
+    options.checkpoint_hmm = True
+    options.window_radius = 4
+    assert not options.check()
+    options.window_radius = 5
+    options.window_step = 2
+    assert not options.check()
+    options.window_step = 1
+    assert options.check() == pycolmap.has_cuda
