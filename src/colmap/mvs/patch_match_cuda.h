@@ -32,6 +32,9 @@ class Fixed24NccCostMap;
 struct Fixed24NccCostView;
 class Fixed20NccCostMap;
 struct Fixed20NccCostView;
+#ifndef COLMAP_HIP_ENABLED
+class OctNormalMap;
+#endif
 struct SparseSourceTestFailure;
 
 class PatchMatchCuda {
@@ -79,9 +82,13 @@ class PatchMatchCuda {
             bool kCheckpointHmm,
             int kCostBits = 0>
   void RunWithWindowSizeAndStep();
+  void CheckUsable() const;
+  void PoisonGeometryState() noexcept;
 
   GpuMatView<float> GeometryView(const GpuMat<float>& owner) const;
   Mat<float> GeometryCopyToMat(const GpuMat<float>& owner) const;
+  auto NormalView() const;
+  void CheckNormalDomain() const;
 
   void ComputeCudaConfig();
 
@@ -92,7 +99,7 @@ class PatchMatchCuda {
   cudaTextureObject_t ReferenceStatisticsTexture() const;
   void InitSourceImages();
   void InitTransforms();
-  void InitWorkspaceMemory();
+  void InitWorkspaceMemory(bool primary_geometry_scratch);
   void RotateStateMaps(size_t width, size_t height);
   size_t CostMapWidth() const;
   size_t CostMapHeight() const;
@@ -103,11 +110,18 @@ class PatchMatchCuda {
   void CheckCostMapDomain() const;
 #ifndef COLMAP_HIP_ENABLED
   void InitAlternateOrientationMemory(const PatchMatchCuda* geometry_donor);
-  void EnsureGeometryRotationMemory();
+  void EnsureGeometryRotationMemory(bool allow_checkpoint = true);
+  bool CanRotateGeometryThroughCheckpoint() const;
+  bool CheckpointGeometryFits() const;
+  size_t GeometryScratchBytes() const;
   static size_t GeometryBytes(const GpuMat<float>& depth,
                               const GpuMat<float>& normal);
+  static size_t GeometryBytes(const GpuMat<float>& depth,
+                              const OctNormalMap& normal);
   void BindReusableRefImageTexture();
-  void RotateWithBufferReuse(bool pack_geometry);
+  void RotateWithBufferReuse(
+      bool pack_geometry,
+      PatchMatchHmmCheckpoint* checkpoint_scratch = nullptr);
 #endif
 
   // Rotate reference image by 90 degrees in counter-clockwise direction.
@@ -178,6 +192,9 @@ class PatchMatchCuda {
   std::unique_ptr<GpuMat<float>> ref_squared_sum_image_;
   std::unique_ptr<GpuMat<float>> depth_map_;
   std::unique_ptr<GpuMat<float>> normal_map_;
+#ifndef COLMAP_HIP_ENABLED
+  std::unique_ptr<OctNormalMap> oct_normal_map_;
+#endif
   std::unique_ptr<PatchMatchStateMap> sel_prob_map_;
   std::unique_ptr<PatchMatchStateMap> prev_sel_prob_map_;
   // Exactly one previous-probability owner is allocated per reference.
@@ -203,6 +220,7 @@ class PatchMatchCuda {
   // Per-problem storage for the opposite reference-image orientation.
   std::unique_ptr<GpuMat<float>> alternate_depth_map_;
   std::unique_ptr<GpuMat<float>> alternate_normal_map_;
+  std::unique_ptr<OctNormalMap> alternate_oct_normal_map_;
   std::unique_ptr<GpuMat<uint8_t>> alternate_ref_image_;
   std::unique_ptr<GpuMat<float>> alternate_ref_sum_image_;
   std::unique_ptr<GpuMat<float>> alternate_ref_squared_sum_image_;

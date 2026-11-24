@@ -1,0 +1,681 @@
+// SPDX-License-Identifier: BSD-3-Clause
+#include "colmap/mvs/oct_normal_state.cuh"
+#include "colmap/util/cuda.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <gtest/gtest.h>
+
+namespace colmap::mvs {
+namespace {
+using oct_magnitude::Encoded;
+using oct_magnitude::Status;
+
+struct Observation {
+  Status status;
+  Encoded code;
+  float3 decoded;
+  bool decoded_ok;
+};
+__global__ void Observe(const float3* input, Observation* output, size_t n) {
+  const size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  Observation result{};
+  result.status = oct_magnitude::Encode<2>(input[i], result.code, 0x1p-23f);
+  result.decoded_ok = oct_magnitude::Decode(result.code, result.decoded);
+  output[i] = result;
+}
+struct PreparedObservation {
+  Status status;
+  Status reference_status;
+  Encoded code;
+  Encoded reference_code;
+  unsigned prepared_bits[3];
+  unsigned decoded_bits[3];
+  unsigned owner_bits[3];
+  unsigned owner_decoded_bits[3];
+  Encoded owner_code;
+  Encoded owner_reference_code;
+  unsigned error;
+  unsigned expected_error;
+};
+__device__ void SaveBits(float3 value, unsigned* bits) {
+  bits[0] = __float_as_uint(value.x);
+  bits[1] = __float_as_uint(value.y);
+  bits[2] = __float_as_uint(value.z);
+}
+__global__ void ObservePrepared(const float3* input,
+                                PreparedObservation* output,
+                                unsigned* errors,
+                                size_t n) {
+  const size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n * 4) return;
+  const unsigned frame = i % 4;
+  const float3 value = input[i / 4];
+  PreparedObservation result{};
+  float3 prepared, decoded;
+  const float limit = i / 4 == n - 1 ? 0.0f : 0x1p-23f;
+  result.status =
+      oct_magnitude::Encode<2>(value, result.code, limit, &prepared);
+  result.reference_status =
+      oct_magnitude::Encode<2>(value, result.reference_code, limit);
+  oct_magnitude::Decode(result.reference_code, decoded);
+  SaveBits(prepared, result.prepared_bits);
+  SaveBits(decoded, result.decoded_bits);
+
+  OctNormalView view{nullptr, nullptr, 0, 0, 0, &errors[i], frame};
+  float normal[3] = {value.x, value.y, value.z};
+  result.owner_code = view.Canonicalize(normal);
+  SaveBits(make_float3(normal[0], normal[1], normal[2]), result.owner_bits);
+  float3 canonical;
+  switch (frame) {
+    case 0:
+      canonical = value;
+      break;
+    case 1:
+      canonical = make_float3(-value.y, value.x, value.z);
+      break;
+    case 2:
+      canonical = make_float3(-value.x, -value.y, value.z);
+      break;
+    default:
+      canonical = make_float3(value.y, -value.x, value.z);
+      break;
+  }
+  const Status status = oct_magnitude::Encode<2>(
+      canonical, result.owner_reference_code, 0x1p-23f);
+  view.DecodeCode(result.owner_reference_code, normal);
+  SaveBits(make_float3(normal[0], normal[1], normal[2]),
+           result.owner_decoded_bits);
+  result.error = errors[i];
+  result.expected_error = status == Status::kOk || status == Status::kZero
+                              ? 0u
+                              : 1u << static_cast<unsigned>(status);
+  output[i] = result;
+}
+__global__ void DecodeMalformed(bool* ok, float3* values) {
+  Encoded c = oct_magnitude::Invalid();
+  c.magnitude = 127;
+  ok[0] = oct_magnitude::Decode(c, values[0]);
+  c = oct_magnitude::Invalid();
+  c.direction.x = 0;
+  ok[1] = oct_magnitude::Decode(c, values[1]);
+}
+__global__ void InvalidOwnerOperations(OctNormalView view, int which) {
+  if (which == 0) {
+    const float invalid[3] = {2.0f, 0.0f, 0.0f};
+    view.SetSlice(0, 0, invalid);
+  } else if (which == 1) {
+    Encoded malformed = oct_magnitude::Invalid();
+    malformed.magnitude = 127;
+    view.StoreCode(0, 0, malformed);
+  } else if (which == 2) {
+    view.Set(0, 0, 1, 1.0f);
+  } else {
+    view.direction[0] = {oct_revisit::kInvalid, 0};
+    view.magnitude[0] = 127;
+    float n[3];
+    view.GetSlice(0, 0, n);
+  }
+}
+__global__ void ReadAndCarry(OctNormalView view,
+                             Encoded* codes,
+                             float3* values,
+                             unsigned* changed) {
+  size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= view.width * view.height) return;
+  const size_t row = i / view.width, col = i % view.width;
+  float n[3];
+  Encoded code;
+  const ActiveNormalView active{{}, view, true};
+  LoadNormal(active, row, col, n, code);
+  StoreNormal(active, row, col, n, code);  // winner carry must not re-encode
+  codes[i] = view.ReadCode(row, col);
+  if (codes[i].direction.x != code.direction.x ||
+      codes[i].direction.y != code.direction.y ||
+      codes[i].magnitude != code.magnitude)
+    atomicAdd(changed, 1u);
+  values[i] = make_float3(n[0], n[1], n[2]);
+}
+bool SameCode(Encoded a, Encoded b) {
+  return a.direction.x == b.direction.x && a.direction.y == b.direction.y &&
+         a.magnitude == b.magnitude;
+}
+
+std::vector<Encoded> CopyNormalCodes(const OctNormalView& view) {
+  const size_t count = view.width * view.height;
+  std::vector<oct_revisit::Code> direction(count);
+  std::vector<uint8_t> magnitude(count);
+  CUDA_SAFE_CALL(cudaMemcpy2D(direction.data(),
+                              view.width * sizeof(oct_revisit::Code),
+                              view.direction,
+                              view.pixel_pitch * sizeof(oct_revisit::Code),
+                              view.width * sizeof(oct_revisit::Code),
+                              view.height,
+                              cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaMemcpy2D(magnitude.data(),
+                              view.width,
+                              view.magnitude,
+                              view.pixel_pitch,
+                              view.width,
+                              view.height,
+                              cudaMemcpyDeviceToHost));
+  std::vector<Encoded> codes(count);
+  for (size_t i = 0; i < count; ++i) codes[i] = {direction[i], magnitude[i]};
+  return codes;
+}
+
+std::vector<uint32_t> CopyNormalWords(const OctNormalMap& owner) {
+  const auto decoded = owner.CopyToMat();
+  std::vector<uint32_t> words(decoded.GetData().size());
+  static_assert(sizeof(float) == sizeof(uint32_t));
+  std::memcpy(words.data(), decoded.GetPtr(), words.size() * sizeof(uint32_t));
+  return words;
+}
+
+std::vector<float> ScratchNormals(size_t count) {
+  std::vector<float> xyz(3 * count);
+  for (size_t i = 0; i < count; ++i) {
+    const double z = -0.9 + 1.8 * (i + 0.5) / count;
+    const double angle = 2.39996322972865332 * i;
+    const double scale = i % 19 == 0 ? 0.0 : 1.0 + (int(i % 7) - 3) * 0x1p-20;
+    const double radius = scale * std::sqrt(1 - z * z);
+    xyz[i] = float(radius * std::cos(angle));
+    xyz[count + i] = float(radius * std::sin(angle));
+    xyz[2 * count + i] = float(scale * z);
+  }
+  return xyz;
+}
+
+size_t NormalPlaneScratchBytes(size_t width, size_t height) {
+  return sizeof(oct_revisit::Code) *
+         std::max((width + 127) / 128 * 128 * height,
+                  (height + 127) / 128 * 128 * width);
+}
+
+class OctNormalCodec : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    int count = 0;
+    const auto status = cudaGetDeviceCount(&count);
+    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver ||
+        (status == cudaSuccess && count == 0)) {
+      GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
+    }
+    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
+  }
+};
+
+TEST_F(OctNormalCodec, IndependentDoubleAngularAndNormOracle) {
+  std::vector<float3> input;
+  // Fibonacci sphere, both hemispheres and folds; each input is FP32, while
+  // comparison below uses double precision on those exact stored values.
+  for (int i = 0; i < 4096; ++i) {
+    const double z = 1.0 - 2.0 * (i + 0.5) / 4096.0;
+    const double phi = i * 2.39996322972865332;
+    const double r = std::sqrt(1.0 - z * z);
+    input.push_back(make_float3(
+        float(r * std::cos(phi)), float(r * std::sin(phi)), float(z)));
+  }
+  float3* device_input = nullptr;
+  Observation* device_output = nullptr;
+  CUDA_SAFE_CALL(cudaMalloc(&device_input, input.size() * sizeof(float3)));
+  CUDA_SAFE_CALL(
+      cudaMalloc(&device_output, input.size() * sizeof(Observation)));
+  CUDA_SAFE_CALL(cudaMemcpy(device_input,
+                            input.data(),
+                            input.size() * sizeof(float3),
+                            cudaMemcpyHostToDevice));
+  Observe<<<(input.size() + 127) / 128, 128>>>(
+      device_input, device_output, input.size());
+  CUDA_SYNC_AND_CHECK();
+  std::vector<Observation> output(input.size());
+  CUDA_SAFE_CALL(cudaMemcpy(output.data(),
+                            device_output,
+                            output.size() * sizeof(Observation),
+                            cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaFree(device_output));
+  CUDA_SAFE_CALL(cudaFree(device_input));
+  for (size_t i = 0; i < input.size(); ++i) {
+    SCOPED_TRACE(i);
+    ASSERT_EQ(output[i].status, Status::kOk);
+    ASSERT_TRUE(output[i].decoded_ok);
+    const double ax = input[i].x, ay = input[i].y, az = input[i].z;
+    const double bx = output[i].decoded.x, by = output[i].decoded.y,
+                 bz = output[i].decoded.z;
+    const double an = std::sqrt(ax * ax + ay * ay + az * az),
+                 bn = std::sqrt(bx * bx + by * by + bz * bz);
+    const double cx = ay * bz - az * by, cy = az * bx - ax * bz,
+                 cz = ax * by - ay * bx;
+    const double angle = std::atan2(std::sqrt(cx * cx + cy * cy + cz * cz),
+                                    ax * bx + ay * by + az * bz);
+    EXPECT_LE(angle, 0.00015);  // 16+16 oct direction bound, radians
+    EXPECT_LE(std::abs(an - bn), std::ldexp(1.0, -23));
+  }
+}
+
+TEST_F(OctNormalCodec, PreparedNormalMatchesSelectedCodeInAllFrames) {
+  std::vector<float3> input;
+  for (int i = 0; i < 4096; ++i) {
+    const double z = 1.0 - 2.0 * (i + 0.5) / 4096.0;
+    const double phi = i * 2.39996322972865332;
+    const double r = std::sqrt(1.0 - z * z);
+    input.push_back(make_float3(
+        float(r * std::cos(phi)), float(r * std::sin(phi)), float(z)));
+  }
+  input.push_back(make_float3(0, 0, 0));
+  input.push_back(make_float3(2, 0, 0));
+  input.push_back(make_float3(std::numeric_limits<float>::infinity(), 0, 0));
+  input.push_back(make_float3(std::numeric_limits<float>::quiet_NaN(), 0, 0));
+  input.push_back(make_float3(1, 0, 0));  // Invalid certificate limit.
+  const size_t count = input.size() * 4;
+  float3* device_input = nullptr;
+  PreparedObservation* device_output = nullptr;
+  unsigned* errors = nullptr;
+  CUDA_SAFE_CALL(cudaMalloc(&device_input, input.size() * sizeof(float3)));
+  CUDA_SAFE_CALL(
+      cudaMalloc(&device_output, count * sizeof(PreparedObservation)));
+  CUDA_SAFE_CALL(cudaMalloc(&errors, count * sizeof(unsigned)));
+  CUDA_SAFE_CALL(cudaMemset(errors, 0, count * sizeof(unsigned)));
+  CUDA_SAFE_CALL(cudaMemcpy(device_input,
+                            input.data(),
+                            input.size() * sizeof(float3),
+                            cudaMemcpyHostToDevice));
+  ObservePrepared<<<(count + 127) / 128, 128>>>(
+      device_input, device_output, errors, input.size());
+  CUDA_SYNC_AND_CHECK();
+  std::vector<PreparedObservation> output(count);
+  CUDA_SAFE_CALL(cudaMemcpy(output.data(),
+                            device_output,
+                            count * sizeof(PreparedObservation),
+                            cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaFree(errors));
+  CUDA_SAFE_CALL(cudaFree(device_output));
+  CUDA_SAFE_CALL(cudaFree(device_input));
+  EXPECT_EQ(output[0].status, Status::kOk);
+  EXPECT_EQ(output[4096 * 4].status, Status::kZero);
+  EXPECT_EQ(output[4097 * 4].status, Status::kOutOfEnvelope);
+  EXPECT_EQ(output[4098 * 4].status, Status::kNonfinite);
+  EXPECT_EQ(output[(input.size() - 1) * 4].status,
+            Status::kNoCertifiedCandidate);
+  for (size_t i = 0; i < count; ++i) {
+    SCOPED_TRACE(i);
+    const auto& got = output[i];
+    EXPECT_EQ(got.status, got.reference_status);
+    EXPECT_TRUE(SameCode(got.code, got.reference_code));
+    EXPECT_TRUE(SameCode(got.owner_code, got.owner_reference_code));
+    EXPECT_EQ(got.error, got.expected_error);
+    for (int axis = 0; axis < 3; ++axis) {
+      EXPECT_EQ(got.prepared_bits[axis], got.decoded_bits[axis]);
+      EXPECT_EQ(got.owner_bits[axis], got.owner_decoded_bits[axis]);
+    }
+  }
+}
+
+TEST_F(OctNormalCodec, RefusalAndSentinels) {
+  const float inf = std::numeric_limits<float>::infinity(),
+              nan = std::numeric_limits<float>::quiet_NaN();
+  const std::vector<float3> input = {make_float3(0, 0, 0),
+                                     make_float3(inf, 0, 0),
+                                     make_float3(nan, 0, 0),
+                                     make_float3(2, 0, 0)};
+  float3* d = nullptr;
+  Observation* o = nullptr;
+  CUDA_SAFE_CALL(cudaMalloc(&d, input.size() * sizeof(float3)));
+  CUDA_SAFE_CALL(cudaMalloc(&o, input.size() * sizeof(Observation)));
+  CUDA_SAFE_CALL(cudaMemcpy(
+      d, input.data(), input.size() * sizeof(float3), cudaMemcpyHostToDevice));
+  Observe<<<1, 32>>>(d, o, input.size());
+  CUDA_SYNC_AND_CHECK();
+  std::vector<Observation> got(input.size());
+  CUDA_SAFE_CALL(cudaMemcpy(
+      got.data(), o, got.size() * sizeof(Observation), cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaFree(o));
+  CUDA_SAFE_CALL(cudaFree(d));
+  EXPECT_EQ(got[0].status, Status::kZero);
+  EXPECT_EQ(got[1].status, Status::kNonfinite);
+  EXPECT_EQ(got[2].status, Status::kNonfinite);
+  EXPECT_EQ(got[3].status, Status::kOutOfEnvelope);
+  for (auto& x : got) {
+    EXPECT_TRUE(x.decoded_ok);
+    EXPECT_EQ(x.code.direction.x, oct_revisit::kInvalid);
+    EXPECT_EQ(x.code.direction.y, oct_revisit::kInvalid);
+    EXPECT_EQ(x.code.magnitude, oct_magnitude::kInvalidMagnitude);
+    EXPECT_EQ(x.decoded.x, 0);
+    EXPECT_EQ(x.decoded.y, 0);
+    EXPECT_EQ(x.decoded.z, 0);
+  }
+  bool* decoded_ok = nullptr;
+  float3* decoded_values = nullptr;
+  CUDA_SAFE_CALL(cudaMalloc(&decoded_ok, 2 * sizeof(bool)));
+  CUDA_SAFE_CALL(cudaMalloc(&decoded_values, 2 * sizeof(float3)));
+  DecodeMalformed<<<1, 1>>>(decoded_ok, decoded_values);
+  CUDA_SYNC_AND_CHECK();
+  bool oks[2];
+  float3 zeros[2];
+  CUDA_SAFE_CALL(
+      cudaMemcpy(oks, decoded_ok, sizeof(oks), cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(
+      cudaMemcpy(zeros, decoded_values, sizeof(zeros), cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaFree(decoded_values));
+  CUDA_SAFE_CALL(cudaFree(decoded_ok));
+  for (int i = 0; i < 2; ++i) {
+    EXPECT_FALSE(oks[i]);
+    EXPECT_EQ(zeros[i].x, 0);
+    EXPECT_EQ(zeros[i].y, 0);
+    EXPECT_EQ(zeros[i].z, 0);
+  }
+  for (int mode = 0; mode < 4; ++mode) {
+    OctNormalMap map(1, 1);
+    InvalidOwnerOperations<<<1, 1>>>(map.View(), mode);
+    CUDA_SYNC_AND_CHECK();
+    EXPECT_ANY_THROW(map.CheckDomain());
+    EXPECT_ANY_THROW(map.CopyToMat());
+  }
+}
+
+__global__ void EncodeTransferReference(OctNormalView view,
+                                        const float3* input,
+                                        Encoded* codes,
+                                        float3* values,
+                                        size_t count) {
+  const size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= count) return;
+  float normal[3] = {input[i].x, input[i].y, input[i].z};
+  codes[i] = view.Canonicalize(normal);
+  values[i] = make_float3(normal[0], normal[1], normal[2]);
+}
+
+TEST_F(OctNormalCodec, PaddedChunkedTransferMatchesDirectOwner) {
+  constexpr size_t width = 1025, height = 343, pitch = width + 7;
+  constexpr size_t count = width * height;
+  const size_t rows = OctNormalMap::TransferRows(width, height);
+  ASSERT_LT(rows, height);
+  ASSERT_NE(height % rows, 0);
+  std::vector<float> padded(3 * pitch * height, -17.0f);
+  std::vector<float3> input(count);
+  const float3 directions[] = {make_float3(1, 0, 0),
+                               make_float3(0, -1, 0),
+                               make_float3(0, 0, 1),
+                               make_float3(-1, 0, 0),
+                               make_float3(0.6f, 0.8f, 0)};
+  for (size_t i = 0; i < count; ++i) {
+    const float3 n = directions[(i + i / width) % 5];
+    input[i] = n;
+    const size_t row = i / width, col = i % width;
+    padded[row * pitch + col] = n.x;
+    padded[(height + row) * pitch + col] = n.y;
+    padded[(2 * height + row) * pitch + col] = n.z;
+  }
+  OctNormalMap map(width, height);
+  map.CopyFromCPU(padded.data(), pitch * sizeof(float));
+  float3 *device_input = nullptr, *device_values = nullptr;
+  Encoded* device_codes = nullptr;
+  unsigned* changed = nullptr;
+  CUDA_SAFE_CALL(cudaMalloc(&device_input, count * sizeof(float3)));
+  CUDA_SAFE_CALL(cudaMalloc(&device_values, count * sizeof(float3)));
+  CUDA_SAFE_CALL(cudaMalloc(&device_codes, count * sizeof(Encoded)));
+  CUDA_SAFE_CALL(cudaMalloc(&changed, sizeof(unsigned)));
+  CUDA_SAFE_CALL(cudaMemset(changed, 0, sizeof(unsigned)));
+  CUDA_SAFE_CALL(cudaMemcpy(device_input,
+                            input.data(),
+                            count * sizeof(float3),
+                            cudaMemcpyHostToDevice));
+  const unsigned blocks = static_cast<unsigned>((count + 127) / 128);
+  EncodeTransferReference<<<blocks, 128>>>(
+      map.View(), device_input, device_codes, device_values, count);
+  CUDA_SYNC_AND_CHECK();
+  std::vector<Encoded> expected_codes(count), actual_codes(count);
+  std::vector<float3> expected(count), actual(count);
+  CUDA_SAFE_CALL(cudaMemcpy(expected_codes.data(),
+                            device_codes,
+                            count * sizeof(Encoded),
+                            cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaMemcpy(expected.data(),
+                            device_values,
+                            count * sizeof(float3),
+                            cudaMemcpyDeviceToHost));
+  ReadAndCarry<<<blocks, 128>>>(
+      map.View(), device_codes, device_values, changed);
+  CUDA_SYNC_AND_CHECK();
+  CUDA_SAFE_CALL(cudaMemcpy(actual_codes.data(),
+                            device_codes,
+                            count * sizeof(Encoded),
+                            cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaMemcpy(actual.data(),
+                            device_values,
+                            count * sizeof(float3),
+                            cudaMemcpyDeviceToHost));
+  unsigned changed_count = 0;
+  CUDA_SAFE_CALL(cudaMemcpy(
+      &changed_count, changed, sizeof(changed_count), cudaMemcpyDeviceToHost));
+  CUDA_SAFE_CALL(cudaFree(changed));
+  CUDA_SAFE_CALL(cudaFree(device_codes));
+  CUDA_SAFE_CALL(cudaFree(device_values));
+  CUDA_SAFE_CALL(cudaFree(device_input));
+  map.CheckDomain();
+  EXPECT_EQ(changed_count, 0u);
+  const auto transferred = map.CopyToMat();
+  const auto same_bits = [](float a, float b) {
+    return std::memcmp(&a, &b, sizeof(float)) == 0;
+  };
+  for (size_t i = 0; i < count; ++i) {
+    if (!SameCode(actual_codes[i], expected_codes[i]) ||
+        !same_bits(actual[i].x, expected[i].x) ||
+        !same_bits(actual[i].y, expected[i].y) ||
+        !same_bits(actual[i].z, expected[i].z) ||
+        !same_bits(transferred.GetPtr()[i], expected[i].x) ||
+        !same_bits(transferred.GetPtr()[count + i], expected[i].y) ||
+        !same_bits(transferred.GetPtr()[2 * count + i], expected[i].z)) {
+      ADD_FAILURE() << "Transfer differs from direct owner at pixel " << i;
+      break;
+    }
+  }
+}
+
+TEST_F(OctNormalCodec, RotationRejectsEitherPoisonedOwnerBeforeCopy) {
+  constexpr size_t width = 7, height = 5, count = width * height;
+  std::vector<float> xyz(3 * count, 0.0f);
+  std::fill(xyz.begin() + 2 * count, xyz.end(), -1.0f);
+  for (const bool poison_source : {false, true}) {
+    SCOPED_TRACE(poison_source);
+    constexpr size_t target_width = 9, target_height = 11;
+    OctNormalMap source(width, height), target(target_width, target_height);
+    source.CopyFromCPU(xyz.data(), width * sizeof(float));
+    std::vector<float> target_xyz(3 * target_width * target_height, 0.0f);
+    std::fill(target_xyz.begin() + 2 * target_width * target_height,
+              target_xyz.end(),
+              -1.0f);
+    target.CopyFromCPU(target_xyz.data(), target_width * sizeof(float));
+    auto& poisoned = poison_source ? source : target;
+    auto& healthy = poison_source ? target : source;
+    const auto before = healthy.CopyToMat().GetData();
+    InvalidOwnerOperations<<<1, 1>>>(poisoned.View(), 2);
+    CUDA_SYNC_AND_CHECK();
+    EXPECT_THROW(source.RotateTo(target), std::invalid_argument);
+    EXPECT_EQ(source.GetWidth(), width);
+    EXPECT_EQ(source.GetHeight(), height);
+    EXPECT_EQ(target.GetWidth(), target_width);
+    EXPECT_EQ(target.GetHeight(), target_height);
+    EXPECT_EQ(source.GetFrame(), 0u);
+    EXPECT_EQ(target.GetFrame(), 0u);
+    EXPECT_EQ(healthy.CopyToMat().GetData(), before);
+    EXPECT_NO_THROW(healthy.CheckDomain());
+    EXPECT_THROW(poisoned.CheckDomain(), std::invalid_argument);
+  }
+}
+
+TEST_F(OctNormalCodec, FourFrameOwnerRotationAndWinnerCodeCarry) {
+  constexpr size_t w = 7, h = 5, n = w * h;
+  std::vector<float> xyz(3 * n);
+  for (size_t i = 0; i < n; ++i) {
+    const double z = -0.9 + 1.8 * (i + 0.5) / n, p = 2.39996322972865332 * i,
+                 r = std::sqrt(1 - z * z);
+    xyz[i] = float(r * std::cos(p));
+    xyz[n + i] = float(r * std::sin(p));
+    xyz[2 * n + i] = float(z);
+  }
+  OctNormalMap a(w, h, true), b(h, w, true);
+  a.CopyFromCPU(xyz.data(), w * sizeof(float));
+  Encoded* codes = nullptr;
+  float3* values = nullptr;
+  unsigned* changed = nullptr;
+  CUDA_SAFE_CALL(cudaMalloc(&changed, sizeof(unsigned)));
+  CUDA_SAFE_CALL(cudaMemset(changed, 0, sizeof(unsigned)));
+  CUDA_SAFE_CALL(cudaMalloc(&codes, n * sizeof(Encoded)));
+  CUDA_SAFE_CALL(cudaMalloc(&values, n * sizeof(float3)));
+  auto capture = [&](OctNormalMap& owner,
+                     std::vector<Encoded>& c,
+                     std::vector<float3>& v) {
+    ReadAndCarry<<<1, 128>>>(owner.View(), codes, values, changed);
+    CUDA_SYNC_AND_CHECK();
+    owner.CheckDomain();
+    c.resize(n);
+    v.resize(n);
+    CUDA_SAFE_CALL(cudaMemcpy(
+        c.data(), codes, n * sizeof(Encoded), cudaMemcpyDeviceToHost));
+    CUDA_SAFE_CALL(cudaMemcpy(
+        v.data(), values, n * sizeof(float3), cudaMemcpyDeviceToHost));
+  };
+  std::vector<Encoded> expected, actual;
+  std::vector<float3> expected_values, actual_values;
+  capture(a, expected, expected_values);
+  OctNormalMap* in = &a;
+  OctNormalMap* out = &b;
+  size_t width = w, height = h;
+  for (unsigned frame = 1; frame <= 4; ++frame) {
+    std::vector<Encoded> next(n);
+    std::vector<float3> nv(n);
+    for (size_t row = 0; row < width; ++row)
+      for (size_t col = 0; col < height; ++col) {
+        const size_t dst = row * height + col,
+                     src = col * width + (width - 1 - row);
+        next[dst] = expected[src];
+        const auto v = expected_values[src];
+        nv[dst] = make_float3(v.y, -v.x, v.z);
+      }
+    in->RotateTo(*out);
+    EXPECT_EQ(out->GetFrame(), frame % 4);
+    capture(*out, actual, actual_values);
+    for (size_t i = 0; i < n; ++i) {
+      EXPECT_TRUE(SameCode(actual[i], next[i]));
+      EXPECT_FLOAT_EQ(actual_values[i].x, nv[i].x);
+      EXPECT_FLOAT_EQ(actual_values[i].y, nv[i].y);
+      EXPECT_FLOAT_EQ(actual_values[i].z, nv[i].z);
+    }
+    expected.swap(next);
+    expected_values.swap(nv);
+    std::swap(width, height);
+    std::swap(in, out);
+  }
+  unsigned changed_count = 0;
+  CUDA_SAFE_CALL(cudaMemcpy(
+      &changed_count, changed, sizeof(unsigned), cudaMemcpyDeviceToHost));
+  EXPECT_EQ(changed_count, 0u);
+  CUDA_SAFE_CALL(cudaFree(changed));
+  CUDA_SAFE_CALL(cudaFree(values));
+  CUDA_SAFE_CALL(cudaFree(codes));
+}
+TEST_F(OctNormalCodec, PlaneScratchRotationMatchesOutOfPlace) {
+  const std::pair<size_t, size_t> shapes[] = {
+      {1, 1}, {43, 55}, {129, 17}, {17, 129}};
+  for (const auto shape : shapes) {
+    const auto [width, height] = shape;
+    SCOPED_TRACE(::testing::Message() << width << "x" << height);
+    const auto xyz = ScratchNormals(width * height);
+    OctNormalMap candidate(width, height, true);
+    OctNormalMap first(width, height, true), second(height, width, true);
+    candidate.CopyFromCPU(xyz.data(), width * sizeof(float));
+    first.CopyFromCPU(xyz.data(), width * sizeof(float));
+    const size_t capacity = NormalPlaneScratchBytes(width, height);
+    constexpr size_t guard = 128;
+    GpuMat<uint8_t> scratch(capacity + 2 * guard, 1);
+    CUDA_SAFE_CALL(cudaMemset(scratch.GetPtr(), 0xa5, capacity + 2 * guard));
+    const auto* magnitude = candidate.View().magnitude;
+    auto* input = &first;
+    auto* output = &second;
+    for (unsigned turn = 1; turn <= 4; ++turn) {
+      SCOPED_TRACE(turn);
+      candidate.RotateWithPlaneScratch(scratch.GetPtr() + guard, capacity);
+      input->RotateTo(*output);
+      EXPECT_EQ(candidate.GetWidth(), output->GetWidth());
+      EXPECT_EQ(candidate.GetHeight(), output->GetHeight());
+      EXPECT_EQ(candidate.GetFrame(), turn % 4);
+      EXPECT_EQ(candidate.View().magnitude, magnitude);
+      const auto actual = CopyNormalCodes(candidate.View());
+      const auto expected = CopyNormalCodes(output->View());
+      ASSERT_EQ(actual.size(), expected.size());
+      EXPECT_TRUE(
+          std::equal(actual.begin(), actual.end(), expected.begin(), SameCode));
+      EXPECT_EQ(CopyNormalWords(candidate), CopyNormalWords(*output));
+      for (const size_t offset : {size_t{0}, guard + capacity}) {
+        std::vector<uint8_t> bytes(guard);
+        CUDA_SAFE_CALL(cudaMemcpy(bytes.data(),
+                                  scratch.GetPtr() + offset,
+                                  bytes.size(),
+                                  cudaMemcpyDeviceToHost));
+        EXPECT_EQ(bytes, std::vector<uint8_t>(guard, 0xa5));
+      }
+      std::swap(input, output);
+    }
+  }
+}
+
+TEST_F(OctNormalCodec, PlaneScratchRefusesBeforeMutation) {
+  constexpr size_t width = 129, height = 17;
+  OctNormalMap owner(width, height, true);
+  const size_t payload_bytes = owner.GetCapacityBytes() - sizeof(unsigned);
+  CUDA_SAFE_CALL(cudaMemset(owner.View().direction, 0xa5, payload_bytes));
+  const auto xyz = ScratchNormals(width * height);
+  owner.CopyFromCPU(xyz.data(), width * sizeof(float));
+  const size_t capacity = NormalPlaneScratchBytes(width, height);
+  GpuMat<uint8_t> scratch(capacity, 1);
+  CUDA_SAFE_CALL(cudaMemset(scratch.GetPtr(), 0xa5, capacity));
+  const auto before = CopyNormalWords(owner);
+  std::vector<uint8_t> payload(payload_bytes);
+  CUDA_SAFE_CALL(cudaMemcpy(payload.data(),
+                            owner.View().direction,
+                            payload_bytes,
+                            cudaMemcpyDeviceToHost));
+  const auto refuse = [&](void* pointer, size_t bytes, const char* reason) {
+    SCOPED_TRACE(reason);
+    try {
+      owner.RotateWithPlaneScratch(pointer, bytes);
+      ADD_FAILURE() << "Invalid scratch was accepted";
+    } catch (const std::invalid_argument& error) {
+      EXPECT_NE(std::string(error.what()).find(reason), std::string::npos);
+    }
+    EXPECT_EQ(owner.GetWidth(), width);
+    EXPECT_EQ(owner.GetHeight(), height);
+    EXPECT_EQ(owner.GetPixelPitch(), (width + 127) / 128 * 128);
+    EXPECT_EQ(owner.GetFrame(), 0u);
+    EXPECT_EQ(CopyNormalWords(owner), before);
+    std::vector<uint8_t> after(payload_bytes), scratch_after(capacity);
+    CUDA_SAFE_CALL(cudaMemcpy(after.data(),
+                              owner.View().direction,
+                              payload_bytes,
+                              cudaMemcpyDeviceToHost));
+    EXPECT_EQ(after, payload);
+    CUDA_SAFE_CALL(cudaMemcpy(scratch_after.data(),
+                              scratch.GetPtr(),
+                              capacity,
+                              cudaMemcpyDeviceToHost));
+    EXPECT_EQ(scratch_after, std::vector<uint8_t>(capacity, 0xa5));
+    EXPECT_NO_THROW(owner.CheckDomain());
+  };
+  const size_t required =
+      sizeof(oct_revisit::Code) * ((height + 127) / 128 * 128) * width;
+  refuse(scratch.GetPtr(), required - 1, "scratch_bytes >= required");
+  refuse(owner.View().direction, capacity, "disjoint");
+  refuse(owner.View().magnitude, capacity, "disjoint");
+}
+}  // namespace
+}  // namespace colmap::mvs

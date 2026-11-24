@@ -13,16 +13,17 @@ namespace mvs {
 // during state rotation. No checkpoint survives a sweep or changes a draw.
 class PatchMatchHmmCheckpoint {
  public:
-  PatchMatchHmmCheckpoint(size_t width, size_t height, size_t sources)
+  PatchMatchHmmCheckpoint(size_t width,
+                          size_t height,
+                          size_t sources,
+                          size_t rotation_element_bytes = sizeof(float))
       : original_width_(width), original_height_(height), sources_(sources) {
     THROW_CHECK_GT(width, 0);
     THROW_CHECK_GT(height, 0);
     THROW_CHECK_LE(width, std::numeric_limits<int>::max());
     THROW_CHECK_LE(height, std::numeric_limits<int>::max());
-    capacity_ = std::max({WorkspaceBytes(width, height, sources),
-                          WorkspaceBytes(height, width, sources),
-                          Multiply(Pitch(width), height),
-                          Multiply(Pitch(height), width)});
+    capacity_ =
+        RequiredCapacity(width, height, sources, rotation_element_bytes);
     CUDA_SAFE_ALLOCATE("cudaMalloc",
                        ptr_,
                        cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_));
@@ -34,6 +35,22 @@ class PatchMatchHmmCheckpoint {
   }
   PatchMatchHmmCheckpoint(const PatchMatchHmmCheckpoint&) = delete;
   PatchMatchHmmCheckpoint& operator=(const PatchMatchHmmCheckpoint&) = delete;
+
+  static size_t RequiredCapacity(size_t width,
+                                 size_t height,
+                                 size_t sources,
+                                 size_t rotation_element_bytes) {
+    THROW_CHECK_GT(width, 0);
+    THROW_CHECK_GT(height, 0);
+    THROW_CHECK_LE(width, std::numeric_limits<int>::max());
+    THROW_CHECK_LE(height, std::numeric_limits<int>::max());
+    THROW_CHECK(rotation_element_bytes == sizeof(uint16_t) ||
+                rotation_element_bytes == sizeof(float));
+    return std::max({WorkspaceBytes(width, height, sources),
+                     WorkspaceBytes(height, width, sources),
+                     Multiply(Pitch(width, rotation_element_bytes), height),
+                     Multiply(Pitch(height, rotation_element_bytes), width)});
+  }
 
   float* GetPtr() const { return ptr_; }
   size_t GetCapacityBytes() const { return capacity_; }
@@ -71,9 +88,10 @@ class PatchMatchHmmCheckpoint {
     THROW_CHECK(b == 0 || a <= std::numeric_limits<size_t>::max() / b);
     return a * b;
   }
-  static size_t Pitch(size_t width) {
-    THROW_CHECK_LE(width, (std::numeric_limits<size_t>::max() - 511) / 4);
-    const size_t pitch = (width * sizeof(float) + 511) / 512 * 512;
+  static size_t Pitch(size_t width, size_t element_bytes = sizeof(float)) {
+    THROW_CHECK_LE(width,
+                   (std::numeric_limits<size_t>::max() - 511) / element_bytes);
+    const size_t pitch = (width * element_bytes + 511) / 512 * 512;
     THROW_CHECK_LE(pitch, std::numeric_limits<int>::max());
     return pitch;
   }
