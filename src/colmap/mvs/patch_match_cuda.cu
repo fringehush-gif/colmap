@@ -15,6 +15,7 @@
 #include "colmap/mvs/patch_match_sampling.cuh"
 #ifdef COLMAP_PATCH_MATCH_TESTING
 #include "colmap/mvs/patch_match_cuda_test.h"
+#include <cstring>
 #endif
 #include "colmap/mvs/patch_match_rng_perimeter.h"
 #include "colmap/util/cuda.h"
@@ -1911,7 +1912,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           cost_map_->View(),                                    \
           depth_map_->View(),                                   \
           normal_map_->View(),                                  \
-          PackedConsistencyMaskView{consistency_mask_->View()},                            \
+          PackedConsistencyMaskView{consistency_mask_->View()}, \
           sel_prob_map_->View(),                                \
           prev_sel_prob_map_->View(),                           \
           ref_image_texture_->GetObj(),                         \
@@ -2436,6 +2437,68 @@ __global__ void SweepContinuation(GpuMatView<curandState> states,
     for (int i = 0; i < 3; ++i) draws.Set(0, col, i, curand(&state));
   }
 }
+// Independent original full-map initializer. The seed uses original launch
+// operands, not GpuMatPRNGSeed or the perimeter layout under test.
+__global__ void LegacyRngInitialization(const RefCamera camera,
+                                        GpuMatView<curandState> states,
+                                        GpuMatView<float> depth,
+                                        GpuMatView<float> normal,
+                                        const bool photo,
+                                        const float depth_min,
+                                        const float depth_max) {
+  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row >= states.GetHeight() || col >= states.GetWidth()) return;
+  const size_t block = blockIdx.y * gridDim.x + blockIdx.x;
+  const size_t seed = block * blockDim.y * blockDim.x +
+                      threadIdx.y * blockDim.x + threadIdx.x;
+  curandState state;
+  curand_init(seed, 0, 0, &state);
+  if (photo) {
+    depth.Set(row, col,
+              curand_uniform(&state) * (depth_max - depth_min) + depth_min);
+    float value[3];
+    GenerateRandomNormal(camera, row, col, &state, value);
+    normal.SetSlice(row, col, value);
+  }
+  states.Set(row, col, state);
+}
+
+// Replay only the unchanged RNG consumers on a legacy full-map row zero.
+// Trace hypothesis zero is the incumbent before random proposals were drawn.
+__global__ void ReplaySweepRng(const RefCamera camera,
+                               GpuMatView<curandState> states,
+                               const GpuMatView<float> hypotheses,
+                               const float perturbation,
+                               const int samples,
+                               GpuMatView<uint32_t> continuation) {
+  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (col >= states.GetWidth()) return;
+  curandState state = states.Get(0, col);
+  for (size_t row = 0; row < states.GetHeight(); ++row) {
+    (void)curand_uniform(&state);  // PerturbDepth always consumes one draw.
+    float incumbent[3], perturbed[3];
+    for (int axis = 0; axis < 3; ++axis)
+      incumbent[axis] = hypotheses.Get(row, col, 1 + axis);
+    PerturbNormal(camera,
+                  row,
+                  col,
+                  perturbation * M_PI,
+                  incumbent,
+                  &state,
+                  perturbed);
+    // Empty support still consumes every sample, with no window padding.
+    for (int sample = 0; sample < samples; ++sample) (void)curand_uniform(&state);
+  }
+  states.Set(0, col, state);
+  for (int i = 0; i < 3; ++i) continuation.Set(0, col, i, curand(&state));
+}
+
+bool SameFloatBits(const Mat<float>& a, const Mat<float>& b) {
+  return a.GetWidth() == b.GetWidth() && a.GetHeight() == b.GetHeight() &&
+         a.GetDepth() == b.GetDepth() &&
+         std::memcmp(a.GetPtr(), b.GetPtr(), a.GetNumBytes()) == 0;
+}
 }  // namespace
 
 struct PatchMatchCudaTestAccess {
@@ -2446,12 +2509,17 @@ struct PatchMatchCudaTestAccess {
                     (pm.ref_height_ + block.y - 1) / block.y);
     SeedOwnershipTest<<<grid, block>>>(
         pm.rand_state_map_->View(), {pm.ref_width_, pm.ref_height_}, seed);
+    return ComputeCost(pm);
+  }
+
+  static Mat<float> ComputeCost(PatchMatchCuda& pm) {
     pm.ComputeCudaConfig();
     dim3 cost_grid = pm.sweep_grid_size_;
     cost_grid.y = (pm.cost_map_->GetHeight() + kInitialCostStripeRows - 1) /
                   kInitialCostStripeRows;
     ComputeInitialCost<11, 1><<<cost_grid, pm.sweep_block_size_>>>(
-        MakeRefCamera(pm.ref_K_host_[0], pm.ref_inv_K_host_[0]),
+        MakeRefCamera(pm.ref_K_host_[pm.rotation_in_half_pi_],
+                      pm.ref_inv_K_host_[pm.rotation_in_half_pi_]),
         pm.cost_map_->View(),
         pm.depth_map_->View(),
         pm.normal_map_->View(),
@@ -2459,7 +2527,7 @@ struct PatchMatchCudaTestAccess {
         pm.ref_image_->sum_image->View(),
         pm.ref_image_->squared_sum_image->View(),
         pm.src_images_texture_->GetObj(),
-        pm.poses_texture_[0]->GetObj(),
+        pm.poses_texture_[pm.rotation_in_half_pi_]->GetObj(),
         pm.options_.sigma_spatial,
         pm.options_.sigma_color);
     CUDA_SYNC_AND_CHECK();
@@ -2469,7 +2537,15 @@ struct PatchMatchCudaTestAccess {
   static SweepTraceResult Sweep(PatchMatchCuda& pm,
                                 const bool cooperative,
                                 const unsigned long long seed) {
-    const Mat<float> initial_cost = InitialCost(pm, seed);
+    InitialCost(pm, seed);
+    return SweepCurrent(pm, cooperative, 1.0f, 0.0f);
+  }
+
+  static SweepTraceResult SweepCurrent(PatchMatchCuda& pm,
+                                       const bool cooperative,
+                                       const float perturbation,
+                                       const float previous_weight) {
+    const Mat<float> initial_cost = pm.cost_map_->CopyToMat();
     const size_t width = pm.cost_map_->GetWidth();
     const size_t height = pm.cost_map_->GetHeight();
     const size_t sources = pm.cost_map_->GetDepth();
@@ -2487,6 +2563,8 @@ struct PatchMatchCudaTestAccess {
                            costs.View(),
                            forward.View()};
     SweepOptions options;
+    options.perturbation = perturbation;
+    options.prev_sel_prob_weight = previous_weight;
     options.depth_min = pm.options_.depth_min;
     options.depth_max = pm.options_.depth_max;
     options.sigma_spatial = pm.options_.sigma_spatial;
@@ -2500,37 +2578,46 @@ struct PatchMatchCudaTestAccess {
         pm.options_.geom_consistency_regularizer;
     options.geom_consistency_max_cost = pm.options_.geom_consistency_max_cost;
     const RefCamera camera =
-        MakeRefCamera(pm.ref_K_host_[0], pm.ref_inv_K_host_[0]);
+        MakeRefCamera(pm.ref_K_host_[pm.rotation_in_half_pi_],
+                      pm.ref_inv_K_host_[pm.rotation_in_half_pi_]);
 
-    // The only difference between these launches is the actual specialization
-    // and its block geometry. InitialCost seeded each instance identically.
-#define LAUNCH_TEST_SWEEP(COOPERATIVE, WIDTH)                               \
-  SweepFromTopToBottom<11, 1, true, false, false, COOPERATIVE, WIDTH, true> \
+    // The two launch paths differ only in specialization and block geometry.
+#define LAUNCH_TEST_SWEEP(COOPERATIVE, WIDTH, GEOMETRY)                     \
+  SweepFromTopToBottom<11, 1, GEOMETRY, false, false, COOPERATIVE, WIDTH, true>\
       <<<dim3((width + (WIDTH) - 1) / (WIDTH)),                             \
          dim3(WIDTH, (COOPERATIVE) ? 16 : 1)>>>(                            \
           camera,                                                           \
           pm.global_workspace_->View(),                                     \
           pm.rand_state_map_->View(),                                       \
-          (PatchMatchRngPerimeter{pm.ref_width_, pm.ref_height_}),             \
-          static_cast<unsigned int>(pm.rotation_in_half_pi_),                \
+          (PatchMatchRngPerimeter{pm.ref_width_, pm.ref_height_}),          \
+          static_cast<unsigned int>(pm.rotation_in_half_pi_),               \
           pm.cost_map_->View(),                                             \
           pm.depth_map_->View(),                                            \
           pm.normal_map_->View(),                                           \
-          PackedConsistencyMaskView{pm.consistency_mask_->View()},                                     \
+          PackedConsistencyMaskView{pm.consistency_mask_->View()},          \
           pm.sel_prob_map_->View(),                                         \
           pm.prev_sel_prob_map_->View(),                                    \
           pm.ref_image_texture_->GetObj(),                                  \
           pm.ref_image_->sum_image->View(),                                 \
           pm.ref_image_->squared_sum_image->View(),                         \
           pm.src_images_texture_->GetObj(),                                 \
-          pm.src_depth_maps_texture_->GetObj(),                             \
-          pm.poses_texture_[0]->GetObj(),                                   \
+          pm.src_depth_maps_texture_ == nullptr                             \
+              ? 0 : pm.src_depth_maps_texture_->GetObj(),                   \
+          pm.poses_texture_[pm.rotation_in_half_pi_]->GetObj(),             \
           options,                                                          \
           trace)
-    if (cooperative) {
-      LAUNCH_TEST_SWEEP(true, 8);
+    if (pm.options_.geom_consistency) {
+      if (cooperative) {
+        LAUNCH_TEST_SWEEP(true, 8, true);
+      } else {
+        LAUNCH_TEST_SWEEP(false, THREADS_PER_BLOCK, true);
+      }
     } else {
-      LAUNCH_TEST_SWEEP(false, THREADS_PER_BLOCK);
+      if (cooperative) {
+        LAUNCH_TEST_SWEEP(true, 8, false);
+      } else {
+        LAUNCH_TEST_SWEEP(false, THREADS_PER_BLOCK, false);
+      }
     }
 #undef LAUNCH_TEST_SWEEP
     CUDA_SYNC_AND_CHECK();
@@ -2553,12 +2640,81 @@ struct PatchMatchCudaTestAccess {
             pm.sel_prob_map_->CopyToMat(),
             continuation.CopyToMat()};
   }
+
+  static SweepSequenceResult Sequence(PatchMatchCuda& pm,
+                                      const bool cooperative) {
+    auto shadow =
+        std::make_unique<GpuMat<curandState>>(pm.ref_width_, pm.ref_height_);
+    GpuMat<float> initial_depth(pm.ref_width_, pm.ref_height_);
+    GpuMat<float> initial_normal(pm.ref_width_, pm.ref_height_, 3);
+    const dim3 block(32, 16);
+    const dim3 grid((pm.ref_width_ + 31) / 32, (pm.ref_height_ + 15) / 16);
+    LegacyRngInitialization<<<grid, block>>>(
+        MakeRefCamera(pm.ref_K_host_[0], pm.ref_inv_K_host_[0]),
+        shadow->View(),
+        initial_depth.View(),
+        initial_normal.View(),
+        !pm.options_.geom_consistency,
+        pm.options_.depth_min,
+        pm.options_.depth_max);
+    if (pm.options_.geom_consistency) {
+      const auto& depth = pm.problem_.depth_maps->at(pm.problem_.ref_image_idx);
+      const auto& normal = pm.problem_.normal_maps->at(pm.problem_.ref_image_idx);
+      initial_depth.CopyToDevice(depth.GetPtr(), depth.GetWidth() * sizeof(float));
+      initial_normal.CopyToDevice(normal.GetPtr(),
+                                   normal.GetWidth() * sizeof(float));
+    }
+    CUDA_SYNC_AND_CHECK();
+    SweepSequenceResult result;
+    result.initialization_matches =
+        SameFloatBits(pm.depth_map_->CopyToMat(), initial_depth.CopyToMat()) &&
+        SameFloatBits(pm.normal_map_->CopyToMat(), initial_normal.CopyToMat());
+    ComputeCost(pm);  // Keep constructor RNG state: never call InitialCost here.
+    constexpr int kSweeps = 8;
+    for (int step = 0; step < kSweeps; ++step) {
+      const float perturbation = 1.0f / std::pow(2.0f, step / 4.0f);
+      auto trace = SweepCurrent(pm,
+                                cooperative,
+                                perturbation,
+                                static_cast<float>(step) / kSweeps);
+      GpuMat<float> hypotheses(trace.hypotheses.GetWidth(),
+                               trace.hypotheses.GetHeight(),
+                               20);
+      hypotheses.CopyToDevice(trace.hypotheses.GetPtr(),
+                               trace.hypotheses.GetWidth() * sizeof(float));
+      GpuMat<uint32_t> continuation(shadow->GetWidth(), 1, 3);
+      ReplaySweepRng<<<(shadow->GetWidth() + 31) / 32, 32>>>(
+          MakeRefCamera(pm.ref_K_host_[pm.rotation_in_half_pi_],
+                        pm.ref_inv_K_host_[pm.rotation_in_half_pi_]),
+          shadow->View(),
+          hypotheses.View(),
+          perturbation,
+          pm.options_.num_samples,
+          continuation.View());
+      CUDA_SYNC_AND_CHECK();
+      result.continuation_matches.push_back(
+          trace.continuation.GetData() == continuation.CopyToMat().GetData());
+      result.sweeps.push_back(std::move(trace));
+      pm.Rotate();
+      auto rotated = std::make_unique<GpuMat<curandState>>(
+          shadow->GetHeight(), shadow->GetWidth());
+      shadow->Rotate(rotated.get());
+      shadow.swap(rotated);
+    }
+    CUDA_SYNC_AND_CHECK();
+    return result;
+  }
 };
 
 SweepTraceResult ProbeSweep(PatchMatchCuda& pm,
                             const bool cooperative,
                             const unsigned long long seed) {
   return PatchMatchCudaTestAccess::Sweep(pm, cooperative, seed);
+}
+
+SweepSequenceResult ProbeSweepSequence(PatchMatchCuda& pm,
+                                       const bool cooperative) {
+  return PatchMatchCudaTestAccess::Sequence(pm, cooperative);
 }
 
 Mat<float> ProbeOwnershipInitialCost(PatchMatchCuda& pm,
