@@ -244,22 +244,22 @@ class Fixed24NccCostMap {
     THROW_CHECK_LE(capacity,
                    std::numeric_limits<size_t>::max() - sizeof(uint32_t));
     try {
-      CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity));
-      CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&domain_error_),
-                                sizeof(uint32_t)));
+      CUDA_SAFE_ALLOCATE("cudaMalloc",
+                         ptr_,
+                         cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity));
+      CUDA_SAFE_ALLOCATE("cudaMalloc",
+                         domain_error_,
+                         cudaMalloc(reinterpret_cast<void**>(&domain_error_),
+                                    sizeof(uint32_t)));
       CUDA_SAFE_CALL(cudaMemset(domain_error_, 0, sizeof(uint32_t)));
       Reorient(width, height);
     } catch (...) {
-      (void)cudaFree(domain_error_);
-      (void)cudaFree(ptr_);
+      Release();
       throw;
     }
   }
 
-  ~Fixed24NccCostMap() {
-    (void)cudaFree(domain_error_);
-    (void)cudaFree(ptr_);
-  }
+  ~Fixed24NccCostMap() { Release(); }
   Fixed24NccCostMap(const Fixed24NccCostMap&) = delete;
   Fixed24NccCostMap& operator=(const Fixed24NccCostMap&) = delete;
 
@@ -329,6 +329,19 @@ class Fixed24NccCostMap {
 #endif
 
  private:
+  void Release() noexcept {
+    if (domain_error_ != nullptr) {
+      const auto status = cudaFree(domain_error_);
+      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                             static_cast<int>(status));
+    }
+    if (ptr_ != nullptr) {
+      const auto status = cudaFree(ptr_);
+      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                             static_cast<int>(status));
+    }
+  }
+
   uint8_t* LowPtr() const {
     return reinterpret_cast<uint8_t*>(ptr_) + 2 * capacity_pixels_;
   }
