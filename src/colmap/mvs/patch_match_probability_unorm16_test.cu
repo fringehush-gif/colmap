@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "colmap/mvs/patch_match_probability_unorm16.h"
+#include "colmap/util/testing_cuda.h"
 
 #include <cmath>
 #include <cstring>
@@ -11,6 +12,8 @@
 namespace colmap {
 namespace mvs {
 namespace {
+
+using PatchMatchProbabilityUnorm16 = CudaTest;
 
 __global__ void StoreValues(GpuMatView<float> values,
                             ProbabilityUnorm16View output) {
@@ -29,11 +32,7 @@ uint16_t ReferenceCode(float value, float scale) {
       lower + (fraction > 0.5 || (fraction == 0.5 && (lower & 1u))));
 }
 
-TEST(PatchMatchProbabilityUnorm16, RoundTripsAndHalfIntegerNeighbors) {
-  int devices = 0;
-  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
-    GTEST_SKIP() << "CUDA device required";
-  }
+TEST_F(PatchMatchProbabilityUnorm16, RoundTripsAndHalfIntegerNeighbors) {
   const float scale = 65535.0f;
   std::vector<float> values;
   values.reserve(65536 + 3 * 65535);
@@ -49,7 +48,7 @@ TEST(PatchMatchProbabilityUnorm16, RoundTripsAndHalfIntegerNeighbors) {
   }
   GpuMat<float> input(values.size(), 1, 1);
   input.CopyToDevice(values.data(), values.size() * sizeof(float));
-  PatchMatchProbabilityUnorm16 output(values.size(), 1, 1);
+  mvs::PatchMatchProbabilityUnorm16 output(values.size(), 1, 1);
   StoreValues<<<(values.size() + 255) / 256, 256>>>(input.View(),
                                                     output.View());
   CUDA_SYNC_AND_CHECK();
@@ -65,11 +64,7 @@ TEST(PatchMatchProbabilityUnorm16, RoundTripsAndHalfIntegerNeighbors) {
   }
 }
 
-TEST(PatchMatchProbabilityUnorm16, ProbabilityEndpointBudget) {
-  int devices = 0;
-  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
-    GTEST_SKIP() << "CUDA device required";
-  }
+TEST_F(PatchMatchProbabilityUnorm16, ProbabilityEndpointBudget) {
   const float epsilon = ProbabilityUnorm16View::kEndpointRoundoff;
   const float infinity = std::numeric_limits<float>::infinity();
   const float values[] = {-0.0f,
@@ -86,7 +81,7 @@ TEST(PatchMatchProbabilityUnorm16, ProbabilityEndpointBudget) {
     const bool accepted = value >= -epsilon && value <= 1.0f + epsilon;
     GpuMat<float> input(1, 1, 1);
     input.CopyToDevice(&value, sizeof(value));
-    PatchMatchProbabilityUnorm16 probability(1, 1, 1);
+    mvs::PatchMatchProbabilityUnorm16 probability(1, 1, 1);
     StoreValues<<<1, 1>>>(input.View(), probability.View());
     CUDA_SAFE_CALL(cudaGetLastError());
     CUDA_SAFE_CALL(cudaDeviceSynchronize());

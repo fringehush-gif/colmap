@@ -9,6 +9,7 @@
 #include "colmap/mvs/gpu_mat_prng.h"
 #include "colmap/mvs/patch_match_sampling.cuh"
 #include "colmap/mvs/patch_match_state_map.h"
+#include "colmap/util/testing_cuda.h"
 
 #include <array>
 #include <cstdint>
@@ -20,23 +21,6 @@
 
 namespace colmap {
 namespace mvs {
-namespace {
-
-class CudaTest : public ::testing::Test {
- protected:
-  void SetUp() override {
-    int num_devices = 0;
-    const cudaError_t status = cudaGetDeviceCount(&num_devices);
-    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver ||
-        (status == cudaSuccess && num_devices == 0)) {
-      GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
-    }
-    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
-  }
-};
-
-}  // namespace
-
 namespace {
 __global__ void CheckSourceSampling(int* errors) {
   int failures = 0;
