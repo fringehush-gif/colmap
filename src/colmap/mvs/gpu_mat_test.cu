@@ -588,7 +588,7 @@ std::vector<uint32_t> Fixed24Codes(const Fixed24NccCostMap& map) {
 }
 }  // namespace
 
-TEST(Fixed24NccCostMap, ScalarErrorBoundAndExactEndpoints) {
+TEST_F(CudaTest, NccFixed24ScalarErrorBoundAndExactEndpoints) {
   Fixed24NccCostMap map(1, 1, 1);
   GpuMat<float> output(1, 1);
   for (const float cost : {0.0f,
@@ -619,7 +619,7 @@ TEST(Fixed24NccCostMap, ScalarErrorBoundAndExactEndpoints) {
     }
   }
 }
-TEST(Fixed24NccCostMap, CodeWordsRoundTripAcrossSources) {
+TEST_F(CudaTest, NccFixed24CodeWordsRoundTripAcrossSources) {
   static_assert(Fixed24NccCostView::kStorageBits == 24);
   constexpr size_t kPlane = 256 * 256, kSources = 3;
   Fixed24NccCostMap map(256, 256, kSources);
@@ -632,7 +632,7 @@ TEST(Fixed24NccCostMap, CodeWordsRoundTripAcrossSources) {
   }
 }
 
-TEST(Fixed24NccCostMap, RejectsEachInvalidDomain) {
+TEST_F(CudaTest, NccFixed24RejectsEachInvalidDomain) {
   for (const float invalid : {-0.1f,
                               -std::numeric_limits<float>::denorm_min(),
                               2.1f,
@@ -654,7 +654,7 @@ TEST(Fixed24NccCostMap, RejectsEachInvalidDomain) {
   }
 }
 
-TEST(Fixed24NccCostMap, RotatesOddPlanesWithBoundedScratch) {
+TEST_F(CudaTest, NccFixed24RotatesOddPlanesWithBoundedScratch) {
   for (const auto [width, height] :
        {std::pair<size_t, size_t>{1, 1}, {7, 5}, {257, 3}, {513, 257}}) {
     for (const size_t kSources : {size_t{1}, size_t{2}, size_t{3}}) {
