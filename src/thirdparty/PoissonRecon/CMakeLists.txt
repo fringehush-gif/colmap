@@ -2,15 +2,19 @@ if(NOT IS_MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -funroll-loops -ffast-math")
 endif()
 
+find_package(Threads REQUIRED)
+
 COLMAP_ADD_LIBRARY(
     NAME colmap_poisson_recon
     SRCS
         PoissonRecon.h PoissonRecon.cpp
         SurfaceTrimmer.h SurfaceTrimmer.cpp
+    PRIVATE_LINK_LIBS
+        Threads::Threads
 )
 target_compile_definitions(colmap_poisson_recon PRIVATE RELEASE)
 target_include_directories(colmap_poisson_recon PRIVATE .)
-if(OPENMP_FOUND)
+if(OPENMP_ENABLED AND OPENMP_FOUND)
     target_link_libraries(colmap_poisson_recon PRIVATE OpenMP::OpenMP_CXX)
 endif()
 if(MSVC)
@@ -21,7 +25,7 @@ COLMAP_ADD_TEST(
     NAME vertex_factory_test
     SRCS vertex_factory_test.cc
 )
-if(TESTS_ENABLED AND OPENMP_FOUND)
+if(TESTS_ENABLED AND OPENMP_ENABLED AND OPENMP_FOUND)
     target_link_libraries(colmap_thirdparty_vertex_factory_test
         OpenMP::OpenMP_CXX)
 endif()
@@ -35,7 +39,7 @@ COLMAP_ADD_TEST(
 )
 if(TESTS_ENABLED)
     target_compile_definitions(colmap_thirdparty_ply_scalar_test PRIVATE RELEASE)
-    if(OPENMP_FOUND)
+    if(OPENMP_ENABLED AND OPENMP_FOUND)
         target_link_libraries(colmap_thirdparty_ply_scalar_test OpenMP::OpenMP_CXX)
     endif()
 endif()

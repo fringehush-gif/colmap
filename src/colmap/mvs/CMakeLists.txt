@@ -2,6 +2,20 @@
 
 set(FOLDER_NAME "mvs")
 
+# Match PoissonRecon's _OPENMP-dependent ThreadPool definitions.
+COLMAP_ADD_LIBRARY(
+    NAME colmap_mvs_poisson
+    TYPE OBJECT
+    SRCS
+        poisson_meshing.h poisson_meshing.cc
+    PRIVATE_LINK_LIBS
+        colmap_util
+        Threads::Threads
+)
+if(OPENMP_ENABLED AND OPENMP_FOUND)
+    target_link_libraries(colmap_mvs_poisson PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
 COLMAP_ADD_LIBRARY(
     NAME colmap_mvs
     SRCS
@@ -14,7 +28,7 @@ COLMAP_ADD_LIBRARY(
         mat.h mat.cc
         mesh_simplification.h mesh_simplification.cc
         model.h model.cc
-        poisson_meshing.h poisson_meshing.cc
+        $<TARGET_OBJECTS:colmap_mvs_poisson>
         normal_map.h normal_map.cc
         patch_match_options.h patch_match_options.cc
         texture_mapping.h texture_mapping.cc
