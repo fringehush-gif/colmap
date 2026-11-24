@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "colmap/mvs/oct_normal_state.cuh"
 #include "colmap/util/cuda.h"
+#include "colmap/util/testing_cuda.h"
 
 #include <algorithm>
 #include <cmath>
@@ -201,18 +202,7 @@ size_t NormalPlaneScratchBytes(size_t width, size_t height) {
                   (height + 127) / 128 * 128 * width);
 }
 
-class OctNormalCodec : public ::testing::Test {
- protected:
-  void SetUp() override {
-    int count = 0;
-    const auto status = cudaGetDeviceCount(&count);
-    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver ||
-        (status == cudaSuccess && count == 0)) {
-      GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
-    }
-    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
-  }
-};
+using OctNormalCodec = CudaTest;
 
 TEST_F(OctNormalCodec, IndependentDoubleAngularAndNormOracle) {
   std::vector<float3> input;

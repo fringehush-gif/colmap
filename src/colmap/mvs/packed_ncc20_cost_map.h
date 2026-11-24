@@ -193,16 +193,14 @@ class Fixed20NccCostMap {
   size_t GetDepth() const { return sources_; }
   size_t GetCapacityBytes() const { return capacity_bytes_ + sizeof(unsigned); }
   Fixed20NccCostView View() const {
-    Fixed20NccCostView view{};
-    view.high = ptr_;
-    view.low = LowWords();
-    view.pitch = pitch_;
-    view.width = width_;
-    view.height = height_;
-    view.sources = sources_;
-    view.low_height = Round8(height_);
-    view.error = error_;
-    return view;
+    return {{ptr_,
+             LowWords(),
+             pitch_,
+             width_,
+             height_,
+             sources_,
+             Round8(height_),
+             error_}};
   }
   void CheckDomain() const {
     unsigned status = 0;
@@ -227,10 +225,9 @@ class Fixed20NccCostMap {
                  new_plane = Multiply(new_pitch, width_);
     const size_t old_low_plane = Multiply(width_, Round8(height_));
     const size_t new_low_plane = Multiply(height_, Round8(width_));
-    const size_t high_stage = Multiply(new_plane, 2);
+    const size_t required = Multiply(new_plane, 2);
     // Only active destination rows are expanded, even for thin shapes.
     const size_t low_stage = new_plane;
-    const size_t required = std::max(high_stage, low_stage);
     THROW_CHECK_LE(required, scratch_bytes);
     THROW_CHECK_LE(Pixels(height_, width_, sources_), capacity_pixels_);
     THROW_CHECK_LE(LowPixels(height_, width_, sources_), low_capacity_);

@@ -2556,7 +2556,8 @@ void PatchMatchCuda::EnsureGeometryRotationMemory(bool allow_checkpoint) {
 #endif
 
 bool PatchMatchCuda::HasCompactStorage() const {
-  return options_.probability_unorm16 || cost_bits_ != 0 || options_.normal_oct40;
+  return options_.probability_unorm16 || cost_bits_ != 0 ||
+         options_.normal_oct40;
 }
 
 void PatchMatchCuda::CheckResultsAvailable() const {
@@ -3485,66 +3486,31 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     dim3 initial_cost_grid = p->sweep_grid_size_;
     initial_cost_grid.y = (p->CostMapHeight() + kInitialCostStripeRows - 1) /
                           kInitialCostStripeRows;
+    const auto compute_initial_cost = [&](auto cost_tag) {
+      constexpr int kCostBits = decltype(cost_tag)::value;
+      ComputeInitialCost<11, 1, kCostBits>
+          <<<initial_cost_grid, p->sweep_block_size_>>>(
+              MakeRefCamera(p->ref_K_host_[0], p->ref_inv_K_host_[0]),
+              p->CostMapView<kCostBits>(),
+              p->GeometryView(*p->depth_map_),
+              p->NormalView(),
+              p->ref_image_texture_->GetObj(),
+              p->ReferenceStatisticsView(false),
+              p->ReferenceStatisticsView(true),
+              p->src_images_texture_->GetObj(),
+              p->poses_texture_[0]->GetObj(),
+              p->options_.sigma_spatial,
+              p->options_.sigma_color,
+              p->ReferenceStatisticsTexture());
+    };
     if (p->cost_bits_ == 24) {
-      ComputeInitialCost<11, 1, 24>
-          <<<initial_cost_grid, p->sweep_block_size_>>>(
-              MakeRefCamera(p->ref_K_host_[0], p->ref_inv_K_host_[0]),
-              p->CostMapView<24>(),
-              p->GeometryView(*p->depth_map_),
-              p->NormalView(),
-              p->ref_image_texture_->GetObj(),
-              p->ReferenceStatisticsView(false),
-              p->ReferenceStatisticsView(true),
-              p->src_images_texture_->GetObj(),
-              p->poses_texture_[0]->GetObj(),
-              p->options_.sigma_spatial,
-              p->options_.sigma_color,
-              p->ReferenceStatisticsTexture());
+      compute_initial_cost(std::integral_constant<int, 24>{});
     } else if (p->cost_bits_ == 20) {
-      ComputeInitialCost<11, 1, 20>
-          <<<initial_cost_grid, p->sweep_block_size_>>>(
-              MakeRefCamera(p->ref_K_host_[0], p->ref_inv_K_host_[0]),
-              p->CostMapView<20>(),
-              p->GeometryView(*p->depth_map_),
-              p->NormalView(),
-              p->ref_image_texture_->GetObj(),
-              p->ReferenceStatisticsView(false),
-              p->ReferenceStatisticsView(true),
-              p->src_images_texture_->GetObj(),
-              p->poses_texture_[0]->GetObj(),
-              p->options_.sigma_spatial,
-              p->options_.sigma_color,
-              p->ReferenceStatisticsTexture());
+      compute_initial_cost(std::integral_constant<int, 20>{});
     } else if (p->cost_bits_ == 16) {
-      ComputeInitialCost<11, 1, 16>
-          <<<initial_cost_grid, p->sweep_block_size_>>>(
-              MakeRefCamera(p->ref_K_host_[0], p->ref_inv_K_host_[0]),
-              p->CostMapView<16>(),
-              p->GeometryView(*p->depth_map_),
-              p->NormalView(),
-              p->ref_image_texture_->GetObj(),
-              p->ReferenceStatisticsView(false),
-              p->ReferenceStatisticsView(true),
-              p->src_images_texture_->GetObj(),
-              p->poses_texture_[0]->GetObj(),
-              p->options_.sigma_spatial,
-              p->options_.sigma_color,
-              p->ReferenceStatisticsTexture());
+      compute_initial_cost(std::integral_constant<int, 16>{});
     } else {
-      ComputeInitialCost<11, 1, false>
-          <<<initial_cost_grid, p->sweep_block_size_>>>(
-              MakeRefCamera(p->ref_K_host_[0], p->ref_inv_K_host_[0]),
-              p->CostMapView<false>(),
-              p->GeometryView(*p->depth_map_),
-              p->NormalView(),
-              p->ref_image_texture_->GetObj(),
-              p->ReferenceStatisticsView(false),
-              p->ReferenceStatisticsView(true),
-              p->src_images_texture_->GetObj(),
-              p->poses_texture_[0]->GetObj(),
-              p->options_.sigma_spatial,
-              p->options_.sigma_color,
-              p->ReferenceStatisticsTexture());
+      compute_initial_cost(std::integral_constant<int, 0>{});
     }
   }
   CUDA_SYNC_AND_CHECK();
