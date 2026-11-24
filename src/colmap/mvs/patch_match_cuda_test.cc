@@ -121,6 +121,7 @@ void ResetStreamFault(StreamFault fault,
 std::atomic<size_t> wrapped_eligible{0}, wrapped_fail_at{0};
 std::atomic<bool> wrapped_fired{false}, wrapped_fail_cleanup{false};
 std::atomic<size_t> wrapped_cleanup_injected{0};
+std::atomic<void*> wrapped_cleanup_target{nullptr};
 std::atomic<bool> wrapped_arm_on_first_meminfo{false};
 std::atomic<size_t> wrapped_meminfo_calls{0};
 std::atomic<bool> wrapped_track_initial_dense{false};
@@ -162,6 +163,7 @@ void ResetAllocationInjection(size_t ordinal,
   wrapped_eligible = 0;
   wrapped_fired = false;
   wrapped_cleanup_injected = 0;
+  wrapped_cleanup_target = nullptr;
   wrapped_status = static_cast<int>(status);
   wrapped_fail_cleanup = cleanup_failure;
   wrapped_fail_at = ordinal;
@@ -288,6 +290,14 @@ extern "C" cudaError_t __wrap_cudaMemGetInfo(size_t* free, size_t* total) {
 }
 extern "C" cudaError_t __wrap_cudaFree(void* ptr) {
   const cudaError_t actual = __real_cudaFree(ptr);
+  void* target = ptr;
+  if (actual == cudaSuccess && ptr &&
+      wrapped_cleanup_target.compare_exchange_strong(target, nullptr)) {
+    // Target selection must not depend on an observer being present:
+    // the regression also needs to inject into the unobserved original.
+    ++wrapped_cleanup_injected;
+    return cudaErrorUnknown;  // The real allocation was freed first.
+  }
   return ptr ? MaybeInjectCleanup(actual) : actual;
 }
 extern "C" cudaError_t __wrap_cudaFreeArray(cudaArray_t ptr) {
@@ -3200,6 +3210,65 @@ TEST_F(CudaTest, Oct40TransferCleanupFailureRejectsResult) {
         testing::ExitedWithCode(0),
         "");
   }
+}
+
+TEST_F(CudaTest, Oct40RotationCleanupFailurePoisonsOwner) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      ([]() {
+        Inputs input = MakeInputs(0, 2, 25, 33);
+        auto options = MakeOptions(false, false, false);
+        const PatchMatchOptions defaults;
+        options.window_radius = defaults.window_radius;
+        options.window_step = defaults.window_step;
+        options.num_iterations = defaults.num_iterations;
+        options.num_samples = defaults.num_samples;
+        options.sigma_spatial = options.window_radius;
+        options.normal_oct40 = true;
+        PatchMatch::Problem problem;
+        problem.ref_image_idx = 0;
+        problem.src_image_idxs = {1, 2};
+        problem.images = &input.images;
+        problem.depth_maps = &input.depths;
+        problem.normal_maps = &input.normals;
+        PatchMatchCuda owner(options, problem);
+        owner.Run();
+        (void)owner.GetNormalMap();
+
+        // Fail the first retired Oct40 status allocation, without an outer
+        // observer. Other frees and the real release itself still succeed.
+        ResetAllocationInjection(0, cudaSuccess);
+        wrapped_cleanup_target =
+            PatchMatchCudaTestPeer::OctNormalStatusPointer(owner);
+        try {
+          owner.Run();
+        } catch (const std::runtime_error& error) {
+          if (std::string(error.what()).find("cleanup cudaFree failed") ==
+                  std::string::npos ||
+              wrapped_cleanup_injected.load() != 1 ||
+              wrapped_cleanup_target.load() != nullptr ||
+              PatchMatchCudaTestPeer::Geometry(owner).rotation != -1)
+            std::_Exit(1);
+          const auto refuses = [](auto&& operation) {
+            try {
+              operation();
+            } catch (const std::invalid_argument&) {
+              return true;
+            }
+            return false;
+          };
+          const bool blocked =
+              refuses([&] { owner.Run(); }) &&
+              refuses([&] { (void)owner.GetDepthMap(); }) &&
+              refuses([&] { (void)owner.GetNormalMap(); }) &&
+              refuses([&] { (void)owner.GetSelProbMap(); }) &&
+              refuses([&] { (void)owner.GetConsistentImageIdxs(); });
+          std::_Exit(blocked ? 0 : 2);
+        }
+        std::_Exit(3);
+      }()),
+      testing::ExitedWithCode(0),
+      "");
 }
 
 TEST_F(CudaTest, ControllerPairAllocationRefusals) {

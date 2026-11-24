@@ -55,6 +55,12 @@ void PatchMatchCudaTestPeer::CheckUsable(const PatchMatchCuda& owner) {
   owner.CheckUsable();
 }
 
+void* PatchMatchCudaTestPeer::OctNormalStatusPointer(
+    const PatchMatchCuda& owner) {
+  THROW_CHECK(owner.oct_normal_map_);
+  return owner.oct_normal_map_->View().error;
+}
+
 void PatchMatchCudaTestPeer::PoisonOctNormal(PatchMatchCuda& owner) {
   THROW_CHECK(owner.oct_normal_map_);
   const unsigned int failure = 1u << 9;

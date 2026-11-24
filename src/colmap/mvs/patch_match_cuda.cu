@@ -4475,6 +4475,7 @@ void PatchMatchCuda::Rotate(bool pack_geometry) {
   }
 #endif
 
+  const CudaCleanupScope cleanup;
   try {
     rotation_in_half_pi_ = (rotation_in_half_pi_ + 1) % 4;
 
@@ -4540,6 +4541,14 @@ void PatchMatchCuda::Rotate(bool pack_geometry) {
 
     // Recompute Cuda configuration for rotated reference image.
     ComputeCudaConfig();
+  } catch (...) {
+    PoisonGeometryState();
+    cleanup.Check();
+    throw;
+  }
+  try {
+    // Retired owners must finish cleanup before rotation succeeds.
+    cleanup.Check();
   } catch (...) {
     PoisonGeometryState();
     throw;

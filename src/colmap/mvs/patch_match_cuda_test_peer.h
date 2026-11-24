@@ -20,5 +20,6 @@ class PatchMatchCudaTestPeer {
   static void RotateThree(PatchMatchCuda& owner);
   static void CheckUsable(const PatchMatchCuda& owner);
   static void PoisonOctNormal(PatchMatchCuda& owner);
+  static void* OctNormalStatusPointer(const PatchMatchCuda& owner);
 };
 }  // namespace colmap::mvs
