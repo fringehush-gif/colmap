@@ -110,4 +110,4 @@ def test_patch_match_probability_unorm16_option() -> None:
     assert not copied.checkpoint_hmm
     assert not copied.check()
     copied.checkpoint_hmm = True
-    assert copied.check() == pycolmap.has_cuda
+    assert copied.check() == pycolmap.COLMAP_build.endswith("with CUDA")

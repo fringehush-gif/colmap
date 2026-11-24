@@ -27,6 +27,7 @@
 #include "colmap/mvs/cuda_texture.h"
 #include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/mvs/patch_match_cuda_test_peer.h"
+#include "colmap/mvs/patch_match_probability_unorm16.h"
 
 #include <algorithm>
 #include <atomic>
@@ -2755,6 +2756,50 @@ TEST_F(CudaTest, ControllerWorkStreamFatalFailuresNeverReadmit) {
         ::testing::ExitedWithCode(0),
         "");
   }
+}
+
+TEST_F(CudaTest, ProbabilityUnorm16AllocationRefusal) {
+  struct ResetOnExit {
+    ~ResetOnExit() { ResetAllocationInjection(0, cudaSuccess); }
+  } reset;
+  const CudaCleanupScope cleanup;
+  ResetAllocationInjection(1, cudaErrorMemoryAllocation);
+  EXPECT_THROW((PatchMatchProbabilityUnorm16(8, 8, 2)), CudaAllocationRefused);
+  EXPECT_TRUE(wrapped_fired.load());
+  EXPECT_EQ(wrapped_eligible.load(), 1u);
+  EXPECT_NO_THROW(cleanup.Check());
+
+  ResetAllocationInjection(0, cudaSuccess);
+  { const PatchMatchProbabilityUnorm16 map(8, 8, 2); }
+  EXPECT_EQ(wrapped_eligible.load(), 1u);
+  EXPECT_FALSE(wrapped_fired.load());
+  EXPECT_NO_THROW(cleanup.Check());
+}
+
+TEST_F(CudaTest, ProbabilityUnorm16DestructorCleanupObservation) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      ([]() {
+        const CudaCleanupScope cleanup;
+        ResetAllocationInjection(0, cudaSuccess, true);
+        {
+          const PatchMatchProbabilityUnorm16 map(8, 8, 2);
+          // Arm only cleanup: the wrapper frees the real allocation before
+          // reporting a synthetic terminal error. Do not reuse this process.
+          wrapped_fired = true;
+        }
+        try {
+          cleanup.Check();
+        } catch (const std::runtime_error& error) {
+          const bool observed =
+              std::string(error.what()).find("cleanup cudaFree failed") !=
+              std::string::npos;
+          std::_Exit(observed && wrapped_cleanup_injected.load() == 1 ? 0 : 1);
+        }
+        std::_Exit(2);
+      }()),
+      testing::ExitedWithCode(0),
+      "");
 }
 
 TEST_F(CudaTest, ControllerPairAllocationRefusals) {
