@@ -14,6 +14,7 @@
 #include "colmap/util/cudacc.h"
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
+#include "colmap/util/testing_cuda.h"
 
 #include <array>
 #include <cfloat>
@@ -1041,19 +1042,6 @@ void ExpectNonempty(const Result& result,
     EXPECT_EQ(consistent_pixels, 0);
   }
 }
-
-class CudaTest : public ::testing::Test {
- protected:
-  void SetUp() override {
-    int num_devices = 0;
-    const cudaError_t status = cudaGetDeviceCount(&num_devices);
-    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver ||
-        (status == cudaSuccess && num_devices == 0)) {
-      GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
-    }
-    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
-  }
-};
 
 TEST_F(CudaTest, EmptySamplingSupportRetainsInitializedParameters) {
   Inputs inputs = MakeInputs(0);
@@ -2775,7 +2763,9 @@ TEST_F(CudaTest, ProbabilityUnorm16AllocationRefusal) {
   EXPECT_NO_THROW(cleanup.Check());
 
   ResetAllocationInjection(0, cudaSuccess);
-  { const PatchMatchProbabilityUnorm16 map(8, 8, 2); }
+  {
+    const PatchMatchProbabilityUnorm16 map(8, 8, 2);
+  }
   EXPECT_EQ(wrapped_eligible.load(), 1u);
   EXPECT_FALSE(wrapped_fired.load());
   EXPECT_NO_THROW(cleanup.Check());
@@ -2823,7 +2813,9 @@ TEST_F(CudaTest, NccUnorm16AllocationRefusals) {
 
   const CudaCleanupScope cleanup;
   ResetAllocationInjection(0, cudaSuccess);
-  { const PackedNccCostMap map(8, 8, 2); }
+  {
+    const PackedNccCostMap map(8, 8, 2);
+  }
   EXPECT_EQ(wrapped_eligible.load(), 2u);
   EXPECT_FALSE(wrapped_fired.load());
   EXPECT_NO_THROW(cleanup.Check());

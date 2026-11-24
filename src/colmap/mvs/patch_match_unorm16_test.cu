@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "colmap/mvs/packed_ncc_cost_map.h"
+#include "colmap/util/testing_cuda.h"
 
 #include <cmath>
 #include <cstring>
@@ -11,6 +12,8 @@
 namespace colmap {
 namespace mvs {
 namespace {
+
+using PatchMatchCostUnorm16 = CudaTest;
 
 __global__ void StoreValues(GpuMatView<float> values,
                             PackedNccCostView output) {
@@ -36,11 +39,7 @@ uint16_t ReferenceCode(float value, float scale) {
       lower + (fraction > 0.5 || (fraction == 0.5 && (lower & 1u))));
 }
 
-TEST(PatchMatchCostUnorm16, RoundTripsAndHalfIntegerNeighbors) {
-  int devices = 0;
-  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
-    GTEST_SKIP() << "CUDA device required";
-  }
+TEST_F(PatchMatchCostUnorm16, RoundTripsAndHalfIntegerNeighbors) {
   const float scale = 32767.5f;
   std::vector<float> values;
   values.reserve(65536 + 3 * 65535);
@@ -72,11 +71,7 @@ TEST(PatchMatchCostUnorm16, RoundTripsAndHalfIntegerNeighbors) {
   }
 }
 
-TEST(PatchMatchCostUnorm16, DecoderMaterializesBeforeConsumerArithmetic) {
-  int devices = 0;
-  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
-    GTEST_SKIP() << "CUDA device required";
-  }
+TEST_F(PatchMatchCostUnorm16, DecoderMaterializesBeforeConsumerArithmetic) {
   PackedNccCostMap cost(1, 1, 1);
   const uint16_t code = 263;
   CUDA_SAFE_CALL(cudaMemcpy(
@@ -92,11 +87,7 @@ TEST(PatchMatchCostUnorm16, DecoderMaterializesBeforeConsumerArithmetic) {
   EXPECT_EQ(bits, 0x3ddd3cdeu);
 }
 
-TEST(PatchMatchCostUnorm16, CostDomainAndStickyRefusal) {
-  int devices = 0;
-  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
-    GTEST_SKIP() << "CUDA device required";
-  }
+TEST_F(PatchMatchCostUnorm16, CostDomainAndStickyRefusal) {
   // Raw binary32 inputs preserve subnormals and signed NaNs under host FTZ.
   const uint32_t cases[] = {0x80000000u,
                             0x00000000u,
