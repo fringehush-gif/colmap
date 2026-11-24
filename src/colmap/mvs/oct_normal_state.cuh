@@ -313,25 +313,27 @@ class OctNormalMap {
     THROW_CHECK_LE(byte_pitch,
                    std::numeric_limits<size_t>::max() / height_ / 3);
     const size_t capacity_rows = TransferRows(width_, height_);
-    auto temporary = AllocateTransfer(TransferCapacityBytes(width_, height_));
-    for (size_t offset = 0; offset < height_; offset += capacity_rows) {
-      const size_t rows = std::min(capacity_rows, height_ - offset);
-      const GpuMatView<float> tile{
-          temporary.get(), width_ * sizeof(float), width_, rows, 3};
-      cudaMemcpy3DParms copy = {};
-      copy.srcPtr = make_cudaPitchedPtr(
-          const_cast<float*>(data), byte_pitch, tile.pitch, height_);
-      copy.srcPos = make_cudaPos(0, offset, 0);
-      copy.dstPtr =
-          make_cudaPitchedPtr(temporary.get(), tile.pitch, tile.pitch, rows);
-      copy.extent = make_cudaExtent(tile.pitch, rows, 3);
-      copy.kind = cudaMemcpyHostToDevice;
-      CUDA_SAFE_CALL(cudaMemcpy3D(&copy));
-      internal::OctNormalUpload<<<TransferBlocks(rows), 128>>>(
-          tile, View(), offset);
-      CUDA_SYNC_AND_CHECK();
-    }
-    CheckDomain();
+    WithTransferBuffer(
+        TransferCapacityBytes(width_, height_), [&](float* temporary) {
+          for (size_t offset = 0; offset < height_; offset += capacity_rows) {
+            const size_t rows = std::min(capacity_rows, height_ - offset);
+            const GpuMatView<float> tile{
+                temporary, width_ * sizeof(float), width_, rows, 3};
+            cudaMemcpy3DParms copy = {};
+            copy.srcPtr = make_cudaPitchedPtr(
+                const_cast<float*>(data), byte_pitch, tile.pitch, height_);
+            copy.srcPos = make_cudaPos(0, offset, 0);
+            copy.dstPtr =
+                make_cudaPitchedPtr(temporary, tile.pitch, tile.pitch, rows);
+            copy.extent = make_cudaExtent(tile.pitch, rows, 3);
+            copy.kind = cudaMemcpyHostToDevice;
+            CUDA_SAFE_CALL(cudaMemcpy3D(&copy));
+            internal::OctNormalUpload<<<TransferBlocks(rows), 128>>>(
+                tile, View(), offset);
+            CUDA_SYNC_AND_CHECK();
+          }
+          CheckDomain();
+        });
   }
   Mat<float> CopyToMat() const {
     CheckDomain();
@@ -340,25 +342,27 @@ class OctNormalMap {
         std::numeric_limits<size_t>::max() / height_ / 3 / sizeof(float));
     Mat<float> result(width_, height_, 3);
     const size_t capacity_rows = TransferRows(width_, height_);
-    auto temporary = AllocateTransfer(TransferCapacityBytes(width_, height_));
-    for (size_t offset = 0; offset < height_; offset += capacity_rows) {
-      const size_t rows = std::min(capacity_rows, height_ - offset);
-      const GpuMatView<float> tile{
-          temporary.get(), width_ * sizeof(float), width_, rows, 3};
-      internal::OctNormalDownload<<<TransferBlocks(rows), 128>>>(
-          View(), tile, offset);
-      CUDA_SYNC_AND_CHECK();
-      cudaMemcpy3DParms copy = {};
-      copy.srcPtr =
-          make_cudaPitchedPtr(temporary.get(), tile.pitch, tile.pitch, rows);
-      copy.dstPtr =
-          make_cudaPitchedPtr(result.GetPtr(), tile.pitch, tile.pitch, height_);
-      copy.dstPos = make_cudaPos(0, offset, 0);
-      copy.extent = make_cudaExtent(tile.pitch, rows, 3);
-      copy.kind = cudaMemcpyDeviceToHost;
-      CUDA_SAFE_CALL(cudaMemcpy3D(&copy));
-    }
-    CheckDomain();
+    WithTransferBuffer(
+        TransferCapacityBytes(width_, height_), [&](float* temporary) {
+          for (size_t offset = 0; offset < height_; offset += capacity_rows) {
+            const size_t rows = std::min(capacity_rows, height_ - offset);
+            const GpuMatView<float> tile{
+                temporary, width_ * sizeof(float), width_, rows, 3};
+            internal::OctNormalDownload<<<TransferBlocks(rows), 128>>>(
+                View(), tile, offset);
+            CUDA_SYNC_AND_CHECK();
+            cudaMemcpy3DParms copy = {};
+            copy.srcPtr =
+                make_cudaPitchedPtr(temporary, tile.pitch, tile.pitch, rows);
+            copy.dstPtr = make_cudaPitchedPtr(
+                result.GetPtr(), tile.pitch, tile.pitch, height_);
+            copy.dstPos = make_cudaPos(0, offset, 0);
+            copy.extent = make_cudaExtent(tile.pitch, rows, 3);
+            copy.kind = cudaMemcpyDeviceToHost;
+            CUDA_SAFE_CALL(cudaMemcpy3D(&copy));
+          }
+          CheckDomain();
+        });
     return result;
   }
   // Private B11 primitive pilot. Caller owns a joined, disjoint dead span.
@@ -492,6 +496,19 @@ class OctNormalMap {
       throw;
     }
     return TransferBuffer(pointer);
+  }
+  template <typename Transfer>
+  static void WithTransferBuffer(size_t bytes, Transfer&& transfer) {
+    const CudaCleanupScope cleanup;
+    try {
+      const auto temporary = AllocateTransfer(bytes);
+      transfer(temporary.get());
+    } catch (...) {
+      cleanup.Check();
+      throw;
+    }
+    // Refuse before a caller consumes the transfer or publishes its output.
+    cleanup.Check();
   }
   unsigned int TransferBlocks(size_t rows) const {
     return static_cast<unsigned int>(

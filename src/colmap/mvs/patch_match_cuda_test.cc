@@ -3225,6 +3225,40 @@ TEST_F(CudaTest, Oct40TransferAllocationRefusals) {
   EXPECT_NO_THROW(cleanup.Check());
 }
 
+TEST_F(CudaTest, Oct40TransferCleanupFailureRejectsResult) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  for (const bool upload : {false, true}) {
+    SCOPED_TRACE(upload);
+    EXPECT_EXIT(
+        ([upload]() {
+          OctNormalMap map(1, 1);
+          const float normal[3] = {0, 0, 1};
+          map.CopyFromCPU(normal, sizeof(float));
+
+          // Supply no outer observer. The transfer must reject its own
+          // cleanup before returning data to the output writer.
+          ResetAllocationInjection(0, cudaSuccess, true);
+          wrapped_fired = true;
+          try {
+            if (upload) {
+              map.CopyFromCPU(normal, sizeof(float));
+            } else {
+              (void)map.CopyToMat();
+            }
+          } catch (const std::runtime_error& error) {
+            const bool observed =
+                std::string(error.what()).find("cleanup cudaFree failed") !=
+                std::string::npos;
+            std::_Exit(observed && wrapped_cleanup_injected.load() == 1 ? 0
+                                                                        : 1);
+          }
+          std::_Exit(2);
+        }()),
+        testing::ExitedWithCode(0),
+        "");
+  }
+}
+
 TEST_F(CudaTest, ControllerPairAllocationRefusals) {
   auto options = ControllerWorkspaceFixture::Options();
   const auto [width, height] =
