@@ -111,6 +111,7 @@ if(CUDA_ENABLED)
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu patch_match_geometry.cuh
             patch_match_sampling.cuh
+            patch_match_rng_perimeter.h
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
@@ -286,6 +287,7 @@ if(HIP_ENABLED)
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu patch_match_geometry.cuh
             patch_match_sampling.cuh
+            patch_match_rng_perimeter.h
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
@@ -313,12 +315,18 @@ if(HIP_ENABLED)
     set_source_files_properties(
         gpu_mat_test.cu
         patch_match_sampling_test.cu
+        patch_match_rng_perimeter_test.cu
         PROPERTIES LANGUAGE HIP
     )
 endif()
 
 # The ordinary production controls compile and register on both GPU backends.
 if(CUDA_ENABLED OR HIP_ENABLED)
+    COLMAP_ADD_TEST(
+        NAME patch_match_rng_perimeter_test
+        SRCS patch_match_rng_perimeter_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
     COLMAP_ADD_TEST(
         NAME patch_match_probability_test
         SRCS patch_match_probability_test.cc
