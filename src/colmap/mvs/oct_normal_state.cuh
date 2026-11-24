@@ -226,8 +226,11 @@ class OctNormalMap {
     }
     payload_bytes_ = 5 * plane_pixels_;
     try {
-      CUDA_SAFE_CALL(cudaMalloc(&data_, payload_bytes_));
-      CUDA_SAFE_CALL(
+      CUDA_SAFE_ALLOCATE(
+          "cudaMalloc", data_, cudaMalloc(&data_, payload_bytes_));
+      CUDA_SAFE_ALLOCATE(
+          "cudaMalloc",
+          error_,
           cudaMalloc(reinterpret_cast<void**>(&error_), sizeof(unsigned int)));
       CUDA_SAFE_CALL(cudaMemset(error_, 0, sizeof(unsigned int)));
     } catch (...) {
@@ -480,7 +483,14 @@ class OctNormalMap {
   using TransferBuffer = std::unique_ptr<float, TransferDeleter>;
   static TransferBuffer AllocateTransfer(size_t bytes) {
     float* pointer = nullptr;
-    CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&pointer), bytes));
+    try {
+      CUDA_SAFE_ALLOCATE("cudaMalloc",
+                         pointer,
+                         cudaMalloc(reinterpret_cast<void**>(&pointer), bytes));
+    } catch (...) {
+      if (pointer != nullptr) TransferDeleter{}(pointer);
+      throw;
+    }
     return TransferBuffer(pointer);
   }
   unsigned int TransferBlocks(size_t rows) const {
@@ -490,12 +500,14 @@ class OctNormalMap {
   void Release() noexcept {
     if (error_ != nullptr) {
       const auto status = cudaFree(error_);
-      (void)status;
+      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                             static_cast<int>(status));
       error_ = nullptr;
     }
     if (data_ != nullptr) {
       const auto status = cudaFree(data_);
-      (void)status;
+      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                             static_cast<int>(status));
       data_ = nullptr;
     }
   }

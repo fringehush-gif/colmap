@@ -147,13 +147,13 @@ def test_patch_match_normal_oct40_option() -> None:
     options.window_step = 2
     copied = pycolmap.PatchMatchOptions(options.todict())
     assert copied.normal_oct40 is True
-    assert copied.check() == pycolmap.has_cuda
+    assert copied.check() == pycolmap.COLMAP_build.endswith("with CUDA")
 
     options.checkpoint_hmm = True
     options.window_radius = 5
     options.window_step = 1
-    assert options.check() == pycolmap.has_cuda
+    assert options.check() == pycolmap.COLMAP_build.endswith("with CUDA")
     for name in ("ncc_cost_unorm16", "ncc_cost_fixed20", "ncc_cost_fixed24"):
         setattr(options, name, True)
-        assert options.check() == pycolmap.has_cuda
+        assert options.check() == pycolmap.COLMAP_build.endswith("with CUDA")
         setattr(options, name, False)

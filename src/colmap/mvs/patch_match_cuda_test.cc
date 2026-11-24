@@ -3190,6 +3190,41 @@ TEST_F(CudaTest, NccFixed20CleanupFailuresAreObserved) {
   ExpectCodecCleanupObservation([] { return Fixed20NccCostMap(8, 8, 2); });
 }
 
+TEST_F(CudaTest, Oct40AllocationRefusals) {
+  ExpectCodecAllocationRefusals([] { return OctNormalMap(8, 8, true); });
+}
+
+TEST_F(CudaTest, Oct40CleanupFailuresAreObserved) {
+  ExpectCodecCleanupObservation([] { return OctNormalMap(8, 8, true); });
+}
+
+TEST_F(CudaTest, Oct40TransferAllocationRefusals) {
+  struct ResetOnExit {
+    ~ResetOnExit() { ResetAllocationInjection(0, cudaSuccess); }
+  } reset;
+  const CudaCleanupScope cleanup;
+  {
+    OctNormalMap map(1, 1);
+    const float normal[3] = {0, 0, 1};
+    ResetAllocationInjection(1, cudaErrorMemoryAllocation);
+    EXPECT_THROW(map.CopyFromCPU(normal, sizeof(float)), CudaAllocationRefused);
+    EXPECT_TRUE(wrapped_fired.load());
+    EXPECT_EQ(wrapped_eligible.load(), 1u);
+    EXPECT_NO_THROW(cleanup.Check());
+
+    ResetAllocationInjection(0, cudaSuccess);
+    ASSERT_NO_THROW(map.CopyFromCPU(normal, sizeof(float)));
+    ResetAllocationInjection(1, cudaErrorMemoryAllocation);
+    EXPECT_THROW(map.CopyToMat(), CudaAllocationRefused);
+    EXPECT_TRUE(wrapped_fired.load());
+    EXPECT_EQ(wrapped_eligible.load(), 1u);
+    EXPECT_NO_THROW(cleanup.Check());
+    ResetAllocationInjection(0, cudaSuccess);
+    EXPECT_NO_THROW(map.CopyToMat());
+  }
+  EXPECT_NO_THROW(cleanup.Check());
+}
+
 TEST_F(CudaTest, ControllerPairAllocationRefusals) {
   auto options = ControllerWorkspaceFixture::Options();
   const auto [width, height] =
