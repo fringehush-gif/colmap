@@ -73,23 +73,21 @@ class PatchMatchProbabilityUnorm16 {
     THROW_CHECK_LE(data_bytes_,
                    std::numeric_limits<size_t>::max() - sizeof(uint32_t));
     capacity_ = data_bytes_ + sizeof(uint32_t);
-    CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_));
-    invalid_ = reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(ptr_) +
-                                           data_bytes_);
     try {
+      CUDA_SAFE_ALLOCATE(
+          "cudaMalloc",
+          ptr_,
+          cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_));
+      invalid_ = reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(ptr_) +
+                                             data_bytes_);
       CUDA_SAFE_CALL(cudaMemset(invalid_, 0, sizeof(uint32_t)));
       Reorient(width, height);
     } catch (...) {
-      (void)cudaFree(ptr_);
-      ptr_ = nullptr;
+      Release();
       throw;
     }
   }
-  ~PatchMatchProbabilityUnorm16() {
-    const auto status = cudaFree(ptr_);
-    (void)CudaCleanupScope::ObserveCleanup("cudaFree",
-                                           static_cast<int>(status));
-  }
+  ~PatchMatchProbabilityUnorm16() { Release(); }
   PatchMatchProbabilityUnorm16(const PatchMatchProbabilityUnorm16&) = delete;
   PatchMatchProbabilityUnorm16& operator=(const PatchMatchProbabilityUnorm16&) =
       delete;
@@ -177,6 +175,14 @@ class PatchMatchProbabilityUnorm16 {
 #endif
 
  private:
+  void Release() noexcept {
+    if (ptr_ != nullptr) {
+      const auto status = cudaFree(ptr_);
+      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
+                                             static_cast<int>(status));
+    }
+  }
+
   static size_t Pitch(size_t width) {
     THROW_CHECK_LE(width, (std::numeric_limits<size_t>::max() - 511) / 2);
     const size_t pitch = (width * 2 + 511) / 512 * 512;
