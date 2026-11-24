@@ -651,7 +651,8 @@ PlyMesh DelaunayMeshing(const DelaunayMeshingOptions& options,
 
       // Likelihood of the point observation.
       const double alpha = edge_weight_computer.ComputeVisibilityProb(
-          point.num_visible_images * point.num_visible_images);
+          static_cast<double>(point.num_visible_images) *
+          point.num_visible_images);
 
       const K::Point_3 point_position = EigenToCGAL(point.position);
       const K::Vector_3 viewing_direction = point_position - image_position;
