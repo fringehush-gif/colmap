@@ -1919,8 +1919,11 @@ TEST(Ply, EveryConsumedBinaryByteIsRequired) {
   mesh.face_uvs = {0.125f, 0.25f, 0.5f, 0.75f, 1, 0, 1, 1, 0, 1, 0.5f, 0.25f};
   WriteBinaryPlyMesh(p, mesh);
   const auto bytes = ReadTestFile(p);
-  const auto payload = bytes.find("end_header\n") + 11;
-  ASSERT_GT(payload, 11);
+  const size_t header_end = bytes.find("end_header");
+  ASSERT_NE(header_end, std::string::npos);
+  const size_t header_newline = bytes.find('\n', header_end);
+  ASSERT_NE(header_newline, std::string::npos);
+  const size_t payload = header_newline + 1;
   ASSERT_LT(payload, bytes.size());
   for (size_t end = payload; end < bytes.size(); ++end) {
     SCOPED_TRACE(end - payload);
