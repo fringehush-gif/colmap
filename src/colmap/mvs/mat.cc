@@ -6,7 +6,10 @@
 #include "colmap/util/file.h"
 #include "colmap/util/string.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <fstream>
+#include <limits>
 #include <vector>
 
 namespace colmap {
@@ -37,7 +40,23 @@ void Mat<float>::Write(const std::filesystem::path& path) const {
   SetFullPrecTextStream(file);
   file << width_ << "&" << height_ << "&" << depth_ << "&";
   THROW_CHECK(file) << path;
-  WriteBinaryLittleEndian<float>(&file, {data_.data(), data_.size()});
+  if (IsLittleEndian()) {
+    // Bound both the byte multiplication and the streamsize conversion.
+    constexpr size_t kMaxChunkSize =
+        static_cast<size_t>(std::min<std::uintmax_t>(
+            std::numeric_limits<size_t>::max(),
+            std::numeric_limits<std::streamsize>::max())) /
+        sizeof(float);
+    for (size_t offset = 0; offset < data_.size();) {
+      const size_t chunk_size = std::min(data_.size() - offset, kMaxChunkSize);
+      file.write(reinterpret_cast<const char*>(data_.data() + offset),
+                 static_cast<std::streamsize>(chunk_size * sizeof(float)));
+      THROW_CHECK(file) << path;
+      offset += chunk_size;
+    }
+  } else {
+    WriteBinaryLittleEndian<float>(&file, {data_.data(), data_.size()});
+  }
   THROW_CHECK(file) << path;
   file.close();
   THROW_CHECK(file) << path;
