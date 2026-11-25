@@ -135,7 +135,9 @@ def generation_namespace(installed, output, precision):
 class CasparSolverTemplateTest(unittest.TestCase):
     def test_initial_damping_uses_configured_minimum(self) -> None:
         source, _ = template.patch_solver_templates(SOURCE, HEADER)
-        self.assertIn("diag = std::max(params_.diag_init, params_.diag_min);", source)
+        self.assertIn(
+            "diag = std::max(params_.diag_init, params_.diag_min);", source
+        )
 
     def test_paired_score_prediction_and_mapping_bounds(self) -> None:
         source, header = template.patch_solver_templates(SOURCE, HEADER)
@@ -240,13 +242,17 @@ class CasparSolverTemplateTest(unittest.TestCase):
             with self.subTest(fail=fail), TemporaryDirectory() as directory:
                 root = Path(directory)
                 output = root / "output"
-                environment = generation_namespace(root / "installed", output, "f64")
+                environment = generation_namespace(
+                    root / "installed", output, "f64"
+                )
                 environment["validate_generation_inputs"] = Mock()
                 loader = environment["template_env"].loader
                 generate = environment["caslib"].generate
                 if fail:
                     generate.side_effect = RuntimeError("generation failure")
-                    with self.assertRaisesRegex(RuntimeError, "generation failure"):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "generation failure"
+                    ):
                         exec(generation_tail(), environment)
                 else:
                     exec(generation_tail(), environment)

@@ -453,12 +453,13 @@ TEST(CasparOptions, NonfiniteInitialObjectiveReturnsFailureWithoutWriteback) {
   options.caspar->collect_iteration_data = true;
   auto adjuster =
       CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
-  auto summary =
-      std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(adjuster->Solve());
+  auto summary = std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
+      adjuster->Solve());
   ASSERT_NE(summary, nullptr);
   EXPECT_FALSE(std::isfinite(summary->initial_score));
   EXPECT_FALSE(summary->IsSolutionUsable());
-  EXPECT_EQ(summary->termination_type, BundleAdjustmentTerminationType::FAILURE);
+  EXPECT_EQ(summary->termination_type,
+            BundleAdjustmentTerminationType::FAILURE);
   EXPECT_EQ(summary->iteration_count, 0);
   EXPECT_TRUE(summary->iterations.empty());
   EXPECT_GT(summary->num_residuals, 0);
@@ -597,9 +598,10 @@ TEST(CasparPcg, CarriesResidualProductBetweenBetaUpdates) {
     Access::ComputeBeta(solver);
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
     Real beta = 0;
-    ASSERT_EQ(cudaMemcpy(
-                  &beta, Access::Beta(solver), sizeof(beta), cudaMemcpyDeviceToHost),
-              cudaSuccess);
+    ASSERT_EQ(
+        cudaMemcpy(
+            &beta, Access::Beta(solver), sizeof(beta), cudaMemcpyDeviceToHost),
+        cudaSuccess);
     EXPECT_EQ(beta, expected_beta[update]);
   }
 }
@@ -866,7 +868,8 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
         const double expected = std::max(
             double(StorageType(kDiagMin)),
             step.diag *
-                std::max(0.0, 1.0 - quality_term * quality_term * quality_term));
+                std::max(0.0,
+                         1.0 - quality_term * quality_term * quality_term));
         // In this interval 2*q and 2*q-1 are exact; the remaining operations
         // and clamps are bounded by four storage-type rounding errors.
         const double rounding_bound =
@@ -895,14 +898,16 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
       ASSERT_EQ(relaxed_run->iterations[0].pcg_iter, 1);
       for (const auto& pair : {std::make_pair(short_run, first),
                                std::make_pair(strict_run, second)}) {
-        EXPECT_NEAR(pair.first->iterations[0].score_best,
-                    pair.second->iterations[0].score_best,
-                    1e-6 *
-                        std::max(1.0, std::abs(pair.second->iterations[0].score_best)));
-        EXPECT_NEAR(pair.first->iterations[0].step_quality,
-                    pair.second->iterations[0].step_quality,
-                    1e-5 * std::max(
-                               1.0, std::abs(pair.second->iterations[0].step_quality)));
+        EXPECT_NEAR(
+            pair.first->iterations[0].score_best,
+            pair.second->iterations[0].score_best,
+            1e-6 *
+                std::max(1.0, std::abs(pair.second->iterations[0].score_best)));
+        EXPECT_NEAR(
+            pair.first->iterations[0].step_quality,
+            pair.second->iterations[0].step_quality,
+            1e-5 * std::max(1.0,
+                            std::abs(pair.second->iterations[0].step_quality)));
       }
       // The relaxed second candidate improves but fails the strict criterion.
       EXPECT_LT(relaxed_run->iterations[0].score_best,
@@ -914,9 +919,9 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
         ASSERT_TRUE(std::isfinite(lhs));
         ASSERT_TRUE(std::isfinite(rhs));
         // A prospective fixture budget, not a solver-wide error bound.
-        const double budget =
-            64.0 * std::numeric_limits<StorageType>::epsilon() *
-            std::max({1.0, std::abs(lhs), std::abs(rhs)});
+        const double budget = 64.0 *
+                              std::numeric_limits<StorageType>::epsilon() *
+                              std::max({1.0, std::abs(lhs), std::abs(rhs)});
         max_state_ratio =
             std::max(max_state_ratio, std::abs(lhs - rhs) / budget);
         EXPECT_NEAR(lhs, rhs, budget);
@@ -931,10 +936,10 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
       for (const auto& [id, image] : short_state.Images()) {
         const auto& a_pose = image.CamFromWorld();
         const auto& b_pose = strict_state.Image(id).CamFromWorld();
-        const double sign = a_pose.rotation().coeffs().dot(
-                                b_pose.rotation().coeffs()) < 0
-                                ? -1.0
-                                : 1.0;
+        const double sign =
+            a_pose.rotation().coeffs().dot(b_pose.rotation().coeffs()) < 0
+                ? -1.0
+                : 1.0;
         for (int i = 0; i < 4; ++i) {
           near_state(a_pose.rotation().coeffs()[i],
                      sign * b_pose.rotation().coeffs()[i]);
@@ -1003,26 +1008,25 @@ TEST(CasparRejectedStep, RetriesMatchFreshLinearizations) {
     for (const bool score_pcg : {false, true}) {
       SCOPED_TRACE(::testing::Message()
                    << "pcg_limit=" << pcg_limit << " score_pcg=" << score_pcg);
-      const auto solve = [&](int iterations,
-                             double diag,
-                             Reconstruction& reconstruction) {
-        BundleAdjustmentOptions options;
-        options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
-        options.caspar->solver_iter_max = iterations;
-        options.caspar->pcg_iter_max = pcg_limit;
-        options.caspar->diag_init = diag;
-        options.caspar->diag_min = kDiagMin;
-        options.caspar->solver_rel_decrease_min = 0;
-        options.caspar->pcg_rel_decrease_min = score_pcg ? 1 : -1;
-        options.caspar->pcg_rel_score_exit = -1;
-        options.caspar->pcg_rel_error_exit = 1e-20;
-        options.caspar->collect_iteration_data = true;
-        options.caspar->gpu_index = "0";
-        auto adjuster =
-            CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
-        return std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
-            adjuster->Solve());
-      };
+      const auto solve =
+          [&](int iterations, double diag, Reconstruction& reconstruction) {
+            BundleAdjustmentOptions options;
+            options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
+            options.caspar->solver_iter_max = iterations;
+            options.caspar->pcg_iter_max = pcg_limit;
+            options.caspar->diag_init = diag;
+            options.caspar->diag_min = kDiagMin;
+            options.caspar->solver_rel_decrease_min = 0;
+            options.caspar->pcg_rel_decrease_min = score_pcg ? 1 : -1;
+            options.caspar->pcg_rel_score_exit = -1;
+            options.caspar->pcg_rel_error_exit = 1e-20;
+            options.caspar->collect_iteration_data = true;
+            options.caspar->gpu_index = "0";
+            auto adjuster = CreateDefaultCasparBundleAdjuster(
+                options, config, reconstruction);
+            return std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
+                adjuster->Solve());
+          };
       Reconstruction retried = initial;
       const auto retries = solve(3, 1, retried);
       ASSERT_NE(retries, nullptr);
@@ -1051,9 +1055,10 @@ TEST(CasparRejectedStep, RetriesMatchFreshLinearizations) {
         // GPU reductions can sum identical inputs in a different order.
         const double tolerance =
             std::is_same_v<StorageType, double> ? 1e-8 : 5e-4;
-        EXPECT_NEAR(retry.score_current,
-                    expected.score_current,
-                    tolerance * std::max(1.0, std::abs(expected.score_current)));
+        EXPECT_NEAR(
+            retry.score_current,
+            expected.score_current,
+            tolerance * std::max(1.0, std::abs(expected.score_current)));
         for (const auto& [point_id, point] : retried.Points3D()) {
           EXPECT_EQ(point.xyz, fresh.Point3D(point_id).xyz);
         }

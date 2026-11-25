@@ -133,14 +133,14 @@ def patch_solver_templates(source: str, header: str) -> tuple[str, str]:
   }""",
         ),
         (
-            '''    BetaFromNumDenom({{solver_key("beta_numerator")}}, {{solver_key("alpha_numerator")}}, {{solver_key("beta")}});''',
-            '''    BetaFromNumDenom({{solver_key("beta_numerator")}}, {{solver_key("alpha_numerator")}}, {{solver_key("beta")}});
+            """    BetaFromNumDenom({{solver_key("beta_numerator")}}, {{solver_key("alpha_numerator")}}, {{solver_key("beta")}});""",
+            """    BetaFromNumDenom({{solver_key("beta_numerator")}}, {{solver_key("alpha_numerator")}}, {{solver_key("beta")}});
     // Carry the current residual product to the next PCG iteration.
     CheckCuda(cudaMemcpy({{solver_key("alpha_numerator")}},
                          {{solver_key("beta_numerator")}},
                          sizeof(*{{solver_key("alpha_numerator")}}),
                          cudaMemcpyDeviceToDevice),
-              "cudaMemcpy PCG residual product");''',
+              "cudaMemcpy PCG residual product");""",
         ),
         (
             "        {{solver.linear_t}} score_new_pcg = DoRetractScore();",
