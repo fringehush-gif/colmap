@@ -35,3 +35,36 @@ if(TESTS_ENABLED AND COVERAGE_ENABLED)
     target_link_options(colmap_thirdparty_attribute_state_test
         PRIVATE -coverage)
 endif()
+
+COLMAP_ADD_TEST(
+    NAME geometry_test
+    SRCS geometry_test.cc
+)
+if(TESTS_ENABLED AND OPENMP_FOUND)
+    target_link_libraries(colmap_thirdparty_geometry_test
+        OpenMP::OpenMP_CXX)
+endif()
+
+COLMAP_ADD_TEST(
+    NAME surface_trimmer_geometry_test
+    SRCS surface_trimmer_geometry_test.cc
+)
+if(TESTS_ENABLED)
+    target_compile_definitions(colmap_thirdparty_surface_trimmer_geometry_test
+        PRIVATE RELEASE)
+    if(MSVC)
+        target_compile_options(colmap_thirdparty_surface_trimmer_geometry_test
+            PRIVATE /bigobj)
+    endif()
+    if(OPENMP_FOUND)
+        target_link_libraries(colmap_thirdparty_surface_trimmer_geometry_test
+            OpenMP::OpenMP_CXX)
+    endif()
+endif()
+
+if(TESTS_ENABLED AND COVERAGE_ENABLED)
+    # These sibling-directory tests link instrumented COLMAP libraries.
+    target_link_options(colmap_thirdparty_geometry_test PRIVATE -coverage)
+    target_link_options(colmap_thirdparty_surface_trimmer_geometry_test
+        PRIVATE -coverage)
+endif()
