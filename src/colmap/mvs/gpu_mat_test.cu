@@ -843,6 +843,10 @@ TEST_F(NccFixed20, ColumnOwnershipAndRotation) {
     Need(map.GetCapacityBytes() == 2 * cap + lowcap / 2 + sizeof(unsigned),
          "capacity charge");
     Need(reinterpret_cast<uintptr_t>(map.View().low) % 4 == 0, "low alignment");
+    Need(
+        reinterpret_cast<uintptr_t>(map.View().error) ==
+            reinterpret_cast<uintptr_t>(map.View().high) + 2 * cap + lowcap / 2,
+        "domain flag follows payload in one allocation");
     Need(map.View().low_height == Round8(h), "low stride");
     std::vector<unsigned> low(lowcap / 8, 1);
     Check(cudaMemcpy(

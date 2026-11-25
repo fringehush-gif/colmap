@@ -2826,11 +2826,12 @@ TEST_F(CudaTest, ProbabilityUnorm16DestructorCleanupObservation) {
 namespace {
 
 template <typename MakeOwner>
-void ExpectCodecAllocationRefusals(const MakeOwner& make_owner) {
+void ExpectCodecAllocationRefusals(const MakeOwner& make_owner,
+                                   const size_t allocation_count = 2) {
   struct ResetOnExit {
     ~ResetOnExit() { ResetAllocationInjection(0, cudaSuccess); }
   } reset;
-  for (const size_t ordinal : {1u, 2u}) {
+  for (size_t ordinal = 1; ordinal <= allocation_count; ++ordinal) {
     SCOPED_TRACE(ordinal);
     const CudaCleanupScope cleanup;
     ResetAllocationInjection(ordinal, cudaErrorMemoryAllocation);
@@ -2845,21 +2846,22 @@ void ExpectCodecAllocationRefusals(const MakeOwner& make_owner) {
   {
     const auto owner = make_owner();
   }
-  EXPECT_EQ(wrapped_eligible.load(), 2u);
+  EXPECT_EQ(wrapped_eligible.load(), allocation_count);
   EXPECT_FALSE(wrapped_fired.load());
   EXPECT_NO_THROW(cleanup.Check());
 }
 
 template <typename MakeOwner>
-void ExpectCodecCleanupObservation(const MakeOwner& make_owner) {
+void ExpectCodecCleanupObservation(const MakeOwner& make_owner,
+                                   const size_t allocation_count = 2) {
   GTEST_FLAG_SET(death_test_style, "threadsafe");
-  for (const bool partial : {false, true}) {
-    SCOPED_TRACE(partial);
+  for (size_t completed = 0; completed < allocation_count; ++completed) {
+    SCOPED_TRACE(completed);
     EXPECT_EXIT(
-        ([&make_owner, partial]() {
+        ([&make_owner, completed]() {
           const CudaCleanupScope cleanup;
           ResetAllocationInjection(
-              partial ? 2 : 0, cudaErrorMemoryAllocation, true);
+              completed ? completed + 1 : 0, cudaErrorMemoryAllocation, true);
           bool refused = false;
           try {
             const auto owner = make_owner();
@@ -2870,7 +2872,7 @@ void ExpectCodecCleanupObservation(const MakeOwner& make_owner) {
           } catch (const CudaAllocationRefused&) {
             refused = true;
           }
-          if (refused != partial) std::_Exit(1);
+          if (refused != (completed != 0)) std::_Exit(1);
           try {
             cleanup.Check();
           } catch (const std::runtime_error& error) {
@@ -2906,11 +2908,11 @@ TEST_F(CudaTest, NccFixed24CleanupFailuresAreObserved) {
 }
 
 TEST_F(CudaTest, NccFixed20AllocationRefusals) {
-  ExpectCodecAllocationRefusals([] { return Fixed20NccCostMap(8, 8, 2); });
+  ExpectCodecAllocationRefusals([] { return Fixed20NccCostMap(8, 8, 2); }, 1);
 }
 
 TEST_F(CudaTest, NccFixed20CleanupFailuresAreObserved) {
-  ExpectCodecCleanupObservation([] { return Fixed20NccCostMap(8, 8, 2); });
+  ExpectCodecCleanupObservation([] { return Fixed20NccCostMap(8, 8, 2); }, 1);
 }
 
 TEST_F(CudaTest, ConsistencyMaskCleanupFailureRejectsResults) {
