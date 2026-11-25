@@ -1083,8 +1083,11 @@ void ExpectExactlyEqual(const Mat<float>& expected, const Mat<float>& actual) {
     ASSERT_TRUE(std::isfinite(b)) << i;
     // These delivery/allocation/scheduling paths preserve the arithmetic.
     // Require byte equality within the same executable and CUDA device only.
-    ASSERT_EQ(std::memcmp(&a, &b, sizeof(float)), 0)
-        << "element " << i << ": " << a << " vs " << b;
+    uint32_t a_bits, b_bits;
+    static_assert(sizeof(a_bits) == sizeof(a));
+    std::memcpy(&a_bits, &a, sizeof(a));
+    std::memcpy(&b_bits, &b, sizeof(b));
+    ASSERT_EQ(a_bits, b_bits) << "element " << i << ": " << a << " vs " << b;
   }
 }
 
@@ -1514,7 +1517,7 @@ TEST_F(CudaTest, PairedSweepAttemptsEveryJoinAfterReportedError) {
 }
 
 TEST_F(CudaTest, CompactDomainFailureWithholdsResultMaps) {
-  for (const int cost_bits : {0, 16, 24}) {
+  for (const int cost_bits : {0, 16, 24, 20}) {
     SCOPED_TRACE(cost_bits);
     Inputs inputs = MakeInputs(0);
     PatchMatch::Problem problem;
@@ -1530,6 +1533,7 @@ TEST_F(CudaTest, CompactDomainFailureWithholdsResultMaps) {
     options.probability_unorm16 = cost_bits == 0;
     options.ncc_cost_unorm16 = cost_bits == 16;
     options.ncc_cost_fixed24 = cost_bits == 24;
+    options.ncc_cost_fixed20 = cost_bits == 20;
     PatchMatchCuda owner(options, problem);
     ASSERT_NO_THROW(owner.Run());
     EXPECT_NO_THROW(owner.GetDepthMap());
@@ -1650,6 +1654,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
     options.probability_unorm16 = unorm16;
     options.ncc_cost_unorm16 = cost_bits == 16;
     options.ncc_cost_fixed24 = cost_bits == 24;
+    options.ncc_cost_fixed20 = cost_bits == 20;
   }
   const bool lossy_storage = unorm16 || cost_bits != 0;
   std::vector<std::unique_ptr<Inputs>> inputs;
@@ -1708,7 +1713,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
   if (!checkpoint) incumbent.clear();
   options.checkpoint_hmm = checkpoint;
   auto batch = construct();
-  if (checkpoint && !unorm16 && cost_bits == 0) {
+  if (checkpoint && !lossy_storage) {
     for (size_t i = 0; i < count; ++i)
       EXPECT_LT(batch[i]->PairPeakBytes(), incumbent[i]->PairPeakBytes());
   }
@@ -3012,6 +3017,14 @@ TEST_F(CudaTest, NccFixed24AllocationRefusals) {
 
 TEST_F(CudaTest, NccFixed24CleanupFailuresAreObserved) {
   ExpectCodecCleanupObservation([] { return Fixed24NccCostMap(8, 8, 2); });
+}
+
+TEST_F(CudaTest, NccFixed20AllocationRefusals) {
+  ExpectCodecAllocationRefusals([] { return Fixed20NccCostMap(8, 8, 2); });
+}
+
+TEST_F(CudaTest, NccFixed20CleanupFailuresAreObserved) {
+  ExpectCodecCleanupObservation([] { return Fixed20NccCostMap(8, 8, 2); });
 }
 
 TEST_F(CudaTest, ConsistencyMaskCleanupFailureRejectsResults) {
@@ -4498,6 +4511,61 @@ TEST_F(CudaTest, NccFixed24RejectsUnsupportedSettings) {
   options.window_radius = 5;
   EXPECT_TRUE(options.Check());
   EXPECT_EQ(options.NccCostBits(), 24);
+  options.ncc_cost_unorm16 = true;
+  EXPECT_FALSE(options.Check());
+  EXPECT_ANY_THROW(PatchMatchCuda(options, problem));
+}
+
+TEST_F(CudaTest, NccFixed20UsesActualOwnerBytes) {
+  ExpectNccOwnerBytes<Fixed20NccCostMap>(&PatchMatchOptions::ncc_cost_fixed20);
+}
+
+TEST_F(CudaTest, NccFixed20RepeatsAndPreservesRotationChoice) {
+  ExpectNccRepeatAndRotationChoice(&PatchMatchOptions::ncc_cost_fixed20);
+}
+
+TEST_F(CudaTest, NccFixed20BatchesMatchSameStorageIncumbents) {
+  for (const bool geometry : {false, true}) {
+    for (const bool probability_unorm16 : {false, true}) {
+      ExpectReferenceBatchOutputs(
+          3, geometry, false, true, probability_unorm16, 20);
+      ExpectReferenceBatchOutputs(
+          5, geometry, true, true, probability_unorm16, 20);
+    }
+  }
+}
+
+TEST_F(CudaTest, NccFixed20RejectsUnsupportedSettings) {
+  Inputs inputs = MakeInputs(0);
+  PatchMatch::Problem problem;
+  problem.ref_image_idx = 0;
+  for (size_t i = 1; i < inputs.images.size(); ++i)
+    problem.src_image_idxs.push_back(static_cast<int>(i));
+  problem.images = &inputs.images;
+  problem.depth_maps = &inputs.depths;
+  problem.normal_maps = &inputs.normals;
+  auto options = MakeOptions(false, false, false);
+  options.ncc_cost_fixed20 = true;
+  options.window_radius = 5;
+  options.window_step = 1;
+  options.checkpoint_hmm = false;
+  EXPECT_FALSE(options.Check());
+  EXPECT_ANY_THROW(PatchMatchCuda(options, problem));
+  options.checkpoint_hmm = true;
+  options.window_step = 2;
+  EXPECT_FALSE(options.Check());
+  EXPECT_ANY_THROW(PatchMatchCuda(options, problem));
+  options.window_step = 1;
+  options.window_radius = 4;
+  EXPECT_FALSE(options.Check());
+  EXPECT_ANY_THROW(PatchMatchCuda(options, problem));
+  options.window_radius = 5;
+  EXPECT_TRUE(options.Check());
+  EXPECT_EQ(options.NccCostBits(), 20);
+  options.ncc_cost_fixed24 = true;
+  EXPECT_FALSE(options.Check());
+  EXPECT_ANY_THROW(PatchMatchCuda(options, problem));
+  options.ncc_cost_fixed24 = false;
   options.ncc_cost_unorm16 = true;
   EXPECT_FALSE(options.Check());
   EXPECT_ANY_THROW(PatchMatchCuda(options, problem));

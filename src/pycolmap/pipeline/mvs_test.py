@@ -113,7 +113,9 @@ def test_patch_match_probability_unorm16_option() -> None:
     assert copied.check() == pycolmap.COLMAP_build.endswith("with CUDA")
 
 
-@pytest.mark.parametrize("name", ["ncc_cost_unorm16", "ncc_cost_fixed24"])
+@pytest.mark.parametrize(
+    "name", ["ncc_cost_unorm16", "ncc_cost_fixed20", "ncc_cost_fixed24"]
+)
 def test_patch_match_ncc_cost_codec_option(name: str) -> None:
     options = pycolmap.PatchMatchOptions()
     assert getattr(options, name) is False
