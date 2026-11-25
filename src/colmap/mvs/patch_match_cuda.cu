@@ -2495,6 +2495,78 @@ void PatchMatchCuda::RotateConsistencyMask() {
   cleanup.Check();
 }
 
+template <int kWindowSize,
+          int kWindowStep,
+          bool kGeomConsistencyTerm,
+          bool kFilterPhotoConsistency,
+          bool kFilterGeomConsistency,
+          bool kCooperative,
+          int kSweepBlockWidth,
+          bool kCheckpointHmm,
+          int kSourceJobGroups,
+          int kCostBits>
+__forceinline__ void PatchMatchCuda::LaunchSweep(
+    const dim3& sweep_kernel_grid_size,
+    const dim3& sweep_kernel_block_size,
+    const SweepOptions& sweep_options,
+    GpuMatView<float> checkpoints,
+    GpuMatView<float> beta_stripe,
+    cudaStream_t stream) {
+#define CALL_SWEEP_TYPED(UNORM, SELECTED, PREVIOUS)                     \
+  SweepFromTopToBottom<kWindowSize,                                     \
+                       kWindowStep,                                     \
+                       kGeomConsistencyTerm,                            \
+                       kFilterPhotoConsistency,                         \
+                       kFilterGeomConsistency,                          \
+                       kCooperative,                                    \
+                       kSweepBlockWidth,                                \
+                       kCheckpointHmm,                                  \
+                       kSourceJobGroups,                                \
+                       UNORM,                                           \
+                       kCostBits>                                       \
+      <<<sweep_kernel_grid_size, sweep_kernel_block_size, 0, stream>>>( \
+          MakeRefCamera(ref_K_host_[rotation_in_half_pi_],              \
+                        ref_inv_K_host_[rotation_in_half_pi_]),         \
+          global_workspace_->View(),                                    \
+          rand_state_map_->View(),                                      \
+          (PatchMatchRngPerimeter{ref_width_, ref_height_}),            \
+          static_cast<unsigned int>(rotation_in_half_pi_),              \
+          CostMapView<kCostBits>(),                                     \
+          GeometryView(*depth_map_),                                    \
+          GeometryView(*normal_map_),                                   \
+          (PackedConsistencyMaskView{consistency_mask_->View()}),       \
+          SELECTED,                                                     \
+          PREVIOUS,                                                     \
+          checkpoints,                                                  \
+          beta_stripe,                                                  \
+          ref_image_texture_->GetObj(),                                 \
+          ReferenceStatisticsView(false),                               \
+          ReferenceStatisticsView(true),                                \
+          src_images_texture_->GetObj(),                                \
+          src_depth_maps_texture_ == nullptr                            \
+              ? 0                                                       \
+              : src_depth_maps_texture_->GetObj(),                      \
+          poses_texture_[rotation_in_half_pi_]->GetObj(),               \
+          sweep_options,                                                \
+          ReferenceStatisticsTexture());
+
+#ifndef COLMAP_HIP_ENABLED
+  if constexpr (kCheckpointHmm) {
+    if (options_.probability_unorm16) {
+      CALL_SWEEP_TYPED(true,
+                       prev_sel_prob_unorm16_map_->View(),
+                       prev_sel_prob_unorm16_map_->View())
+      return;
+    }
+  }
+#endif
+  CALL_SWEEP_TYPED(
+      false,
+      kCheckpointHmm ? prev_sel_prob_map_->View() : sel_prob_map_->View(),
+      prev_sel_prob_map_->View())
+#undef CALL_SWEEP_TYPED
+}
+
 template <int kWindowSize, int kWindowStep, bool kCheckpointHmm, int kCostBits>
 void PatchMatchCuda::RunWithWindowSizeAndStep() {
   // Wait for all initializations to finish.
@@ -2596,68 +2668,21 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
                   << ", threads per block: "
                   << sweep_kernel_block_size.x * sweep_kernel_block_size.y;
 
-#define CALL_SWEEP_TYPED(UNORM, SELECTED, PREVIOUS)               \
-  SweepFromTopToBottom<kWindowSize,                               \
-                       kWindowStep,                               \
-                       kGeomConsistencyTerm,                      \
-                       kFilterPhotoConsistency,                   \
-                       kFilterGeomConsistency,                    \
-                       kCooperative,                              \
-                       kSweepBlockWidth,                          \
-                       kCheckpointHmm,                            \
-                       kSourceJobGroups,                          \
-                       UNORM,                                     \
-                       kCostBits>                                 \
-      <<<sweep_kernel_grid_size, sweep_kernel_block_size>>>(      \
-          MakeRefCamera(ref_K_host_[rotation_in_half_pi_],        \
-                        ref_inv_K_host_[rotation_in_half_pi_]),   \
-          global_workspace_->View(),                              \
-          rand_state_map_->View(),                                \
-          (PatchMatchRngPerimeter{ref_width_, ref_height_}),      \
-          static_cast<unsigned int>(rotation_in_half_pi_),        \
-          CostMapView<kCostBits>(),                               \
-          GeometryView(*depth_map_),                              \
-          GeometryView(*normal_map_),                             \
-          (PackedConsistencyMaskView{consistency_mask_->View()}), \
-          SELECTED,                                               \
-          PREVIOUS,                                               \
-          checkpoints,                                            \
-          beta_stripe,                                            \
-          ref_image_texture_->GetObj(),                           \
-          ReferenceStatisticsView(false),                         \
-          ReferenceStatisticsView(true),                          \
-          src_images_texture_->GetObj(),                          \
-          src_depth_maps_texture_ == nullptr                      \
-              ? 0                                                 \
-              : src_depth_maps_texture_->GetObj(),                \
-          poses_texture_[rotation_in_half_pi_]->GetObj(),         \
-          sweep_options,                                          \
-          ReferenceStatisticsTexture());
-
-#ifdef COLMAP_HIP_ENABLED
-#define CALL_SWEEP_FUNC                                                    \
-  CALL_SWEEP_TYPED(                                                        \
-      false,                                                               \
-      kCheckpointHmm ? prev_sel_prob_map_->View() : sel_prob_map_->View(), \
-      prev_sel_prob_map_->View())
-#else
-#define CALL_SWEEP_FUNC                                                    \
-  do {                                                                     \
-    if constexpr (kCheckpointHmm) {                                        \
-      if (options_.probability_unorm16) {                                  \
-        CALL_SWEEP_TYPED(true,                                             \
-                         prev_sel_prob_unorm16_map_->View(),               \
-                         prev_sel_prob_unorm16_map_->View())               \
-      } else {                                                             \
-        CALL_SWEEP_TYPED(                                                  \
-            false, prev_sel_prob_map_->View(), prev_sel_prob_map_->View()) \
-      }                                                                    \
-    } else {                                                               \
-      CALL_SWEEP_TYPED(                                                    \
-          false, sel_prob_map_->View(), prev_sel_prob_map_->View())        \
-    }                                                                      \
-  } while (false);
-#endif
+#define CALL_SWEEP_FUNC                           \
+  LaunchSweep<kWindowSize,                        \
+              kWindowStep,                        \
+              kGeomConsistencyTerm,               \
+              kFilterPhotoConsistency,            \
+              kFilterGeomConsistency,             \
+              kCooperative,                       \
+              kSweepBlockWidth,                   \
+              kCheckpointHmm,                     \
+              kSourceJobGroups,                   \
+              kCostBits>(sweep_kernel_grid_size,  \
+                         sweep_kernel_block_size, \
+                         sweep_options,           \
+                         checkpoints,             \
+                         beta_stripe);
 
         if (last_sweep) {
           if (options_.filter) {
@@ -2699,7 +2724,6 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
         }
 
 #undef CALL_SWEEP_FUNC
-#undef CALL_SWEEP_TYPED
       };
       if constexpr (kCooperative && kSweepBlockWidth == 8 &&
                     kWindowSize == 11 && kWindowStep == 1) {
@@ -3388,107 +3412,25 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
         VLOG(1) << "Cooperative source-job groups: " << kSourceJobGroups
                 << ", threads per block: " << block.x * block.y;
 
-#define PAIR_LAUNCH_TYPED(GEOM,                                 \
-                          PHOTO_FILTER,                         \
-                          GEO_FILTER,                           \
-                          CHECKPOINT,                           \
-                          UNORM,                                \
-                          COST,                                 \
-                          SELECTED,                             \
-                          PREVIOUS)                             \
-  SweepFromTopToBottom<11,                                      \
-                       1,                                       \
-                       GEOM,                                    \
-                       PHOTO_FILTER,                            \
-                       GEO_FILTER,                              \
-                       true,                                    \
-                       8,                                       \
-                       CHECKPOINT,                              \
-                       kSourceJobGroups,                        \
-                       UNORM,                                   \
-                       COST><<<grid, block, 0, stream>>>(       \
-      MakeRefCamera(p.ref_K_host_[p.rotation_in_half_pi_],      \
-                    p.ref_inv_K_host_[p.rotation_in_half_pi_]), \
-      p.global_workspace_->View(),                              \
-      p.rand_state_map_->View(),                                \
-      (PatchMatchRngPerimeter{p.ref_width_, p.ref_height_}),    \
-      static_cast<unsigned int>(p.rotation_in_half_pi_),        \
-      p.CostMapView<COST>(),                                    \
-      p.GeometryView(*p.depth_map_),                            \
-      p.GeometryView(*p.normal_map_),                           \
-      (PackedConsistencyMaskView{p.consistency_mask_->View()}), \
-      SELECTED,                                                 \
-      PREVIOUS,                                                 \
-      checkpoints,                                              \
-      beta_stripe,                                              \
-      p.ref_image_texture_->GetObj(),                           \
-      p.ReferenceStatisticsView(false),                         \
-      p.ReferenceStatisticsView(true),                          \
-      p.src_images_texture_->GetObj(),                          \
-      p.src_depth_maps_texture_ == nullptr                      \
-          ? 0                                                   \
-          : p.src_depth_maps_texture_->GetObj(),                \
-      p.poses_texture_[p.rotation_in_half_pi_]->GetObj(),       \
-      o,                                                        \
-      p.ReferenceStatisticsTexture())
-#define PAIR_LAUNCH_STORAGE(G, P, F, CHECKPOINT, UNORM, SELECTED, PREVIOUS)    \
-  do {                                                                         \
-    if constexpr (CHECKPOINT) {                                                \
-      if (p.cost_bits_ == 24) {                                                \
-        PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, UNORM, 24, SELECTED, PREVIOUS); \
-      } else if (p.cost_bits_ == 20) {                                         \
-        PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, UNORM, 20, SELECTED, PREVIOUS); \
-      } else if (p.cost_bits_ == 16) {                                         \
-        PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, UNORM, 16, SELECTED, PREVIOUS); \
-      } else {                                                                 \
-        PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, UNORM, 0, SELECTED, PREVIOUS);  \
-      }                                                                        \
-    } else {                                                                   \
-      PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, UNORM, 0, SELECTED, PREVIOUS);    \
-    }                                                                          \
+#define PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, COST)                          \
+  p.LaunchSweep<11, 1, G, P, F, true, 8, CHECKPOINT, kSourceJobGroups, COST>( \
+      grid, block, o, checkpoints, beta_stripe, stream)
+#define PAIR_LAUNCH(G, P, F, CHECKPOINT)            \
+  do {                                              \
+    if constexpr (CHECKPOINT) {                     \
+      if (p.cost_bits_ == 24) {                     \
+        PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, 24); \
+      } else if (p.cost_bits_ == 20) {              \
+        PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, 20); \
+      } else if (p.cost_bits_ == 16) {              \
+        PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, 16); \
+      } else {                                      \
+        PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, 0);  \
+      }                                             \
+    } else {                                        \
+      PAIR_LAUNCH_TYPED(G, P, F, CHECKPOINT, 0);    \
+    }                                               \
   } while (false)
-#ifdef COLMAP_HIP_ENABLED
-#define PAIR_LAUNCH(GEOM, PHOTO_FILTER, GEO_FILTER, CHECKPOINT)            \
-  PAIR_LAUNCH_STORAGE(                                                     \
-      GEOM,                                                                \
-      PHOTO_FILTER,                                                        \
-      GEO_FILTER,                                                          \
-      CHECKPOINT,                                                          \
-      false,                                                               \
-      CHECKPOINT ? p.prev_sel_prob_map_->View() : p.sel_prob_map_->View(), \
-      p.prev_sel_prob_map_->View())
-#else
-#define PAIR_LAUNCH(GEOM, PHOTO_FILTER, GEO_FILTER, CHECKPOINT)    \
-  do {                                                             \
-    if constexpr (CHECKPOINT) {                                    \
-      if (p.options_.probability_unorm16) {                        \
-        PAIR_LAUNCH_STORAGE(GEOM,                                  \
-                            PHOTO_FILTER,                          \
-                            GEO_FILTER,                            \
-                            true,                                  \
-                            true,                                  \
-                            p.prev_sel_prob_unorm16_map_->View(),  \
-                            p.prev_sel_prob_unorm16_map_->View()); \
-      } else {                                                     \
-        PAIR_LAUNCH_STORAGE(GEOM,                                  \
-                            PHOTO_FILTER,                          \
-                            GEO_FILTER,                            \
-                            true,                                  \
-                            false,                                 \
-                            p.prev_sel_prob_map_->View(),          \
-                            p.prev_sel_prob_map_->View());         \
-      }                                                            \
-    } else {                                                       \
-      PAIR_LAUNCH_STORAGE(GEOM,                                    \
-                          PHOTO_FILTER,                            \
-                          GEO_FILTER,                              \
-                          false,                                   \
-                          false,                                   \
-                          p.sel_prob_map_->View(),                 \
-                          p.prev_sel_prob_map_->View());           \
-    }                                                              \
-  } while (false)
-#endif
       if (p.options_.checkpoint_hmm) {
         if (p.options_.geom_consistency) {
           if (last) {
@@ -3511,7 +3453,6 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
         }
       }
 #undef PAIR_LAUNCH
-#undef PAIR_LAUNCH_STORAGE
 #undef PAIR_LAUNCH_TYPED
     };
     if (p.cooperative_sample_batch_size_ == 2)
