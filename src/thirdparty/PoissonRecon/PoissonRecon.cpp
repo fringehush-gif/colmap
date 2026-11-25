@@ -207,21 +207,23 @@ void WriteMesh
 )
 {
 	// A description of the output vertex information
-	using VInfo = Reconstructor::OutputVertexInfo< Real , Dim , HasGradients , HasDensity , AuxDataFactories ... >;
+	// Preserve distinct internal positions through the model-space map.
+	using PositionReal = double;
+	using VInfo = Reconstructor::OutputVertexInfoWithPosition< PositionReal , Real , Dim , HasGradients , HasDensity , AuxDataFactories ... >;
 
 	// A factory generating the output vertices
 	using Factory = typename VInfo::Factory;
 	Factory factory = VInfo::GetFactory( factories... );
 
-	Reconstructor::OutputInputFactoryTypeStream< Real , Dim , Factory , InCore , true , typename AuxDataFactories::VertexType... > vertexStream( factory , VInfo::Convert );
+	Reconstructor::OutputInputFactoryTypeStreamWithPosition< PositionReal , Real , Dim , Factory , InCore , true , typename AuxDataFactories::VertexType... > vertexStream( factory , VInfo::Convert );
 	Reconstructor::OutputInputFaceStream< Dim-1 , InCore , true > faceStream;
 
-	implicit.extractLevelSet( vertexStream , faceStream , meParams );
+	implicit.template extractLevelSet< PositionReal >( vertexStream , faceStream , meParams );
 
 	// Write the mesh to a .ply file
 	std::vector< std::string > noComments;
 	vertexStream.reset();
-	PLY::Write< Factory , node_index_type , Real , Dim >( fileName , factory , vertexStream.size() , faceStream.size() , vertexStream , faceStream , ascii ? PLY_ASCII : PLY_BINARY_NATIVE , noComments );
+	PLY::Write< Factory , node_index_type , PositionReal , Dim >( fileName , factory , vertexStream.size() , faceStream.size() , vertexStream , faceStream , ascii ? PLY_ASCII : PLY_BINARY_NATIVE , noComments );
 }
 
 template< typename Real , unsigned int Dim , unsigned int FEMSig , bool HasDensity , bool InCore , typename ... AuxDataFactories >

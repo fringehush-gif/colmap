@@ -190,6 +190,8 @@ namespace PoissonRecon
 
 			// A method that writes the extracted mesh to the streams
 			void extractLevelSet( OutputLevelSetVertexStream< Real , Dim , AuxData... > &vertexStream , OutputFaceStream< Dim-1 > &faceStream , LevelSetExtractionParameters params ) const;
+			template< typename PositionReal >
+			void extractLevelSet( OutputLevelSetVertexStreamWithPosition< PositionReal , Real , Dim , AuxData... > &vertexStream , OutputFaceStream< Dim-1 > &faceStream , LevelSetExtractionParameters params ) const;
 
 			struct Evaluator
 			{
@@ -294,10 +296,11 @@ namespace PoissonRecon
 
 			InternalNormalAndAuxData _zeroNormalAndAuxData;
 
+			template< typename PositionReal >
 			struct _VertexTypeConverter
 			{
-				using ExternalVertexType = std::tuple< Position< Real , Dim > , Gradient< Real , Dim > , Weight< Real > , InternalAuxData >;
-				using InternalVertexType = std::tuple< Position< Real , Dim > , Gradient< Real , Dim > , Weight< Real > , AuxData...  >;
+				using ExternalVertexType = std::tuple< Position< PositionReal , Dim > , Gradient< Real , Dim > , Weight< Real > , InternalAuxData >;
+				using InternalVertexType = std::tuple< Position< PositionReal , Dim > , Gradient< Real , Dim > , Weight< Real > , AuxData...  >;
 
 				static ExternalVertexType ConvertI2X( const InternalVertexType &iType )
 				{
@@ -591,6 +594,13 @@ namespace PoissonRecon
 		template< typename Real , unsigned int Dim , unsigned int ... FEMSigs , typename ... AuxData >
 		void Implicit< Real , Dim , UIntPack< FEMSigs ... > , AuxData ... >::extractLevelSet( OutputLevelSetVertexStream< Real , Dim , AuxData... > &vertexStream , OutputFaceStream< Dim-1 > &faceStream , LevelSetExtractionParameters params ) const
 		{
+			extractLevelSet< Real >( vertexStream , faceStream , params );
+		}
+
+		template< typename Real , unsigned int Dim , unsigned int ... FEMSigs , typename ... AuxData >
+		template< typename PositionReal >
+		void Implicit< Real , Dim , UIntPack< FEMSigs ... > , AuxData ... >::extractLevelSet( OutputLevelSetVertexStreamWithPosition< PositionReal , Real , Dim , AuxData... > &vertexStream , OutputFaceStream< Dim-1 > &faceStream , LevelSetExtractionParameters params ) const
+		{
 			XForm< Real , Dim+1 > unitCubeToModel;
 			if( params.gridCoordinates )
 			{
@@ -608,28 +618,25 @@ namespace PoissonRecon
 
 				std::string statsString;
 
-				TransformedOutputLevelSetVertexStream< Real , Dim , AuxData... > _vertexStream( unitCubeToModel , vertexStream );
+				TransformedOutputLevelSetVertexStreamWithPosition< PositionReal , Real , Dim , AuxData... > _vertexStream( unitCubeToModel , vertexStream );
 				if constexpr( sizeof...(AuxData) )
 				{
 					// Convert stream:
-					// OutputDataStream< Position< Real , Dim > , Gradient< Real , Dim > , Weight< Real > , AuxData... >
-					// -> OutputDataStream< Position< Real , Dim > , Gradient< Real , Dim > , Weight< Real > , InternalAuxData >
-					OutputDataStreamConverter< typename _VertexTypeConverter::InternalVertexType , typename _VertexTypeConverter::ExternalVertexType > __vertexStream( _vertexStream , _VertexTypeConverter::ConvertX2I );
-					typename LevelSetExtractor< Real , Dim , InternalAuxData >::Stats stats;
+					// OutputDataStream< Position< PositionReal , Dim > , Gradient< Real , Dim > , Weight< Real > , AuxData... >
+					// -> OutputDataStream< Position< PositionReal , Dim > , Gradient< Real , Dim > , Weight< Real > , InternalAuxData >
+					using VertexTypeConverter = _VertexTypeConverter< PositionReal >;
+					OutputDataStreamConverter< typename VertexTypeConverter::InternalVertexType , typename VertexTypeConverter::ExternalVertexType > __vertexStream( _vertexStream , VertexTypeConverter::ConvertX2I );
 					if constexpr( Dim==3 )
-						stats = LevelSetExtractor< Real , Dim , InternalAuxData >::Extract( Sigs() , UIntPack< Reconstructor::WeightDegree >() , UIntPack< DataSig >() , tree , density , _auxData , solution , isoValue , __vertexStream , faceStream , _zeroAuxData , !params.linearFit , params.outputGradients , params.forceManifold , params.polygonMesh , false );
+						statsString = LevelSetExtractor< Real , Dim , InternalAuxData >::Extract( Sigs() , UIntPack< Reconstructor::WeightDegree >() , UIntPack< DataSig >() , tree , density , _auxData , solution , isoValue , __vertexStream , faceStream , _zeroAuxData , !params.linearFit , params.outputGradients , params.forceManifold , params.polygonMesh , false ).toString();
 					else if constexpr( Dim==2 )
-						stats = LevelSetExtractor< Real , Dim , InternalAuxData >::Extract( Sigs() , UIntPack< Reconstructor::WeightDegree >() , UIntPack< DataSig >() , tree , density , _auxData , solution , isoValue , __vertexStream , faceStream , _zeroAuxData , !params.linearFit , params.outputGradients , false );
-					statsString = stats.toString();
+						statsString = LevelSetExtractor< Real , Dim , InternalAuxData >::Extract( Sigs() , UIntPack< Reconstructor::WeightDegree >() , UIntPack< DataSig >() , tree , density , _auxData , solution , isoValue , __vertexStream , faceStream , _zeroAuxData , !params.linearFit , params.outputGradients , false ).toString();
 				}
 				else
 				{
-					typename LevelSetExtractor< Real , Dim >::Stats stats;
 					if constexpr( Dim==3 )
-						stats = LevelSetExtractor< Real , Dim >::Extract( Sigs() , UIntPack< Reconstructor::WeightDegree >() , tree , density , solution , isoValue , _vertexStream , faceStream , !params.linearFit , params.outputGradients , params.forceManifold , params.polygonMesh , false );
+						statsString = LevelSetExtractor< Real , Dim >::Extract( Sigs() , UIntPack< Reconstructor::WeightDegree >() , tree , density , solution , isoValue , _vertexStream , faceStream , !params.linearFit , params.outputGradients , params.forceManifold , params.polygonMesh , false ).toString();
 					else if constexpr( Dim==2 )
-						stats = LevelSetExtractor< Real , Dim >::Extract( Sigs() , UIntPack< Reconstructor::WeightDegree >() , tree , density , solution , isoValue , _vertexStream , faceStream , !params.linearFit , params.outputGradients , false );
-					statsString = stats.toString();
+						statsString = LevelSetExtractor< Real , Dim >::Extract( Sigs() , UIntPack< Reconstructor::WeightDegree >() , tree , density , solution , isoValue , _vertexStream , faceStream , !params.linearFit , params.outputGradients , false ).toString();
 				}
 
 				if( params.verbose )

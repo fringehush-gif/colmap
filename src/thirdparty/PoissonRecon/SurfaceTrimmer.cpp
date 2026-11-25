@@ -35,6 +35,7 @@ DAMAGE.
 #include <float.h>
 #include <algorithm>
 #include <memory>
+#include <type_traits>
 #include <unordered_set>
 #include <list>
 #include "FEMTree.h"
@@ -172,8 +173,8 @@ protected:
 
 };
 
-template< typename Real , unsigned int Dim , typename ... AuxData >
-using ValuedPointData = DirectSum< Real , Point< Real , Dim > , Real , AuxData ... >;
+template< typename PositionReal , typename Real , unsigned int Dim , typename ... AuxData >
+using ValuedPointData = DirectSum< Real , Point< PositionReal , Dim > , Real , AuxData ... >;
 
 template< typename Index >
 size_t BoostHash( Index i1 , Index i2 )
@@ -206,19 +207,25 @@ struct HalfEdgeKey
 	struct Hasher{ size_t operator()( const HalfEdgeKey &key ) const { return BoostHash(key.key1,key.key2); } };
 };
 
-template< typename Real , unsigned int Dim ,  typename ... AuxData >
-ValuedPointData< Real , Dim , AuxData ... > InterpolateVertices( const ValuedPointData< Real , Dim , AuxData ... >& v1 , const ValuedPointData< Real , Dim , AuxData ... >& v2 , Real value )
+template< typename PositionReal , typename Real , unsigned int Dim , typename ... AuxData >
+ValuedPointData< PositionReal , Real , Dim , AuxData ... > InterpolateVertices( const ValuedPointData< PositionReal , Real , Dim , AuxData ... >& v1 , const ValuedPointData< PositionReal , Real , Dim , AuxData ... >& v2 , Real value )
 {
 	if( v1.template get<1>()==v2.template get<1>() ) return (v1+v2)/Real(2.);
 	Real dx = ( v1.template get<1>()-value ) / ( v1.template get<1>()-v2.template get<1>() );
-	return v1 * (Real)(1.-dx) + v2*dx;
+	auto vertex = v1 * (Real)(1.-dx) + v2*dx;
+	// Keep density and auxiliary arithmetic unchanged. Wide positions need a
+	// partition of unity for the retained interpolation parameter: two rounded
+	// Real weights can otherwise translate the result off the input edge.
+	if constexpr( !std::is_same< PositionReal , Real >::value )
+		vertex.template get<0>() = v1.template get<0>() + ( v2.template get<0>() - v1.template get<0>() ) * PositionReal(dx);
+	return vertex;
 }
 
-template< typename Real , unsigned int Dim , typename Index , typename ... AuxData >
+template< typename PositionReal , typename Real , unsigned int Dim , typename Index , typename ... AuxData >
 void SplitPolygon
 (
 	const std::vector< Index >& polygon ,
-	std::vector< ValuedPointData< Real , Dim , AuxData ... > >& vertices ,
+	std::vector< ValuedPointData< PositionReal , Real , Dim , AuxData ... > >& vertices ,
 	std::vector< std::vector< Index > >* ltPolygons , std::vector< std::vector< Index > >* gtPolygons ,
 	std::vector< bool >* ltFlags , std::vector< bool >* gtFlags ,
 	std::unordered_map< EdgeKey< Index > , Index , typename EdgeKey< Index >::Hasher >& vertexTable,
@@ -385,12 +392,12 @@ void SetConnectedComponents( const std::vector< std::vector< Index > >& polygons
 	for( Index i=0 ; i<(Index)polygonRoots.size() ; i++ ) components[ vMap[ polygonRoots[i] ] ].push_back(i);
 }
 
-template< typename Real , unsigned int Dim , typename Index , typename ... AuxDataFactories >
+template< typename PositionReal , typename Real , unsigned int Dim , typename Index , typename ... AuxDataFactories >
 int Execute( AuxDataFactories ... auxDataFactories )
 {
-	typedef VertexFactory::Factory< Real , typename VertexFactory::PositionFactory< Real , Dim > , typename VertexFactory::ValueFactory< Real > , AuxDataFactories ... > Factory;
+	typedef VertexFactory::Factory< Real , typename VertexFactory::PositionFactory< PositionReal , Dim > , typename VertexFactory::ValueFactory< Real > , AuxDataFactories ... > Factory;
 	typedef typename Factory::VertexType Vertex;
-	typename VertexFactory::PositionFactory< Real , Dim > pFactory;
+	typename VertexFactory::PositionFactory< PositionReal , Dim > pFactory;
 	typename VertexFactory::ValueFactory< Real > vFactory;
 	Factory factory( pFactory , vFactory , auxDataFactories ... );
 	Real min , max;
@@ -457,7 +464,7 @@ int Execute( AuxDataFactories ... auxDataFactories )
 		for( unsigned int i=0 ; i<_components.size() ; i++ )
 		{
 			nodes[i].polygonIndices.insert( nodes[i].polygonIndices.end() , _components[i].begin() , _components[i].end() );
-			for( auto iter=nodes[i].polygonIndices.begin() ; iter!=nodes[i].polygonIndices.end() ; iter++ ) nodes[i].area += PolygonArea< Real , Dim , Index , Vertex >( vertices , _polygons[ *iter ] );
+			for( auto iter=nodes[i].polygonIndices.begin() ; iter!=nodes[i].polygonIndices.end() ; iter++ ) nodes[i].area += PolygonArea< PositionReal , Dim , Index , Vertex >( vertices , _polygons[ *iter ] );
 		}
 
 		// Compute the connectivity
@@ -540,11 +547,11 @@ int Execute( AuxDataFactories ... auxDataFactories )
 	{
 		{
 			std::vector< std::vector< Index > > polys = ltPolygons;
-			Triangulate< Real , Dim , Index , Vertex >( vertices , ltPolygons , polys ) , ltPolygons = polys;
+			Triangulate< PositionReal , Dim , Index , Vertex >( vertices , ltPolygons , polys ) , ltPolygons = polys;
 		}
 		{
 			std::vector< std::vector< Index > > polys = gtPolygons;
-			Triangulate< Real , Dim , Index , Vertex >( vertices , gtPolygons , polys ) , gtPolygons = polys;
+			Triangulate< PositionReal , Dim , Index , Vertex >( vertices , gtPolygons , polys ) , gtPolygons = polys;
 		}
 	}
 
@@ -556,20 +563,12 @@ int Execute( AuxDataFactories ... auxDataFactories )
 	return EXIT_SUCCESS;
 }
 
-}  // namespace
-
-int RunSurfaceTrimmer( int argc , char* argv[] )
+template< typename PositionReal >
+int ExecuteWithPosition( void )
 {
-	CmdLineParse( argc-1 , &argv[1] , params );
-
-	if( !In.set || !Trim.set )
-	{
-		ShowUsage( argv[0] );
-		return EXIT_FAILURE;
-	}
 	typedef float Real;
 	static constexpr unsigned int Dim = DEFAULT_DIMENSION;
-	typedef VertexFactory::Factory< Real , typename VertexFactory::PositionFactory< Real , Dim > , typename VertexFactory::ValueFactory< Real > > Factory;
+	typedef VertexFactory::Factory< Real , typename VertexFactory::PositionFactory< PositionReal , Dim > , typename VertexFactory::ValueFactory< Real > > Factory;
 	Factory factory;
 	std::unique_ptr< bool[] > readFlags( new bool[ factory.plyReadNum() ] );
 	std::vector< PlyProperty > unprocessedProperties;
@@ -583,7 +582,28 @@ int RunSurfaceTrimmer( int argc , char* argv[] )
 	if( !factory.template plyValidReadProperties<0>( readFlags.get() ) ) MK_THROW( "Ply file does not contain positions" );
 	if( !factory.template plyValidReadProperties<1>( readFlags.get() ) ) MK_THROW( "Ply file does not contain values" );
 
-	if( Long.set ) return Execute< Real , Dim , long long >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
-	else           return Execute< Real , Dim , int       >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
+	if( Long.set ) return Execute< PositionReal , Real , Dim , long long >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
+	else           return Execute< PositionReal , Real , Dim , int       >( VertexFactory::DynamicFactory< Real >( unprocessedProperties ) );
 
+}
+
+}  // namespace
+
+int RunSurfaceTrimmer( int argc , char* argv[] )
+{
+	CmdLineParse( argc-1 , &argv[1] , params );
+	if( !In.set || !Trim.set )
+	{
+		ShowUsage( argv[0] );
+		return EXIT_FAILURE;
+	}
+
+	// Keep density and auxiliary arithmetic unchanged, while retaining wide
+	// positions from Poisson output instead of narrowing them on input.
+	std::vector< PlyProperty > properties;
+	PLY::ReadVertexHeader( In.value , properties );
+	for( const PlyProperty &property : properties )
+		if( property.name=="x" || property.name=="y" || property.name=="z" )
+			if( property.external_type==PLY_DOUBLE || property.external_type==PLY_FLOAT_64 ) return ExecuteWithPosition< double >();
+	return ExecuteWithPosition< float >();
 }

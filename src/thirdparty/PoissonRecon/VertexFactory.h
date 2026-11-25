@@ -191,9 +191,9 @@ namespace PoissonRecon
 
 			PositionFactory( TypeOnDisk typeOnDisk=GetTypeOnDisk< Real >() ) : _typeOnDisk( typeOnDisk ) { _realTypeOnDisk = GetTypeOnDisk< Real >()==_typeOnDisk; }
 
-			size_t bufferSize( void ) const { return sizeof( VertexType ); }
-			void toBuffer( const VertexType &dt , Pointer( char ) buffer ) const { memcpy( buffer , &dt , sizeof( VertexType ) ); }
-			void fromBuffer( ConstPointer( char ) buffer , VertexType &dt ) const { memcpy( &dt , buffer , sizeof( VertexType ) ); }
+			size_t bufferSize( void ) const { return sizeof(Real)*Dim; }
+			void toBuffer( const VertexType &dt , Pointer( char ) buffer ) const { memcpy( buffer , dt.coords , sizeof(Real)*Dim ); }
+			void fromBuffer( ConstPointer( char ) buffer , VertexType &dt ) const { memcpy( dt.coords , buffer , sizeof(Real)*Dim ); }
 
 			bool operator == ( const PositionFactory &factory ) const { return _typeOnDisk==factory._typeOnDisk; }
 		protected:
