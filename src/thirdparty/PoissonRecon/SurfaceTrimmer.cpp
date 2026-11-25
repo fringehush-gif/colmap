@@ -417,9 +417,7 @@ int Execute( AuxDataFactories ... auxDataFactories )
 	std::vector< std::string > comments;
 	PLY::ReadPolygons< Factory , Index >( In.value , factory , vertices , polygons , ft , comments );
 
-	std::unordered_map< EdgeKey< Index > , Index , typename EdgeKey< Index >::Hasher > vertexTable;
 	std::vector< std::vector< Index > > ltPolygons , gtPolygons;
-	std::vector< bool > ltFlags , gtFlags;
 
 	if( Verbose.set )
 	{
@@ -448,7 +446,17 @@ int Execute( AuxDataFactories ... auxDataFactories )
 	}
 
 	double t=Time();
-	for( size_t i=0 ; i<polygons.size() ; i++ ) SplitPolygon( polygons[i] , vertices , &ltPolygons , &gtPolygons , &ltFlags , &gtFlags , vertexTable , Trim.value );
+	{
+		std::unordered_map< EdgeKey< Index > , Index , typename EdgeKey< Index >::Hasher > vertexTable;
+		std::vector< bool > ltFlags , gtFlags;
+		for( size_t i=0 ; i<polygons.size() ; i++ )
+		{
+			SplitPolygon( polygons[i] , vertices , &ltPolygons , &gtPolygons , &ltFlags , &gtFlags , vertexTable , Trim.value );
+			// Split outputs own their index arrays; this input face is consumed.
+			std::vector< Index >().swap( polygons[i] );
+		}
+	}
+	std::vector< std::vector< Index > >().swap( polygons );
 
 	if( IslandAreaRatio.value>0 )
 	{
@@ -558,12 +566,17 @@ int Execute( AuxDataFactories ... auxDataFactories )
 		{
 			std::vector< std::vector< Index > > polys = ltPolygons;
 			Triangulate< PositionReal , Dim , Index , Vertex >( vertices , ltPolygons , polys ) , ltPolygons = polys;
+			// Preserve rejected-side triangulation before retiring its storage.
+			std::vector< std::vector< Index > >().swap( ltPolygons );
 		}
 		{
 			std::vector< std::vector< Index > > polys = gtPolygons;
 			Triangulate< PositionReal , Dim , Index , Vertex >( vertices , gtPolygons , polys ) , gtPolygons = polys;
 		}
 	}
+
+	// Polygon-mesh mode bypasses the triangulation scopes above.
+	std::vector< std::vector< Index > >().swap( ltPolygons );
 
 	RemoveHangingVertices( vertices , gtPolygons );
 	char comment[1024];
