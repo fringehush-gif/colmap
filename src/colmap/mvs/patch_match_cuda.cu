@@ -1646,7 +1646,7 @@ void PatchMatchCuda::InitSourceImages() {
         kDefaultValue);
     for (size_t i = 0; i < problem_.src_image_idxs.size(); ++i) {
       const DepthMap& depth_map =
-          problem_.depth_maps->at(problem_.src_image_idxs[i]);
+          problem_.InputDepthMap(problem_.src_image_idxs[i]);
       float* dest =
           src_depth_maps_host_data.data() + max_width * max_height * i;
       for (size_t r = 0; r < depth_map.GetHeight(); ++r) {
