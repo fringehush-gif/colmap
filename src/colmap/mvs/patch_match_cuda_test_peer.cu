@@ -55,6 +55,18 @@ void PatchMatchCudaTestPeer::CheckUsable(const PatchMatchCuda& owner) {
   owner.CheckUsable();
 }
 
+void* PatchMatchCudaTestPeer::ConsistencyMaskPointer(
+    const PatchMatchCuda& owner) {
+  return owner.consistency_mask_->GetWidth() ? owner.consistency_mask_->GetPtr()
+                                             : nullptr;
+}
+
+void* PatchMatchCudaTestPeer::AlternateDepthPointer(
+    const PatchMatchCuda& owner) {
+  THROW_CHECK(owner.alternate_depth_map_);
+  return owner.alternate_depth_map_->GetPtr();
+}
+
 void* PatchMatchCudaTestPeer::OctNormalStatusPointer(
     const PatchMatchCuda& owner) {
   THROW_CHECK(owner.oct_normal_map_);

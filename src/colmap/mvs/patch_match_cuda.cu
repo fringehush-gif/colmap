@@ -2616,6 +2616,41 @@ std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
   return consistent_image_idxs;
 }
 
+void PatchMatchCuda::PrepareConsistencyMask() {
+  if (!options_.rotation_buffer_reuse) {
+    const CudaCleanupScope cleanup;
+    consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
+        CostMapWidth(),
+        CostMapHeight(),
+        PackedConsistencyMaskDepth(CostMapDepth()));
+    cleanup.Check();
+  }
+  consistency_mask_->FillWithScalar(0);
+}
+
+void PatchMatchCuda::RotateConsistencyMask() {
+#ifndef COLMAP_HIP_ENABLED
+  if (options_.rotation_buffer_reuse) {
+    // Rotate() swapped the produced mask into the alternate owner.
+    alternate_consistency_mask_->Rotate(consistency_mask_.get());
+    return;
+  }
+#endif
+  const CudaCleanupScope cleanup;
+  try {
+    auto rotated = std::make_unique<GpuMat<uint8_t>>(
+        CostMapWidth(),
+        CostMapHeight(),
+        PackedConsistencyMaskDepth(CostMapDepth()));
+    consistency_mask_->Rotate(rotated.get());
+    consistency_mask_.swap(rotated);
+  } catch (...) {
+    cleanup.Check();
+    throw;
+  }
+  cleanup.Check();
+}
+
 template <int kWindowSize, int kWindowStep, bool kCheckpointHmm, int kCostBits>
 void PatchMatchCuda::RunWithWindowSizeAndStep() {
   // Wait for all initializations to finish.
@@ -2782,13 +2817,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
         if (last_sweep) {
           if (options_.filter) {
-            if (!options_.rotation_buffer_reuse) {
-              consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
-                  CostMapWidth(),
-                  CostMapHeight(),
-                  PackedConsistencyMaskDepth(CostMapDepth()));
-            }
-            consistency_mask_->FillWithScalar(0);
+            PrepareConsistencyMask();
           }
           if (options_.geom_consistency) {
             const bool kGeomConsistencyTerm = true;
@@ -2847,19 +2876,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
       // Rotate selected image map.
       if (last_sweep && options_.filter) {
-#ifndef COLMAP_HIP_ENABLED
-        if (options_.rotation_buffer_reuse) {
-          alternate_consistency_mask_->Rotate(consistency_mask_.get());
-        } else
-#endif
-        {
-          std::unique_ptr<GpuMat<uint8_t>> rot_consistency_mask_(
-              new GpuMat<uint8_t>(CostMapWidth(),
-                                  CostMapHeight(),
-                                  PackedConsistencyMaskDepth(CostMapDepth())));
-          consistency_mask_->Rotate(rot_consistency_mask_.get());
-          consistency_mask_.swap(rot_consistency_mask_);
-        }
+        RotateConsistencyMask();
         consistency_mask_valid_ = true;
       }
 
@@ -3457,11 +3474,13 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     }
     VLOG(2) << "PatchMatch shared geometry rotation bank: " << views.size()
             << " references, " << first.ref_width_ << "x" << first.ref_height_;
+    const CudaCleanupScope retired_bank;
     for (PatchMatchCuda* p : views) {
       p->alternate_depth_map_.reset();
       p->alternate_normal_map_.reset();
       p->alternate_oct_normal_map_.reset();
     }
+    retired_bank.Check();
   } else if (!checkpoint_geometry) {
     for (PatchMatchCuda* p : views)
       if (p->options_.rotation_buffer_reuse) p->EnsureGeometryRotationMemory();
@@ -3517,16 +3536,6 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
   for (PatchMatchCuda* p : views)
     if (p->cost_bits_) p->CheckCostMapDomain();
 
-  const auto prepare_last_mask = [](PatchMatchCuda& p, bool last) {
-    if (!last || !p.options_.filter) return;
-    if (!p.options_.rotation_buffer_reuse) {
-      p.consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
-          p.CostMapWidth(),
-          p.CostMapHeight(),
-          PackedConsistencyMaskDepth(p.CostMapDepth()));
-    }
-    p.consistency_mask_->FillWithScalar(0);
-  };
   const auto launch = [](PatchMatchCuda& p,
                          cudaStream_t stream,
                          int iter,
@@ -3692,25 +3701,12 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
     else
       launch_group(std::integral_constant<int, kCooperativeSampleBatchSize>{});
   };
-  const auto rotate_last_mask = [](PatchMatchCuda& p, bool last) {
-    if (!last || !p.options_.filter) return;
-    if (p.options_.rotation_buffer_reuse) {
-      // Rotate() swapped the produced mask into the alternate owner.
-      p.alternate_consistency_mask_->Rotate(p.consistency_mask_.get());
-    } else {
-      std::unique_ptr<GpuMat<uint8_t>> rotated(
-          new GpuMat<uint8_t>(p.CostMapWidth(),
-                              p.CostMapHeight(),
-                              PackedConsistencyMaskDepth(p.CostMapDepth())));
-      p.consistency_mask_->Rotate(rotated.get());
-      p.consistency_mask_.swap(rotated);
-    }
-  };
-
   for (int iter = 0; iter < first.options_.num_iterations; ++iter) {
     for (int sweep = 0; sweep < 4; ++sweep) {
       const bool last = iter == first.options_.num_iterations - 1 && sweep == 3;
-      for (PatchMatchCuda* p : views) prepare_last_mask(*p, last);
+      if (last)
+        for (PatchMatchCuda* p : views)
+          if (p->options_.filter) p->PrepareConsistencyMask();
       if (last && first.options_.filter) CUDA_SYNC_AND_CHECK();
       try {
         if (last && !final_together) {
@@ -3757,7 +3753,9 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
             geometry_oct_normal = std::move(p->alternate_oct_normal_map_);
           }
         }
-        for (PatchMatchCuda* p : views) rotate_last_mask(*p, last);
+        if (last)
+          for (PatchMatchCuda* p : views)
+            if (p->options_.filter) p->RotateConsistencyMask();
 
         CUDA_SYNC_AND_CHECK();
       } catch (...) {

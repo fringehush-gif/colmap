@@ -19,6 +19,8 @@ class PatchMatchCudaTestPeer {
   static PatchMatchTestGeometry Geometry(const PatchMatchCuda& owner);
   static void RotateThree(PatchMatchCuda& owner);
   static void CheckUsable(const PatchMatchCuda& owner);
+  static void* ConsistencyMaskPointer(const PatchMatchCuda& owner);
+  static void* AlternateDepthPointer(const PatchMatchCuda& owner);
   static void PoisonOctNormal(PatchMatchCuda& owner);
   static void* OctNormalStatusPointer(const PatchMatchCuda& owner);
 };
