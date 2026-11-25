@@ -9,7 +9,10 @@
 #include "colmap/util/testing.h"
 
 #include <fstream>
+#include <string>
+#include <utility>
 
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -232,15 +235,34 @@ TEST(StereoFusion, OverlappingRowTasksTouchSameProjectedMaskPixel) {
   }
   fusion_cfg.close();
   StereoFusionOptions options;
-  options.num_threads = 2;
   options.min_num_pixels = 1;
   options.max_traversal_depth = 2;
-  options.use_cache = false;
-  StereoFusion fusion(options, temp_dir, "COLMAP", "", "geometric");
-  fusion.Run();
-  EXPECT_FALSE(fusion.GetFusedPoints().empty());
-  EXPECT_EQ(fusion.GetFusedPoints().size(),
-            fusion.GetFusedPointsVisibility().size());
+  for (const auto& [use_cache, num_threads] :
+       {std::pair{false, 2}, std::pair{true, 2}, std::pair{true, -1}}) {
+    SCOPED_TRACE(use_cache);
+    SCOPED_TRACE(num_threads);
+    options.use_cache = use_cache;
+    options.num_threads = num_threads;
+    // The cached run cannot retain more than one image's components.
+    options.cache_size = 1.0 / (1024.0 * 1024.0 * 1024.0);
+    StereoFusion fusion(options, temp_dir, "COLMAP", "", "geometric");
+    const bool previous_log_to_stderr = FLAGS_logtostderr;
+    const int previous_min_log_level = FLAGS_minloglevel;
+    FLAGS_logtostderr = true;
+    FLAGS_minloglevel = 0;
+    testing::internal::CaptureStderr();
+    EXPECT_NO_THROW(fusion.Run());
+    const std::string diagnostic = testing::internal::GetCapturedStderr();
+    FLAGS_logtostderr = previous_log_to_stderr;
+    FLAGS_minloglevel = previous_min_log_level;
+    const int expected_threads = num_threads > 0 ? num_threads : 1;
+    EXPECT_NE(diagnostic.find("Starting fusion with " +
+                              std::to_string(expected_threads) + " threads"),
+              std::string::npos);
+    EXPECT_FALSE(fusion.GetFusedPoints().empty());
+    EXPECT_EQ(fusion.GetFusedPoints().size(),
+              fusion.GetFusedPointsVisibility().size());
+  }
 }
 
 TEST(ReadPointsVisibility, RoundTrip) {

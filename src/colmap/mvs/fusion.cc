@@ -135,13 +135,15 @@ void StereoFusion::Run() {
 
   const auto image_names = ReadTextFileLines(
       workspace_path_ / workspace_options.stereo_folder / "fusion.cfg");
-  int num_threads = 1;
+  // Preserve serial cached scheduling unless the caller requests workers.
+  const int num_threads = options_.use_cache && options_.num_threads <= 0
+                              ? 1
+                              : GetEffectiveNumThreads(options_.num_threads);
   if (options_.use_cache) {
     workspace_ = std::make_unique<CachedWorkspace>(workspace_options);
   } else {
     workspace_ = std::make_unique<Workspace>(workspace_options);
     workspace_->Load(image_names);
-    num_threads = GetEffectiveNumThreads(options_.num_threads);
   }
 
   if (CheckIfStopped()) {
@@ -220,8 +222,9 @@ void StereoFusion::Run() {
             .transpose();
   }
 
-  LOG(INFO) << StringPrintf("Starting fusion with %d threads", num_threads);
   ThreadPool thread_pool(num_threads);
+  LOG(INFO) << "Starting fusion with " << thread_pool.NumThreads()
+            << " threads";
 
   // Using a row stride of 10 to avoid starting parallel processing in rows that
   // are too close to each other which may lead to duplicated work, since nearby
