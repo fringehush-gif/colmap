@@ -99,16 +99,17 @@ BENCHMARK_DEFINE_F(BM_BundleAdjustment, Ceres)(benchmark::State& state) {
     const auto summary = ba->Solve();
 
     state.PauseTiming();
-    if (summary->termination_type ==
-        BundleAdjustmentTerminationType::NO_CONVERGENCE) {
-      state.SkipWithError("Bundle adjustment did not converge");
-      break;
+    if (!summary->IsSolutionUsable() ||
+        summary->termination_type ==
+            BundleAdjustmentTerminationType::NO_CONVERGENCE) {
+      state.SkipWithError("Bundle adjustment failed or did not converge");
+      return;
     }
     const auto* ceres_sum =
         dynamic_cast<const CeresBundleAdjustmentSummary*>(summary.get());
     if (ceres_sum == nullptr) {
       state.SkipWithError("Unexpected summary type for Ceres backend");
-      break;
+      return;
     }
     total_lm_steps += ceres_sum->ceres_summary.num_successful_steps +
                       ceres_sum->ceres_summary.num_unsuccessful_steps;
@@ -116,7 +117,6 @@ BENCHMARK_DEFINE_F(BM_BundleAdjustment, Ceres)(benchmark::State& state) {
     state.ResumeTiming();
   }
 
-  state.PauseTiming();
   ReportSceneCounters(state);
   const int64_t num_iters = state.iterations();
   if (num_iters > 0) {
@@ -127,7 +127,6 @@ BENCHMARK_DEFINE_F(BM_BundleAdjustment, Ceres)(benchmark::State& state) {
     state.counters["avg_ms_per_lm_step"] =
         total_ceres_time_s * 1000.0 / total_lm_steps;
   }
-  state.ResumeTiming();
 }
 
 #ifdef CASPAR_ENABLED
@@ -145,17 +144,16 @@ BENCHMARK_DEFINE_F(BM_BundleAdjustment, Caspar)(benchmark::State& state) {
     const auto summary = ba->Solve();
 
     state.PauseTiming();
-    if (summary->termination_type ==
-        BundleAdjustmentTerminationType::NO_CONVERGENCE) {
-      state.SkipWithError("Bundle adjustment did not converge");
-      break;
+    if (!summary->IsSolutionUsable() ||
+        summary->termination_type ==
+            BundleAdjustmentTerminationType::NO_CONVERGENCE) {
+      state.SkipWithError("Bundle adjustment failed or did not converge");
+      return;
     }
     state.ResumeTiming();
   }
 
-  state.PauseTiming();
   ReportSceneCounters(state);
-  state.ResumeTiming();
 }
 #endif
 
