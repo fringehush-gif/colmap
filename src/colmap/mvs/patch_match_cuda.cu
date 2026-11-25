@@ -2269,6 +2269,7 @@ void PatchMatchCuda::PoisonGeometryState() noexcept {
 
 void PatchMatchCuda::Run() {
   CheckUsable();
+  const CudaCleanupScope cleanup;
   results_valid_ = false;
   consistency_mask_valid_ = false;
   try {
@@ -2277,10 +2278,12 @@ void PatchMatchCuda::Run() {
       prev_sel_prob_unorm16_map_->ValidateStoredRange();
     }
     CheckNormalDomain();
+    cleanup.Check();
     results_valid_ = true;
   } catch (...) {
     if (rotation_in_half_pi_ != 0) PoisonGeometryState();
     consistency_mask_valid_ = false;
+    cleanup.Check();
     throw;
   }
 }

@@ -2,14 +2,110 @@
 
 #include "colmap/util/cudacc.h"
 
+#include <exception>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#ifdef COLMAP_TEST_CUDA_TIMER_WRAPPING
+namespace {
+int timer_event_handles[2] = {};
+struct TimerEvents {
+  int creates = 0, destroys = 0, live = 0, fail_stage = 0;
+  unsigned destroy_mask = 0;
+  bool failed_output = false;
+  cudaStream_t stream = nullptr;
+} timer_events;
+}  // namespace
+
+extern "C" cudaError_t __wrap_cudaEventCreate(cudaEvent_t* event) {
+  const int ordinal = ++timer_events.creates;
+  const bool fail = ordinal == timer_events.fail_stage;
+  *event = nullptr;
+  if (!fail || timer_events.failed_output) {
+    *event = reinterpret_cast<cudaEvent_t>(&timer_event_handles[ordinal - 1]);
+    ++timer_events.live;
+  }
+  return fail ? cudaErrorMemoryAllocation : cudaSuccess;
+}
+extern "C" cudaError_t __wrap_cudaEventRecord(cudaEvent_t,
+                                              cudaStream_t stream) {
+  timer_events.stream = stream;
+  return timer_events.fail_stage == 3 ? cudaErrorInvalidResourceHandle
+                                      : cudaSuccess;
+}
+extern "C" cudaError_t __wrap_cudaEventDestroy(cudaEvent_t event) {
+  ++timer_events.destroys;
+  --timer_events.live;
+  const unsigned mask =
+      event == reinterpret_cast<cudaEvent_t>(&timer_event_handles[0]) ? 1u : 2u;
+  return (timer_events.destroy_mask & mask) != 0 ? cudaErrorUnknown
+                                                 : cudaSuccess;
+}
+#endif
+
 namespace colmap {
 namespace {
+
+#ifdef COLMAP_TEST_CUDA_TIMER_WRAPPING
+TEST(CudaTimer, ConstructionAndUnwind) {
+  // Event calls are synthetic; these ownership regressions need no GPU.
+  for (const auto [stage, failed_output] : {std::pair{0, false},
+                                            {1, false},
+                                            {1, true},
+                                            {2, false},
+                                            {2, true},
+                                            {3, false}}) {
+    SCOPED_TRACE(::testing::Message() << stage << ":" << failed_output);
+    timer_events = {};
+    timer_events.fail_stage = stage;
+    timer_events.failed_output = failed_output;
+    const CudaCleanupScope cleanup;
+    if (stage == 0)
+      EXPECT_NO_THROW((CudaTimer{}));
+    else
+      EXPECT_THROW((CudaTimer{}), std::invalid_argument);
+    EXPECT_EQ(timer_events.live, 0);
+    EXPECT_EQ(timer_events.destroys,
+              stage == 1 ? int(failed_output)
+                         : (stage == 2 ? 1 + int(failed_output) : 2));
+    if (stage == 0 || stage == 3)
+      EXPECT_EQ(timer_events.stream, CudaDefaultStream());
+    EXPECT_NO_THROW(cleanup.Check());
+  }
+}
+
+TEST(CudaTimer, CleanupFailuresRemainObservable) {
+  struct PrimaryError : std::exception {};
+  for (const bool primary : {false, true}) {
+    for (const unsigned mask : {1u, 2u, 3u}) {
+      SCOPED_TRACE(::testing::Message() << primary << ":" << mask);
+      timer_events = {};
+      timer_events.destroy_mask = mask;
+      const CudaCleanupScope cleanup;
+      try {
+        try {
+          const CudaTimer timer;
+          if (primary) throw PrimaryError{};
+        } catch (...) {
+          cleanup.Check();
+          throw;
+        }
+        cleanup.Check();
+        FAIL() << "Expected an observed event cleanup failure";
+      } catch (const std::runtime_error& error) {
+        EXPECT_THAT(error.what(), testing::HasSubstr("cudaEventDestroy"));
+        if (primary) EXPECT_THROW(std::rethrow_if_nested(error), PrimaryError);
+      }
+      EXPECT_EQ(timer_events.destroys, 2);
+      EXPECT_EQ(timer_events.live, 0);
+    }
+  }
+}
+#endif
 
 TEST(CudaSafeCall, Success) {
   EXPECT_NO_THROW(CudaSafeCall(cudaSuccess, "probe.cc", 42));

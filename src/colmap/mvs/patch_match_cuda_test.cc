@@ -93,6 +93,8 @@ std::atomic<size_t> stream_fired{0}, stream_destroy_failures{0};
 std::atomic<StreamFault> stream_fault{StreamFault::kNone};
 std::atomic<bool> stream_capture{false};
 thread_local bool stream_worker_seen = false;
+thread_local bool timer_cleanup_failure = false;
+thread_local size_t timer_cleanup_injected = 0;
 bool InWorkStreamConstruction() {
   return colmap::mvs::internal::IsPatchMatchWorkStreamConstructionActive &&
          colmap::mvs::internal::IsPatchMatchWorkStreamConstructionActive();
@@ -183,6 +185,7 @@ extern "C" cudaError_t __real_cudaFreeArray(cudaArray_t);
 extern "C" cudaError_t __real_cudaStreamCreateWithFlags(cudaStream_t*,
                                                         unsigned int);
 extern "C" cudaError_t __real_cudaStreamDestroy(cudaStream_t);
+extern "C" cudaError_t __real_cudaEventDestroy(cudaEvent_t);
 extern "C" cudaError_t __real_cudaPeekAtLastError();
 extern "C" cudaError_t __real_cudaGetLastError();
 extern "C" cudaError_t __wrap_cudaStreamCreateWithFlags(cudaStream_t* out,
@@ -222,6 +225,14 @@ extern "C" cudaError_t __wrap_cudaStreamDestroy(cudaStream_t stream) {
   if (status == cudaSuccess && stream_fault == StreamFault::kDestroy &&
       stream_fired && stream_destroy_failures.fetch_add(1) == 0)
     return cudaErrorUnknown;  // The real handle was released before injection.
+  return status;
+}
+extern "C" cudaError_t __wrap_cudaEventDestroy(cudaEvent_t event) {
+  const auto status = __real_cudaEventDestroy(event);
+  if (status == cudaSuccess && std::exchange(timer_cleanup_failure, false)) {
+    ++timer_cleanup_injected;
+    return cudaErrorUnknown;  // The real event was released before injection.
+  }
   return status;
 }
 extern "C" cudaError_t __wrap_cudaPeekAtLastError() {
@@ -3224,6 +3235,40 @@ TEST_F(CudaTest, ConsistencyMaskCleanupFailureRejectsResults) {
         testing::ExitedWithCode(0),
         "");
   }
+}
+
+TEST_F(CudaTest, TimerCleanupFailureRejectsResults) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(([]() {
+                Inputs input = MakeInputs(0, 2, 25, 33);
+                auto options = MakeOptions(false, false, false);
+                options.checkpoint_hmm = true;
+                options.probability_unorm16 = true;
+                PatchMatch::Problem problem;
+                problem.ref_image_idx = 0;
+                problem.src_image_idxs = {1, 2};
+                problem.images = &input.images;
+                PatchMatchCuda owner(options, problem);
+                timer_cleanup_injected = 0;
+                timer_cleanup_failure = true;
+                try {
+                  owner.Run();
+                } catch (const std::runtime_error& error) {
+                  if (std::string(error.what())
+                              .find("cleanup cudaEventDestroy failed") ==
+                          std::string::npos ||
+                      timer_cleanup_injected != 1)
+                    std::_Exit(1);
+                  try {
+                    (void)owner.GetDepthMap();
+                  } catch (const std::invalid_argument&) {
+                    std::_Exit(0);
+                  }
+                }
+                std::_Exit(2);
+              }()),
+              testing::ExitedWithCode(0),
+              "");
 }
 
 TEST_F(CudaTest, SharedGeometryBankRetirementFailureRejectsBatch) {

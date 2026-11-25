@@ -242,6 +242,7 @@ if(CUDA_ENABLED)
                 "LINKER:--wrap=cudaMalloc3DArray"
                 "LINKER:--wrap=cudaFree"
                 "LINKER:--wrap=cudaFreeArray"
+                "LINKER:--wrap=cudaEventDestroy"
                 "LINKER:--wrap=cudaStreamCreateWithFlags"
                 "LINKER:--wrap=cudaStreamDestroy"
                 "LINKER:--wrap=cudaPeekAtLastError"
