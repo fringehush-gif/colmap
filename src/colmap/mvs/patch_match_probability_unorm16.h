@@ -63,25 +63,23 @@ static __global__ void Fill(ProbabilityUnorm16View view, float value) {
 class PatchMatchProbabilityUnorm16 {
  public:
   PatchMatchProbabilityUnorm16(size_t width, size_t height, size_t sources)
-      : original_width_(width), original_height_(height), depth_(sources) {
+      : depth_(sources), width_(width), height_(height) {
     THROW_CHECK_GT(width, 0);
     THROW_CHECK_GT(height, 0);
     THROW_CHECK_LE(width, std::numeric_limits<int>::max());
     THROW_CHECK_LE(height, std::numeric_limits<int>::max());
-    data_bytes_ = std::max(Bytes(Pitch(width), height, sources),
-                           Bytes(Pitch(height), width, sources));
-    THROW_CHECK_LE(data_bytes_,
+    pitch_ = Pitch(width);
+    const size_t data_bytes = std::max(Bytes(pitch_, height, sources),
+                                       Bytes(Pitch(height), width, sources));
+    THROW_CHECK_LE(data_bytes,
                    std::numeric_limits<size_t>::max() - sizeof(uint32_t));
-    capacity_ = data_bytes_ + sizeof(uint32_t);
+    capacity_ = data_bytes + sizeof(uint32_t);
     try {
       CUDA_SAFE_ALLOCATE(
           "cudaMalloc",
           ptr_,
           cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_));
-      invalid_ = reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(ptr_) +
-                                             data_bytes_);
-      CUDA_SAFE_CALL(cudaMemset(invalid_, 0, sizeof(uint32_t)));
-      Reorient(width, height);
+      CUDA_SAFE_CALL(cudaMemset(ErrorFlag(), 0, sizeof(uint32_t)));
     } catch (...) {
       Release();
       throw;
@@ -97,12 +95,12 @@ class PatchMatchProbabilityUnorm16 {
   size_t GetPitch() const { return pitch_; }
   size_t GetCapacityBytes() const { return capacity_; }
   ProbabilityUnorm16View View() const {
-    return {ptr_, pitch_, width_, height_, depth_, invalid_};
+    return {ptr_, pitch_, width_, height_, depth_, ErrorFlag()};
   }
   void ValidateStoredRange() const {
     uint32_t invalid = 0;
     CUDA_SAFE_CALL(cudaMemcpy(
-        &invalid, invalid_, sizeof(invalid), cudaMemcpyDeviceToHost));
+        &invalid, ErrorFlag(), sizeof(invalid), cudaMemcpyDeviceToHost));
     THROW_CHECK_EQ(invalid, 0u)
         << "UNORM16 probability saw nonfinite/out-of-range state";
   }
@@ -134,25 +132,32 @@ class PatchMatchProbabilityUnorm16 {
   }
   void RotateWithPlaneScratch(float* scratch, size_t scratch_bytes) {
     THROW_CHECK(scratch != nullptr);
-    THROW_CHECK_NE(static_cast<void*>(scratch), static_cast<void*>(ptr_));
-    const size_t nw = height_, nh = width_, np = Pitch(nw);
-    const size_t new_plane = Bytes(np, nh, 1);
+    const size_t new_width = height_, new_height = width_;
+    const size_t new_pitch = Pitch(new_width);
+    const size_t new_plane = Bytes(new_pitch, new_height, 1);
     THROW_CHECK_LE(new_plane, scratch_bytes);
-    THROW_CHECK_LE(Bytes(np, nh, depth_), data_bytes_);
     const auto own_begin = reinterpret_cast<uintptr_t>(ptr_);
     const auto scratch_begin = reinterpret_cast<uintptr_t>(scratch);
+    THROW_CHECK_EQ(scratch_begin % alignof(uint16_t), 0);
     const auto max_address = std::numeric_limits<uintptr_t>::max();
     THROW_CHECK_LE(capacity_, max_address - own_begin);
     THROW_CHECK_LE(new_plane, max_address - scratch_begin);
     THROW_CHECK(scratch_begin + new_plane <= own_begin ||
                 own_begin + capacity_ <= scratch_begin);
-    CudaRotateLayers(ptr_, scratch, width_, height_, depth_, pitch_, np);
+    CudaRotateLayers(ptr_, scratch, width_, height_, depth_, pitch_, new_pitch);
     CUDA_SYNC_AND_CHECK();
-    Reorient(nw, nh);
+    width_ = new_width;
+    height_ = new_height;
+    pitch_ = new_pitch;
   }
 #endif
 
  private:
+  uint32_t* ErrorFlag() const {
+    return reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(ptr_) +
+                                       capacity_ - sizeof(uint32_t));
+  }
+
   void Release() noexcept {
     if (ptr_ != nullptr) {
       const auto status = cudaFree(ptr_);
@@ -174,18 +179,9 @@ class PatchMatchProbabilityUnorm16 {
                 plane <= std::numeric_limits<size_t>::max() / depth);
     return plane * depth;
   }
-  void Reorient(size_t width, size_t height) {
-    THROW_CHECK((width == original_width_ && height == original_height_) ||
-                (width == original_height_ && height == original_width_));
-    THROW_CHECK_LE(Bytes(Pitch(width), height, depth_), data_bytes_);
-    width_ = width;
-    height_ = height;
-    pitch_ = Pitch(width);
-  }
-  const size_t original_width_, original_height_, depth_;
+  const size_t depth_;
   uint16_t* ptr_ = nullptr;
-  uint32_t* invalid_ = nullptr;
-  size_t data_bytes_ = 0, capacity_ = 0, width_ = 0, height_ = 0, pitch_ = 0;
+  size_t capacity_ = 0, width_ = 0, height_ = 0, pitch_ = 0;
 };
 
 }  // namespace mvs

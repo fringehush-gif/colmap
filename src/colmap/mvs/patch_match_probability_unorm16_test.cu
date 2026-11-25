@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -96,6 +98,32 @@ TEST_F(PatchMatchProbabilityUnorm16, ProbabilityEndpointBudget) {
       EXPECT_ANY_THROW(probability.ValidateStoredRange());
     }
   }
+}
+
+TEST_F(PatchMatchProbabilityUnorm16, RotationChecksScratchAlignment) {
+  mvs::PatchMatchProbabilityUnorm16 probability(5, 3, 2);
+  probability.FillWithScalar(0.5f);
+  const auto expected = probability.CopyToMat().GetData();
+  GpuMat<uint8_t> scratch(5 * 512 + 2, 1, 1);
+  try {
+    probability.RotateWithPlaneScratch(
+        reinterpret_cast<float*>(scratch.GetPtr() + 1), scratch.GetPitch() - 1);
+    FAIL() << "Unaligned scratch reached rotation";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_NE(
+        std::string(error.what()).find("scratch_begin % alignof(uint16_t)"),
+        std::string::npos);
+  }
+  EXPECT_EQ(probability.GetWidth(), 5);
+  EXPECT_EQ(probability.GetHeight(), 3);
+  EXPECT_EQ(probability.CopyToMat().GetData(), expected);
+
+  // The scratch carrier is float*, but the rotation stores uint16_t values.
+  probability.RotateWithPlaneScratch(
+      reinterpret_cast<float*>(scratch.GetPtr() + 2), scratch.GetPitch() - 2);
+  EXPECT_EQ(probability.GetWidth(), 3);
+  EXPECT_EQ(probability.GetHeight(), 5);
+  EXPECT_EQ(probability.CopyToMat().GetData(), expected);
 }
 
 }  // namespace
