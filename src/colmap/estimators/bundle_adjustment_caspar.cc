@@ -106,10 +106,10 @@ class CasparBundleAdjuster : public BundleAdjuster {
 
   void BuildFactors() {
     CreateCalibrationNodes();
-    CreatePoseNodes();
+    const auto frame_to_model = CreatePoseNodes();
     CreatePointNodes();
     AddFactors();
-    AddExternalFactors();
+    AddExternalFactors(frame_to_model);
   }
 
   void CreateCalibrationNodes() {
@@ -132,7 +132,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
     }
   }
 
-  void CreatePoseNodes() {
+  std::map<frame_t, CameraModelId> CreatePoseNodes() {
     std::map<frame_t, CameraModelId> frame_to_model;
     for (const image_t image_id : config_.Images()) {
       const Image& image = reconstruction_.Image(image_id);
@@ -152,6 +152,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
     for (const auto& [frame_id, model_id] : frame_to_model) {
       GetOrCreatePose(frame_id, model_id);
     }
+    return frame_to_model;
   }
 
   void CreatePointNodes() {
@@ -242,16 +243,19 @@ class CasparBundleAdjuster : public BundleAdjuster {
     }
   }
 
-  void AddExternalFactors() {
+  void AddExternalFactors(
+      const std::map<frame_t, CameraModelId>& frame_to_model) {
     for (const auto point3D_id : config_.VariablePoints()) {
-      AddFactorsForExternalObservations(point3D_id);
+      AddFactorsForExternalObservations(point3D_id, frame_to_model);
     }
     for (const auto point3D_id : config_.ConstantPoints()) {
-      AddFactorsForExternalObservations(point3D_id);
+      AddFactorsForExternalObservations(point3D_id, frame_to_model);
     }
   }
 
-  void AddFactorsForExternalObservations(const point3D_t point3D_id) {
+  void AddFactorsForExternalObservations(
+      const point3D_t point3D_id,
+      const std::map<frame_t, CameraModelId>& frame_to_model) {
     THROW_CHECK(!config_.IsIgnoredPoint(point3D_id));
     if (!HasSufficientTrackLength(point3D_id)) {
       return;
@@ -287,13 +291,27 @@ class CasparBundleAdjuster : public BundleAdjuster {
       }
       const Point2D& point2D = image.Point2D(track_el.point2D_idx);
       const size_t calib_idx = GetOrCreateCalibration(camera.camera_id, camera);
+      const bool focal_and_extra = IsFocalAndExtraVariable(camera.camera_id);
+      const bool principal_point_var =
+          IsPrincipalPointVariable(camera.camera_id);
+
+      // Every residual must use the same pose that will be written back
+      // for a configured frame. Frames outside the solve keep a fixed pose.
+      const auto frame_model = frame_to_model.find(image.FrameId());
+      const bool pose_var = frame_model != frame_to_model.end() &&
+                            IsPoseVariable(image.FrameId());
+      if (pose_var && frame_model->second != camera.model_id) {
+        LOG(FATAL_THROW)
+            << "Caspar cannot refine a frame with multiple camera models. "
+               "Hold the frame's rig_from_world pose constant.";
+      }
       AddFactorCore(image,
                     camera,
                     point2D,
                     point3D,
-                    /*pose_var=*/false,
-                    IsFocalAndExtraVariable(camera.camera_id),
-                    IsPrincipalPointVariable(camera.camera_id),
+                    pose_var,
+                    focal_and_extra,
+                    principal_point_var,
                     calib_idx,
                     *adapter);
     }
