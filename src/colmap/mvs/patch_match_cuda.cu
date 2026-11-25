@@ -2191,11 +2191,18 @@ void PatchMatchCuda::UseSparseSources(
 #endif
 
 void PatchMatchCuda::Run() {
+  const CudaCleanupScope cleanup;
   results_valid_ = false;
-  RunImpl();
-  if (prev_sel_prob_unorm16_map_) {
-    prev_sel_prob_unorm16_map_->ValidateStoredRange();
+  try {
+    RunImpl();
+    if (prev_sel_prob_unorm16_map_) {
+      prev_sel_prob_unorm16_map_->ValidateStoredRange();
+    }
+  } catch (...) {
+    cleanup.Check();
+    throw;
   }
+  cleanup.Check();
   results_valid_ = true;
 }
 
@@ -3383,19 +3390,29 @@ void RunPatchMatchBatch(const std::vector<PatchMatchCuda*>& views,
         for (PatchMatchCuda* p : views)
           if (p->options_.filter) p->PrepareConsistencyMask();
       if (last && first.options_.filter) CUDA_SYNC_AND_CHECK();
-      if (last && !final_together) {
-        // Retain the incumbent pair's low-residency final-filter sequence.
-        for (size_t i = 0; i < views.size(); ++i) {
-          launch(*views[i], streams[i], iter, sweep, last);
+      try {
+        if (last && !final_together) {
+          // Retain the incumbent pair's low-residency final-filter sequence.
+          for (size_t i = 0; i < views.size(); ++i) {
+            launch(*views[i], streams[i], iter, sweep, last);
+            CUDA_CHECK();
+            CUDA_SAFE_CALL(cudaStreamSynchronize(streams[i]));
+          }
+        } else {
+          for (size_t i = 0; i < views.size(); ++i)
+            launch(*views[i], streams[i], iter, sweep, last);
           CUDA_CHECK();
-          CUDA_SAFE_CALL(cudaStreamSynchronize(streams[i]));
+          for (cudaStream_t stream : streams)
+            CUDA_SAFE_CALL(cudaStreamSynchronize(stream));
         }
-      } else {
-        for (size_t i = 0; i < views.size(); ++i)
-          launch(*views[i], streams[i], iter, sweep, last);
-        CUDA_CHECK();
-        for (cudaStream_t stream : streams)
-          CUDA_SAFE_CALL(cudaStreamSynchronize(stream));
+      } catch (...) {
+        // Attempt every join before caller-owned state can unwind.
+        for (cudaStream_t stream : streams) {
+          CudaCleanupScope::ObserveCleanup(
+              "cudaStreamSynchronize PatchMatch batch",
+              cudaStreamSynchronize(stream));
+        }
+        throw;
       }
       for (PatchMatchCuda* p : views)
         if (p->packed_cost_) p->packed_cost_map_->CheckDomain();
