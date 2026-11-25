@@ -57,16 +57,13 @@ class PackedNccCostMap {
         std::max(Bytes(width, height, sources), Bytes(height, width, sources));
     THROW_CHECK_LE(capacity_,
                    std::numeric_limits<size_t>::max() - sizeof(uint32_t));
+    capacity_ += sizeof(uint32_t);
     try {
       CUDA_SAFE_ALLOCATE(
           "cudaMalloc",
           ptr_,
           cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_));
-      CUDA_SAFE_ALLOCATE("cudaMalloc",
-                         domain_error_,
-                         cudaMalloc(reinterpret_cast<void**>(&domain_error_),
-                                    sizeof(uint32_t)));
-      CUDA_SAFE_CALL(cudaMemset(domain_error_, 0, sizeof(uint32_t)));
+      CUDA_SAFE_CALL(cudaMemset(ErrorFlag(), 0, sizeof(uint32_t)));
       Reorient(width, height);
     } catch (...) {
       Release();
@@ -81,15 +78,15 @@ class PackedNccCostMap {
   size_t GetWidth() const { return width_; }
   size_t GetHeight() const { return height_; }
   size_t GetDepth() const { return sources_; }
-  size_t GetCapacityBytes() const { return capacity_ + sizeof(uint32_t); }
+  size_t GetCapacityBytes() const { return capacity_; }
   PackedNccCostView View() const {
-    return {{ptr_, pitch_, width_, height_, sources_}, domain_error_};
+    return {{ptr_, pitch_, width_, height_, sources_}, ErrorFlag()};
   }
 
   void CheckDomain() const {
     uint32_t domain_status = 0;
     CUDA_SAFE_CALL(cudaMemcpy(&domain_status,
-                              domain_error_,
+                              ErrorFlag(),
                               sizeof(domain_status),
                               cudaMemcpyDeviceToHost));
     THROW_CHECK_EQ(domain_status, 0u) << "NCC cost outside finite [0,2]";
@@ -99,7 +96,6 @@ class PackedNccCostMap {
     THROW_CHECK((width == original_width_ && height == original_height_) ||
                 (width == original_height_ && height == original_width_));
     const size_t pitch = Pitch(width);
-    THROW_CHECK_LE(Bytes(width, height, sources_), capacity_);
     width_ = width;
     height_ = height;
     pitch_ = pitch;
@@ -110,7 +106,6 @@ class PackedNccCostMap {
   // source slice into already-dead HMM checkpoint memory before replacing it.
   void RotateWithPlaneScratch(void* scratch, size_t scratch_bytes) {
     THROW_CHECK(scratch != nullptr);
-    THROW_CHECK_NE(scratch, ptr_);
     const size_t new_width = height_, new_height = width_;
     const size_t new_pitch = Pitch(new_width);
     const size_t new_plane = CheckedMultiply(new_pitch, new_height);
@@ -118,16 +113,12 @@ class PackedNccCostMap {
     // Reject interior aliases too: writing a rotated slice must not clobber
     // any live source plane or the sticky domain flag.
     const uintptr_t begin = reinterpret_cast<uintptr_t>(scratch);
+    THROW_CHECK_EQ(begin % alignof(uint16_t), 0);
     THROW_CHECK_LE(new_plane, std::numeric_limits<uintptr_t>::max() - begin);
     const uintptr_t end = begin + new_plane;
     const uintptr_t data = reinterpret_cast<uintptr_t>(ptr_);
-    const uintptr_t flag = reinterpret_cast<uintptr_t>(domain_error_);
     THROW_CHECK_LE(capacity_, std::numeric_limits<uintptr_t>::max() - data);
-    THROW_CHECK_LE(sizeof(uint32_t),
-                   std::numeric_limits<uintptr_t>::max() - flag);
     THROW_CHECK(end <= data || begin >= data + capacity_);
-    THROW_CHECK(end <= flag || begin >= flag + sizeof(uint32_t));
-    THROW_CHECK_LE(Bytes(new_width, new_height, sources_), capacity_);
     CudaRotateLayers(
         ptr_, scratch, width_, height_, sources_, pitch_, new_pitch);
     CUDA_SYNC_AND_CHECK();
@@ -137,16 +128,16 @@ class PackedNccCostMap {
 
  private:
   void Release() noexcept {
-    if (domain_error_ != nullptr) {
-      const auto status = cudaFree(domain_error_);
-      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
-                                             static_cast<int>(status));
-    }
     if (ptr_ != nullptr) {
       const auto status = cudaFree(ptr_);
       (void)CudaCleanupScope::ObserveCleanup("cudaFree",
                                              static_cast<int>(status));
     }
+  }
+
+  uint32_t* ErrorFlag() const {
+    return reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(ptr_) +
+                                       capacity_ - sizeof(uint32_t));
   }
 
   static size_t CheckedMultiply(size_t a, size_t b) {
@@ -166,7 +157,6 @@ class PackedNccCostMap {
 
   const size_t original_width_, original_height_, sources_;
   uint16_t* ptr_ = nullptr;
-  uint32_t* domain_error_ = nullptr;
   size_t capacity_ = 0;
   size_t width_ = 0, height_ = 0, pitch_ = 0;
 };
