@@ -1103,6 +1103,19 @@ TEST(DefaultBundleAdjuster, FreeGaugeDampingFloorKeepsStepsValid) {
     }
     const auto& ceres_summary = GetCeresSummary(summary.get());
 
+    size_t num_observations = 0;
+    for (const auto& [_, point3D] : reconstruction.Points3D()) {
+      EXPECT_TRUE(point3D.xyz.allFinite());
+      for (const auto& track_el : point3D.track.Elements()) {
+        const Eigen::Vector3d point3D_in_cam =
+            reconstruction.Image(track_el.image_id).CamFromWorld() *
+            point3D.xyz;
+        EXPECT_TRUE(point3D_in_cam.allFinite());
+        ++num_observations;
+      }
+    }
+    EXPECT_EQ(num_observations, 400);
+
     int num_invalid_steps = 0;
     for (const auto& iteration : ceres_summary.iterations) {
       if (!iteration.step_is_valid) {
