@@ -23,16 +23,10 @@ __device__ void Swap(T& a, T& b) {
 // Batcher odd–even mergesort, sorts at most 1024 elements
 template <typename TVal, uint kArrayLength, typename TIdx = uint>
 __forceinline__ __device__ void Sort(TVal* const values, TIdx* const indices = nullptr) {
-  __shared__ bool is_sorted;
-  if (threadIdx.x == 0)
-    is_sorted = true;
-
+  // Order MakeUnique's duplicate marks before reading adjacent values.
   __syncthreads();
-  if (threadIdx.x + 1 < kArrayLength)
-    if (values[threadIdx.x] > values[threadIdx.x + 1])
-      is_sorted = false;
-  __syncthreads();
-  if (is_sorted)
+  if (!__syncthreads_or(threadIdx.x + 1 < kArrayLength &&
+                       values[threadIdx.x] > values[threadIdx.x + 1]))
     return;
 
 #pragma unroll
@@ -82,19 +76,6 @@ __forceinline__ __device__ void MakeUnique(uint* const values, uint* const indic
   Sort<uint, kArrayLength>(values);
 }
 
-template <int kArrayLength>
-__forceinline__ __device__ uint GetNUnique(const uint* values) {
-  __shared__ uint n_sorted;  // last block might have less than 1024 elements
-  if (threadIdx.x == 0)
-    n_sorted = kArrayLength;
-  __syncthreads();
-  if (threadIdx.x < kArrayLength - 1)
-    if (values[threadIdx.x + 1] == 0xFFFFFFFF && values[threadIdx.x] != 0xFFFFFFFF)
-      n_sorted = threadIdx.x + 1;
-  __syncthreads();
-  return n_sorted;
-}
-
 __forceinline__ __device__ uint GetOrd(const uint* values, const uint length, const uint val) {
   const uint* lo = values;
   const uint* hi = values + length;
@@ -128,22 +109,16 @@ __global__ void SharedIndicesKernel(const uint* const __restrict__ indices,
   __shared__ uint indices_sh[1024];
   values_sh[threadIdx.x] = val;
   indices_sh[threadIdx.x] = threadIdx.x;
-  __syncthreads();
 
   MakeUnique<1024>(values_sh, indices_sh);
-  SharedIndex shared_index;
+  const uint n_unique = __syncthreads_count(values_sh[btrank] != 0xFFFFFFFF);
   if (gtrank < size) {
-    const uint n_unique = GetNUnique<1024>(values_sh);
+    SharedIndex shared_index;
     shared_index.unique = values_sh[btrank];
     shared_index.argsort = indices_sh[btrank];
     shared_index.target = GetOrd(values_sh, n_unique, val);
-  } else {
-    shared_index.unique = 0xffffffff;
-    shared_index.argsort = 0xffff;
-    shared_index.target = 0xffff;
-  };
-  if (gtrank < size)
     shared_indices_out[gtrank] = shared_index;
+  }
 }
 
 void SharedIndices(const uint* const indices, SharedIndex* const shared_indices_out,

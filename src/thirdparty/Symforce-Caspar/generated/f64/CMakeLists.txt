@@ -30,3 +30,4 @@ set_target_properties(caspar_lib_core PROPERTIES
   POSITION_INDEPENDENT_CODE ON
 )
 
+target_compile_definitions(caspar_lib_core PUBLIC CASPAR_LEGACY_DOUBLE_SHARED_SUM=1)

@@ -191,6 +191,11 @@ if(CASPAR_ENABLED AND CUDA_ENABLED)
     )
     message(STATUS "Configuring Caspar...")
     FetchContent_MakeAvailable(caspar)
+    # Caspar uses CCCL headers that require MSVC's conforming preprocessor.
+    if(MSVC AND CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+        target_compile_options(caspar_lib_core PRIVATE
+            "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>")
+    endif()
     # Wrap the source-tree include path in BUILD_INTERFACE so caspar_lib_core
     # can be part of install(EXPORT). Caspar's generated CMakeLists.txt uses a
     # raw ${CMAKE_CURRENT_SOURCE_DIR} which CMake rejects on exported targets.
@@ -207,7 +212,7 @@ if(CASPAR_ENABLED AND CUDA_ENABLED)
         set(_MSVC_COMPACT_HEADER "${CASPAR_GEN_DIR}/../../msvc_compact.h")
         set(_MSVC_CUDA_COMPACT_HEADER "${CASPAR_GEN_DIR}/../../msvc_cuda_compact.h")
         target_compile_options(caspar_lib_core PRIVATE
-            $<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:/FI"${_MSVC_COMPACT_HEADER}">
+            "$<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:/FI${_MSVC_COMPACT_HEADER}>"
             # Keep CUDA pre-includes minimal and use NVCC's native pre-include
             # option to avoid forcing C++ standard library headers into NVCC's
             # MSVC host pass.

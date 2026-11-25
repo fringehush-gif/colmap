@@ -1,164 +1,147 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # ruff: noqa: E501 -- Preserve exact upstream template anchors and fragments.
 
-"""Process-local compatibility for two complete Caspar solver template shapes."""
+"""Small COLMAP overlays on the reviewed canonical Caspar generator."""
 
+from hashlib import sha256
 from pathlib import Path
 
-_CORRECTNESS_REPAIRS = (
-    (
-        "#include <chrono>",
-        """#include <chrono>
-#include <cmath>""",
-    ),
-    (
-        """void {{ solver.struct_name }}::DoUpdateRFirst() {
-    Zero({{solver_key("r_0_norm2_tot")}}, {{solver_key("r_0_norm2_tot")}}+1);
-
-    {% for nodetype in solver.node_types %}""",
-        """void {{ solver.struct_name }}::DoUpdateRFirst() {
-    Zero({{solver_key("r_0_norm2_tot")}}, {{solver_key("r_0_norm2_tot")}}+1);
-    Zero({{solver_key("r_kp1_norm2_tot")}}, {{solver_key("r_kp1_norm2_tot")}}+1);
-
-    {% for nodetype in solver.node_types %}""",
-    ),
-    (
-        "    bool have_pcg_proposal = false;",
-        """    bool have_pcg_proposal = false;
-    {{solver.linear_t}} pred_decrease_best_pcg = 0;""",
-    ),
-    (
-        "        if (!(score_new_pcg <= score_best_pcg * params_.pcg_rel_decrease_min)) {",
-        """        if (!std::isfinite(score_new_pcg) ||
-            (params_.pcg_rel_decrease_min != -1.0f &&
-             !(score_new_pcg <= score_best_pcg * params_.pcg_rel_decrease_min))) {""",
-    ),
-    (
-        "      quality = (score_best - score_best_pcg) / GetPredDecrease();",
-        """      const {{solver.linear_t}} pred_decrease =
-          params_.pcg_rel_decrease_min == -1.0f &&
-                  params_.pcg_rel_score_exit == -1.0f
-              ? GetPredDecrease()
-              : pred_decrease_best_pcg;
-      quality = (score_best - score_best_pcg) / pred_decrease;""",
-    ),
-)
-
-_RETAINED_PROPOSAL = (
-    "        score_best_pcg = score_new_pcg;",
-    """        score_best_pcg = score_new_pcg;
-        // Retain the prediction before the next PCG update overwrites the step.
-        pred_decrease_best_pcg = GetPredDecrease();""",
-)
-_TEST_ACCESS = (
-    "private:\n  SolverParams<{{solver.linear_t}}> params_;",
-    "private:\n  friend struct GraphSolverTestAccess;\n"
-    "  SolverParams<{{solver.linear_t}}> params_;",
-)
-
-_PARAMETER_GUARDS = """  if (params.pcg_rel_error_exit <= 0.0f) {
-    throw std::runtime_error("params.pcg_rel_error_exit must be positive");
-  }
-  if (params.diag_init < 0.0f) {
-    throw std::runtime_error("params.diag_init must be positive");
-  }
-  if (params.pcg_iter_max < 1) {
-    throw std::runtime_error("params.pcg_iter_max must be at least 1");
-  }
-"""
-_PARAMETER_REGIONS = (
-    (
-        "  indices_valid_ = false;\n"
-        + _PARAMETER_GUARDS.replace("exit <=", "exit<=").replace(") {", "){")
-        + "  allocation_size_ = get_nbytes();",
-        "  indices_valid_ = false;\n  set_params(params);\n"
-        "  allocation_size_ = get_nbytes();",
-    ),
-    (
-        "void {{ solver.struct_name }}::set_params(const SolverParams<double> &params){\n"
-        "  this->params_ = params;\n}",
-        "void {{ solver.struct_name }}::set_params(const SolverParams<double> &params){\n"
-        + _PARAMETER_GUARDS
-        + "  this->params_ = params;\n}",
-    ),
-)
+# SymForce cfff699b with the reviewed shared-index follow-ups. Keeping
+# one source contract removes legacy repair paths and prevents regeneration
+# from silently restoring an older numerical or readback implementation.
+GENERATOR_OWNER = "398a91dc783cb72bcba7f9d199d7db29aa47349a"
+_GENERATION_INPUTS = {
+    "source/runtime/memops.cuh": "2e5cbedb7f9c5a66f6ffd123c050e00546a2f951546627f42a4197b4ad22ce11",
+    "source/templates/__init__.py": "17540509eb4673ded9977429c29b7841915a499e27ba6ed3669ba0d8b6322d1b",
+    "code_generation/library.py": "251bd162ab85975c812a7e46991c83d91d9e52ff08953e8e7e067711b64154b4",
+    "source/templates/solver.cc.jinja": "647028609d57c11dbdc1387cff36e235e2ff53b216407258ad16fbcbbd3bcff1",
+    "source/templates/solver.h.jinja": "d9b1eb9db48105dbf426da503a4bd8c098f2cb3b4b0ee96987b20af02fde3f5c",
+    "source/templates/buildfiles/CMakeLists.txt.jinja": "724402194513c78f776609344c8d77368253346a0124f67aa92d18dd60609831",
+    "source/runtime/solver_tools.cu": "6e55cfcecabe8a1f8e33493e215e16c2962451ce416912006032dad6a4399b2b",
+    "source/runtime/shared_indices.cu": "9d0c1fa422728384f71bf5fcb1f5be54eb19d96f5213109134fc74af0d3f7e95",
+    "code_generation/solver.py": "1c528c6130b58c0fee30d5a64fa24337e0d88cd39c747796a334b70d59ae317d",
+    "code_generation/solver_utils.py": "63b5ddca9a0886f7247df4ad8df8248356b3c671acb999584925e7b351926673",
+}
 
 
-def _patch_parameter_validation(source: str) -> str:
-    """Retain the owner's shared constructor/setter precondition checks."""
-    if all(
-        source.count(new) == 1 and source.count(old) == 0
-        for old, new in _PARAMETER_REGIONS
-    ):
-        return source
-    if not all(
-        source.count(old) == 1 and source.count(new) == 0
-        for old, new in _PARAMETER_REGIONS
-    ):
-        raise RuntimeError(
-            "Caspar parameter validation template is incomplete or incompatible"
-        )
-    for old, new in _PARAMETER_REGIONS:
-        source = source.replace(old, new)
-    return source
+def validate_generation_inputs(
+    caspar_dir: Path, templates: dict[str, str]
+) -> None:
+    """Check actual loaded templates and copied runtime before writing outputs."""
+    for name, digest in _GENERATION_INPUTS.items():
+        try:
+            text = (
+                templates[name.removeprefix("source/templates/")]
+                if name.endswith(".jinja")
+                else (caspar_dir / name).read_text(encoding="utf-8")
+            )
+        except (OSError, KeyError) as error:
+            raise RuntimeError(
+                f"Missing Caspar generator input: {name}"
+            ) from error
+        # Normalize a Windows checkout without accepting other source changes.
+        if sha256(text.replace("\r\n", "\n").encode()).hexdigest() != digest:
+            raise RuntimeError(
+                f"Unsupported Caspar generator input: {name}. "
+                f"Install SymForce {GENERATOR_OWNER}, or review this input "
+                "before updating its digest. No output has been changed."
+            )
 
 
 def _replace_once(source: str, old: str, new: str) -> str:
     if source.count(old) != 1:
         raise RuntimeError(
-            "Caspar solver template changed; review scored-proposal repairs"
+            "Caspar solver template changed; review COLMAP overlays"
         )
     return source.replace(old, new)
 
 
+_RETAINED_PROPOSAL = """        score_best_pcg = score_new_pcg;
+        // Retain the prediction before the next PCG update overwrites the step.
+        pred_decrease_best_pcg = GetPredDecrease();"""
+
+_READBACK_RANGE = """template <typename T, size_t Dimension, size_t StorageDimension>
+void CheckReadbackRange(size_t offset, size_t num, size_t count,
+                        size_t capacity, const char* node) {
+  static_assert(Dimension > 0 && StorageDimension >= Dimension);
+  if (offset > count || num > count - offset) {
+    throw std::runtime_error(std::string(node) +
+                             " readback range exceeds node count");
+  }
+  if (num == 0) {
+    return;
+  }
+  // Mappers use unsigned component indices and increment output lanes by 32.
+  constexpr size_t kIndexLimit = std::numeric_limits<unsigned int>::max() - 32;
+  if (capacity > kIndexLimit / StorageDimension ||
+      num > std::numeric_limits<size_t>::max() / sizeof(T) / Dimension) {
+    throw std::runtime_error(std::string(node) +
+                             " readback exceeds mapping argument limits");
+  }
+}
+
+"""
+
+_READBACK_GUARD = """  if (offset > {{num_key(nodetype)}} || num > {{num_key(nodetype)}} - offset) {
+    throw std::runtime_error("{{nodetype.__name__}} readback range exceeds node count");
+  }
+  if (num == 0) {
+    return;
+  }
+  constexpr size_t kDimension = {{Ops.storage_dim(nodetype)}};
+  // The current mapper rounds up unsigned counts in blocks of 32.
+  const size_t limit = std::numeric_limits<unsigned int>::max();
+  if ({{num_max_key(nodetype)}} > limit || offset > limit || num > limit - 31 ||
+      kDimension == 0 ||
+      num > std::numeric_limits<size_t>::max() / sizeof({{solver.storage_t}}) / kDimension) {
+    throw std::runtime_error("{{nodetype.__name__}} readback exceeds mapping argument limits");
+  }
+"""
+
+_CHECK_READBACK_RANGE = """  CheckReadbackRange<{{solver.storage_t}}, {{Ops.storage_dim(nodetype)}}, {{solver.fields[node_key(nodetype, "storage_current")].dim_real}}>(
+      offset, num, {{num_key(nodetype)}}, {{num_max_key(nodetype)}}, "{{nodetype.__name__}}");
+  if (num == 0) {
+    return;
+  }
+"""
+
+
 def patch_solver_templates(source: str, header: str) -> tuple[str, str]:
-    """Preserve paired readback for complete legacy or owner-corrected inputs.
-
-    Validate both templates before transforming either. Unknown, partial and
-    already-overlaid inputs are refused; installed templates are never changed.
-    """
-    source = _patch_parameter_validation(source)
-    regions = (*_CORRECTNESS_REPAIRS, _RETAINED_PROPOSAL)
-    legacy = all(
-        source.count(old) == 1 and source.count(new) == 0
-        for old, new in regions
-    )
-    corrected = all(
-        source.count(new) == 1 and source.count(old) == new.count(old)
-        for old, new in regions
-    )
-    old_friend, new_friend = _TEST_ACCESS
-    friend_count = header.count("friend struct GraphSolverTestAccess;")
-    legacy_header = (
-        header.count(old_friend) == 1
-        and header.count(new_friend) == 0
-        and friend_count == 0
-    )
-    corrected_header = (
-        header.count(new_friend) == 1
-        and header.count(old_friend) == 0
-        and friend_count == 1
-    )
-    if legacy and legacy_header:
-        for old, new in _CORRECTNESS_REPAIRS:
-            source = _replace_once(source, old, new)
-        header = _replace_once(header, old_friend, new_friend)
-        retention = _RETAINED_PROPOSAL[0]
-    elif corrected and corrected_header:
-        retention = _RETAINED_PROPOSAL[1]
-    else:
-        raise RuntimeError(
-            "Caspar source/header repairs are incomplete or incompatible"
-        )
-
+    """Apply COLMAP overlays after validating the canonical generator inputs."""
     # Replace the owner's retained direct call with the same paired result.
     source = _replace_once(
         source,
-        retention,
+        _RETAINED_PROPOSAL,
         """        score_best_pcg = score_new_pcg;
         pred_decrease_best_pcg = predicted_decrease_pcg;""",
     )
     replacements = (
+        (
+            "  {{solver.linear_t}} diag = params_.diag_init;",
+            "  {{solver.linear_t}} diag = std::max(params_.diag_init, params_.diag_min);",
+        ),
+        (
+            "  result.initial_score = score_best;",
+            """  result.initial_score = score_best;
+  if (!std::isfinite(score_best)) {
+    result.exit_reason = ExitReason::FAILURE_NONFINITE_INITIAL_SCORE;
+    result.final_score = score_best;
+    result.runtime =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+            .count();
+    return result;
+  }""",
+        ),
+        (
+            """    BetaFromNumDenom({{solver_key("beta_numerator")}}, {{solver_key("alpha_numerator")}}, {{solver_key("beta")}});""",
+            """    BetaFromNumDenom({{solver_key("beta_numerator")}}, {{solver_key("alpha_numerator")}}, {{solver_key("beta")}});
+    // Carry the current residual product to the next PCG iteration.
+    CheckCuda(cudaMemcpy({{solver_key("alpha_numerator")}},
+                         {{solver_key("beta_numerator")}},
+                         sizeof(*{{solver_key("alpha_numerator")}}),
+                         cudaMemcpyDeviceToDevice),
+              "cudaMemcpy PCG residual product");""",
+        ),
         (
             "        {{solver.linear_t}} score_new_pcg = DoRetractScore();",
             """        {{solver.linear_t}} predicted_decrease_pcg;
@@ -209,6 +192,10 @@ void {{ solver.struct_name }}::DoBeta() {""",
         source = _replace_once(source, old, new)
     for old, new in (
         (
+            "  CONVERGED_DIAG_EXIT",
+            "  CONVERGED_DIAG_EXIT,\n  FAILURE_NONFINITE_INITIAL_SCORE",
+        ),
+        (
             "  {{solver.linear_t}} DoRetractScore();",
             "  {{solver.linear_t}} DoRetractScore({{solver.linear_t}}* predicted_decrease = nullptr);",
         ),
@@ -219,166 +206,30 @@ void {{ solver.struct_name }}::DoBeta() {""",
         ),
     ):
         header = _replace_once(header, old, new)
+    source = _replace_once(
+        source, "namespace {\n\n", "namespace {\n\n" + _READBACK_RANGE
+    )
+    if source.count(_READBACK_GUARD) != 2:
+        raise RuntimeError(
+            "Caspar readback template changed; review mapping bounds"
+        )
+    source = source.replace(_READBACK_GUARD, _CHECK_READBACK_RANGE)
+    source = _replace_once(
+        source,
+        "kDimension * num * sizeof({{solver.storage_t}})",
+        "{{Ops.storage_dim(nodetype)}} * num * sizeof({{solver.storage_t}})",
+    )
     return source, header
 
 
-_READBACK_HELPERS = """void CheckReadbackCuda(cudaError_t status, const char* operation) {
-  if (status != cudaSuccess) {
-    throw std::runtime_error(std::string(operation) + " failed: " +
-                             cudaGetErrorString(status));
-  }
-}
-
-template <typename T, size_t Dimension, size_t StorageDimension>
-void CheckReadbackRange(size_t offset, size_t num, size_t count,
-                        size_t capacity, const char* node) {
-  static_assert(Dimension > 0 && StorageDimension >= Dimension);
-  if (offset > count || num > count - offset) {
-    throw std::runtime_error(std::string(node) +
-                             " readback range exceeds node count");
-  }
-  if (num == 0) {
-    return;
-  }
-  // Mappers use unsigned component indices and increment output lanes by 32.
-  constexpr size_t kIndexLimit = std::numeric_limits<unsigned int>::max() - 32;
-  if (capacity > kIndexLimit / StorageDimension ||
-      num > std::numeric_limits<size_t>::max() / sizeof(T) / Dimension) {
-    throw std::runtime_error(std::string(node) +
-                             " readback exceeds mapping argument limits");
-  }
-}
-
-"""
-
-_READBACK_GETTERS = (
-    """void {{solver.struct_name}}::Get{{nodetype.__name__}}NodesToStackedHost(
-    {{solver.storage_t}}* const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > {{num_key(nodetype)}}){
-    throw std::runtime_error(std::to_string(offset + num) + " > {{num_key(nodetype)}}");
-  }
-  {{nodetype.__name__}}CasparToStacked({{node_key(nodetype, "storage_current")}},
-                                          marker__scratch_inout_, {{num_max_key(nodetype)}},
-                                          offset, num);
-  cudaMemcpy(data, marker__scratch_inout_, {{Ops.storage_dim(nodetype)}} * num * sizeof({{solver.storage_t}}),
-             cudaMemcpyDeviceToHost);
-}
-
-void {{solver.struct_name}}::Get{{nodetype.__name__}}NodesToStackedDevice(
-    {{solver.storage_t}}* const data, const size_t offset, const size_t num) {
-  cudaSetDevice(device_id_);
-  if (offset + num > {{num_key(nodetype)}}){
-    throw std::runtime_error(std::to_string(offset + num) + " > {{num_key(nodetype)}}");
-  }
-  {{nodetype.__name__}}CasparToStacked({{node_key(nodetype, "storage_current")}}, data,
-                                          {{num_max_key(nodetype)}}, offset, num);
-}
-""",
-    """void {{solver.struct_name}}::Get{{nodetype.__name__}}NodesToStackedHost(
-    {{solver.storage_t}}* const data, const size_t offset, const size_t num) {
-  CheckReadbackRange<{{solver.storage_t}}, {{Ops.storage_dim(nodetype)}}, {{solver.fields[node_key(nodetype, "storage_current")].dim_real}}>(
-      offset, num, {{num_key(nodetype)}}, {{num_max_key(nodetype)}}, "{{nodetype.__name__}}");
-  if (num == 0) {
-    return;
-  }
-  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
-  CheckReadbackCuda(
-      {{nodetype.__name__}}CasparToStacked({{node_key(nodetype, "storage_current")}},
-                            marker__scratch_inout_, {{num_max_key(nodetype)}}, offset, num),
-      "{{nodetype.__name__}}CasparToStacked");
-  CheckReadbackCuda(cudaMemcpy(data, marker__scratch_inout_,
-                               {{Ops.storage_dim(nodetype)}} * num * sizeof({{solver.storage_t}}), cudaMemcpyDeviceToHost),
-                    "cudaMemcpy device-to-host");
-}
-
-void {{solver.struct_name}}::Get{{nodetype.__name__}}NodesToStackedDevice(
-    {{solver.storage_t}}* const data, const size_t offset, const size_t num) {
-  CheckReadbackRange<{{solver.storage_t}}, {{Ops.storage_dim(nodetype)}}, {{solver.fields[node_key(nodetype, "storage_current")].dim_real}}>(
-      offset, num, {{num_key(nodetype)}}, {{num_max_key(nodetype)}}, "{{nodetype.__name__}}");
-  if (num == 0) {
-    return;
-  }
-  CheckReadbackCuda(cudaSetDevice(device_id_), "cudaSetDevice");
-  CheckReadbackCuda(
-      {{nodetype.__name__}}CasparToStacked({{node_key(nodetype, "storage_current")}},
-                            data, {{num_max_key(nodetype)}}, offset, num),
-      "{{nodetype.__name__}}CasparToStacked");
-}
-""",
-)
-
-_READBACK_SCRATCH = (
-    """    at_least = std::max(at_least, offset + {{solver.at_least[name]}}*sizeof({{field.dtype}}));""",
-    """    {% if name == "marker__scratch_inout_" %}
-    {# Include factor constants and host indices in the transfer scratch. #}
-    at_least = std::max(at_least, offset + std::max({
-      {% for nodetype in solver.node_types %}
-      {{Ops.storage_dim(nodetype)}} * {{num_max_key(nodetype)}},
-      {% endfor %}
-      {% for fac in solver.factors %}
-      {% set scratch = namespace(dim=0) %}
-      {% for arg, typ in fac.const_arg_types.items() %}
-        {% if fac.isconstuniq[arg] %}
-      size_t({{Ops.storage_dim(typ)}}),
-        {% else %}
-          {% set scratch.dim = [scratch.dim, Ops.storage_dim(typ)] | max %}
-        {% endif %}
-      {% endfor %}
-      {% for shared in fac.isnodeshared.values() | list + fac.isconstshared.values() | list %}
-        {% if shared %}{% set scratch.dim = [scratch.dim, 1] | max %}{% endif %}
-      {% endfor %}
-      {% if scratch.dim %}
-      {{scratch.dim}} * {{num_max_key(fac)}},
-      {% endif %}
-      {% endfor %}
-      size_t(0)}) * sizeof({{field.dtype}}));
-    {% else %}
-    at_least = std::max(at_least, offset + {{solver.at_least[name]}}*sizeof({{field.dtype}}));
-    {% endif %}""",
-)
-
-_SCALAR_READBACK = (
-    """  T result;
-  cudaMemcpy(&result, data, sizeof(T), cudaMemcpyDeviceToHost);
-  return result;""",
-    """  T result{};
-  const cudaError_t status =
-      cudaMemcpy(&result, data, sizeof(T), cudaMemcpyDeviceToHost);
-  if (status != cudaSuccess) {
-    throw std::runtime_error(std::string("ReadCuMem cudaMemcpy failed: ") +
-                             cudaGetErrorString(status));
-  }
-  return result;""",
-)
-
-
-def patch_readback_template(source: str) -> str:
-    """Repair the known getter/scratch owner; refuse template drift."""
-    source = _replace_once(
-        source,
-        "#include <chrono>",
-        "#include <chrono>\n#include <limits>\n#include <string>",
-    )
-    source = _replace_once(
-        source, "namespace {\n\n", "namespace {\n\n" + _READBACK_HELPERS
-    )
-    for old, new in (_READBACK_GETTERS, _READBACK_SCRATCH):
-        source = _replace_once(source, old, new)
-    return source
-
-
-def patch_solver_tools(source: str) -> str:
-    """Check the scalar read copied from the supported SymForce runtime."""
-    source = _replace_once(source, *_SCALAR_READBACK)
-    return _replace_once(
-        source,
-        '#include "solver_tools.h"',
-        '#include <stdexcept>\n#include <string>\n\n#include "solver_tools.h"',
-    )
-
-
-def write_solver_tools(path: Path, source: str) -> None:
-    """Replace copied runtime output without following a prior generator symlink."""
-    path.unlink(missing_ok=True)
-    path.write_text(source)
+def buildfile_overrides(source: str, precision: str) -> dict[str, str]:
+    """Keep the shared double reduction order in this generated COLMAP profile."""
+    if precision == "f32":
+        return {}
+    if precision != "f64":
+        raise ValueError(f"Unexpected Caspar precision: {precision}")
+    return {
+        "buildfiles/CMakeLists.txt.jinja": source.rstrip()
+        + "\n\ntarget_compile_definitions({{caslib.name}}_core PUBLIC "
+        "CASPAR_LEGACY_DOUBLE_SHARED_SUM=1)\n"
+    }

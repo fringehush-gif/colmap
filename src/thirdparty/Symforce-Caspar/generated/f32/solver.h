@@ -14,7 +14,8 @@ namespace caspar {
 enum class ExitReason {
   MAX_ITERATIONS,
   CONVERGED_SCORE_THRESHOLD,
-  CONVERGED_DIAG_EXIT
+  CONVERGED_DIAG_EXIT,
+  FAILURE_NONFINITE_INITIAL_SCORE
 };
 
 struct IterationData {
@@ -170,12 +171,12 @@ public:
           pinhole_split_fixed_focal_fixed_principal_point_fixed_point_num_max,
       int device_id = 0);
 
-  // This class is managing cuda memory and cannot be copied.
+  // CUDA allocation ownership cannot be copied or moved.
   GraphSolver(const GraphSolver &) = delete;
   GraphSolver &operator=(const GraphSolver &) = delete;
 
-  GraphSolver(GraphSolver &&) = default;
-  GraphSolver &operator=(GraphSolver &&) = default;
+  GraphSolver(GraphSolver &&) = delete;
+  GraphSolver &operator=(GraphSolver &&) = delete;
 
   ~GraphSolver();
 
@@ -4046,7 +4047,6 @@ private:
   SolverParams<float> params_;
   int device_id_;
   uint8_t *origin_ptr_;
-  size_t scratch_inout_size_;
   size_t allocation_size_;
 
   int solver_iter_;
