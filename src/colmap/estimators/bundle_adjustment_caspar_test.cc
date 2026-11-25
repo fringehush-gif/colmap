@@ -153,6 +153,28 @@ TEST(CasparCalibrationPool, SimpleRadialMixedIntrinsics) {
   CheckCalibrationNodes(CameraModelId::kSimpleRadial, true);
 }
 
+TEST(CasparBundleAdjustmentSummary, ReportsExitReason) {
+  using ExitReason = caspar::ExitReason;
+  using Termination = BundleAdjustmentTerminationType;
+  struct TestCase {
+    ExitReason reason;
+    Termination expected;
+  };
+  constexpr TestCase cases[] = {
+      {ExitReason::CONVERGED_DIAG_EXIT, Termination::NO_CONVERGENCE},
+      {ExitReason::CONVERGED_SCORE_THRESHOLD, Termination::CONVERGENCE},
+      {ExitReason::MAX_ITERATIONS, Termination::NO_CONVERGENCE},
+  };
+  caspar::SolveResult result{};
+  for (const auto& test : cases) {
+    SCOPED_TRACE(static_cast<int>(test.reason));
+    result.exit_reason = test.reason;
+    const auto summary = CasparBundleAdjustmentSummary::Create(result);
+    EXPECT_EQ(summary->termination_type, test.expected);
+    EXPECT_TRUE(summary->IsSolutionUsable());
+  }
+}
+
 TEST(DefaultBundleAdjuster, RigThrowsErrorOnVariableSensorFromRig) {
   Reconstruction reconstruction;
   SyntheticDatasetOptions synthetic_dataset_options;
@@ -864,8 +886,7 @@ TEST(DefaultBundleAdjuster, FreeGaugeMatchesFixedGauge) {
     const auto summary =
         CreateDefaultCasparBundleAdjuster(options, config, reconstruction)
             ->Solve();
-    EXPECT_EQ(summary->termination_type,
-              BundleAdjustmentTerminationType::CONVERGENCE);
+    THROW_CHECK(summary->IsSolutionUsable());
     const auto& caspar_summary =
         dynamic_cast<const CasparBundleAdjustmentSummary&>(*summary);
     THROW_CHECK(!caspar_summary.iterations.empty());
