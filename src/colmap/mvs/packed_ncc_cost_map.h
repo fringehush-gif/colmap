@@ -113,7 +113,6 @@ class PackedNccCostMap {
     THROW_CHECK_NE(scratch, ptr_);
     const size_t new_width = height_, new_height = width_;
     const size_t new_pitch = Pitch(new_width);
-    const size_t old_plane = CheckedMultiply(pitch_, height_);
     const size_t new_plane = CheckedMultiply(new_pitch, new_height);
     THROW_CHECK_LE(new_plane, scratch_bytes);
     // Reject interior aliases too: writing a rotated slice must not clobber
@@ -129,23 +128,8 @@ class PackedNccCostMap {
     THROW_CHECK(end <= data || begin >= data + capacity_);
     THROW_CHECK(end <= flag || begin >= flag + sizeof(uint32_t));
     THROW_CHECK_LE(Bytes(new_width, new_height, sources_), capacity_);
-    for (size_t ordinal = 0; ordinal < sources_; ++ordinal) {
-      const size_t source =
-          new_plane > old_plane ? sources_ - 1 - ordinal : ordinal;
-      const auto* input = reinterpret_cast<const uint16_t*>(
-          reinterpret_cast<const char*>(ptr_) + source * old_plane);
-      auto* output = reinterpret_cast<uint16_t*>(reinterpret_cast<char*>(ptr_) +
-                                                 source * new_plane);
-      auto* temp = reinterpret_cast<uint16_t*>(scratch);
-      CudaRotate(input, temp, width_, height_, pitch_, new_pitch);
-      CUDA_SAFE_CALL(cudaMemcpy2D(output,
-                                  new_pitch,
-                                  temp,
-                                  new_pitch,
-                                  new_width * sizeof(uint16_t),
-                                  new_height,
-                                  cudaMemcpyDeviceToDevice));
-    }
+    CudaRotateLayers(
+        ptr_, scratch, width_, height_, sources_, pitch_, new_pitch);
     CUDA_SYNC_AND_CHECK();
     Reorient(new_width, new_height);
   }

@@ -136,7 +136,6 @@ class PatchMatchProbabilityUnorm16 {
     THROW_CHECK(scratch != nullptr);
     THROW_CHECK_NE(static_cast<void*>(scratch), static_cast<void*>(ptr_));
     const size_t nw = height_, nh = width_, np = Pitch(nw);
-    const size_t old_plane = Bytes(pitch_, height_, 1);
     const size_t new_plane = Bytes(np, nh, 1);
     THROW_CHECK_LE(new_plane, scratch_bytes);
     THROW_CHECK_LE(Bytes(np, nh, depth_), data_bytes_);
@@ -147,28 +146,7 @@ class PatchMatchProbabilityUnorm16 {
     THROW_CHECK_LE(new_plane, max_address - scratch_begin);
     THROW_CHECK(scratch_begin + new_plane <= own_begin ||
                 own_begin + capacity_ <= scratch_begin);
-    for (size_t ordinal = 0; ordinal < depth_; ++ordinal) {
-      const size_t layer =
-          new_plane > old_plane ? depth_ - 1 - ordinal : ordinal;
-      auto* input = reinterpret_cast<uint16_t*>(reinterpret_cast<char*>(ptr_) +
-                                                layer * old_plane);
-      auto* output = reinterpret_cast<uint16_t*>(reinterpret_cast<char*>(ptr_) +
-                                                 layer * new_plane);
-      // Actual current native cuda_rotate.h defines the generic T primitive.
-      CudaRotate<uint16_t>(input,
-                           reinterpret_cast<uint16_t*>(scratch),
-                           static_cast<int>(width_),
-                           static_cast<int>(height_),
-                           static_cast<int>(pitch_),
-                           static_cast<int>(np));
-      CUDA_SAFE_CALL(cudaMemcpy2D(output,
-                                  np,
-                                  scratch,
-                                  np,
-                                  nw * sizeof(uint16_t),
-                                  nh,
-                                  cudaMemcpyDeviceToDevice));
-    }
+    CudaRotateLayers(ptr_, scratch, width_, height_, depth_, pitch_, np);
     CUDA_SYNC_AND_CHECK();
     Reorient(nw, nh);
   }
