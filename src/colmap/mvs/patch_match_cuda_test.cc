@@ -120,6 +120,8 @@ void ResetStreamFault(StreamFault fault,
 std::atomic<size_t> wrapped_eligible{0}, wrapped_fail_at{0};
 std::atomic<bool> wrapped_fired{false}, wrapped_fail_cleanup{false};
 std::atomic<size_t> wrapped_cleanup_injected{0};
+std::atomic<void*> wrapped_cleanup_target{nullptr};
+std::atomic<const colmap::mvs::PatchMatchCuda*> wrapped_mask_owner{nullptr};
 std::atomic<bool> wrapped_arm_on_first_meminfo{false};
 std::atomic<size_t> wrapped_meminfo_calls{0};
 std::atomic<bool> wrapped_track_initial_dense{false};
@@ -161,6 +163,8 @@ void ResetAllocationInjection(size_t ordinal,
   wrapped_eligible = 0;
   wrapped_fired = false;
   wrapped_cleanup_injected = 0;
+  wrapped_cleanup_target = nullptr;
+  wrapped_mask_owner = nullptr;
   wrapped_status = static_cast<int>(status);
   wrapped_fail_cleanup = cleanup_failure;
   wrapped_fail_at = ordinal;
@@ -248,6 +252,14 @@ extern "C" cudaError_t __wrap_cudaMallocPitch(void** out,
                                               size_t* pitch,
                                               size_t width,
                                               size_t height) {
+  if (const auto* owner = wrapped_mask_owner.load()) {
+    if (void* mask =
+            colmap::mvs::PatchMatchCudaTestPeer::ConsistencyMaskPointer(
+                *owner)) {
+      wrapped_cleanup_target = mask;
+      wrapped_mask_owner = nullptr;
+    }
+  }
   if (InjectAllocation()) {
     *out = nullptr;
     return static_cast<cudaError_t>(wrapped_status.load());
@@ -287,6 +299,14 @@ extern "C" cudaError_t __wrap_cudaMemGetInfo(size_t* free, size_t* total) {
 }
 extern "C" cudaError_t __wrap_cudaFree(void* ptr) {
   const cudaError_t actual = __real_cudaFree(ptr);
+  void* target = ptr;
+  if (actual == cudaSuccess && ptr &&
+      wrapped_cleanup_target.compare_exchange_strong(target, nullptr)) {
+    // Target selection must not depend on an observer being present:
+    // the regression also needs to inject into the unobserved original.
+    ++wrapped_cleanup_injected;
+    return cudaErrorUnknown;  // The real allocation was freed first.
+  }
   return ptr ? MaybeInjectCleanup(actual) : actual;
 }
 extern "C" cudaError_t __wrap_cudaFreeArray(cudaArray_t ptr) {
@@ -2894,6 +2914,109 @@ TEST_F(CudaTest, NccFixed20AllocationRefusals) {
 
 TEST_F(CudaTest, NccFixed20CleanupFailuresAreObserved) {
   ExpectCodecCleanupObservation([] { return Fixed20NccCostMap(8, 8, 2); });
+}
+
+TEST_F(CudaTest, ConsistencyMaskCleanupFailureRejectsResults) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  for (const bool repeated_run : {false, true}) {
+    SCOPED_TRACE(repeated_run ? "prepare" : "rotate");
+    EXPECT_EXIT(
+        ([repeated_run]() {
+          Inputs input = MakeInputs(0, 2, 25, 33);
+          auto options = MakeOptions(false, true, false);
+          options.checkpoint_hmm = true;
+          options.probability_unorm16 = true;
+          PatchMatch::Problem problem;
+          problem.ref_image_idx = 0;
+          problem.src_image_idxs = {1, 2};
+          problem.images = &input.images;
+          PatchMatchCuda owner(options, problem);
+          if (repeated_run) owner.Run();
+
+          ResetAllocationInjection(0, cudaSuccess);
+          if (repeated_run) {
+            // Replacing a completed run's mask retires it before filtering.
+            wrapped_cleanup_target =
+                PatchMatchCudaTestPeer::ConsistencyMaskPointer(owner);
+            if (!wrapped_cleanup_target.load()) std::_Exit(1);
+          } else {
+            // The first allocation after preparation sees the new live mask;
+            // it is retired by the final mask rotation. No observer is needed
+            // to select this pointer, so the unfixed path also gets the fault.
+            wrapped_mask_owner = &owner;
+          }
+          try {
+            owner.Run();
+          } catch (const std::runtime_error& error) {
+            if (std::string(error.what()).find("cleanup cudaFree failed") ==
+                    std::string::npos ||
+                wrapped_cleanup_injected.load() != 1 ||
+                wrapped_cleanup_target.load() || wrapped_mask_owner.load())
+              std::_Exit(2);
+            const auto refuses = [](auto&& operation) {
+              try {
+                operation();
+              } catch (const std::invalid_argument&) {
+                return true;
+              }
+              return false;
+            };
+            const bool blocked = refuses([&] { (void)owner.GetDepthMap(); }) &&
+                                 refuses([&] { (void)owner.GetNormalMap(); }) &&
+                                 refuses([&] { (void)owner.GetSelProbMap(); });
+            std::_Exit(blocked ? 0 : 3);
+          }
+          std::_Exit(4);
+        }()),
+        testing::ExitedWithCode(0),
+        "");
+  }
+}
+
+TEST_F(CudaTest, SharedGeometryBankRetirementFailureRejectsBatch) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      ([]() {
+        std::array<Inputs, 3> inputs;
+        std::array<PatchMatch::Problem, 3> problems;
+        std::vector<std::unique_ptr<PatchMatchCuda>> owners;
+        std::vector<PatchMatchCuda*> views;
+        std::vector<cudaStream_t> streams(3);
+        auto options = MakeOptions(false, false, true);
+        const PatchMatchOptions defaults;
+        options.window_radius = defaults.window_radius;
+        options.num_iterations = defaults.num_iterations;
+        options.sigma_spatial = options.window_radius;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+          inputs[i] = MakeInputs(i, 2, 25, 33);
+          auto& problem = problems[i];
+          problem.ref_image_idx = 0;
+          problem.src_image_idxs = {1, 2};
+          problem.images = &inputs[i].images;
+          owners.push_back(std::make_unique<PatchMatchCuda>(options, problem));
+          THROW_CHECK(owners.back()->CanShareGeometryRotation());
+          views.push_back(owners.back().get());
+          CUDA_SAFE_CALL(
+              cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
+        }
+        // Independently prepared children own banks that batch entry retires.
+        ResetAllocationInjection(0, cudaSuccess);
+        wrapped_cleanup_target =
+            PatchMatchCudaTestPeer::AlternateDepthPointer(*owners[1]);
+        try {
+          RunPatchMatchBatch(views, streams);
+        } catch (const std::runtime_error& error) {
+          const bool observed =
+              std::string(error.what()).find("cleanup cudaFree failed") !=
+                  std::string::npos &&
+              wrapped_cleanup_injected.load() == 1 &&
+              !wrapped_cleanup_target.load();
+          std::_Exit(observed ? 0 : 1);
+        }
+        std::_Exit(2);
+      }()),
+      testing::ExitedWithCode(0),
+      "");
 }
 
 TEST_F(CudaTest, ControllerPairAllocationRefusals) {
