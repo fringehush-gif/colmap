@@ -96,6 +96,8 @@ class PatchMatchCuda {
 
   // Rotate reference image by 90 degrees in counter-clockwise direction.
   void Rotate(bool pack_geometry = false);
+  void PrepareConsistencyMask();
+  void RotateConsistencyMask();
 
   // Packed logical planes can use padded physical owners of sufficient
   // capacity. GpuMat dimensions remain allocation metadata after a shared
