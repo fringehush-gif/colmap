@@ -75,6 +75,16 @@ if(CASPAR_ENABLED)
         SRCS bundle_adjustment_caspar_test.cc
         LINK_LIBS colmap_estimators
     )
+    # Each fault case verifies that wrapping reaches its generated owner.
+    if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+       AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT BUILD_SHARED_LIBS)
+        target_compile_definitions(colmap_estimators_bundle_adjustment_caspar_test PRIVATE
+            COLMAP_TEST_CASPAR_READBACK_WRAPPING=1)
+        target_link_options(colmap_estimators_bundle_adjustment_caspar_test PRIVATE
+            "LINKER:--wrap=cudaSetDevice"
+            "LINKER:--wrap=cudaGetLastError"
+            "LINKER:--wrap=cudaMemcpy")
+    endif()
 endif()
 COLMAP_ADD_TEST(
     NAME ceres_loss_function_test

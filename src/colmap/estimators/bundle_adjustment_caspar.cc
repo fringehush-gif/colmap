@@ -950,8 +950,10 @@ class CasparBundleAdjuster : public BundleAdjuster {
       params.diag_exit_value = co.diag_exit_value;
       params.score_exit_value = co.score_exit_value;
       params.pcg_rel_error_exit = co.pcg_rel_error_exit;
-      params.pcg_rel_score_exit = co.pcg_rel_score_exit;
-      params.pcg_rel_decrease_min = co.pcg_rel_decrease_min;
+      params.pcg_rel_score_exit =
+          co.pcg_rel_score_exit < 0.0 ? -1.0 : co.pcg_rel_score_exit;
+      params.pcg_rel_decrease_min =
+          co.pcg_rel_decrease_min < 0.0 ? -1.0 : co.pcg_rel_decrease_min;
       params.solver_rel_decrease_min = co.solver_rel_decrease_min;
     }
 
