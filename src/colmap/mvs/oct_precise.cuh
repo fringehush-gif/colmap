@@ -34,11 +34,6 @@ __device__ inline float3 Decode(Code c) {
   return make_float3(n.x * inv_length, n.y * inv_length, n.z * inv_length);
 }
 
-__device__ inline Code QuarterTurn(Code c) {
-  if (c.x == kInvalid || c.y == kInvalid) return {kInvalid, kInvalid};
-  return {c.y, static_cast<int16_t>(-c.x)};
-}
-
 // Compare angular error through cross products, avoiding near-one FP32 dots.
 // This does four cheap corner evaluations; the read-side decoder is unchanged.
 __device__ inline bool Encode(float3 input, Code& out) {
@@ -67,9 +62,9 @@ __device__ inline bool Encode(float3 input, Code& out) {
             hi_y = static_cast<int>(ceilf(qy));
   float best_error = 0, best_length = 1;
   bool found = false;
-  for (int i = 0; i < 4; ++i) {
-    const Code c{static_cast<int16_t>((i & 1) ? hi_x : lo_x),
-                 static_cast<int16_t>((i & 2) ? hi_y : lo_y)};
+  for (unsigned i = 0; i < 4; ++i) {
+    const Code c{static_cast<int16_t>((i & 1u) ? hi_x : lo_x),
+                 static_cast<int16_t>((i & 2u) ? hi_y : lo_y)};
     const float3 v = RawDecode(c);
     const float dot = n.x * v.x + n.y * v.y + n.z * v.z;
     if (!(dot > 0)) continue;

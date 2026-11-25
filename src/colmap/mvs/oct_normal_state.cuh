@@ -42,7 +42,7 @@ struct OctNormalView {
   __device__ void Signal(unsigned int bits) const { atomicOr(error, bits); }
   __device__ bool InBounds(size_t row, size_t col) const {
     if (row < height && col < width) return true;
-    Signal(1u << 8);
+    Signal(1u << 8u);
     return false;
   }
   __device__ static bool WellFormed(oct_magnitude::Encoded code) {
@@ -56,7 +56,7 @@ struct OctNormalView {
     const size_t index = row * pixel_pitch + col;
     const oct_magnitude::Encoded code{direction[index], magnitude[index]};
     if (WellFormed(code)) return code;
-    Signal(1u << 9);
+    Signal(1u << 9u);
     return oct_magnitude::Invalid();
   }
   __device__ void StoreCode(size_t row,
@@ -64,7 +64,7 @@ struct OctNormalView {
                             oct_magnitude::Encoded code) const {
     if (!InBounds(row, col)) return;
     if (!WellFormed(code)) {
-      Signal(1u << 9);
+      Signal(1u << 9u);
       code = oct_magnitude::Invalid();
     }
     const size_t index = row * pixel_pitch + col;
@@ -96,20 +96,11 @@ struct OctNormalView {
   }
   __device__ void DecodeCode(oct_magnitude::Encoded code, float* normal) const {
     float3 value;
-    if (!oct_magnitude::Decode(code, value)) Signal(1u << 9);
+    if (!oct_magnitude::Decode(code, value)) Signal(1u << 9u);
     ApplyFrame(value, normal);
   }
   __device__ void GetSlice(size_t row, size_t col, float* normal) const {
     DecodeCode(ReadCode(row, col), normal);
-  }
-  __device__ float Get(size_t row, size_t col, size_t axis = 0) const {
-    if (axis >= 3) {
-      Signal(1u << 10);
-      return 0;
-    }
-    float normal[3];
-    GetSlice(row, col, normal);
-    return normal[axis];
   }
   __device__ oct_magnitude::Encoded Canonicalize(float* normal) const {
     float3 canonical;
@@ -152,7 +143,7 @@ struct OctNormalView {
   __device__ void Set(size_t row, size_t col, size_t axis, float value) const {
     if (!InBounds(row, col)) return;
     if (axis >= 3 || value != 0.0f) {
-      Signal(1u << 10);
+      Signal(1u << 10u);
       return;
     }
     if (axis == 0) StoreCode(row, col, oct_magnitude::Invalid());
@@ -227,12 +218,8 @@ class OctNormalMap {
     payload_bytes_ = 5 * plane_pixels_;
     try {
       CUDA_SAFE_ALLOCATE(
-          "cudaMalloc", data_, cudaMalloc(&data_, payload_bytes_));
-      CUDA_SAFE_ALLOCATE(
-          "cudaMalloc",
-          error_,
-          cudaMalloc(reinterpret_cast<void**>(&error_), sizeof(unsigned int)));
-      CUDA_SAFE_CALL(cudaMemset(error_, 0, sizeof(unsigned int)));
+          "cudaMalloc", data_, cudaMalloc(&data_, GetCapacityBytes()));
+      CUDA_SAFE_CALL(cudaMemset(ErrorFlag(), 0, sizeof(unsigned int)));
     } catch (...) {
       Release();
       throw;
@@ -287,8 +274,8 @@ class OctNormalMap {
     THROW_CHECK_LT(frame_, 4u)
         << "Interrupted in-place normal rotation; reconstruct the owner";
     unsigned int failure = 0;
-    CUDA_SAFE_CALL(
-        cudaMemcpy(&failure, error_, sizeof(failure), cudaMemcpyDeviceToHost));
+    CUDA_SAFE_CALL(cudaMemcpy(
+        &failure, ErrorFlag(), sizeof(failure), cudaMemcpyDeviceToHost));
     THROW_CHECK_EQ(failure, 0u) << "Oct40 normal domain refusal (sticky bits)";
   }
 
@@ -301,7 +288,7 @@ class OctNormalMap {
             pixel_pitch_,
             width_,
             height_,
-            error_,
+            ErrorFlag(),
             frame_};
   }
   // CPU input follows GpuMat's planar xyz layout, with byte pitch per row.
@@ -383,8 +370,7 @@ class OctNormalMap {
       return pointer >= begin ? pointer - begin >= bytes
                               : begin - pointer >= scratch_bytes;
     };
-    THROW_CHECK(disjoint(data_, payload_bytes_));
-    THROW_CHECK(disjoint(error_, sizeof(unsigned int)));
+    THROW_CHECK(disjoint(data_, GetCapacityBytes()));
     int device = 0;
     cudaDeviceProp properties;
     CUDA_SAFE_CALL(cudaGetDevice(&device));
@@ -514,13 +500,12 @@ class OctNormalMap {
     return static_cast<unsigned int>(
         std::min(size_t(65535), (width_ * rows - 1) / 128 + 1));
   }
+  unsigned int* ErrorFlag() const {
+    // The 128-pixel plane alignment also aligns the trailing status word.
+    return reinterpret_cast<unsigned int*>(static_cast<uint8_t*>(data_) +
+                                           payload_bytes_);
+  }
   void Release() noexcept {
-    if (error_ != nullptr) {
-      const auto status = cudaFree(error_);
-      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
-                                             static_cast<int>(status));
-      error_ = nullptr;
-    }
     if (data_ != nullptr) {
       const auto status = cudaFree(data_);
       (void)CudaCleanupScope::ObserveCleanup("cudaFree",
@@ -531,7 +516,6 @@ class OctNormalMap {
   size_t width_, height_;
   size_t pixel_pitch_ = 0, plane_pixels_ = 0, payload_bytes_ = 0;
   void* data_ = nullptr;
-  unsigned int* error_ = nullptr;
   unsigned int frame_ = 0;
 };
 
@@ -548,9 +532,6 @@ struct ActiveNormalView {
       oct.GetSlice(row, col, normal);
     else
       fp32.GetSlice(row, col, normal);
-  }
-  __device__ float Get(size_t row, size_t col, size_t axis) const {
-    return packed ? oct.Get(row, col, axis) : fp32.Get(row, col, axis);
   }
   __device__ void SetSlice(size_t row, size_t col, const float* normal) {
     if (packed)

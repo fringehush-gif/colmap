@@ -121,23 +121,21 @@ __device__ inline Status Encode(float3 source,
   const float difference = __fsub_rn(target, base_mu);
   const float rho = __fmaf_rn(-base_mu, difference, difference);
   const int center = __float2int_rn(__fmul_rn(rho, 0x1p24f));
+  // Infinite error also rejects an empty candidate interval.
   float best_error = CUDART_INF_F;
   int best_q = 0;
-  bool found = false;
 #pragma unroll
   for (int offset = -Radius; offset <= Radius; ++offset) {
     const int q = center + offset;
     if (q < -127 || q > 127) continue;
     const float3 candidate = Correct(base, q);
     const float error = fabsf(__fsub_rn(ResidualUnchecked(candidate), target));
-    if (!found || error < best_error) {
-      found = true;
+    if (error < best_error) {
       best_error = error;
       best_q = q;
     }
   }
-  if (!found ||
-      __fadd_rn(best_error, 2.0f * kEstimatorBudget) > norm_error_limit)
+  if (__fadd_rn(best_error, 2.0f * kEstimatorBudget) > norm_error_limit)
     return Status::kNoCertifiedCandidate;
   out = {direction, static_cast<uint8_t>(best_q + 127)};
   if (prepared) *prepared = Correct(base, best_q);

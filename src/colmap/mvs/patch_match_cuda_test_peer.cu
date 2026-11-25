@@ -67,10 +67,10 @@ void* PatchMatchCudaTestPeer::AlternateDepthPointer(
   return owner.alternate_depth_map_->GetPtr();
 }
 
-void* PatchMatchCudaTestPeer::OctNormalStatusPointer(
+void* PatchMatchCudaTestPeer::OctNormalAllocationPointer(
     const PatchMatchCuda& owner) {
   THROW_CHECK(owner.oct_normal_map_);
-  return owner.oct_normal_map_->View().error;
+  return owner.oct_normal_map_->View().direction;
 }
 
 void PatchMatchCudaTestPeer::PoisonOctNormal(PatchMatchCuda& owner) {

@@ -22,6 +22,6 @@ class PatchMatchCudaTestPeer {
   static void* ConsistencyMaskPointer(const PatchMatchCuda& owner);
   static void* AlternateDepthPointer(const PatchMatchCuda& owner);
   static void PoisonOctNormal(PatchMatchCuda& owner);
-  static void* OctNormalStatusPointer(const PatchMatchCuda& owner);
+  static void* OctNormalAllocationPointer(const PatchMatchCuda& owner);
 };
 }  // namespace colmap::mvs

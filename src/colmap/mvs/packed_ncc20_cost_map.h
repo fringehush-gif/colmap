@@ -29,11 +29,10 @@ __device__ inline bool Encode(float value, unsigned& code) {
   const unsigned bits = __float_as_uint(value);
   if (bits > 0x40000000u && bits != 0x80000000u) return false;
   unsigned rounded = __float2uint_rn(__fmul_rn(value, 0x1p19f));
-  rounded = min(rounded, kMaxCode);
   // Select the nearest endpoint reconstruction; tie chooses the even lower
   // code.
   if (rounded == kMaxCode && value <= 2.0f - kStep) --rounded;
-  code = rounded;
+  code = min(rounded, kMaxCode);
   return true;
 }
 #endif
@@ -56,7 +55,8 @@ struct View {
   __device__ unsigned GetCode(size_t row, size_t col, size_t source) const {
     const size_t hi = (source * height + row) * pitch + col;
     const size_t word = (source * (low_height / 8) + row / 8) * width + col;
-    return (unsigned(high[hi]) << 4) | ((low[word] >> (4 * (row & 7))) & 15u);
+    return (unsigned(high[hi]) << 4u) |
+           ((low[word] >> (4u * (row & 7u))) & 15u);
   }
   __device__ void StoreCode(size_t row,
                             size_t col,
@@ -68,8 +68,8 @@ struct View {
     }
     const size_t hi = (source * height + row) * pitch + col;
     const size_t word = (source * (low_height / 8) + row / 8) * width + col;
-    high[hi] = uint16_t(code >> 4);
-    const unsigned shift = 4 * unsigned(row & 7), mask = 15u << shift;
+    high[hi] = uint16_t(code >> 4u);
+    const unsigned shift = 4u * unsigned(row & 7u), mask = 15u << shift;
     // No payload atomics: the caller contract orders all accesses to this word.
     const unsigned previous = low[word];
     const unsigned next = (previous & ~mask) | ((code & 15u) << shift);
@@ -109,7 +109,7 @@ static __global__ void GatherRotated(const uint32_t* input,
     if (col < height) {
       const size_t old_row = col, old_col = width - 1 - row;
       const size_t word = (old_row / 8) * width + old_col;
-      nibble = (input[word] >> (4 * (old_row & 7))) & 15u;
+      nibble = (input[word] >> (4u * (old_row & 7u))) & 15u;
     }
     scratch[i] = uint8_t(nibble);
   }
@@ -130,7 +130,7 @@ static __global__ void PackRotated(const uint8_t* scratch,
 #pragma unroll
     for (unsigned k = 0; k < 8; ++k)
       if (row + k < height)
-        value |= unsigned(scratch[(row + k) * pitch + col]) << (4 * k);
+        value |= unsigned(scratch[(row + k) * pitch + col]) << (4u * k);
     output[word] = value;
   }
 }
@@ -165,7 +165,7 @@ class Fixed20NccCostMap {
     THROW_CHECK_LE(high_bytes,
                    std::numeric_limits<size_t>::max() - low_capacity_ / 2 -
                        sizeof(unsigned));
-    capacity_bytes_ = high_bytes + low_capacity_ / 2;
+    capacity_bytes_ = high_bytes + low_capacity_ / 2 + sizeof(unsigned);
     try {
       CUDA_SAFE_ALLOCATE(
           "cudaMalloc",
@@ -173,12 +173,9 @@ class Fixed20NccCostMap {
           cudaMalloc(reinterpret_cast<void**>(&ptr_), capacity_bytes_));
       THROW_CHECK_EQ(
           reinterpret_cast<uintptr_t>(LowWords()) % alignof(uint32_t), 0);
-      CUDA_SAFE_CALL(cudaMemset(LowWords(), 0, low_capacity_ / 2));
-      CUDA_SAFE_ALLOCATE(
-          "cudaMalloc",
-          error_,
-          cudaMalloc(reinterpret_cast<void**>(&error_), sizeof(unsigned)));
-      CUDA_SAFE_CALL(cudaMemset(error_, 0, sizeof(unsigned)));
+      // The domain flag follows the full low-plane capacity in this allocation.
+      CUDA_SAFE_CALL(
+          cudaMemset(LowWords(), 0, low_capacity_ / 2 + sizeof(unsigned)));
       Reorient(width, height);
     } catch (...) {
       Release();
@@ -191,7 +188,7 @@ class Fixed20NccCostMap {
   size_t GetWidth() const { return width_; }
   size_t GetHeight() const { return height_; }
   size_t GetDepth() const { return sources_; }
-  size_t GetCapacityBytes() const { return capacity_bytes_ + sizeof(unsigned); }
+  size_t GetCapacityBytes() const { return capacity_bytes_; }
   Fixed20NccCostView View() const {
     return {{ptr_,
              LowWords(),
@@ -200,19 +197,18 @@ class Fixed20NccCostMap {
              height_,
              sources_,
              Round8(height_),
-             error_}};
+             ErrorFlag()}};
   }
   void CheckDomain() const {
     unsigned status = 0;
-    CUDA_SAFE_CALL(
-        cudaMemcpy(&status, error_, sizeof(status), cudaMemcpyDeviceToHost));
+    CUDA_SAFE_CALL(cudaMemcpy(
+        &status, ErrorFlag(), sizeof(status), cudaMemcpyDeviceToHost));
     THROW_CHECK_EQ(status, 0u) << "NCC20 cost outside finite [0,2]";
   }
   void Reorient(size_t width, size_t height) {
     THROW_CHECK((width == original_width_ && height == original_height_) ||
                 (width == original_height_ && height == original_width_));
-    THROW_CHECK_LE(Pixels(width, height, sources_), capacity_pixels_);
-    THROW_CHECK_LE(LowPixels(width, height, sources_), low_capacity_);
+    // Construction reserves both legal orientations for both planes.
     width_ = width;
     height_ = height;
     pitch_ = Pitch(width);
@@ -228,20 +224,14 @@ class Fixed20NccCostMap {
     // Only active destination rows are expanded, even for thin shapes.
     const size_t low_stage = new_plane;
     THROW_CHECK_LE(required, scratch_bytes);
-    THROW_CHECK_LE(Pixels(height_, width_, sources_), capacity_pixels_);
-    THROW_CHECK_LE(LowPixels(height_, width_, sources_), low_capacity_);
     const uintptr_t begin = reinterpret_cast<uintptr_t>(scratch);
     THROW_CHECK_EQ(begin % alignof(uint16_t), 0);
     THROW_CHECK_LE(required, std::numeric_limits<uintptr_t>::max() - begin);
     const uintptr_t end = begin + required,
-                    data = reinterpret_cast<uintptr_t>(ptr_),
-                    flag = reinterpret_cast<uintptr_t>(error_);
+                    data = reinterpret_cast<uintptr_t>(ptr_);
     THROW_CHECK_LE(capacity_bytes_,
                    std::numeric_limits<uintptr_t>::max() - data);
-    THROW_CHECK_LE(sizeof(unsigned),
-                   std::numeric_limits<uintptr_t>::max() - flag);
     THROW_CHECK(end <= data || begin >= data + capacity_bytes_);
-    THROW_CHECK(end <= flag || begin >= flag + sizeof(unsigned));
     // Each source is fully staged before overwriting; order protects other
     // slices.
     CudaRotateLayers(
@@ -275,18 +265,15 @@ class Fixed20NccCostMap {
 #endif
  private:
   void Release() noexcept {
-    if (error_ != nullptr) {
-      const auto status = cudaFree(error_);
-      (void)CudaCleanupScope::ObserveCleanup("cudaFree",
-                                             static_cast<int>(status));
-    }
     if (ptr_ != nullptr) {
       const auto status = cudaFree(ptr_);
       (void)CudaCleanupScope::ObserveCleanup("cudaFree",
                                              static_cast<int>(status));
     }
-    error_ = nullptr;
     ptr_ = nullptr;
+  }
+  unsigned* ErrorFlag() const {
+    return reinterpret_cast<unsigned*>(LowWords() + low_capacity_ / 8);
   }
   uint32_t* LowWords() const {
     return reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(ptr_) +
@@ -319,7 +306,6 @@ class Fixed20NccCostMap {
   size_t capacity_pixels_ = 0, low_capacity_ = 0, capacity_bytes_ = 0,
          width_ = 0, height_ = 0, pitch_ = 0;
   uint16_t* ptr_ = nullptr;
-  unsigned* error_ = nullptr;
 };
 
 }  // namespace mvs

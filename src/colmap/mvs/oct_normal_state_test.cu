@@ -666,6 +666,7 @@ TEST_F(OctNormalCodec, PlaneScratchRefusesBeforeMutation) {
   refuse(scratch.GetPtr(), required - 1, "scratch_bytes >= required");
   refuse(owner.View().direction, capacity, "disjoint");
   refuse(owner.View().magnitude, capacity, "disjoint");
+  refuse(owner.View().error, capacity, "disjoint");
 }
 }  // namespace
 }  // namespace colmap::mvs
