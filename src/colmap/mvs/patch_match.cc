@@ -978,7 +978,11 @@ void PatchMatchController::ProcessProblemPair(const PatchMatchOptions& options,
   }
   std::unique_ptr<PatchMatchCuda> second_cuda;
   try {
-    second_cuda = CreateCudaOwner(second.options, second.problem);
+    second_cuda = CreateCudaOwner(
+        second.options,
+        second.problem,
+        {},
+        first_cuda->CanShareGeometryRotation() ? first_cuda.get() : nullptr);
   } catch (const CudaAllocationRefused& error) {
     size_t free_bytes = 0, total_bytes = 0;
     CUDA_SAFE_CALL(cudaMemGetInfo(&free_bytes, &total_bytes));
@@ -1121,8 +1125,12 @@ void PatchMatchController::ProcessProblemBatch(
                   std::numeric_limits<size_t>::max() - kExternalMargin &&
               free_bytes >= owned_peak + kExternalMargin) {
             try {
-              owners[i + 1] =
-                  CreateCudaOwner(input[i + 1]->options, input[i + 1]->problem);
+              owners[i + 1] = CreateCudaOwner(
+                  input[i + 1]->options,
+                  input[i + 1]->problem,
+                  {},
+                  owners[i]->CanShareGeometryRotation() ? owners[i].get()
+                                                        : nullptr);
             } catch (const CudaAllocationRefused& error) {
               query_memory(
                   "after-optional-pair-refusal", &free_bytes, &total_bytes);
