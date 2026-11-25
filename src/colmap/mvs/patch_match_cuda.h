@@ -31,6 +31,7 @@ struct PackedNccCostView;
 class Fixed24NccCostMap;
 struct Fixed24NccCostView;
 struct SparseSourceTestFailure;
+struct SweepOptions;
 
 class PatchMatchCuda {
  public:
@@ -77,6 +78,22 @@ class PatchMatchCuda {
             bool kCheckpointHmm,
             int kCostBits = 0>
   void RunWithWindowSizeAndStep();
+  template <int kWindowSize,
+            int kWindowStep,
+            bool kGeomConsistencyTerm,
+            bool kFilterPhotoConsistency,
+            bool kFilterGeomConsistency,
+            bool kCooperative,
+            int kSweepBlockWidth,
+            bool kCheckpointHmm,
+            int kSourceJobGroups,
+            int kCostBits>
+  void LaunchSweep(const dim3& sweep_kernel_grid_size,
+                   const dim3& sweep_kernel_block_size,
+                   const SweepOptions& sweep_options,
+                   GpuMatView<float> checkpoints,
+                   GpuMatView<float> beta_stripe,
+                   cudaStream_t stream = nullptr);
 
   GpuMatView<float> GeometryView(const GpuMat<float>& owner) const;
   Mat<float> GeometryCopyToMat(const GpuMat<float>& owner) const;
