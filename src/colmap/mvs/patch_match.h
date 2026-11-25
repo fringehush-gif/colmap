@@ -43,6 +43,21 @@ class PatchMatch {
     // Input normal maps for the geometric consistency term.
     std::vector<NormalMap>* normal_maps = nullptr;
 
+    // Optional owning leases for immutable source depth maps. The reference
+    // always uses its independent initialization copy in depth_maps.
+    const std::vector<std::shared_ptr<const DepthMap>>* source_depth_leases =
+        nullptr;
+
+    const DepthMap& InputDepthMap(const int image_idx) const {
+      if (source_depth_leases != nullptr && image_idx != ref_image_idx &&
+          image_idx >= 0 &&
+          static_cast<size_t>(image_idx) < source_depth_leases->size()) {
+        const auto& lease = source_depth_leases->at(image_idx);
+        if (lease != nullptr && lease.use_count() > 0) return *lease;
+      }
+      return depth_maps->at(image_idx);
+    }
+
     // Print the configuration to stdout.
     void Print() const;
   };

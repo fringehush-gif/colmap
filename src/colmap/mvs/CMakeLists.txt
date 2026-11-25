@@ -296,3 +296,11 @@ if(HIP_ENABLED)
     )
     set_source_files_properties(gpu_mat_test.cu PROPERTIES LANGUAGE HIP)
 endif()
+
+if(CUDA_ENABLED OR HIP_ENABLED)
+    COLMAP_ADD_TEST(
+        NAME patch_match_source_depth_test
+        SRCS patch_match_source_depth_test.cc
+        LINK_LIBS colmap_mvs_cuda
+    )
+endif()

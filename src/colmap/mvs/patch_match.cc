@@ -84,7 +84,7 @@ void PatchMatch::Check() const {
 
     if (options_.geom_consistency) {
       THROW_CHECK_LT(image_idx, problem_.depth_maps->size()) << image_idx;
-      const DepthMap& depth_map = problem_.depth_maps->at(image_idx);
+      const DepthMap& depth_map = problem_.InputDepthMap(image_idx);
       THROW_CHECK_EQ(image.GetWidth(), depth_map.GetWidth()) << image_idx;
       THROW_CHECK_EQ(image.GetHeight(), depth_map.GetHeight()) << image_idx;
     }
@@ -413,14 +413,17 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
 
   std::vector<Image> images = model.images;
   std::vector<DepthMap> depth_maps;
+  std::vector<std::shared_ptr<const DepthMap>> source_depth_leases;
   std::vector<NormalMap> normal_maps;
   if (options.geom_consistency) {
     depth_maps.resize(model.images.size());
+    source_depth_leases.resize(model.images.size());
     normal_maps.resize(model.images.size());
   }
 
   problem.images = &images;
   problem.depth_maps = &depth_maps;
+  problem.source_depth_leases = &source_depth_leases;
   problem.normal_maps = &normal_maps;
 
   {
@@ -476,8 +479,10 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
                                     *io_thread_pool_,
                                     valid_image_idxs,
                                     options.geom_consistency,
+                                    problem.ref_image_idx,
                                     images,
                                     depth_maps,
+                                    source_depth_leases,
                                     normal_maps);
 
     problem.src_image_idxs = src_image_idxs;

@@ -13,13 +13,16 @@ namespace colmap {
 namespace mvs {
 namespace internal {
 
-void StagePatchMatchInputs(Workspace& workspace,
-                           ThreadPool& io_thread_pool,
-                           const std::vector<int>& image_idxs,
-                           const bool geom_consistency,
-                           std::vector<Image>& images,
-                           std::vector<DepthMap>& depth_maps,
-                           std::vector<NormalMap>& normal_maps) {
+void StagePatchMatchInputs(
+    Workspace& workspace,
+    ThreadPool& io_thread_pool,
+    const std::vector<int>& image_idxs,
+    const bool geom_consistency,
+    const int ref_image_idx,
+    std::vector<Image>& images,
+    std::vector<DepthMap>& depth_maps,
+    std::vector<std::shared_ptr<const DepthMap>>& source_depth_leases,
+    std::vector<NormalMap>& normal_maps) {
   // Reserve before submitting so growth cannot lose an accepted task.
   std::vector<std::shared_future<void>> futures;
   futures.reserve(image_idxs.size());
@@ -29,7 +32,19 @@ void StagePatchMatchInputs(Workspace& workspace,
       futures.push_back(io_thread_pool.AddTask([&, image_idx]() {
         images.at(image_idx).SetBitmap(*workspace.GetBitmapLease(image_idx));
         if (geom_consistency) {
-          depth_maps.at(image_idx) = *workspace.GetDepthMapLease(image_idx);
+          const auto depth_lease = workspace.GetDepthMapLease(image_idx);
+          auto& source_lease = source_depth_leases.at(image_idx);
+          // Workspace's borrowed leases can be non-null without owning data.
+          // Only retain a cache owner; mutable reference seeds remain copies.
+          if (image_idx != ref_image_idx && depth_lease.use_count() > 0 &&
+              depth_lease->GetWidth() == images.at(image_idx).GetWidth() &&
+              depth_lease->GetHeight() == images.at(image_idx).GetHeight()) {
+            source_lease = depth_lease;
+            depth_maps.at(image_idx) = DepthMap();
+          } else {
+            source_lease.reset();
+            depth_maps.at(image_idx) = *depth_lease;
+          }
           normal_maps.at(image_idx) = *workspace.GetNormalMapLease(image_idx);
         }
       }));
