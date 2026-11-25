@@ -221,8 +221,7 @@ class Fixed20NccCostMap {
   void RotateWithPlaneScratch(void* scratch, size_t scratch_bytes) {
     THROW_CHECK(scratch != nullptr);
     const size_t new_pitch = Pitch(height_);
-    const size_t old_plane = Multiply(pitch_, height_),
-                 new_plane = Multiply(new_pitch, width_);
+    const size_t new_plane = Multiply(new_pitch, width_);
     const size_t old_low_plane = Multiply(width_, Round8(height_));
     const size_t new_low_plane = Multiply(height_, Round8(width_));
     const size_t required = Multiply(new_plane, 2);
@@ -245,24 +244,8 @@ class Fixed20NccCostMap {
     THROW_CHECK(end <= flag || begin >= flag + sizeof(unsigned));
     // Each source is fully staged before overwriting; order protects other
     // slices.
-    for (size_t ordinal = 0; ordinal < sources_; ++ordinal) {
-      const size_t source =
-          new_plane > old_plane ? sources_ - 1 - ordinal : ordinal;
-      auto* temp = static_cast<uint16_t*>(scratch);
-      CudaRotate(ptr_ + source * old_plane,
-                 temp,
-                 width_,
-                 height_,
-                 2 * pitch_,
-                 2 * new_pitch);
-      CUDA_SAFE_CALL(cudaMemcpy2D(ptr_ + source * new_plane,
-                                  2 * new_pitch,
-                                  temp,
-                                  2 * new_pitch,
-                                  2 * height_,
-                                  width_,
-                                  cudaMemcpyDeviceToDevice));
-    }
+    CudaRotateLayers(
+        ptr_, scratch, width_, height_, sources_, 2 * pitch_, 2 * new_pitch);
     // Column-low source planes can grow while high planes shrink (129x127).
     // Choose this traversal independently; never reuse high-plane ordering.
     for (size_t ordinal = 0; ordinal < sources_; ++ordinal) {

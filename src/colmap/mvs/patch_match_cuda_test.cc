@@ -1694,9 +1694,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
                                  const bool reuse,
                                  const bool checkpoint = false,
                                  const bool unorm16 = false,
-                                 const bool packed_cost = false,
-                                 const bool fixed24_cost = false,
-                                 const bool fixed20_cost = false,
+                                 const int cost_bits = 0,
                                  const bool normal_oct40 = false) {
   const auto make_problem = [](Inputs& images) {
     PatchMatch::Problem problem;
@@ -1715,19 +1713,18 @@ void ExpectReferenceBatchOutputs(const size_t count,
   options.num_samples = defaults.num_samples;
   options.num_iterations = defaults.num_iterations;
   options.sigma_spatial = options.window_radius;
-  if (unorm16 || packed_cost || fixed24_cost || fixed20_cost) {
+  if (unorm16 || cost_bits != 0) {
     options.checkpoint_hmm = true;
     options.probability_unorm16 = unorm16;
-    options.ncc_cost_unorm16 = packed_cost;
-    options.ncc_cost_fixed24 = fixed24_cost;
-    options.ncc_cost_fixed20 = fixed20_cost;
+    options.ncc_cost_unorm16 = cost_bits == 16;
+    options.ncc_cost_fixed24 = cost_bits == 24;
+    options.ncc_cost_fixed20 = cost_bits == 20;
   }
   if (normal_oct40) {
     options.normal_oct40 = true;
     options.checkpoint_hmm = checkpoint;
   }
-  const bool lossy_storage =
-      unorm16 || packed_cost || fixed24_cost || fixed20_cost || normal_oct40;
+  const bool lossy_storage = unorm16 || cost_bits != 0 || normal_oct40;
   std::vector<std::unique_ptr<Inputs>> inputs;
   std::vector<PatchMatch::Problem> problems;
   inputs.reserve(count);
@@ -4870,12 +4867,9 @@ TEST_F(CudaTest, NormalOct40NondefaultWindowWithoutCheckpointRepeats) {
 TEST_F(CudaTest, NormalOct40BatchesMatchSerialOutputs) {
   for (const bool geometry : {false, true}) {
     for (const bool reuse : {false, true}) {
-      ExpectReferenceBatchOutputs(
-          3, geometry, reuse, false, false, false, false, false, true);
-      ExpectReferenceBatchOutputs(
-          3, geometry, reuse, true, false, false, false, true, true);
-      ExpectReferenceBatchOutputs(
-          5, geometry, reuse, true, true, false, true, false, true);
+      ExpectReferenceBatchOutputs(3, geometry, reuse, false, false, 0, true);
+      ExpectReferenceBatchOutputs(3, geometry, reuse, true, false, 20, true);
+      ExpectReferenceBatchOutputs(5, geometry, reuse, true, true, 24, true);
     }
   }
 }
@@ -4890,7 +4884,8 @@ size_t PackedNccCheckpointScratchSavings(size_t width,
   return float_scratch - packed_scratch;
 }
 
-TEST_F(CudaTest, NccCostUnorm16UsesActualOwnerBytes) {
+template <typename PackedCostMap>
+void ExpectNccOwnerBytes(bool PatchMatchOptions::* enable_cost) {
   Inputs inputs = MakeInputs(0, 4, 385, 513);
   PatchMatch::Problem problem;
   problem.ref_image_idx = 0;
@@ -4901,7 +4896,7 @@ TEST_F(CudaTest, NccCostUnorm16UsesActualOwnerBytes) {
   const size_t width = inputs.images[0].GetWidth();
   const size_t height = inputs.images[0].GetHeight();
   PatchMatchStateMap float_cost(width, height, 4);
-  PackedNccCostMap packed_cost(width, height, 4);
+  PackedCostMap packed_cost(width, height, 4);
   ASSERT_GT(float_cost.GetCapacityBytes(), packed_cost.GetCapacityBytes());
   for (const bool probability_unorm16 : {false, true}) {
     auto options = MakeOptions(false, false, false);
@@ -4909,9 +4904,9 @@ TEST_F(CudaTest, NccCostUnorm16UsesActualOwnerBytes) {
     options.window_step = 1;
     options.checkpoint_hmm = true;
     options.probability_unorm16 = probability_unorm16;
-    EXPECT_FALSE(options.ncc_cost_unorm16);
+    EXPECT_FALSE(options.*enable_cost);
     PatchMatchCuda fp32(options, problem);
-    options.ncc_cost_unorm16 = true;
+    options.*enable_cost = true;
     PatchMatchCuda packed(options, problem);
     // With both owners packed, state rotation needs only 16-bit scratch.
     const size_t scratch_savings =
@@ -4924,7 +4919,7 @@ TEST_F(CudaTest, NccCostUnorm16UsesActualOwnerBytes) {
   }
 }
 
-TEST_F(CudaTest, NccCostUnorm16RepeatsAndPreservesRotationChoice) {
+void ExpectNccRepeatAndRotationChoice(bool PatchMatchOptions::* enable_cost) {
   for (const bool geometry : {false, true}) {
     for (const bool probability_unorm16 : {false, true}) {
       for (const int sources : {1, 2, 3, 9}) {
@@ -4936,7 +4931,7 @@ TEST_F(CudaTest, NccCostUnorm16RepeatsAndPreservesRotationChoice) {
         options.window_step = 1;
         options.checkpoint_hmm = true;
         options.probability_unorm16 = probability_unorm16;
-        options.ncc_cost_unorm16 = true;
+        options.*enable_cost = true;
         const Result original = RunPatchMatch(&inputs, options);
         ExpectNonempty(original, inputs, geometry);
         ExpectEquivalent(original, RunPatchMatch(&inputs, options));
@@ -4947,13 +4942,21 @@ TEST_F(CudaTest, NccCostUnorm16RepeatsAndPreservesRotationChoice) {
   }
 }
 
+TEST_F(CudaTest, NccCostUnorm16UsesActualOwnerBytes) {
+  ExpectNccOwnerBytes<PackedNccCostMap>(&PatchMatchOptions::ncc_cost_unorm16);
+}
+
+TEST_F(CudaTest, NccCostUnorm16RepeatsAndPreservesRotationChoice) {
+  ExpectNccRepeatAndRotationChoice(&PatchMatchOptions::ncc_cost_unorm16);
+}
+
 TEST_F(CudaTest, NccCostUnorm16BatchesMatchSameStorageIncumbents) {
   for (const bool geometry : {false, true}) {
     for (const bool probability_unorm16 : {false, true}) {
       ExpectReferenceBatchOutputs(
-          3, geometry, false, true, probability_unorm16, true);
+          3, geometry, false, true, probability_unorm16, 16);
       ExpectReferenceBatchOutputs(
-          5, geometry, true, true, probability_unorm16, true);
+          5, geometry, true, true, probability_unorm16, 16);
     }
   }
 }
@@ -5009,69 +5012,20 @@ TEST_F(CudaTest, NccCostUnorm16RejectsUnsupportedSettings) {
 }
 
 TEST_F(CudaTest, NccFixed24UsesActualOwnerBytes) {
-  Inputs inputs = MakeInputs(0, 4, 385, 513);
-  PatchMatch::Problem problem;
-  problem.ref_image_idx = 0;
-  problem.src_image_idxs = {1, 2, 3, 4};
-  problem.images = &inputs.images;
-  problem.depth_maps = &inputs.depths;
-  problem.normal_maps = &inputs.normals;
-  const size_t width = inputs.images[0].GetWidth();
-  const size_t height = inputs.images[0].GetHeight();
-  PatchMatchStateMap float_cost(width, height, 4);
-  Fixed24NccCostMap packed_cost(width, height, 4);
-  ASSERT_GT(float_cost.GetCapacityBytes(), packed_cost.GetCapacityBytes());
-  for (const bool probability_unorm16 : {false, true}) {
-    auto options = MakeOptions(false, false, false);
-    options.window_radius = 5;
-    options.window_step = 1;
-    options.checkpoint_hmm = true;
-    options.probability_unorm16 = probability_unorm16;
-    EXPECT_FALSE(options.ncc_cost_fixed24);
-    PatchMatchCuda fp32(options, problem);
-    options.ncc_cost_fixed24 = true;
-    PatchMatchCuda packed(options, problem);
-    // With both owners packed, state rotation needs only 16-bit scratch.
-    const size_t scratch_savings =
-        probability_unorm16 ? PackedNccCheckpointScratchSavings(
-                                  width, height, problem.src_image_idxs.size())
-                            : 0;
-    EXPECT_EQ(fp32.PairPeakBytes() - packed.PairPeakBytes(),
-              float_cost.GetCapacityBytes() - packed_cost.GetCapacityBytes() +
-                  scratch_savings);
-  }
+  ExpectNccOwnerBytes<Fixed24NccCostMap>(&PatchMatchOptions::ncc_cost_fixed24);
 }
 
 TEST_F(CudaTest, NccFixed24RepeatsAndPreservesRotationChoice) {
-  for (const bool geometry : {false, true}) {
-    for (const bool probability_unorm16 : {false, true}) {
-      for (const int sources : {1, 2, 3, 9}) {
-        SCOPED_TRACE(::testing::Message()
-                     << sources << " / UN2 " << probability_unorm16);
-        Inputs inputs = MakeInputs(0, sources, sources % 2 ? 129 : 35, 47);
-        auto options = MakeOptions(geometry, geometry, false);
-        options.window_radius = 5;
-        options.window_step = 1;
-        options.checkpoint_hmm = true;
-        options.probability_unorm16 = probability_unorm16;
-        options.ncc_cost_fixed24 = true;
-        const Result original = RunPatchMatch(&inputs, options);
-        ExpectNonempty(original, inputs, geometry);
-        ExpectEquivalent(original, RunPatchMatch(&inputs, options));
-        options.rotation_buffer_reuse = true;
-        ExpectEquivalent(original, RunPatchMatch(&inputs, options));
-      }
-    }
-  }
+  ExpectNccRepeatAndRotationChoice(&PatchMatchOptions::ncc_cost_fixed24);
 }
 
 TEST_F(CudaTest, NccFixed24BatchesMatchSameStorageIncumbents) {
   for (const bool geometry : {false, true}) {
     for (const bool probability_unorm16 : {false, true}) {
       ExpectReferenceBatchOutputs(
-          3, geometry, false, true, probability_unorm16, false, true);
+          3, geometry, false, true, probability_unorm16, 24);
       ExpectReferenceBatchOutputs(
-          5, geometry, true, true, probability_unorm16, false, true);
+          5, geometry, true, true, probability_unorm16, 24);
     }
   }
 }
@@ -5109,69 +5063,20 @@ TEST_F(CudaTest, NccFixed24RejectsUnsupportedSettings) {
 }
 
 TEST_F(CudaTest, NccFixed20UsesActualOwnerBytes) {
-  Inputs inputs = MakeInputs(0, 4, 385, 513);
-  PatchMatch::Problem problem;
-  problem.ref_image_idx = 0;
-  problem.src_image_idxs = {1, 2, 3, 4};
-  problem.images = &inputs.images;
-  problem.depth_maps = &inputs.depths;
-  problem.normal_maps = &inputs.normals;
-  const size_t width = inputs.images[0].GetWidth();
-  const size_t height = inputs.images[0].GetHeight();
-  PatchMatchStateMap float_cost(width, height, 4);
-  Fixed20NccCostMap packed_cost(width, height, 4);
-  ASSERT_GT(float_cost.GetCapacityBytes(), packed_cost.GetCapacityBytes());
-  for (const bool probability_unorm16 : {false, true}) {
-    auto options = MakeOptions(false, false, false);
-    options.window_radius = 5;
-    options.window_step = 1;
-    options.checkpoint_hmm = true;
-    options.probability_unorm16 = probability_unorm16;
-    EXPECT_FALSE(options.ncc_cost_fixed20);
-    PatchMatchCuda fp32(options, problem);
-    options.ncc_cost_fixed20 = true;
-    PatchMatchCuda packed(options, problem);
-    // With both owners packed, state rotation needs only 16-bit scratch.
-    const size_t scratch_savings =
-        probability_unorm16 ? PackedNccCheckpointScratchSavings(
-                                  width, height, problem.src_image_idxs.size())
-                            : 0;
-    EXPECT_EQ(fp32.PairPeakBytes() - packed.PairPeakBytes(),
-              float_cost.GetCapacityBytes() - packed_cost.GetCapacityBytes() +
-                  scratch_savings);
-  }
+  ExpectNccOwnerBytes<Fixed20NccCostMap>(&PatchMatchOptions::ncc_cost_fixed20);
 }
 
 TEST_F(CudaTest, NccFixed20RepeatsAndPreservesRotationChoice) {
-  for (const bool geometry : {false, true}) {
-    for (const bool probability_unorm16 : {false, true}) {
-      for (const int sources : {1, 2, 3, 9}) {
-        SCOPED_TRACE(::testing::Message()
-                     << sources << " / UN2 " << probability_unorm16);
-        Inputs inputs = MakeInputs(0, sources, sources % 2 ? 129 : 35, 47);
-        auto options = MakeOptions(geometry, geometry, false);
-        options.window_radius = 5;
-        options.window_step = 1;
-        options.checkpoint_hmm = true;
-        options.probability_unorm16 = probability_unorm16;
-        options.ncc_cost_fixed20 = true;
-        const Result original = RunPatchMatch(&inputs, options);
-        ExpectNonempty(original, inputs, geometry);
-        ExpectEquivalent(original, RunPatchMatch(&inputs, options));
-        options.rotation_buffer_reuse = true;
-        ExpectEquivalent(original, RunPatchMatch(&inputs, options));
-      }
-    }
-  }
+  ExpectNccRepeatAndRotationChoice(&PatchMatchOptions::ncc_cost_fixed20);
 }
 
 TEST_F(CudaTest, NccFixed20BatchesMatchSameStorageIncumbents) {
   for (const bool geometry : {false, true}) {
     for (const bool probability_unorm16 : {false, true}) {
       ExpectReferenceBatchOutputs(
-          3, geometry, false, true, probability_unorm16, false, false, true);
+          3, geometry, false, true, probability_unorm16, 20);
       ExpectReferenceBatchOutputs(
-          5, geometry, true, true, probability_unorm16, false, false, true);
+          5, geometry, true, true, probability_unorm16, 20);
     }
   }
 }
