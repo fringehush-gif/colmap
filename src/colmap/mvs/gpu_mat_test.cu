@@ -19,6 +19,8 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -485,6 +487,19 @@ TEST_F(CudaTest, NccUnorm16RotatesOddPlanesWithBoundedScratch) {
       EXPECT_ANY_THROW(
           map.RotateWithPlaneScratch(scratch.GetPtr(), next_plane - 1));
       EXPECT_ANY_THROW(map.RotateWithPlaneScratch(view.ptr + 1, scratch_bytes));
+      EXPECT_ANY_THROW(
+          map.RotateWithPlaneScratch(map.View().domain_error, scratch_bytes));
+      {
+        GpuMat<uint8_t> unaligned_scratch(next_plane + 1, 1);
+        try {
+          map.RotateWithPlaneScratch(unaligned_scratch.GetPtr() + 1,
+                                     next_plane);
+          FAIL() << "Misaligned scratch accepted";
+        } catch (const std::invalid_argument& error) {
+          EXPECT_NE(std::string(error.what()).find("begin % alignof(uint16_t)"),
+                    std::string::npos);
+        }
+      }
       EXPECT_EQ(map.GetWidth(), width);
       EXPECT_EQ(map.GetHeight(), height);
       size_t w = width, h = height;
