@@ -6,6 +6,7 @@
 #include "colmap/util/string.h"
 
 #include <exception>
+#include <initializer_list>
 
 namespace colmap {
 
@@ -34,14 +35,25 @@ std::string GetCudaErrorMessage(const cudaError_t error) {
 }
 
 CudaTimer::CudaTimer(cudaStream_t stream) : stream_(stream) {
-  CUDA_SAFE_CALL(cudaEventCreate(&start_));
-  CUDA_SAFE_CALL(cudaEventCreate(&stop_));
-  CUDA_SAFE_CALL(cudaEventRecord(start_, stream_));
+  try {
+    CUDA_SAFE_CALL(cudaEventCreate(&start_));
+    CUDA_SAFE_CALL(cudaEventCreate(&stop_));
+    CUDA_SAFE_CALL(cudaEventRecord(start_, stream_));
+  } catch (...) {
+    Release();
+    throw;
+  }
 }
 
-CudaTimer::~CudaTimer() {
-  CUDA_SAFE_CALL(cudaEventDestroy(start_));
-  CUDA_SAFE_CALL(cudaEventDestroy(stop_));
+CudaTimer::~CudaTimer() noexcept { Release(); }
+
+void CudaTimer::Release() noexcept {
+  for (cudaEvent_t event : {start_, stop_}) {
+    if (event != nullptr) {
+      CudaCleanupScope::ObserveCleanup("cudaEventDestroy",
+                                       cudaEventDestroy(event));
+    }
+  }
 }
 
 void CudaTimer::Print(const std::string& message) {
