@@ -13,6 +13,7 @@
 #include "colmap/util/cudacc.h"
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
+#include "colmap/util/testing_cuda.h"
 
 #include <array>
 #include <cfloat>
@@ -26,6 +27,8 @@
 #ifndef COLMAP_HIP_ENABLED
 #include "colmap/mvs/cuda_texture.h"
 #include "colmap/mvs/patch_match_cuda.h"
+#include "colmap/mvs/patch_match_cuda_test_peer.h"
+#include "colmap/mvs/patch_match_probability_unorm16.h"
 
 #include <algorithm>
 #include <atomic>
@@ -89,6 +92,8 @@ std::atomic<size_t> stream_fired{0}, stream_destroy_failures{0};
 std::atomic<StreamFault> stream_fault{StreamFault::kNone};
 std::atomic<bool> stream_capture{false};
 thread_local bool stream_worker_seen = false;
+thread_local bool timer_cleanup_failure = false;
+thread_local size_t timer_cleanup_injected = 0;
 bool InWorkStreamConstruction() {
   return colmap::mvs::internal::IsPatchMatchWorkStreamConstructionActive &&
          colmap::mvs::internal::IsPatchMatchWorkStreamConstructionActive();
@@ -117,6 +122,8 @@ void ResetStreamFault(StreamFault fault,
 std::atomic<size_t> wrapped_eligible{0}, wrapped_fail_at{0};
 std::atomic<bool> wrapped_fired{false}, wrapped_fail_cleanup{false};
 std::atomic<size_t> wrapped_cleanup_injected{0};
+std::atomic<void*> wrapped_cleanup_target{nullptr};
+std::atomic<const colmap::mvs::PatchMatchCuda*> wrapped_mask_owner{nullptr};
 std::atomic<bool> wrapped_arm_on_first_meminfo{false};
 std::atomic<size_t> wrapped_meminfo_calls{0};
 std::atomic<bool> wrapped_track_initial_dense{false};
@@ -158,6 +165,8 @@ void ResetAllocationInjection(size_t ordinal,
   wrapped_eligible = 0;
   wrapped_fired = false;
   wrapped_cleanup_injected = 0;
+  wrapped_cleanup_target = nullptr;
+  wrapped_mask_owner = nullptr;
   wrapped_status = static_cast<int>(status);
   wrapped_fail_cleanup = cleanup_failure;
   wrapped_fail_at = ordinal;
@@ -175,6 +184,7 @@ extern "C" cudaError_t __real_cudaFreeArray(cudaArray_t);
 extern "C" cudaError_t __real_cudaStreamCreateWithFlags(cudaStream_t*,
                                                         unsigned int);
 extern "C" cudaError_t __real_cudaStreamDestroy(cudaStream_t);
+extern "C" cudaError_t __real_cudaEventDestroy(cudaEvent_t);
 extern "C" cudaError_t __real_cudaPeekAtLastError();
 extern "C" cudaError_t __real_cudaGetLastError();
 extern "C" cudaError_t __wrap_cudaStreamCreateWithFlags(cudaStream_t* out,
@@ -216,6 +226,14 @@ extern "C" cudaError_t __wrap_cudaStreamDestroy(cudaStream_t stream) {
     return cudaErrorUnknown;  // The real handle was released before injection.
   return status;
 }
+extern "C" cudaError_t __wrap_cudaEventDestroy(cudaEvent_t event) {
+  const auto status = __real_cudaEventDestroy(event);
+  if (status == cudaSuccess && std::exchange(timer_cleanup_failure, false)) {
+    ++timer_cleanup_injected;
+    return cudaErrorUnknown;  // The real event was released before injection.
+  }
+  return status;
+}
 extern "C" cudaError_t __wrap_cudaPeekAtLastError() {
   if (stream_capture && InWorkStreamConstruction() &&
       stream_fault == StreamFault::kPrior && !stream_fired &&
@@ -245,6 +263,14 @@ extern "C" cudaError_t __wrap_cudaMallocPitch(void** out,
                                               size_t* pitch,
                                               size_t width,
                                               size_t height) {
+  if (const auto* owner = wrapped_mask_owner.load()) {
+    if (void* mask =
+            colmap::mvs::PatchMatchCudaTestPeer::ConsistencyMaskPointer(
+                *owner)) {
+      wrapped_cleanup_target = mask;
+      wrapped_mask_owner = nullptr;
+    }
+  }
   if (InjectAllocation()) {
     *out = nullptr;
     return static_cast<cudaError_t>(wrapped_status.load());
@@ -284,6 +310,14 @@ extern "C" cudaError_t __wrap_cudaMemGetInfo(size_t* free, size_t* total) {
 }
 extern "C" cudaError_t __wrap_cudaFree(void* ptr) {
   const cudaError_t actual = __real_cudaFree(ptr);
+  void* target = ptr;
+  if (actual == cudaSuccess && ptr &&
+      wrapped_cleanup_target.compare_exchange_strong(target, nullptr)) {
+    // Target selection must not depend on an observer being present:
+    // the regression also needs to inject into the unobserved original.
+    ++wrapped_cleanup_injected;
+    return cudaErrorUnknown;  // The real allocation was freed first.
+  }
   return ptr ? MaybeInjectCleanup(actual) : actual;
 }
 extern "C" cudaError_t __wrap_cudaFreeArray(cudaArray_t ptr) {
@@ -296,6 +330,65 @@ extern "C" cudaError_t __wrap_cudaFreeArray(cudaArray_t ptr) {
     return cudaErrorUnknown;
   }
   return ptr ? MaybeInjectCleanup(actual) : actual;
+}
+#endif
+
+#ifdef COLMAP_TEST_CUDA_COMPLETION_WRAPPING
+namespace {
+struct CompletionTrace {
+  cudaStream_t first = nullptr, second = nullptr;
+  int first_calls = 0, second_calls = 0;
+  bool safety_join_completed = false;
+  bool primary_injected = false, secondary_injected = false;
+  bool inject_secondary = false;
+  bool real_error = false;
+};
+thread_local CompletionTrace* completion_trace = nullptr;
+
+cudaError_t ObserveStreamCompletion(cudaStream_t stream,
+                                    cudaError_t status,
+                                    cudaError_t (*real_sync)(cudaStream_t)) {
+  if (completion_trace == nullptr) return status;
+  auto& trace = *completion_trace;
+  if (status != cudaSuccess) trace.real_error = true;
+  if (trace.real_error) return status;
+  if (stream == trace.first) {
+    ++trace.first_calls;
+    if (!trace.primary_injected) {
+      // Make the old-owner control safe: finish B through the real API before
+      // reporting an error for A. This safety join is deliberately separate
+      // from the production-observed B calls counted below.
+      const auto second_status = real_sync(trace.second);
+      if (second_status != cudaSuccess) {
+        trace.real_error = true;
+        return second_status;
+      }
+      trace.safety_join_completed = true;
+      trace.primary_injected = true;
+      return cudaErrorInvalidValue;
+    }
+  } else if (stream == trace.second) {
+    ++trace.second_calls;
+    if (trace.primary_injected && trace.inject_secondary &&
+        !trace.secondary_injected) {
+      trace.secondary_injected = true;
+      return cudaErrorUnknown;
+    }
+  }
+  return status;
+}
+}  // namespace
+extern "C" cudaError_t __real_cudaStreamSynchronize(cudaStream_t);
+extern "C" cudaError_t __real_cudaStreamSynchronize_ptsz(cudaStream_t);
+extern "C" cudaError_t __wrap_cudaStreamSynchronize(cudaStream_t stream) {
+  return ObserveStreamCompletion(stream,
+                                 __real_cudaStreamSynchronize(stream),
+                                 __real_cudaStreamSynchronize);
+}
+extern "C" cudaError_t __wrap_cudaStreamSynchronize_ptsz(cudaStream_t stream) {
+  return ObserveStreamCompletion(stream,
+                                 __real_cudaStreamSynchronize_ptsz(stream),
+                                 __real_cudaStreamSynchronize_ptsz);
 }
 #endif
 
@@ -1039,19 +1132,6 @@ void ExpectNonempty(const Result& result,
   }
 }
 
-class CudaTest : public ::testing::Test {
- protected:
-  void SetUp() override {
-    int num_devices = 0;
-    const cudaError_t status = cudaGetDeviceCount(&num_devices);
-    if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver ||
-        (status == cudaSuccess && num_devices == 0)) {
-      GTEST_SKIP() << "CUDA device unavailable: " << cudaGetErrorString(status);
-    }
-    ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
-  }
-};
-
 TEST_F(CudaTest, EmptySamplingSupportRetainsInitializedParameters) {
   Inputs inputs = MakeInputs(0);
   for (auto& image : inputs.images) {
@@ -1339,6 +1419,195 @@ void ExpectPairedDefaultSweepOutputs(const bool reuse,
   }
 }
 
+TEST_F(CudaTest, PairedSweepAttemptsEveryJoinAfterReportedError) {
+#ifndef COLMAP_TEST_CUDA_COMPLETION_WRAPPING
+  GTEST_SKIP() << "Requires Linux/GNU static CUDA stream wrapping";
+#else
+  const auto make_problem = [](Inputs& inputs) {
+    PatchMatch::Problem problem;
+    problem.ref_image_idx = 0;
+    for (size_t i = 1; i < inputs.images.size(); ++i)
+      problem.src_image_idxs.push_back(static_cast<int>(i));
+    problem.images = &inputs.images;
+    problem.depth_maps = &inputs.depths;
+    problem.normal_maps = &inputs.normals;
+    return problem;
+  };
+  for (const bool secondary_error : {false, true}) {
+    SCOPED_TRACE(secondary_error);
+    Inputs first_inputs = MakeInputs(0, 9);
+    Inputs second_inputs = MakeInputs(1, 9);
+    auto first_problem = make_problem(first_inputs);
+    auto second_problem = make_problem(second_inputs);
+    auto options = MakeOptions(false, false, false);
+    const PatchMatchOptions defaults;
+    options.window_radius = defaults.window_radius;
+    options.window_step = defaults.window_step;
+    options.num_samples = defaults.num_samples;
+    options.num_iterations = defaults.num_iterations;
+    options.sigma_spatial = options.window_radius;
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    if (!CanPairPatchMatchViews(first_inputs.images[0].GetWidth(),
+                                first_inputs.images[0].GetHeight(),
+                                second_inputs.images[0].GetWidth(),
+                                second_inputs.images[0].GetHeight(),
+                                options.geom_consistency,
+                                options.checkpoint_hmm)) {
+      GTEST_SKIP() << "Device cannot admit the pair for this ordering test";
+    }
+    PatchMatchCuda first(options, first_problem);
+    PatchMatchCuda second(options, second_problem);
+    struct Streams {
+      cudaStream_t first = nullptr, second = nullptr;
+      ~Streams() {
+        for (const auto stream : {first, second}) {
+          if (stream) {
+            (void)cudaStreamSynchronize(stream);
+            (void)cudaStreamDestroy(stream);
+          }
+        }
+      }
+    } streams;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&streams.first, cudaStreamNonBlocking),
+              cudaSuccess);
+    ASSERT_EQ(cudaStreamCreateWithFlags(&streams.second, cudaStreamNonBlocking),
+              cudaSuccess);
+    CompletionTrace trace;
+    trace.first = streams.first;
+    trace.second = streams.second;
+    trace.inject_secondary = secondary_error;
+    CudaCleanupScope cleanup;
+    completion_trace = &trace;
+    struct ResetTrace {
+      ~ResetTrace() { completion_trace = nullptr; }
+    } reset_trace;
+    try {
+      RunPatchMatchPair(first, second, streams.first, streams.second);
+      FAIL() << "Expected the injected synchronization status";
+    } catch (const std::exception& error) {
+      EXPECT_NE(std::string(error.what())
+                    .find(cudaGetErrorString(cudaErrorInvalidValue)),
+                std::string::npos);
+    }
+    EXPECT_FALSE(trace.real_error);
+    EXPECT_TRUE(trace.safety_join_completed);
+    EXPECT_TRUE(trace.primary_injected);
+    EXPECT_EQ(trace.first_calls, 2);
+    EXPECT_EQ(trace.second_calls, 1);
+    EXPECT_EQ(trace.secondary_injected, secondary_error);
+    if (secondary_error) {
+      try {
+        cleanup.Check();
+        FAIL() << "Expected the secondary cleanup status";
+      } catch (const std::exception& error) {
+        EXPECT_NE(std::string(error.what())
+                      .find("cudaStreamSynchronize PatchMatch batch"),
+                  std::string::npos);
+      }
+    } else {
+      EXPECT_NO_THROW(cleanup.Check());
+    }
+    // No retry/readback assertion: an execution failure does not promise a
+    // reusable numerical trajectory. Each arm constructs fresh owners.
+  }
+#endif
+}
+
+TEST_F(CudaTest, CompactDomainFailureWithholdsResultMaps) {
+  for (const int cost_bits : {0}) {
+    SCOPED_TRACE(cost_bits);
+    Inputs inputs = MakeInputs(0);
+    PatchMatch::Problem problem;
+    problem.ref_image_idx = 0;
+    problem.src_image_idxs = {1, 2};
+    problem.images = &inputs.images;
+    problem.depth_maps = &inputs.depths;
+    problem.normal_maps = &inputs.normals;
+    auto options = MakeOptions(false, false, false);
+    options.checkpoint_hmm = true;
+    options.window_radius = 5;
+    options.num_iterations = 5;
+    options.probability_unorm16 = cost_bits == 0;
+    PatchMatchCuda owner(options, problem);
+    ASSERT_NO_THROW(owner.Run());
+    EXPECT_NO_THROW(owner.GetDepthMap());
+    EXPECT_NO_THROW(owner.GetNormalMap());
+    EXPECT_NO_THROW(owner.GetSelProbMap());
+
+    PatchMatchCudaTestPeer::SetCompactDomainError(owner, cost_bits);
+    ASSERT_ANY_THROW(owner.Run());
+    EXPECT_ANY_THROW(owner.GetDepthMap());
+    EXPECT_ANY_THROW(owner.GetNormalMap());
+    EXPECT_ANY_THROW(owner.GetSelProbMap());
+    EXPECT_TRUE(owner.GetConsistentImageIdxs().empty());
+  }
+}
+
+TEST_F(CudaTest, PairAdmissionRefusalPreservesCompletedCompactResults) {
+  // A long, thin image needs enough grid blocks to exceed the two-view
+  // resident-wave limit without allocating a large image.
+  constexpr int kHeight = 25;
+  int width = 257;
+  while (width <= 8193 &&
+         CanPairPatchMatchViews(
+             width, kHeight, width, kHeight, true, true, true)) {
+    width = 2 * width - 1;
+  }
+  if (width > 8193) {
+    GTEST_SKIP() << "No bounded input exceeded this device's paired limit";
+  }
+
+  auto options = MakeOptions(true, true, false);
+  options.window_radius = 5;
+  options.num_iterations = 5;
+  options.checkpoint_hmm = true;
+  options.probability_unorm16 = true;
+  const auto problem_for = [](Inputs& inputs) {
+    PatchMatch::Problem problem;
+    problem.ref_image_idx = 0;
+    problem.src_image_idxs = {1, 2};
+    problem.images = &inputs.images;
+    problem.depth_maps = &inputs.depths;
+    problem.normal_maps = &inputs.normals;
+    return problem;
+  };
+  Inputs a = MakeInputs(0, 2, kHeight, width),
+         b = MakeInputs(1, 2, kHeight, width);
+  const auto pa = problem_for(a), pb = problem_for(b);
+  PatchMatchCuda first(options, pa), second(options, pb);
+  struct Streams {
+    std::array<cudaStream_t, 2> values{};
+    ~Streams() {
+      for (const auto stream : values) {
+        if (stream) (void)cudaStreamDestroy(stream);
+      }
+    }
+  } streams;
+  for (auto& stream : streams.values) {
+    ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
+              cudaSuccess);
+  }
+  ASSERT_NO_THROW(first.Run());
+  ASSERT_NO_THROW(second.Run());
+  const auto snapshot = [](const PatchMatchCuda& owner) {
+    return std::make_tuple(owner.GetDepthMap(),
+                           owner.GetNormalMap(),
+                           owner.GetSelProbMap(),
+                           owner.GetConsistentImageIdxs());
+  };
+  const auto before_first = snapshot(first), before_second = snapshot(second);
+  EXPECT_ANY_THROW(
+      RunPatchMatchPair(first, second, streams.values[0], streams.values[1]));
+  const auto check = [](const auto& before, const auto& after) {
+    ExpectExactlyEqual(std::get<0>(before), std::get<0>(after));
+    ExpectExactlyEqual(std::get<1>(before), std::get<1>(after));
+    ExpectExactlyEqual(std::get<2>(before), std::get<2>(after));
+    EXPECT_EQ(std::get<3>(before), std::get<3>(after));
+  };
+  check(before_first, snapshot(first));
+  check(before_second, snapshot(second));
+}
+
 TEST_F(CudaTest, PairedDefaultSweepsPreserveIndependentOutputs) {
   ExpectPairedDefaultSweepOutputs(false);
 }
@@ -1354,7 +1623,8 @@ TEST_F(CudaTest, PairedTallInitialCostStripeTailsPreserveOutputs) {
 void ExpectReferenceBatchOutputs(const size_t count,
                                  const bool geometry,
                                  const bool reuse,
-                                 const bool checkpoint = false) {
+                                 const bool checkpoint = false,
+                                 const bool unorm16 = false) {
   const auto make_problem = [](Inputs& images) {
     PatchMatch::Problem problem;
     problem.ref_image_idx = 0;
@@ -1372,16 +1642,20 @@ void ExpectReferenceBatchOutputs(const size_t count,
   options.num_samples = defaults.num_samples;
   options.num_iterations = defaults.num_iterations;
   options.sigma_spatial = options.window_radius;
+  if (unorm16) {
+    options.checkpoint_hmm = true;
+    options.probability_unorm16 = true;
+  }
   std::vector<std::unique_ptr<Inputs>> inputs;
   std::vector<PatchMatch::Problem> problems;
   inputs.reserve(count);
   problems.reserve(count);
   for (size_t i = 0; i < count; ++i) {
     inputs.push_back(std::make_unique<Inputs>(
-        MakeInputs(static_cast<int>(i % 2),
+        MakeInputs(unorm16 ? 0 : static_cast<int>(i % 2),
                    9,
-                   checkpoint ? 129 : (i % 2 ? 153 : 149),
-                   checkpoint ? 257 : 0)));
+                   unorm16 ? 25 : (checkpoint ? 129 : (i % 2 ? 153 : 149)),
+                   unorm16 ? 33 : (checkpoint ? 257 : 0))));
     problems.push_back(make_problem(*inputs.back()));
   }
   const auto construct = [&]() {
@@ -1428,7 +1702,7 @@ void ExpectReferenceBatchOutputs(const size_t count,
   if (!checkpoint) incumbent.clear();
   options.checkpoint_hmm = checkpoint;
   auto batch = construct();
-  if (checkpoint) {
+  if (checkpoint && !unorm16) {
     for (size_t i = 0; i < count; ++i)
       EXPECT_LT(batch[i]->PairPeakBytes(), incumbent[i]->PairPeakBytes());
   }
@@ -1486,6 +1760,28 @@ TEST_F(CudaTest, ThreeViewCheckpointGeometricBatchPreservesFullStorageOutputs) {
 
 TEST_F(CudaTest, FiveViewCheckpointGeometricBatchPreservesFullStorageOutputs) {
   ExpectReferenceBatchOutputs(5, true, true, true);
+}
+
+TEST_F(CudaTest, Unorm16CheckpointPhotoPairAndFiveRefPreserveOutputs) {
+  EXPECT_TRUE(CanPairPatchMatchViews(33, 25, 33, 25, false, true, true));
+  EXPECT_TRUE(CanBatchPatchMatchViews(
+      std::vector<std::pair<size_t, size_t>>(5, {33, 25}), false, true, true));
+  for (const bool reuse : {false, true}) {
+    SCOPED_TRACE(::testing::Message() << "rotation_reuse=" << reuse);
+    ExpectReferenceBatchOutputs(3, false, reuse, true, true);
+    ExpectReferenceBatchOutputs(5, false, reuse, true, true);
+  }
+}
+
+TEST_F(CudaTest, Unorm16CheckpointGeometricPairAndFiveRefPreserveOutputs) {
+  EXPECT_TRUE(CanPairPatchMatchViews(33, 25, 33, 25, true, true, true));
+  EXPECT_TRUE(CanBatchPatchMatchViews(
+      std::vector<std::pair<size_t, size_t>>(5, {33, 25}), true, true, true));
+  for (const bool reuse : {false, true}) {
+    SCOPED_TRACE(::testing::Message() << "rotation_reuse=" << reuse);
+    ExpectReferenceBatchOutputs(3, true, reuse, true, true);
+    ExpectReferenceBatchOutputs(5, true, reuse, true, true);
+  }
 }
 
 TEST_F(CudaTest, SharedGeometryBankPreservesRepeatedBatchAndStandaloneRuns) {
@@ -2632,6 +2928,189 @@ TEST_F(CudaTest, ControllerWorkStreamFatalFailuresNeverReadmit) {
         ::testing::ExitedWithCode(0),
         "");
   }
+}
+
+TEST_F(CudaTest, ProbabilityUnorm16AllocationRefusal) {
+  struct ResetOnExit {
+    ~ResetOnExit() { ResetAllocationInjection(0, cudaSuccess); }
+  } reset;
+  const CudaCleanupScope cleanup;
+  ResetAllocationInjection(1, cudaErrorMemoryAllocation);
+  EXPECT_THROW((PatchMatchProbabilityUnorm16(8, 8, 2)), CudaAllocationRefused);
+  EXPECT_TRUE(wrapped_fired.load());
+  EXPECT_EQ(wrapped_eligible.load(), 1u);
+  EXPECT_NO_THROW(cleanup.Check());
+
+  ResetAllocationInjection(0, cudaSuccess);
+  {
+    const PatchMatchProbabilityUnorm16 map(8, 8, 2);
+  }
+  EXPECT_EQ(wrapped_eligible.load(), 1u);
+  EXPECT_FALSE(wrapped_fired.load());
+  EXPECT_NO_THROW(cleanup.Check());
+}
+
+TEST_F(CudaTest, ProbabilityUnorm16DestructorCleanupObservation) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      ([]() {
+        const CudaCleanupScope cleanup;
+        ResetAllocationInjection(0, cudaSuccess, true);
+        {
+          const PatchMatchProbabilityUnorm16 map(8, 8, 2);
+          // Arm only cleanup: the wrapper frees the real allocation before
+          // reporting a synthetic terminal error. Do not reuse this process.
+          wrapped_fired = true;
+        }
+        try {
+          cleanup.Check();
+        } catch (const std::runtime_error& error) {
+          const bool observed =
+              std::string(error.what()).find("cleanup cudaFree failed") !=
+              std::string::npos;
+          std::_Exit(observed && wrapped_cleanup_injected.load() == 1 ? 0 : 1);
+        }
+        std::_Exit(2);
+      }()),
+      testing::ExitedWithCode(0),
+      "");
+}
+
+TEST_F(CudaTest, ConsistencyMaskCleanupFailureRejectsResults) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  for (const bool repeated_run : {false, true}) {
+    SCOPED_TRACE(repeated_run ? "prepare" : "rotate");
+    EXPECT_EXIT(
+        ([repeated_run]() {
+          Inputs input = MakeInputs(0, 2, 25, 33);
+          auto options = MakeOptions(false, true, false);
+          options.checkpoint_hmm = true;
+          options.probability_unorm16 = true;
+          PatchMatch::Problem problem;
+          problem.ref_image_idx = 0;
+          problem.src_image_idxs = {1, 2};
+          problem.images = &input.images;
+          PatchMatchCuda owner(options, problem);
+          if (repeated_run) owner.Run();
+
+          ResetAllocationInjection(0, cudaSuccess);
+          if (repeated_run) {
+            // Replacing a completed run's mask retires it before filtering.
+            wrapped_cleanup_target =
+                PatchMatchCudaTestPeer::ConsistencyMaskPointer(owner);
+            if (!wrapped_cleanup_target.load()) std::_Exit(1);
+          } else {
+            // The first allocation after preparation sees the new live mask;
+            // it is retired by the final mask rotation. No observer is needed
+            // to select this pointer, so the unfixed path also gets the fault.
+            wrapped_mask_owner = &owner;
+          }
+          try {
+            owner.Run();
+          } catch (const std::runtime_error& error) {
+            if (std::string(error.what()).find("cleanup cudaFree failed") ==
+                    std::string::npos ||
+                wrapped_cleanup_injected.load() != 1 ||
+                wrapped_cleanup_target.load() || wrapped_mask_owner.load())
+              std::_Exit(2);
+            const auto refuses = [](auto&& operation) {
+              try {
+                operation();
+              } catch (const std::invalid_argument&) {
+                return true;
+              }
+              return false;
+            };
+            const bool blocked = refuses([&] { (void)owner.GetDepthMap(); }) &&
+                                 refuses([&] { (void)owner.GetNormalMap(); }) &&
+                                 refuses([&] { (void)owner.GetSelProbMap(); });
+            std::_Exit(blocked ? 0 : 3);
+          }
+          std::_Exit(4);
+        }()),
+        testing::ExitedWithCode(0),
+        "");
+  }
+}
+
+TEST_F(CudaTest, TimerCleanupFailureRejectsResults) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(([]() {
+                Inputs input = MakeInputs(0, 2, 25, 33);
+                auto options = MakeOptions(false, false, false);
+                options.checkpoint_hmm = true;
+                options.probability_unorm16 = true;
+                PatchMatch::Problem problem;
+                problem.ref_image_idx = 0;
+                problem.src_image_idxs = {1, 2};
+                problem.images = &input.images;
+                PatchMatchCuda owner(options, problem);
+                timer_cleanup_injected = 0;
+                timer_cleanup_failure = true;
+                try {
+                  owner.Run();
+                } catch (const std::runtime_error& error) {
+                  if (std::string(error.what())
+                              .find("cleanup cudaEventDestroy failed") ==
+                          std::string::npos ||
+                      timer_cleanup_injected != 1)
+                    std::_Exit(1);
+                  try {
+                    (void)owner.GetDepthMap();
+                  } catch (const std::invalid_argument&) {
+                    std::_Exit(0);
+                  }
+                }
+                std::_Exit(2);
+              }()),
+              testing::ExitedWithCode(0),
+              "");
+}
+
+TEST_F(CudaTest, SharedGeometryBankRetirementFailureRejectsBatch) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      ([]() {
+        std::array<Inputs, 3> inputs;
+        std::array<PatchMatch::Problem, 3> problems;
+        std::vector<std::unique_ptr<PatchMatchCuda>> owners;
+        std::vector<PatchMatchCuda*> views;
+        std::vector<cudaStream_t> streams(3);
+        auto options = MakeOptions(false, false, true);
+        const PatchMatchOptions defaults;
+        options.window_radius = defaults.window_radius;
+        options.num_iterations = defaults.num_iterations;
+        options.sigma_spatial = options.window_radius;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+          inputs[i] = MakeInputs(i, 2, 25, 33);
+          auto& problem = problems[i];
+          problem.ref_image_idx = 0;
+          problem.src_image_idxs = {1, 2};
+          problem.images = &inputs[i].images;
+          owners.push_back(std::make_unique<PatchMatchCuda>(options, problem));
+          THROW_CHECK(owners.back()->CanShareGeometryRotation());
+          views.push_back(owners.back().get());
+          CUDA_SAFE_CALL(
+              cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
+        }
+        // Independently prepared children own banks that batch entry retires.
+        ResetAllocationInjection(0, cudaSuccess);
+        wrapped_cleanup_target =
+            PatchMatchCudaTestPeer::AlternateDepthPointer(*owners[1]);
+        try {
+          RunPatchMatchBatch(views, streams);
+        } catch (const std::runtime_error& error) {
+          const bool observed =
+              std::string(error.what()).find("cleanup cudaFree failed") !=
+                  std::string::npos &&
+              wrapped_cleanup_injected.load() == 1 &&
+              !wrapped_cleanup_target.load();
+          std::_Exit(observed ? 0 : 1);
+        }
+        std::_Exit(2);
+      }()),
+      testing::ExitedWithCode(0),
+      "");
 }
 
 TEST_F(CudaTest, ControllerPairAllocationRefusals) {

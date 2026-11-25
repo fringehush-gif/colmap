@@ -41,14 +41,15 @@ class CudaTimer {
  public:
   // Pass an explicit stream to time work on that stream.
   explicit CudaTimer(cudaStream_t stream = CudaDefaultStream());
-  ~CudaTimer();
+  ~CudaTimer() noexcept;
 
   void Print(const std::string& message);
 
  private:
+  void Release() noexcept;
   cudaStream_t stream_;
-  cudaEvent_t start_;
-  cudaEvent_t stop_;
+  cudaEvent_t start_ = nullptr;
+  cudaEvent_t stop_ = nullptr;
   float elapsed_time_;
 };
 

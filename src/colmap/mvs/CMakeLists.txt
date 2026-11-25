@@ -213,7 +213,7 @@ if(CUDA_ENABLED)
 
         COLMAP_ADD_TEST(
             NAME patch_match_cuda_test
-            SRCS patch_match_cuda_test.cc
+            SRCS patch_match_cuda_test.cc patch_match_probability_unorm16_test.cu patch_match_cuda_test_peer.cu
             LINK_LIBS colmap_mvs_cuda
         )
         COLMAP_ADD_TEST(
@@ -229,7 +229,8 @@ if(CUDA_ENABLED)
         if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
            AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT BUILD_SHARED_LIBS)
             target_compile_definitions(colmap_mvs_patch_match_cuda_test PRIVATE
-                COLMAP_TEST_CUDA_ALLOCATION_WRAPPING=1)
+                COLMAP_TEST_CUDA_ALLOCATION_WRAPPING=1
+                COLMAP_TEST_CUDA_COMPLETION_WRAPPING=1)
             target_link_options(colmap_mvs_patch_match_cuda_test PRIVATE
                 "LINKER:--wrap=cudaMemGetInfo"
                 "LINKER:--wrap=cudaMalloc"
@@ -237,10 +238,13 @@ if(CUDA_ENABLED)
                 "LINKER:--wrap=cudaMalloc3DArray"
                 "LINKER:--wrap=cudaFree"
                 "LINKER:--wrap=cudaFreeArray"
+                "LINKER:--wrap=cudaEventDestroy"
                 "LINKER:--wrap=cudaStreamCreateWithFlags"
                 "LINKER:--wrap=cudaStreamDestroy"
                 "LINKER:--wrap=cudaPeekAtLastError"
-                "LINKER:--wrap=cudaGetLastError")
+                "LINKER:--wrap=cudaGetLastError"
+                "LINKER:--wrap=cudaStreamSynchronize"
+                "LINKER:--wrap=cudaStreamSynchronize_ptsz")
             COLMAP_ADD_TEST(
                 NAME cuda_texture_constructor_test
                 SRCS cuda_texture_constructor_test.cc

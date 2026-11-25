@@ -180,6 +180,12 @@ void BindMVS(py::module& m) {
               "Retain rotated GPU buffers between sweeps. CUDA only; "
               "uses additional GPU memory.")
           .def_readwrite(
+              "probability_unorm16",
+              &PMOpts::probability_unorm16,
+              "Store previous selection probabilities as lossy UNORM16. "
+              "Requires CUDA and checkpoint_hmm; may change source sampling, "
+              "depth and normals.")
+          .def_readwrite(
               "checkpoint_hmm",
               &PMOpts::checkpoint_hmm,
               "Reduce GPU memory by replaying backward HMM messages from "

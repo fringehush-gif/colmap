@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "colmap/util/cuda_to_hip.h"
+#include "colmap/util/cudacc.h"
 
 namespace colmap {
 namespace mvs {
@@ -75,6 +75,37 @@ void CudaRotate(const T* input,
 
   internal::CudaRotateKernel<<<grid_dim, block_dim>>>(
       output, input, width, height, pitch_input, pitch_output);
+}
+
+// Rotate overlapping source layers in place through disjoint plane scratch.
+// The caller validates both layouts and scratch capacity, then synchronizes
+// and publishes the new shape after all planes have been copied.
+template <typename T>
+__forceinline__ void CudaRotateLayers(T* data,
+                                      void* scratch,
+                                      size_t width,
+                                      size_t height,
+                                      size_t depth,
+                                      size_t old_pitch,
+                                      size_t new_pitch) {
+  const size_t old_plane = old_pitch * height;
+  const size_t new_plane = new_pitch * width;
+  for (size_t ordinal = 0; ordinal < depth; ++ordinal) {
+    const size_t source = new_plane > old_plane ? depth - 1 - ordinal : ordinal;
+    const auto* input = reinterpret_cast<const T*>(
+        reinterpret_cast<const char*>(data) + source * old_plane);
+    auto* output = reinterpret_cast<T*>(reinterpret_cast<char*>(data) +
+                                        source * new_plane);
+    auto* temp = static_cast<T*>(scratch);
+    CudaRotate(input, temp, width, height, old_pitch, new_pitch);
+    CUDA_SAFE_CALL(cudaMemcpy2D(output,
+                                new_pitch,
+                                temp,
+                                new_pitch,
+                                height * sizeof(T),
+                                width,
+                                cudaMemcpyDeviceToDevice));
+  }
 }
 
 #undef TILE_DIM_ROTATE

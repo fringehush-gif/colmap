@@ -310,6 +310,13 @@ if(CUDA_ENABLED OR HIP_ENABLED)
     # Test runtime error attribution without a GPU using GNU link wrapping.
     if(TESTS_ENABLED AND CUDA_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
        AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT BUILD_SHARED_LIBS)
+        target_compile_definitions(colmap_util_cudacc_test PRIVATE
+            COLMAP_TEST_CUDA_TIMER_WRAPPING=1)
+        target_link_options(colmap_util_cudacc_test PRIVATE
+            "LINKER:--wrap=cudaEventCreate"
+            "LINKER:--wrap=cudaEventRecord"
+            "LINKER:--wrap=cudaEventDestroy"
+        )
         COLMAP_ADD_TEST(
             NAME cudacc_origin_test
             SRCS cudacc_origin_test.cc
