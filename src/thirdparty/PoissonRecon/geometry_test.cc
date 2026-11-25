@@ -189,9 +189,8 @@ TYPED_TEST(PoissonQuadTriangulationTest,
       const int count = static_cast<int>(vertices.size());
       for (int winding = 0; winding < 2; ++winding) {
         for (int rotation = 0; rotation < count; ++rotation) {
-          SCOPED_TRACE(testing::Message()
-                       << count << ":" << scale << ":" << winding << ":"
-                       << rotation);
+          SCOPED_TRACE(testing::Message() << count << ":" << scale << ":"
+                                          << winding << ":" << rotation);
           const auto triangles =
               PoissonRecon::MinimalAreaTriangulation<int, TypeParam, 3>(
                   GetPointer(vertices), vertices.size());
@@ -203,8 +202,10 @@ TYPED_TEST(PoissonQuadTriangulationTest,
               ASSERT_GE(index, 0);
               ASSERT_LT(index, count);
             }
-            const auto a = vertices[triangle.idx[1]] - vertices[triangle.idx[0]];
-            const auto b = vertices[triangle.idx[2]] - vertices[triangle.idx[0]];
+            const auto a =
+                vertices[triangle.idx[1]] - vertices[triangle.idx[0]];
+            const auto b =
+                vertices[triangle.idx[2]] - vertices[triangle.idx[0]];
             const TypeParam oriented_area =
                 (a[0] * b[1] - a[1] * b[0]) * (winding ? -1 : 1);
             EXPECT_GT(oriented_area, 0);
