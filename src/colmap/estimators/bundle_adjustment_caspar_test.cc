@@ -198,6 +198,120 @@ constexpr double kConstantPoseVarEps = 1e-9;
 namespace colmap {
 namespace {
 
+void CheckCalibrationNodes(CameraModelId model, bool mixed) {
+  int device_count = 0;
+  if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable";
+  }
+
+  SyntheticDatasetOptions data;
+  data.num_rigs = 1;
+  data.num_cameras_per_rig = 2;
+  data.num_frames_per_rig = 3;
+  data.num_points3D = 64;
+  data.camera_model_id = model;
+  if (model == CameraModelId::kPinhole) {
+    data.camera_params = {1280, 1280, 512, 384};
+  }
+  Reconstruction reconstruction;
+  SynthesizeDataset(data, &reconstruction);
+  SyntheticNoiseOptions noise;
+  noise.point3D_stddev = 0.02;
+  SynthesizeNoise(noise, &reconstruction);
+
+  const camera_t anchor =
+      reconstruction.Image(reconstruction.RegImageIds().front()).CameraId();
+  if (mixed) {
+    for (const auto& [id, camera] : reconstruction.Cameras()) {
+      if (id != anchor) {
+        // Give the observed variable camera a calibration error to fix.
+        reconstruction.Camera(id).SetPrincipalPointX(camera.PrincipalPointX() +
+                                                     4.0);
+      }
+    }
+  }
+  const Reconstruction initial = reconstruction;
+  BundleAdjustmentConfig config;
+  for (const image_t image_id : reconstruction.RegImageIds()) {
+    const auto& image = reconstruction.Image(image_id);
+    config.AddImage(image_id);
+    config.SetConstantRigFromWorldPose(image.FrameId());
+    if (!mixed || image.CameraId() == anchor) {
+      config.SetConstantCamIntrinsics(image.CameraId());
+    } else {
+      ASSERT_GT(image.NumPoints3D(), 0);
+    }
+  }
+
+  BundleAdjustmentOptions options;
+  options.refine_principal_point = true;
+  options.refine_sensor_from_rig = false;
+  options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
+  options.caspar->solver_iter_max = 1;
+  options.caspar->collect_iteration_data = true;
+  auto adjuster =
+      CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+  const auto summary = std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
+      adjuster->Solve());
+  ASSERT_NE(summary, nullptr);
+  ASSERT_EQ(summary->iterations.size(), 1);
+  EXPECT_LT(summary->iterations.front().score_best, summary->initial_score);
+
+  bool refined_point = false;
+  for (const auto& [id, point] : initial.Points3D()) {
+    if (!point.xyz.isApprox(reconstruction.Point3D(id).xyz)) {
+      refined_point = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(refined_point);
+  for (const auto& [id, camera] : initial.Cameras()) {
+    if (!mixed || id == anchor) {
+      EXPECT_EQ(reconstruction.Camera(id).params, camera.params);
+    } else {
+      EXPECT_NE(reconstruction.Camera(id).params, camera.params);
+    }
+  }
+}
+
+TEST(CasparCalibrationPool, PinholeFixedIntrinsics) {
+  CheckCalibrationNodes(CameraModelId::kPinhole, false);
+}
+
+TEST(CasparCalibrationPool, SimpleRadialFixedIntrinsics) {
+  CheckCalibrationNodes(CameraModelId::kSimpleRadial, false);
+}
+
+TEST(CasparCalibrationPool, PinholeMixedIntrinsics) {
+  CheckCalibrationNodes(CameraModelId::kPinhole, true);
+}
+
+TEST(CasparCalibrationPool, SimpleRadialMixedIntrinsics) {
+  CheckCalibrationNodes(CameraModelId::kSimpleRadial, true);
+}
+
+TEST(CasparBundleAdjustmentSummary, ReportsExitReason) {
+  using ExitReason = caspar::ExitReason;
+  using Termination = BundleAdjustmentTerminationType;
+  struct TestCase {
+    ExitReason reason;
+    Termination expected;
+  };
+  constexpr TestCase cases[] = {
+      {ExitReason::CONVERGED_DIAG_EXIT, Termination::NO_CONVERGENCE},
+      {ExitReason::CONVERGED_SCORE_THRESHOLD, Termination::CONVERGENCE},
+      {ExitReason::MAX_ITERATIONS, Termination::NO_CONVERGENCE},
+  };
+  caspar::SolveResult result{};
+  for (const auto& test : cases) {
+    SCOPED_TRACE(static_cast<int>(test.reason));
+    result.exit_reason = test.reason;
+    const auto summary = CasparBundleAdjustmentSummary::Create(result);
+    EXPECT_EQ(summary->termination_type, test.expected);
+    EXPECT_TRUE(summary->IsSolutionUsable());
+  }
+}
+
 TEST(CasparTransfers, ReservesFactorScratchWithoutPointNodes) {
   int device_count = 0;
   const cudaError_t status = cudaGetDeviceCount(&device_count);
@@ -1505,5 +1619,58 @@ TEST(CasparReadbackFault, WrappingUnavailable) {
       << "Readback fault injection requires a GNU/Linux static test link";
 }
 #endif
+TEST(DefaultBundleAdjuster, FreeGaugeMatchesFixedGauge) {
+  Reconstruction gt_reconstruction;
+  SyntheticDatasetOptions synthetic_dataset_options;
+  synthetic_dataset_options.num_rigs = 1;
+  synthetic_dataset_options.num_cameras_per_rig = 1;
+  synthetic_dataset_options.num_frames_per_rig = 10;
+  synthetic_dataset_options.num_points3D = 200;
+  SynthesizeDataset(synthetic_dataset_options, &gt_reconstruction);
+
+  Reconstruction noisy_reconstruction = gt_reconstruction;
+  SyntheticNoiseOptions synthetic_noise_options;
+  synthetic_noise_options.point2D_stddev = 0.5;
+  synthetic_noise_options.point3D_stddev = 0.1;
+  synthetic_noise_options.rig_from_world_rotation_stddev = 0.5;
+  synthetic_noise_options.rig_from_world_translation_stddev = 0.1;
+  SynthesizeNoise(synthetic_noise_options, &noisy_reconstruction);
+
+  const auto solve = [](BundleAdjustmentGauge gauge,
+                        Reconstruction& reconstruction) {
+    BundleAdjustmentConfig config;
+    for (const image_t image_id : reconstruction.RegImageIds()) {
+      config.AddImage(image_id);
+    }
+    config.FixGauge(gauge);
+    BundleAdjustmentOptions options;
+    options.caspar->collect_iteration_data = true;
+    const auto summary =
+        CreateDefaultCasparBundleAdjuster(options, config, reconstruction)
+            ->Solve();
+    THROW_CHECK(summary->IsSolutionUsable());
+    const auto& caspar_summary =
+        dynamic_cast<const CasparBundleAdjustmentSummary&>(*summary);
+    THROW_CHECK(!caspar_summary.iterations.empty());
+    return caspar_summary.iterations.back().score_best;
+  };
+
+  Reconstruction fixed_reconstruction = noisy_reconstruction;
+  const double fixed_cost =
+      solve(BundleAdjustmentGauge::TWO_CAMS_FROM_WORLD, fixed_reconstruction);
+  Reconstruction free_reconstruction = noisy_reconstruction;
+  const double free_cost =
+      solve(BundleAdjustmentGauge::UNSPECIFIED, free_reconstruction);
+
+  // The gauge does not change the optimum, only its representative.
+  EXPECT_NEAR(free_cost, fixed_cost, 1e-4 * fixed_cost);
+  EXPECT_THAT(gt_reconstruction,
+              ReconstructionNear(free_reconstruction,
+                                 /*max_rotation_error_deg=*/0.1,
+                                 /*max_proj_center_error=*/0.1,
+                                 /*max_scale_error=*/std::nullopt,
+                                 /*num_obs_tolerance=*/0.0));
+}
+
 }  // namespace
 }  // namespace colmap
