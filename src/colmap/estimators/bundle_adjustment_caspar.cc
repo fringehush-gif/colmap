@@ -662,6 +662,9 @@ class CasparBundleAdjuster : public BundleAdjuster {
                     << calib_data[3] << "]";
           }
           adapter_ptr->SetCalibNodes(solver, calib_data.data(), n_calib);
+        } else {
+          // Retraction visits every active node, including unused pools.
+          adapter_ptr->DisableCalibNodes(solver);
         }
       }
       for (int v = 0; v < CASPAR_NUM_VARIANTS; ++v) {
@@ -1018,7 +1021,8 @@ CasparBundleAdjustmentSummary::Create(
       VLOG(1) << "Caspar: CONVERGED_DIAG_EXIT after "
               << caspar_summary.iteration_count << " iters"
               << " (diag limit hit -> likely premature termination)";
-      summary->termination_type = BundleAdjustmentTerminationType::CONVERGENCE;
+      summary->termination_type =
+          BundleAdjustmentTerminationType::NO_CONVERGENCE;
       break;
     case caspar::ExitReason::CONVERGED_SCORE_THRESHOLD:
       VLOG(1) << "Caspar: CONVERGED_SCORE_THRESHOLD after "
