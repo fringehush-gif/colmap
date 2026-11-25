@@ -16,6 +16,7 @@ COLMAP_ADD_LIBRARY(
         model.h model.cc
         poisson_meshing.h poisson_meshing.cc
         normal_map.h normal_map.cc
+        patch_match_input.h patch_match_input.cc
         patch_match_options.h patch_match_options.cc
         texture_mapping.h texture_mapping.cc
         workspace.h workspace.cc
@@ -89,6 +90,11 @@ COLMAP_ADD_TEST(
 COLMAP_ADD_TEST(
     NAME normal_map_test
     SRCS normal_map_test.cc
+    LINK_LIBS colmap_mvs
+)
+COLMAP_ADD_TEST(
+    NAME patch_match_input_test
+    SRCS patch_match_input_test.cc
     LINK_LIBS colmap_mvs
 )
 COLMAP_ADD_TEST(
