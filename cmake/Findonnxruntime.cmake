@@ -6,6 +6,7 @@
 #
 #   onnxruntime_FOUND: TRUE if onnxruntime is found.
 #   onnxruntime::onnxruntime: Imported target to link against.
+#   onnxruntime_RUNTIME_DLLS: Windows runtime files for the fallback target.
 #
 # The following variables control the behavior of this module:
 #
@@ -23,6 +24,7 @@ set(onnxruntime_LIBRARY_DIR_HINTS "" CACHE PATH "onnxruntime library directory")
 unset(onnxruntime_FOUND)
 unset(onnxruntime_INCLUDE_DIRS)
 unset(onnxruntime_LIBRARIES)
+set(onnxruntime_RUNTIME_DLLS "")
 
 find_package(onnxruntime CONFIG QUIET PATHS ${onnxruntime_CONFIG_DIR_HINTS})
 if(TARGET onnxruntime::onnxruntime)
@@ -60,12 +62,14 @@ else()
             PATHS ${onnxruntime_LIBRARY_DIR_HINTS})
     endif()
 
+    # Shared providers are loaded by ORT; retain their paths for DLL staging.
+    set(_onnxruntime_runtime_libraries ${onnxruntime_LIBRARIES})
     if(onnxruntime_INCLUDE_DIRS AND onnxruntime_LIBRARIES)
         if(onnxruntime_PROVIDERS_SHARED_LIBRARY)
-            list(APPEND onnxruntime_LIBRARIES ${onnxruntime_PROVIDERS_SHARED_LIBRARY})
+            list(APPEND _onnxruntime_runtime_libraries ${onnxruntime_PROVIDERS_SHARED_LIBRARY})
         endif()
-        if(onnxruntime_PROVIDERS_CUDA_LIBRARY)
-            list(APPEND onnxruntime_LIBRARIES ${onnxruntime_PROVIDERS_CUDA_LIBRARY})
+        if(CUDA_ENABLED AND EXISTS "${onnxruntime_PROVIDERS_CUDA_LIBRARY}")
+            list(APPEND _onnxruntime_runtime_libraries ${onnxruntime_PROVIDERS_CUDA_LIBRARY})
         endif()
         set(onnxruntime_FOUND TRUE)
         message(STATUS "Found onnxruntime")
@@ -84,20 +88,30 @@ else()
     # since vcpkg's custom add_library/add_executable macros copy any dependencies from vcpkg's
     # installed directory to the output directory.
     # See: https://github.com/microsoft/vcpkg/blob/fb7ba3b89b0d8e3e56b0508a144fe85015edfab6/scripts/buildsystems/vcpkg.cmake#L607
-    if(IS_WINDOWS AND VCPKG_INSTALLED_DIR)
-        foreach(_lib ${onnxruntime_LIBRARIES})
+    if(IS_WINDOWS AND onnxruntime_FOUND)
+        if(CUDA_ENABLED AND NOT EXISTS "${onnxruntime_PROVIDERS_CUDA_LIBRARY}")
+            # Recent packages ship the dynamically loaded provider without an import library.
+            get_filename_component(_core_dir "${onnxruntime_LIBRARIES}" DIRECTORY)
+            list(APPEND _onnxruntime_runtime_libraries
+                "${_core_dir}/onnxruntime_providers_cuda.dll")
+        endif()
+        foreach(_lib IN LISTS _onnxruntime_runtime_libraries)
             get_filename_component(_lib_dir "${_lib}" DIRECTORY)
             get_filename_component(_lib_name "${_lib}" NAME_WE)
-            set(_dlls
-                "${_lib_dir}/${_lib_name}.dll"
-                "${_lib_dir}/../bin/${_lib_name}.dll")
-            foreach(_dll ${_dlls})
-                if( EXISTS "${_dll}" )
-                    file(COPY "${_dll}" DESTINATION "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin")
+            # Preserve the previous staging result when both locations exist.
+            foreach(_dll IN ITEMS "${_lib_dir}/../bin/${_lib_name}.dll"
+                                  "${_lib_dir}/${_lib_name}.dll")
+                if(EXISTS "${_dll}")
+                    list(APPEND onnxruntime_RUNTIME_DLLS "${_dll}")
+                    if(VCPKG_INSTALLED_DIR)
+                        file(COPY "${_dll}" DESTINATION "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin")
+                    endif()
+                    break()
                 endif()
             endforeach()
         endforeach()
     endif()
+    unset(_onnxruntime_runtime_libraries)
 endif()
 
 if(NOT onnxruntime_FOUND AND onnxruntime_FIND_REQUIRED)
