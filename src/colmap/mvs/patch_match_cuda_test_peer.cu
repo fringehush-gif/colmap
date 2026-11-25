@@ -15,6 +15,9 @@ void PatchMatchCudaTestPeer::SetCompactDomainError(PatchMatchCuda& owner,
     case 16:
       error = owner.packed_cost_map_->View().domain_error;
       break;
+    case 24:
+      error = owner.fixed24_cost_map_->View().domain_error;
+      break;
     default:
       THROW_CHECK(false) << "Unknown test storage format";
       return;
