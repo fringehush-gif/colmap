@@ -662,6 +662,9 @@ class CasparBundleAdjuster : public BundleAdjuster {
                     << calib_data[3] << "]";
           }
           adapter_ptr->SetCalibNodes(solver, calib_data.data(), n_calib);
+        } else {
+          // Retraction visits every active node, including unused pools.
+          adapter_ptr->DisableCalibNodes(solver);
         }
       }
       for (int v = 0; v < CASPAR_NUM_VARIANTS; ++v) {

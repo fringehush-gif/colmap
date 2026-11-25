@@ -91,6 +91,7 @@ class ICasparModelAdapter {
   virtual void SetCalibNodes(caspar::GraphSolver& solver,
                              StorageType* data,
                              size_t n) const = 0;
+  virtual void DisableCalibNodes(caspar::GraphSolver& solver) const = 0;
   virtual void GetCalibNodes(caspar::GraphSolver& solver,
                              StorageType* data,
                              size_t n) const = 0;
@@ -291,6 +292,10 @@ class SimpleRadialAdapter : public ICasparModelAdapter {
                      StorageType* data,
                      size_t n) const override {
     s.SetSimpleRadialCalibNodesFromStackedHost(data, 0, n);
+  }
+
+  void DisableCalibNodes(caspar::GraphSolver& s) const override {
+    s.SetSimpleRadialCalibNum(0);
   }
 
   void GetCalibNodes(caspar::GraphSolver& s,
@@ -675,6 +680,10 @@ class PinholeAdapter : public ICasparModelAdapter {
                      StorageType* data,
                      size_t n) const override {
     s.SetPinholeCalibNodesFromStackedHost(data, 0, n);
+  }
+
+  void DisableCalibNodes(caspar::GraphSolver& s) const override {
+    s.SetPinholeCalibNum(0);
   }
 
   void GetCalibNodes(caspar::GraphSolver& s,

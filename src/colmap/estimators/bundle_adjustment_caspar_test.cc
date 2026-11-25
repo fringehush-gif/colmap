@@ -8,6 +8,7 @@
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/models.h"
 
+#include <cuda_runtime_api.h>
 #include <gtest/gtest.h>
 
 // Due to pose normalization operations, constant variables may not be perfectly
@@ -59,6 +60,85 @@ constexpr double kConstantPoseVarEps = 1e-9;
 
 namespace colmap {
 namespace {
+
+void CheckCalibrationNodes(CameraModelId model, bool mixed) {
+  int device_count = 0;
+  if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable";
+  }
+
+  SyntheticDatasetOptions data;
+  data.num_rigs = 1;
+  data.num_cameras_per_rig = 2;
+  data.num_frames_per_rig = 3;
+  data.num_points3D = 64;
+  data.camera_model_id = model;
+  if (model == CameraModelId::kPinhole) {
+    data.camera_params = {1280, 1280, 512, 384};
+  }
+  Reconstruction reconstruction;
+  SynthesizeDataset(data, &reconstruction);
+  SyntheticNoiseOptions noise;
+  noise.point3D_stddev = 0.02;
+  SynthesizeNoise(noise, &reconstruction);
+
+  const Reconstruction initial = reconstruction;
+  const camera_t anchor =
+      reconstruction.Image(reconstruction.RegImageIds().front()).CameraId();
+  BundleAdjustmentConfig config;
+  for (const image_t image_id : reconstruction.RegImageIds()) {
+    const auto& image = reconstruction.Image(image_id);
+    config.AddImage(image_id);
+    config.SetConstantRigFromWorldPose(image.FrameId());
+    if (!mixed || image.CameraId() == anchor) {
+      config.SetConstantCamIntrinsics(image.CameraId());
+    }
+  }
+
+  BundleAdjustmentOptions options;
+  options.refine_principal_point = true;
+  options.refine_sensor_from_rig = false;
+  options.caspar = std::make_shared<CasparBundleAdjustmentOptions>();
+  options.caspar->solver_iter_max = 1;
+  options.caspar->collect_iteration_data = true;
+  auto adjuster =
+      CreateDefaultCasparBundleAdjuster(options, config, reconstruction);
+  const auto summary = std::dynamic_pointer_cast<CasparBundleAdjustmentSummary>(
+      adjuster->Solve());
+  ASSERT_NE(summary, nullptr);
+  ASSERT_EQ(summary->iterations.size(), 1);
+  EXPECT_LT(summary->iterations.front().score_best, summary->initial_score);
+
+  bool refined_point = false;
+  for (const auto& [id, point] : initial.Points3D()) {
+    if (!point.xyz.isApprox(reconstruction.Point3D(id).xyz)) {
+      refined_point = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(refined_point);
+  for (const auto& [id, camera] : initial.Cameras()) {
+    if (!mixed || id == anchor) {
+      EXPECT_EQ(reconstruction.Camera(id).params, camera.params);
+    }
+  }
+}
+
+TEST(CasparCalibrationPool, PinholeFixedIntrinsics) {
+  CheckCalibrationNodes(CameraModelId::kPinhole, false);
+}
+
+TEST(CasparCalibrationPool, SimpleRadialFixedIntrinsics) {
+  CheckCalibrationNodes(CameraModelId::kSimpleRadial, false);
+}
+
+TEST(CasparCalibrationPool, PinholeMixedIntrinsics) {
+  CheckCalibrationNodes(CameraModelId::kPinhole, true);
+}
+
+TEST(CasparCalibrationPool, SimpleRadialMixedIntrinsics) {
+  CheckCalibrationNodes(CameraModelId::kSimpleRadial, true);
+}
 
 TEST(DefaultBundleAdjuster, RigThrowsErrorOnVariableSensorFromRig) {
   Reconstruction reconstruction;
