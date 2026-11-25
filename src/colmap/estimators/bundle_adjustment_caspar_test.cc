@@ -540,7 +540,8 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
         const double expected = std::max(
             double(StorageType(kDiagMin)),
             step.diag *
-                std::max(0.0, 1.0 - quality_term * quality_term * quality_term));
+                std::max(0.0,
+                         1.0 - quality_term * quality_term * quality_term));
         // In this interval 2*q and 2*q-1 are exact; the remaining operations
         // and clamps are bounded by four storage-type rounding errors.
         const double rounding_bound =
@@ -569,14 +570,16 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
       ASSERT_EQ(relaxed_run->iterations[0].pcg_iter, 1);
       for (const auto& pair : {std::make_pair(short_run, first),
                                std::make_pair(strict_run, second)}) {
-        EXPECT_NEAR(pair.first->iterations[0].score_best,
-                    pair.second->iterations[0].score_best,
-                    1e-6 *
-                        std::max(1.0, std::abs(pair.second->iterations[0].score_best)));
-        EXPECT_NEAR(pair.first->iterations[0].step_quality,
-                    pair.second->iterations[0].step_quality,
-                    1e-5 * std::max(
-                               1.0, std::abs(pair.second->iterations[0].step_quality)));
+        EXPECT_NEAR(
+            pair.first->iterations[0].score_best,
+            pair.second->iterations[0].score_best,
+            1e-6 *
+                std::max(1.0, std::abs(pair.second->iterations[0].score_best)));
+        EXPECT_NEAR(
+            pair.first->iterations[0].step_quality,
+            pair.second->iterations[0].step_quality,
+            1e-5 * std::max(1.0,
+                            std::abs(pair.second->iterations[0].step_quality)));
       }
       // The relaxed second candidate improves but fails the strict criterion.
       EXPECT_LT(relaxed_run->iterations[0].score_best,
@@ -588,9 +591,9 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
         ASSERT_TRUE(std::isfinite(lhs));
         ASSERT_TRUE(std::isfinite(rhs));
         // A prospective fixture budget, not a solver-wide error bound.
-        const double budget =
-            64.0 * std::numeric_limits<StorageType>::epsilon() *
-            std::max({1.0, std::abs(lhs), std::abs(rhs)});
+        const double budget = 64.0 *
+                              std::numeric_limits<StorageType>::epsilon() *
+                              std::max({1.0, std::abs(lhs), std::abs(rhs)});
         max_state_ratio =
             std::max(max_state_ratio, std::abs(lhs - rhs) / budget);
         EXPECT_NEAR(lhs, rhs, budget);
@@ -605,10 +608,10 @@ TEST(CasparScoredPcg, RetainedPredictionMatchesTruncatedSolve) {
       for (const auto& [id, image] : short_state.Images()) {
         const auto& a_pose = image.CamFromWorld();
         const auto& b_pose = strict_state.Image(id).CamFromWorld();
-        const double sign = a_pose.rotation().coeffs().dot(
-                                b_pose.rotation().coeffs()) < 0
-                                ? -1.0
-                                : 1.0;
+        const double sign =
+            a_pose.rotation().coeffs().dot(b_pose.rotation().coeffs()) < 0
+                ? -1.0
+                : 1.0;
         for (int i = 0; i < 4; ++i) {
           near_state(a_pose.rotation().coeffs()[i],
                      sign * b_pose.rotation().coeffs()[i]);
