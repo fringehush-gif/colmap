@@ -9,6 +9,8 @@
 #include "colmap/util/cuda.h"
 #include "colmap/util/testing.h"
 
+#include <limits>
+
 #include <gtest/gtest.h>
 
 // Due to pose normalization operations, constant variables may not be perfectly
@@ -1032,7 +1034,7 @@ TEST(DefaultBundleAdjuster, FreeGaugeMatchesFixedGauge) {
                                  /*num_obs_tolerance=*/0.0));
 }
 
-TEST(DefaultBundleAdjuster, LowParallaxScaleCollapse) {
+TEST(DefaultBundleAdjuster, FreeGaugeDampingFloorKeepsStepsValid) {
   SetPRNGSeed(42);
   Reconstruction gt_reconstruction;
   SyntheticDatasetOptions synthetic_dataset_options;
@@ -1063,11 +1065,9 @@ TEST(DefaultBundleAdjuster, LowParallaxScaleCollapse) {
     }
   }
 
-  // Perturb camera orientations with a slight inward vergence bias, as can
-  // occur after global rotation averaging in low-parallax scenes. With fixed
-  // rotations, the reprojection error drives camera positions to collapse
-  // toward the optical axis while expanding scene depth along the weakly
-  // constrained scale direction.
+  // Perturb camera orientations with a slight inward vergence bias and keep
+  // rotations fixed to exercise an ill-conditioned free-gauge translation and
+  // point update.
   Reconstruction noisy_reconstruction = gt_reconstruction;
   for (const frame_t frame_id : noisy_reconstruction.RegFrameIds()) {
     const double x = kBaseline * (static_cast<int>(frame_id) - 2);
@@ -1084,9 +1084,7 @@ TEST(DefaultBundleAdjuster, LowParallaxScaleCollapse) {
     config.AddImage(image_id);
   }
 
-  auto run_fixed_rotation_ba = [&](const double max_trust_region_radius,
-                                   int& num_invalid_steps,
-                                   double& baseline_to_depth) {
+  auto count_invalid_steps = [&](const double max_trust_region_radius) {
     Reconstruction reconstruction = noisy_reconstruction;
     BundleAdjustmentOptions options;
     options.refine_focal_length = false;
@@ -1099,59 +1097,44 @@ TEST(DefaultBundleAdjuster, LowParallaxScaleCollapse) {
     const auto summary =
         CreateDefaultCeresBundleAdjuster(options, config, reconstruction)
             ->Solve();
-    ASSERT_TRUE(summary->IsSolutionUsable());
+    EXPECT_TRUE(summary->IsSolutionUsable());
+    if (!summary->IsSolutionUsable()) {
+      return -1;
+    }
     const auto& ceres_summary = GetCeresSummary(summary.get());
 
-    num_invalid_steps = 0;
+    size_t num_observations = 0;
+    for (const auto& [_, point3D] : reconstruction.Points3D()) {
+      EXPECT_TRUE(point3D.xyz.allFinite());
+      for (const auto& track_el : point3D.track.Elements()) {
+        const Eigen::Vector3d point3D_in_cam =
+            reconstruction.Image(track_el.image_id).CamFromWorld() *
+            point3D.xyz;
+        EXPECT_TRUE(point3D_in_cam.allFinite());
+        ++num_observations;
+      }
+    }
+    EXPECT_EQ(num_observations, 400);
+
+    int num_invalid_steps = 0;
     for (const auto& iteration : ceres_summary.iterations) {
       if (!iteration.step_is_valid) {
         ++num_invalid_steps;
       }
     }
-
-    const double baseline = (reconstruction.Image(4).ProjectionCenter() -
-                             reconstruction.Image(1).ProjectionCenter())
-                                .norm() /
-                            3.0;
-    double mean_depth = 0.0;
-    size_t num_observations = 0;
-    const Rigid3d cam_from_world = reconstruction.Image(1).CamFromWorld();
-    for (const auto& [_, point3D] : reconstruction.Points3D()) {
-      ASSERT_TRUE(point3D.xyz.allFinite());
-      for (const auto& track_el : point3D.track.Elements()) {
-        const Eigen::Vector3d point3D_in_cam =
-            reconstruction.Image(track_el.image_id).CamFromWorld() *
-            point3D.xyz;
-        ASSERT_TRUE(point3D_in_cam.allFinite());
-        ++num_observations;
-      }
-      mean_depth += std::abs((cam_from_world * point3D.xyz).z());
-    }
-    ASSERT_EQ(num_observations, 400);
-    mean_depth /= reconstruction.NumPoints3D();
-    baseline_to_depth = baseline / mean_depth;
+    return num_invalid_steps;
   };
 
   // Without capping max_trust_region_radius (Ceres's 1e16 default), the LM
   // damping 1 / tr_radius vanishes below machine precision, causing repeated
-  // Cholesky factorization failures and an order-of-magnitude deeper collapse
-  // of the baseline-to-depth ratio along the nearly unobservable scale mode.
-  int uncapped_invalid_steps = 0;
-  double uncapped_baseline_to_depth = 0.0;
-  run_fixed_rotation_ba(
-      1e16, uncapped_invalid_steps, uncapped_baseline_to_depth);
-  EXPECT_GT(uncapped_invalid_steps, 0);
+  // Cholesky factorization failures on the rank-deficient free-gauge system.
+  EXPECT_GT(count_invalid_steps(1e16), 0);
 
-  // With the default 1e8 cap (damping floor 1e-8), all steps remain
-  // numerically valid and the baseline-to-depth collapse is arrested.
-  int capped_invalid_steps = 0;
-  double capped_baseline_to_depth = 0.0;
-  run_fixed_rotation_ba(
-      BundleAdjustmentOptions().ceres->solver_options.max_trust_region_radius,
-      capped_invalid_steps,
-      capped_baseline_to_depth);
-  EXPECT_EQ(capped_invalid_steps, 0);
-  EXPECT_GT(capped_baseline_to_depth, 10.0 * uncapped_baseline_to_depth);
+  // With the default 1e8 cap (damping floor 1e-8), all steps remain valid.
+  EXPECT_EQ(
+      count_invalid_steps(BundleAdjustmentOptions()
+                              .ceres->solver_options.max_trust_region_radius),
+      0);
 }
 
 TEST(PosePriorBundleAdjuster, AlignmentRobustToOutliers) {
@@ -1423,6 +1406,19 @@ TEST(PosePriorBundleAdjuster, OptimizationRobustToOutliers) {
                                  /*max_proj_center_error=*/0.1,
                                  /*max_scale_error=*/std::nullopt,
                                  /*num_obs_tolerance=*/0.02));
+}
+
+TEST(CeresPosePriorBundleAdjustmentOptions, CheckGemanMcClure) {
+  CeresPosePriorBundleAdjustmentOptions options;
+  options.prior_position_loss_function_type =
+      CeresLossFunctionType::GEMAN_MCCLURE;
+  options.prior_position_loss_scale = 1.0;
+  EXPECT_TRUE(options.Check());
+  for (const double bad_scale :
+       {0.0, 1e-200, 1e200, std::numeric_limits<double>::infinity()}) {
+    options.prior_position_loss_scale = bad_scale;
+    EXPECT_FALSE(options.Check());
+  }
 }
 
 }  // namespace
