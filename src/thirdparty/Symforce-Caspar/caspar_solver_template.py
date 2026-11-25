@@ -9,12 +9,12 @@ from pathlib import Path
 # SymForce cfff699b with the reviewed shared-index follow-ups. Keeping
 # one source contract removes legacy repair paths and prevents regeneration
 # from silently restoring an older numerical or readback implementation.
-GENERATOR_OWNER = "c7896249b2b6f308859ae4883dd82aa5ca4e5c14"
+GENERATOR_OWNER = "398a91dc783cb72bcba7f9d199d7db29aa47349a"
 _GENERATION_INPUTS = {
     "source/runtime/memops.cuh": "2e5cbedb7f9c5a66f6ffd123c050e00546a2f951546627f42a4197b4ad22ce11",
     "source/templates/__init__.py": "17540509eb4673ded9977429c29b7841915a499e27ba6ed3669ba0d8b6322d1b",
     "code_generation/library.py": "251bd162ab85975c812a7e46991c83d91d9e52ff08953e8e7e067711b64154b4",
-    "source/templates/solver.cc.jinja": "fc2aee9bb099593b229c91bc20a30ee327fc05b3b4ecf85f122b65649f21d423",
+    "source/templates/solver.cc.jinja": "647028609d57c11dbdc1387cff36e235e2ff53b216407258ad16fbcbbd3bcff1",
     "source/templates/solver.h.jinja": "d9b1eb9db48105dbf426da503a4bd8c098f2cb3b4b0ee96987b20af02fde3f5c",
     "source/templates/buildfiles/CMakeLists.txt.jinja": "724402194513c78f776609344c8d77368253346a0124f67aa92d18dd60609831",
     "source/runtime/solver_tools.cu": "6e55cfcecabe8a1f8e33493e215e16c2962451ce416912006032dad6a4399b2b",
