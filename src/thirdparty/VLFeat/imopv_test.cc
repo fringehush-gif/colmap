@@ -112,7 +112,10 @@ void CheckSupportsAndLayouts() {
                             {16, 32, 1, 4, false},
                             {17, 33, 2, 0, true},
                             {127, 2, 1, 0, false},
+                            {127, 33, 1, 1, false},
                             {128, 7, 2, 4, true},
+                            {128, 31, 1, 0, false},
+                            {128, 32, 1, 0, false},
                             {129, 33, 1, 0, false},
                             {160, 33, 2, 0, true},
                             {160, 33, 1, 4, false}};
@@ -192,20 +195,20 @@ TEST_F(VLFeatPadding, DoubleSupportsAndLayouts) {
   CheckSupportsAndLayouts<double>();
 }
 
-template <typename T>
+template <typename T, int width, int height>
 void CheckAlignedColumnsAndScalarTails() {
-  constexpr int width = 13, height = 5;
-  // A 16-byte-aligned first column and stride 16 exercise the vector body.
+  constexpr int aligned_stride = (width + 15) / 16 * 16;
+  // A 16-byte-aligned first column and stride exercise the vector body.
   // The odd width retains scalar tails; an offset and odd stride also cover
   // unaligned starting columns and the scalar fallback inside the SIMD owner.
-  alignas(16) std::array<T, height * 17 + 1> storage;
+  alignas(16) std::array<T, height*(aligned_stride + 1) + 1> storage;
   for (size_t i = 0; i < storage.size(); ++i) {
     storage[i] = T(int(i % 31) - 15) / T(8);
   }
   const auto original = storage;
   for (const int simd : {0, 1}) {
     vl_set_simd_enabled(simd);
-    for (const int src_stride : {16, 17}) {
+    for (const int src_stride : {aligned_stride, aligned_stride + 1}) {
       for (const int offset : {0, 1}) {
         for (const int step : {1, 3}) {
           const int output_height = (height - 1) / step + 1;
@@ -269,13 +272,16 @@ void CheckAlignedColumnsAndScalarTails() {
 }
 
 TEST_F(VLFeatPadding, AlignedVectorsAndScalarTails) {
-  CheckAlignedColumnsAndScalarTails<float>();
-  CheckAlignedColumnsAndScalarTails<double>();
+  CheckAlignedColumnsAndScalarTails<float, 13, 5>();
+  CheckAlignedColumnsAndScalarTails<double, 13, 5>();
+  // Large aligned float inputs admit four-vector batching, followed by a tail.
+  CheckAlignedColumnsAndScalarTails<float, 129, 33>();
+  CheckAlignedColumnsAndScalarTails<double, 129, 33>();
 }
 
-template <typename T>
+template <typename T, int width, int height>
 void CheckWhollyOutsidePadding() {
-  constexpr int width = 9, height = 3, src_stride = 16;
+  constexpr int src_stride = (width + 15) / 16 * 16;
   alignas(16) std::array<T, height * src_stride> source{};
   for (int x = 0; x < width; ++x) {
     source[x] = T(-3);
@@ -284,7 +290,8 @@ void CheckWhollyOutsidePadding() {
   const T filter[] = {T(0.25), T(0.75)};
   for (const int simd : {0, 1}) {
     vl_set_simd_enabled(simd);
-    for (const vl_index begin : {vl_index(-4),
+    for (const vl_index begin : {vl_index(-height - 1),
+                                 vl_index(height + 1),
                                  std::numeric_limits<vl_index>::min(),
                                  std::numeric_limits<vl_index>::max() - 1}) {
       for (const unsigned int mode : {VL_PAD_BY_ZERO, VL_PAD_BY_CONTINUITY}) {
@@ -320,19 +327,26 @@ void CheckWhollyOutsidePadding() {
 }
 
 TEST_F(VLFeatPadding, WhollyOutsidePaddingUsesEdgeRows) {
-  CheckWhollyOutsidePadding<float>();
-  CheckWhollyOutsidePadding<double>();
+  CheckWhollyOutsidePadding<float, 9, 3>();
+  CheckWhollyOutsidePadding<double, 9, 3>();
+  CheckWhollyOutsidePadding<float, 129, 33>();
+  CheckWhollyOutsidePadding<double, 129, 33>();
 }
 
 TEST_F(VLFeatPadding, InPlaceContinuityRetainsColumnOrder) {
-  for (const int simd : {0, 1}) {
+  // A one-vector shift preserves conventional dependencies while exposing
+  // the cross-column reorder if four-vector batching is wrongly admitted.
+  for (const auto [simd, dst_offset] :
+       {std::pair{0, 0}, std::pair{0, 4}, std::pair{1, 0}, std::pair{1, 4}}) {
     vl_set_simd_enabled(simd);
+    SCOPED_TRACE(testing::Message()
+                 << "simd=" << simd << " dst_offset=" << dst_offset);
     constexpr int width = 160, height = 33;
-    std::vector<float> actual(width * height);
+    std::vector<float> actual(width * height + 4);
     for (size_t i = 0; i < actual.size(); ++i) actual[i] = float(i % 19) / 8;
     auto expected = actual;
     const float filter[] = {0.125f, 0.25f, 0.125f};
-    ReferenceConvolve(expected.data(),
+    ReferenceConvolve(expected.data() + dst_offset,
                       width,
                       expected.data(),
                       width,
@@ -343,7 +357,7 @@ TEST_F(VLFeatPadding, InPlaceContinuityRetainsColumnOrder) {
                       1,
                       1,
                       VL_PAD_BY_CONTINUITY);
-    Convolve(actual.data(),
+    Convolve(actual.data() + dst_offset,
              width,
              actual.data(),
              width,
