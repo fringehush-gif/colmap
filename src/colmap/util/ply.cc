@@ -402,6 +402,24 @@ void WriteBinaryPlyPoints(const std::filesystem::path& path,
                           const std::vector<PlyPoint>& points,
                           const bool write_normal,
                           const bool write_rgb) {
+  // Pack complete wire records without emitting struct padding or invoking
+  // the stream for every scalar. The final chunk may be partially filled.
+  constexpr size_t kMaxRecordBytes = 6 * sizeof(float) + 3 * sizeof(uint8_t);
+  std::array<char, 1024 * kMaxRecordBytes> payload;
+  const size_t record_bytes = 3 * sizeof(float) +
+                              (write_normal ? 3 * sizeof(float) : 0) +
+                              (write_rgb ? 3 * sizeof(uint8_t) : 0);
+
+  // Coalesce multiple chunks; single-chunk output needs no extra buffer.
+  // Allocate before truncating the destination. The buffer must outlive the
+  // stream's final flush.
+  std::vector<char> file_buffer;
+  std::fstream binary_file;
+  if (points.size() > payload.size() / record_bytes) {
+    file_buffer.resize(256 * 1024);
+    binary_file.rdbuf()->pubsetbuf(file_buffer.data(), file_buffer.size());
+  }
+
   std::fstream text_file(path, std::ios::out);
   THROW_CHECK_FILE_OPEN(text_file, path);
   SetFullPrecTextStream(text_file);
@@ -430,22 +448,6 @@ void WriteBinaryPlyPoints(const std::filesystem::path& path,
   text_file.close();
   THROW_CHECK(text_file.good()) << "Failed to write PLY file: " << path;
 
-  // Pack complete wire records without emitting struct padding or invoking
-  // the stream for every scalar. The final chunk may be partially filled.
-  constexpr size_t kMaxRecordBytes = 6 * sizeof(float) + 3 * sizeof(uint8_t);
-  std::array<char, 1024 * kMaxRecordBytes> payload;
-  const size_t record_bytes = 3 * sizeof(float) +
-                              (write_normal ? 3 * sizeof(float) : 0) +
-                              (write_rgb ? 3 * sizeof(uint8_t) : 0);
-
-  // Coalesce multiple chunks; single-chunk output needs no extra buffer.
-  // The buffer must outlive the stream's final flush.
-  std::vector<char> file_buffer;
-  std::fstream binary_file;
-  if (points.size() > payload.size() / record_bytes) {
-    file_buffer.resize(256 * 1024);
-    binary_file.rdbuf()->pubsetbuf(file_buffer.data(), file_buffer.size());
-  }
   binary_file.open(path, std::ios::out | std::ios::binary | std::ios::app);
   THROW_CHECK_FILE_OPEN(binary_file, path);
 
