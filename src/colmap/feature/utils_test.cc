@@ -5,10 +5,10 @@
 #include "colmap/math/random_eigen.h"
 #include "colmap/sensor/bitmap.h"
 
-#include <gtest/gtest.h>
-
 #include <cmath>
 #include <cstring>
+
+#include <gtest/gtest.h>
 
 namespace colmap {
 namespace {
@@ -59,8 +59,7 @@ TEST(L2NormalizeFeatureDescriptors, FixedNonzeroRowsPreserveBits) {
   FeatureDescriptorsFloatData descriptors(4, 128);
   for (Eigen::Index r = 0; r < descriptors.rows(); ++r) {
     for (Eigen::Index c = 0; c < descriptors.cols(); ++c) {
-      descriptors(r, c) =
-          static_cast<float>((r + 1) * (c % 13 + 1)) / 16.0f;
+      descriptors(r, c) = static_cast<float>((r + 1) * (c % 13 + 1)) / 16.0f;
     }
   }
   FeatureDescriptorsFloatData expected = descriptors;
