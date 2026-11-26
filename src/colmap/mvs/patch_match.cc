@@ -5,6 +5,7 @@
 #include "colmap/math/math.h"
 #include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/patch_match_cuda.h"
+#include "colmap/mvs/patch_match_tasks.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/file.h"
@@ -151,30 +152,26 @@ void PatchMatchController::Run() {
   io_thread_pool_ = std::make_unique<ThreadPool>(
       GetEffectiveNumThreads(options_.num_threads));
 
-  // If geometric consistency is enabled, then photometric output must be
-  // computed first for all images without filtering.
+  const auto run_phase = [&](const PatchMatchOptions& phase_options) {
+    internal::RunPatchMatchPhase(*thread_pool_, [&]() {
+      for (size_t problem_idx = 0; problem_idx < problems_.size();
+           ++problem_idx) {
+        thread_pool_->AddTask(&PatchMatchController::ProcessProblem,
+                              this,
+                              phase_options,
+                              problem_idx);
+      }
+    });
+  };
+
+  // Geometric consistency needs completed, unfiltered photometric output.
   if (options_.geom_consistency) {
     auto photometric_options = options_;
     photometric_options.geom_consistency = false;
     photometric_options.filter = false;
-
-    for (size_t problem_idx = 0; problem_idx < problems_.size();
-         ++problem_idx) {
-      thread_pool_->AddTask(&PatchMatchController::ProcessProblem,
-                            this,
-                            photometric_options,
-                            problem_idx);
-    }
-
-    thread_pool_->Wait();
+    run_phase(photometric_options);
   }
-
-  for (size_t problem_idx = 0; problem_idx < problems_.size(); ++problem_idx) {
-    thread_pool_->AddTask(
-        &PatchMatchController::ProcessProblem, this, options_, problem_idx);
-  }
-
-  thread_pool_->Wait();
+  run_phase(options_);
 
   run_timer.PrintMinutes();
 }
@@ -472,23 +469,27 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
     }
 
     // Read images in parallel using the shared I/O thread pool.
-    std::vector<std::shared_future<void>> futures;
-    futures.reserve(valid_image_idxs.size());
-    for (const auto image_idx : valid_image_idxs) {
-      futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
-        images.at(image_idx).SetBitmap(workspace_->GetBitmap(image_idx));
-        if (options.geom_consistency) {
-          depth_maps.at(image_idx) = workspace_->GetDepthMap(image_idx);
-          // Only the reference normal map is used to initialize PatchMatch.
-          if (image_idx == problem.ref_image_idx) {
-            normal_maps.at(image_idx) = workspace_->GetNormalMap(image_idx);
+    // Keep the workspace lock and destinations alive until accepted reads
+    // finish.
+    internal::RunPatchMatchPhase(*io_thread_pool_, [&] {
+      std::vector<std::shared_future<void>> futures;
+      futures.reserve(valid_image_idxs.size());
+      for (const auto image_idx : valid_image_idxs) {
+        futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
+          images.at(image_idx).SetBitmap(workspace_->GetBitmap(image_idx));
+          if (options.geom_consistency) {
+            depth_maps.at(image_idx) = workspace_->GetDepthMap(image_idx);
+            // Only the reference normal map is used to initialize PatchMatch.
+            if (image_idx == problem.ref_image_idx) {
+              normal_maps.at(image_idx) = workspace_->GetNormalMap(image_idx);
+            }
           }
-        }
-      }));
-    }
-    for (auto& future : futures) {
-      future.get();
-    }
+        }));
+      }
+      for (auto& future : futures) {
+        future.get();
+      }
+    });
 
     problem.src_image_idxs = src_image_idxs;
   }
