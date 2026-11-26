@@ -7,8 +7,10 @@
 #include "colmap/scene/reconstruction_matchers.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/file.h"
+#include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
 
+#include <fstream>
 #include <map>
 #include <vector>
 
@@ -153,6 +155,121 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(AutomaticReconstructionController::Mapper::INCREMENTAL,
                       AutomaticReconstructionController::Mapper::HIERARCHICAL,
                       AutomaticReconstructionController::Mapper::GLOBAL));
+
+#if defined(COLMAP_MVS_ENABLED) && \
+    (defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED))
+TEST(AutomaticReconstruction, PoissonRetriesIncompleteOutput) {
+  const auto dir = CreateTestDir();
+  const auto dense = dir / "dense" / "0";
+  const auto fused = dense / "fused.ply";
+  const auto mesh = dense / "meshed-poisson.ply";
+  CreateDirIfNotExists(dense / "sparse", true);
+  CreateDirIfNotExists(dense / "stereo");
+  CreateDirIfNotExists(dir / "images");
+  Reconstruction().Write(dense / "sparse");
+  ASSERT_TRUE(std::ofstream(dense / "stereo" / "patch-match.cfg").is_open());
+  std::ofstream(dense / "fused.ply.vis") << "cached visibility";
+  WriteTextPlyPoints(fused,
+                     std::vector<PlyPoint>(1),
+                     /*write_normal=*/false,
+                     /*write_rgb=*/false);
+
+  AutomaticReconstructionController::Options options;
+  options.workspace_path = dir;
+  options.image_path = dir / "images";
+  options.extraction = false;
+  options.matching = false;
+  options.single_view_calibration = false;
+  options.sparse = false;
+  options.dense = true;
+  options.use_gpu = false;
+  options.num_threads = 1;
+  options.quality = AutomaticReconstructionController::Quality::LOW;
+  options.mesher = AutomaticReconstructionController::Mesher::POISSON;
+  // The empty scene submits no GPU jobs and explicit indices avoid enumeration.
+  options.gpu_index = "0,1";
+
+  const auto run = [&] {
+    auto manager = std::make_shared<ReconstructionManager>();
+    manager->Add();
+    AutomaticReconstructionController controller(options, manager);
+    controller.Setup();
+    controller.Start();
+    controller.Wait();
+  };
+  const auto expect_failure = [&](const char* message) {
+    try {
+      run();
+      ADD_FAILURE() << "Expected failure: " << message;
+    } catch (const std::exception& error) {
+      EXPECT_THAT(error.what(), testing::HasSubstr(message));
+    }
+  };
+
+  expect_failure("Poisson meshing failed");
+  EXPECT_FALSE(std::filesystem::exists(mesh));
+  // Simulate an empty output left behind by an older controller.
+  ASSERT_TRUE(std::ofstream(mesh).is_open());
+  expect_failure("Poisson meshing failed");
+  EXPECT_EQ(std::filesystem::file_size(mesh), 0);
+
+  std::vector<PlyPoint> points;
+  for (int axis = 0; axis < 3; ++axis) {
+    for (const float side : {-1.0f, 1.0f}) {
+      for (int u = -3; u < 4; u += 2) {
+        for (int v = -3; v < 4; v += 2) {
+          float pos[3] = {};
+          float normal[3] = {};
+          pos[axis] = normal[axis] = side;
+          pos[(axis + 1) % 3] = 0.25f * u;
+          pos[(axis + 2) % 3] = 0.25f * v;
+          PlyPoint point;
+          point.x = pos[0];
+          point.y = pos[1];
+          point.z = pos[2];
+          point.nx = normal[0];
+          point.ny = normal[1];
+          point.nz = normal[2];
+          points.push_back(point);
+        }
+      }
+    }
+  }
+  WriteBinaryPlyPoints(
+      fused, points, /*write_normal=*/true, /*write_rgb=*/true);
+  ASSERT_NO_THROW(run());
+  ASSERT_GT(std::filesystem::file_size(mesh), 0);
+  EXPECT_NO_THROW(ReadPly(mesh));
+  const auto expected_size = std::filesystem::file_size(mesh);
+  WriteTextPlyPoints(fused,
+                     std::vector<PlyPoint>(1),
+                     /*write_normal=*/false,
+                     /*write_rgb=*/false);
+  EXPECT_NO_THROW(run());
+  EXPECT_EQ(std::filesystem::file_size(mesh), expected_size);
+#ifndef _WIN32
+  // Creating a symlink can require elevated privileges on Windows.
+  const auto saved_mesh = dense / "preserved-mesh.ply";
+  std::filesystem::rename(mesh, saved_mesh);
+  std::filesystem::create_symlink(saved_mesh.filename(), mesh);
+  EXPECT_NO_THROW(run());
+  EXPECT_EQ(std::filesystem::read_symlink(mesh), saved_mesh.filename());
+  EXPECT_EQ(std::filesystem::file_size(saved_mesh), expected_size);
+
+  ASSERT_TRUE(std::filesystem::remove(saved_mesh));
+  expect_failure("Poisson mesh symlink needs a regular target");
+  EXPECT_EQ(std::filesystem::read_symlink(mesh), saved_mesh.filename());
+  EXPECT_FALSE(std::filesystem::exists(saved_mesh));
+#endif
+  ASSERT_TRUE(std::filesystem::remove(mesh));
+  ASSERT_TRUE(std::filesystem::create_directory(mesh));
+  expect_failure("Poisson mesh destination is not a regular file");
+  EXPECT_TRUE(std::filesystem::is_directory(mesh));
+  for (const auto& entry : std::filesystem::directory_iterator(dense)) {
+    EXPECT_NE(entry.path().filename().string().find(".colmap-poisson-"), 0);
+  }
+}
+#endif
 
 }  // namespace
 }  // namespace colmap

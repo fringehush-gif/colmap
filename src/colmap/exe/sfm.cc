@@ -20,6 +20,8 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/opengl_utils.h"
 
+#include <exception>
+
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
@@ -143,18 +145,23 @@ int RunAutomaticReconstructor(int argc, char** argv) {
   reconstruction_options.ba_backend =
       BundleAdjustmentBackendFromString(ba_backend);
 
-  auto reconstruction_manager = std::make_shared<ReconstructionManager>();
-
-  AutomaticReconstructionController controller(reconstruction_options,
-                                               reconstruction_manager);
-  if (controller.RequiresOpenGL()) {
-    QApplication app(argc, argv);
-    controller.Setup();
-    RunThreadWithOpenGLContext(&controller);
-  } else {
-    controller.Setup();
-    controller.Start();
-    controller.Wait();
+  int exit_code = EXIT_SUCCESS;
+  try {
+    auto reconstruction_manager = std::make_shared<ReconstructionManager>();
+    AutomaticReconstructionController controller(reconstruction_options,
+                                                 reconstruction_manager);
+    if (controller.RequiresOpenGL()) {
+      QApplication app(argc, argv);
+      controller.Setup();
+      RunThreadWithOpenGLContext(&controller);
+    } else {
+      controller.Setup();
+      controller.Start();
+      controller.Wait();
+    }
+  } catch (const std::exception& error) {
+    LOG(ERROR) << "Automatic reconstruction failed: " << error.what();
+    exit_code = EXIT_FAILURE;
   }
 
   if (signal_handler && signal_handler->ReceivedSignal() != 0) {
@@ -162,7 +169,7 @@ int RunAutomaticReconstructor(int argc, char** argv) {
               << signal_handler->ReceivedSignal();
     return signal_handler->GetExitCode();
   }
-  return EXIT_SUCCESS;
+  return exit_code;
 }
 
 int RunBundleAdjuster(int argc, char** argv) {

@@ -6,12 +6,75 @@
 #include "colmap/scene/reconstruction_matchers.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/file.h"
+#include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
+
+#include <cstdlib>
+#include <fstream>
 
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace {
+
+#if defined(COLMAP_MVS_ENABLED) && \
+    (defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED))
+TEST(AutomaticReconstructor, ReturnsFailureForInvalidPoissonInput) {
+  const auto dir = CreateTestDir();
+  const auto sparse = dir / "sparse" / "0";
+  const auto dense = dir / "dense" / "0";
+  const auto images = dir / "images";
+  CreateDirIfNotExists(sparse, true);
+  CreateDirIfNotExists(dense / "sparse", true);
+  CreateDirIfNotExists(dense / "stereo");
+  CreateDirIfNotExists(images);
+  Reconstruction().Write(sparse);
+  Reconstruction().Write(dense / "sparse");
+  ASSERT_TRUE(std::ofstream(dense / "stereo" / "patch-match.cfg").is_open());
+  ASSERT_TRUE(std::ofstream(dense / "fused.ply.vis").is_open());
+  WriteTextPlyPoints(dense / "fused.ply",
+                     std::vector<PlyPoint>(1),
+                     /*write_normal=*/false,
+                     /*write_rgb=*/false);
+
+  std::vector<std::string> args = {
+      "automatic_reconstructor",
+      "--workspace_path",
+      dir.string(),
+      "--image_path",
+      images.string(),
+      "--extraction",
+      "0",
+      "--matching",
+      "0",
+      "--single_view_calibration",
+      "0",
+      "--sparse",
+      "1",
+      "--dense",
+      "1",
+      "--quality",
+      "low",
+      "--use_gpu",
+      "0",
+      // The empty workspace has no GPU jobs or device enumeration.
+      "--gpu_index",
+      "0,1",
+      "--num_threads",
+      "1",
+  };
+  std::vector<char*> argv;
+  argv.reserve(args.size() + 1);
+  for (auto& arg : args) {
+    argv.push_back(arg.data());
+  }
+  argv.push_back(nullptr);
+  EXPECT_EQ(
+      RunAutomaticReconstructor(static_cast<int>(args.size()), argv.data()),
+      EXIT_FAILURE);
+  EXPECT_FALSE(ExistsFile(dense / "meshed-poisson.ply"));
+}
+#endif
 
 TEST(PointTriangulator, IncludesRegisteredImagesOutsideImageList) {
   const auto test_path = CreateTestDir();
