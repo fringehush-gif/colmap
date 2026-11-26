@@ -92,6 +92,25 @@ TEST(DelaunayMeshingFacetAngle, LargeFiniteSquaredNorms) {
   }
 }
 
+TEST(DelaunayMeshingFacetAngle, SmallFiniteSquaredNorms) {
+  constexpr double length = 0x1p-200;
+  FacetAngleDelaunay triangulation;
+  triangulation.insert(FacetAngleKernel::Point_3(0, 0, 0));
+  triangulation.insert(FacetAngleKernel::Point_3(length, 0, 0));
+  triangulation.insert(FacetAngleKernel::Point_3(0, length, 0));
+  const auto top_vertex =
+      triangulation.insert(FacetAngleKernel::Point_3(0, 0, length));
+  ASSERT_EQ(triangulation.dimension(), 3);
+  const FacetAngleDelaunay::Cell_handle cell =
+      triangulation.finite_cells_begin();
+  const FacetAngleDelaunay::Facet facet(cell, cell->index(top_vertex));
+
+  // The two squared norms are nonzero, but their product underflows to zero.
+  const double cosine = ComputeCosFacetCellAngle(triangulation, facet);
+  ASSERT_TRUE(std::isfinite(cosine));
+  EXPECT_NEAR(std::abs(cosine), 1.0 / std::sqrt(3.0), 1e-15);
+}
+
 TEST(SparseDelaunayMeshing, Integration) {
   const auto test_dir = CreateTestDir();
   const auto sparse_path = test_dir / "sparse";

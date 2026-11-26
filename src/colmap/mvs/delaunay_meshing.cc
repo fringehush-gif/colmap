@@ -11,6 +11,7 @@
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/logging.h"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <vector>
@@ -526,9 +527,10 @@ double ComputeCosFacetCellAngle(const Delaunay& triangulation,
     return 0.5;
   }
 
-  // Below this bound, the product of squared norms is at most 2^1022.
-  if (facet_normal_length_squared > 0x1p511 ||
-      co_tangent_length_squared > 0x1p511) {
+  // In this range, the product of the squared norms is normal and finite.
+  const auto [min_length_squared, max_length_squared] =
+      std::minmax(facet_normal_length_squared, co_tangent_length_squared);
+  if (min_length_squared < 0x1p-511 || max_length_squared > 0x1p511) {
     return (facet_normal * co_tangent) /
            (std::sqrt(facet_normal_length_squared) *
             std::sqrt(co_tangent_length_squared));
