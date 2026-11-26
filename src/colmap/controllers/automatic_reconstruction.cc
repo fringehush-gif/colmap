@@ -27,7 +27,59 @@
 #include "colmap/util/logging.h"
 #include "colmap/util/misc.h"
 
+#include <random>
+
 namespace colmap {
+namespace {
+
+#if defined(COLMAP_MVS_ENABLED)
+void PublishPoissonMesh(const mvs::PoissonMeshingOptions& options,
+                        const std::filesystem::path& input_path,
+                        const std::filesystem::path& mesh_path) {
+  namespace fs = std::filesystem;
+  std::random_device random;
+  fs::path staging_dir;
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    const auto candidate = mesh_path.parent_path() /
+                           (".colmap-poisson-" + std::to_string(random()) +
+                            "-" + std::to_string(random()));
+    if (fs::create_directory(candidate)) {
+      staging_dir = candidate;
+      break;
+    }
+  }
+  THROW_CHECK(!staging_dir.empty()) << "Could not stage mesh " << mesh_path;
+
+  const auto staged_mesh = staging_dir / mesh_path.filename();
+  const auto clean_staging = [&]() {
+    std::error_code ec;
+    fs::remove(staged_mesh, ec);
+    if (ec) {
+      LOG(WARNING) << "Could not remove " << staged_mesh << ": "
+                   << ec.message();
+    }
+    fs::remove(staging_dir, ec);
+    if (ec) {
+      LOG(WARNING) << "Could not remove " << staging_dir << ": "
+                   << ec.message();
+    }
+  };
+
+  try {
+    THROW_CHECK(mvs::PoissonMeshing(options, input_path, staged_mesh))
+        << "Poisson meshing failed for " << mesh_path;
+    THROW_CHECK_GT(fs::file_size(staged_mesh), 0u);
+    // Automatic reconstruction requires a single writer for its workspace.
+    fs::rename(staged_mesh, mesh_path);
+  } catch (...) {
+    clean_staging();
+    throw;
+  }
+  clean_staging();
+}
+#endif
+
+}  // namespace
 
 AutomaticReconstructionController::AutomaticReconstructionController(
     const Options& options,
@@ -449,7 +501,26 @@ void AutomaticReconstructionController::RunDenseMapper() {
       meshing_path = dense_path / "meshed-advancing-front.ply";
     }
 
-    if (ExistsFile(fused_path) && ExistsFile(meshing_path)) {
+    const auto mesh_is_complete = [&]() {
+      if (options_.mesher != Mesher::POISSON) {
+        return ExistsFile(meshing_path);
+      }
+      namespace fs = std::filesystem;
+      const auto status = fs::symlink_status(meshing_path);
+      if (fs::is_symlink(status)) {
+        THROW_CHECK(ExistsFile(meshing_path))
+            << "Poisson mesh symlink needs a regular target: " << meshing_path;
+        return true;
+      }
+      if (fs::is_regular_file(status)) {
+        // The old Poisson failure path could leave an empty regular file.
+        return fs::file_size(meshing_path) != 0;
+      }
+      THROW_CHECK(!fs::exists(status))
+          << "Poisson mesh destination is not a regular file: " << meshing_path;
+      return false;
+    };
+    if (ExistsFile(fused_path) && mesh_is_complete()) {
       LOG(INFO) << "Skipping dense reconstruction for model " << i
                 << " as it already exists.";
       continue;
@@ -528,9 +599,9 @@ void AutomaticReconstructionController::RunDenseMapper() {
 
     // Surface meshing.
 
-    if (!ExistsFile(meshing_path)) {
+    if (!mesh_is_complete()) {
       if (options_.mesher == Mesher::POISSON) {
-        mvs::PoissonMeshing(
+        PublishPoissonMesh(
             *option_manager_.poisson_meshing, fused_path, meshing_path);
       } else if (options_.mesher == Mesher::DELAUNAY) {
 #if defined(COLMAP_CGAL_ENABLED)
