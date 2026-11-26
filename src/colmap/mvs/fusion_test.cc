@@ -146,6 +146,16 @@ TEST(ReadPointsVisibility, RoundTrip) {
   }
 }
 
+TEST(ReadPointsVisibility, RejectsTruncatedReads) {
+  const auto vis_path = CreateTestDir() / "truncated.vis";
+  WritePointsVisibility(vis_path, {{0}});
+  for (const uintmax_t size : {15, 11, 7}) {
+    SCOPED_TRACE(size);
+    std::filesystem::resize_file(vis_path, size);
+    EXPECT_THROW(ReadPointsVisibility(vis_path, 1), std::ios_base::failure);
+  }
+}
+
 TEST(ReadPointsVisibility, SizeMismatch) {
   const auto test_dir = CreateTestDir();
   const auto vis_path = test_dir / "test.vis";
