@@ -271,6 +271,21 @@ TEST(Reconstruction, AddFrame) {
   ExpectValidPtrs(reconstruction);
 }
 
+TEST(Reconstruction, AddPosedFrameInvalidIdPreservesState) {
+  Reconstruction reconstruction;
+  GenerateReconstruction(1, &reconstruction);
+  const Reconstruction before = reconstruction;
+  Frame frame = reconstruction.Frame(1);
+  frame.SetFrameId(kInvalidFrameId);
+
+  EXPECT_THROW(reconstruction.AddFrame(frame), std::invalid_argument);
+  EXPECT_FALSE(reconstruction.ExistsFrame(kInvalidFrameId));
+  EXPECT_THAT(reconstruction, ReconstructionEq(before));
+  EXPECT_EQ(reconstruction.RegFrameIds(), before.RegFrameIds());
+  EXPECT_EQ(reconstruction.NumRegImages(), before.NumRegImages());
+  ExpectValidPtrs(reconstruction);
+}
+
 TEST(Reconstruction, AddImageWrongFrameCorrespondence) {
   Reconstruction reconstruction;
   Camera camera =
