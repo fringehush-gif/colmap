@@ -3,6 +3,7 @@
 #include "colmap/mvs/fusion.h"
 
 #include "colmap/math/math.h"
+#include "colmap/mvs/mat.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/file.h"
@@ -207,6 +208,91 @@ TEST(StereoFusion, OverlappingRowTasksTouchSameProjectedMaskPixel) {
   EXPECT_FALSE(fusion.GetFusedPoints().empty());
   EXPECT_EQ(fusion.GetFusedPoints().size(),
             fusion.GetFusedPointsVisibility().size());
+}
+
+TEST(StereoFusion, RowStripsPreserveMasksAndTail) {
+  constexpr int kWidth = 4;
+  constexpr int kHeight = 23;
+  const auto temp_dir = CreateTestDir();
+  for (const char* subdir : {"sparse",
+                             "images",
+                             "stereo/depth_maps",
+                             "stereo/normal_maps",
+                             "masks"}) {
+    CreateDirIfNotExists(temp_dir / subdir, true);
+  }
+
+  Reconstruction reconstruction;
+  colmap::Camera camera;
+  camera.camera_id = 1;
+  camera.model_id = CameraModelId::kPinhole;
+  camera.width = kWidth;
+  camera.height = kHeight;
+  camera.params = {1.0, 1.0, 0.5, 0.5};
+  reconstruction.AddCameraWithTrivialRig(camera);
+  colmap::Image image;
+  image.SetImageId(1);
+  image.SetName("image.png");
+  image.SetCameraId(1);
+  reconstruction.AddImageWithTrivialFrame(image, Rigid3d());
+  reconstruction.Write(temp_dir / "sparse");
+
+  Mat<float> depths(kWidth, kHeight, 1);
+  Mat<float> normals(kWidth, kHeight, 3);
+  Bitmap bitmap(kWidth, kHeight, true);
+  Bitmap mask(kWidth, kHeight, false);
+  std::vector<std::pair<int, int>> expected_pixels;
+  for (int row = 0; row < kHeight; ++row) {
+    for (int col = 0; col < kWidth; ++col) {
+      const bool masked = (row + 2 * col) % 7 == 0 || row == 10;
+      const bool valid_depth = (row + col) % 11 != 0;
+      depths.Set(row, col, valid_depth ? 1.0f : 0.0f);
+      // Reject one seed after collecting its samples. The next seed still
+      // needs to start with empty scratch buffers.
+      const bool valid_normal = row != 0 || col != 1;
+      normals.Set(row, col, 2, valid_normal ? 1.0f : 0.0f);
+      bitmap.SetPixel(col, row, BitmapColor<uint8_t>(col + 1, row + 1, 17));
+      mask.SetPixel(col, row, BitmapColor<uint8_t>(masked ? 0 : 255));
+      if (!masked && valid_depth && valid_normal) {
+        expected_pixels.emplace_back(row, col);
+      }
+    }
+  }
+  depths.Write(temp_dir / "stereo/depth_maps/image.png.geometric.bin");
+  normals.Write(temp_dir / "stereo/normal_maps/image.png.geometric.bin");
+  ASSERT_TRUE(bitmap.Write(temp_dir / "images/image.png"));
+  ASSERT_TRUE(mask.Write(temp_dir / "masks/image.png"));
+  std::ofstream(temp_dir / "stereo/fusion.cfg") << "image.png\n";
+  ASSERT_EQ(expected_pixels.size(), 68);
+  ASSERT_EQ(expected_pixels.back().first, kHeight - 1);
+
+  for (const bool use_cache : {false, true}) {
+    SCOPED_TRACE(use_cache);
+    StereoFusionOptions options;
+    options.num_threads = 1;
+    options.min_num_pixels = 1;
+    options.mask_path = temp_dir / "masks";
+    options.use_cache = use_cache;
+    StereoFusion fusion(options, temp_dir, "COLMAP", "", "geometric");
+    fusion.Run();
+    const auto& points = fusion.GetFusedPoints();
+    const auto& visibility = fusion.GetFusedPointsVisibility();
+    ASSERT_EQ(points.size(), expected_pixels.size());
+    ASSERT_EQ(visibility.size(), expected_pixels.size());
+    for (size_t i = 0; i < points.size(); ++i) {
+      const auto [row, col] = expected_pixels[i];
+      EXPECT_FLOAT_EQ(points[i].x, col);
+      EXPECT_FLOAT_EQ(points[i].y, row);
+      EXPECT_FLOAT_EQ(points[i].z, 1.0f);
+      EXPECT_FLOAT_EQ(points[i].nx, 0.0f);
+      EXPECT_FLOAT_EQ(points[i].ny, 0.0f);
+      EXPECT_FLOAT_EQ(points[i].nz, 1.0f);
+      EXPECT_EQ(points[i].r, col + 1);
+      EXPECT_EQ(points[i].g, row + 1);
+      EXPECT_EQ(points[i].b, 17);
+      EXPECT_EQ(visibility[i], std::vector<int>{0});
+    }
+  }
 }
 
 TEST(ReadPointsVisibility, RoundTrip) {
