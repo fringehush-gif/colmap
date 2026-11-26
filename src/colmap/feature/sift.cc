@@ -25,6 +25,7 @@
 #include "thirdparty/VLFeat/sift.h"
 
 #include <array>
+#include <cfloat>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -63,6 +64,16 @@ bool SiftMatchingOptions::Check() const {
 }
 
 namespace {
+
+// Caching rounds the epipolar lines to their stored precision. Keep the
+// per-pair expressions where x87 excess precision or FMA contraction may fold
+// the line computation into the residual.
+#if FLT_EVAL_METHOD == 0 && (defined(__x86_64__) || defined(_M_X64)) && \
+    !defined(__FMA__) && !defined(__FMA4__) && !defined(__AVX2__) &&    \
+    !defined(__FAST_MATH__) && !defined(_M_FP_FAST) &&                  \
+    !defined(_M_FP_CONTRACT) && !defined(_M_ARM64EC)
+#define COLMAP_CACHE_CPU_GUIDED_GEOMETRY
+#endif
 
 void WarnDarknessAdaptivityNotAvailable() {
   LOG(WARNING) << "Darkness adaptivity only available for GLSL SiftGPU.";
@@ -1016,6 +1027,25 @@ void FindBestMatchesGuided(
                        matches);
 }
 
+#if defined(COLMAP_CACHE_CPU_GUIDED_GEOMETRY)
+// Mirrors ComputeSquaredTangentSampsonError with the invariant matrix
+// products supplied by the caller. Keep the residual arithmetic in sync.
+inline double ComputeSquaredTangentSampsonErrorFromEpipolarLines(
+    const Eigen::Vector3d& cam_ray2,
+    const Eigen::Vector3d& Eray1,
+    const Eigen::Vector3d& Etray2,
+    const Eigen::Matrix3x2d& J1,
+    const Eigen::Matrix3x2d& J2) {
+  const double num = cam_ray2.dot(Eray1);
+  const double denom_sq_norm = SquaredPixelGradientNorm(J1, Etray2) +
+                               SquaredPixelGradientNorm(J2, Eray1);
+  if (denom_sq_norm == 0) {
+    return std::numeric_limits<double>::max();
+  }
+  return num * num / denom_sq_norm;
+}
+#endif
+
 // Unit bearing vectors and their pixel Jacobians for a set of keypoints,
 // together with a validity mask.
 //
@@ -1216,8 +1246,41 @@ class SiftCPUFeatureMatcher : public FeatureMatcher {
     const double max_residual_double = max_error * max_error;
     const float max_residual = static_cast<float>(max_residual_double);
 
+#if defined(COLMAP_CACHE_CPU_GUIDED_GEOMETRY)
+    if (image1.keypoints->empty() || image2.keypoints->empty()) {
+      return;
+    }
+#endif
+
     std::function<bool(Eigen::Index, Eigen::Index)> guided_filter;
     if (use_essential_matrix) {
+#if defined(COLMAP_CACHE_CPU_GUIDED_GEOMETRY)
+      std::vector<Eigen::Vector3d> Erays1(cam_rays1.rays.size());
+      std::vector<Eigen::Vector3d> Etrays2(cam_rays2.rays.size());
+      for (size_t i = 0; i < Erays1.size(); ++i) {
+        if (cam_rays1.valid[i]) {
+          Erays1[i] = E * cam_rays1.rays[i];
+        }
+      }
+      for (size_t i = 0; i < Etrays2.size(); ++i) {
+        if (cam_rays2.valid[i]) {
+          Etrays2[i] = E.transpose() * cam_rays2.rays[i];
+        }
+      }
+      guided_filter =
+          [&, Erays1 = std::move(Erays1), Etrays2 = std::move(Etrays2)](
+              const Eigen::Index i1, const Eigen::Index i2) {
+            if (!cam_rays1.valid[i1] || !cam_rays2.valid[i2]) {
+              return true;
+            }
+            return ComputeSquaredTangentSampsonErrorFromEpipolarLines(
+                       cam_rays2.rays[i2],
+                       Erays1[i1],
+                       Etrays2[i2],
+                       cam_rays1.jacobians[i1],
+                       cam_rays2.jacobians[i2]) > max_residual_double;
+          };
+#else
       guided_filter = [&](const Eigen::Index i1, const Eigen::Index i2) {
         if (!cam_rays1.valid[i1] || !cam_rays2.valid[i2]) {
           return true;
@@ -1228,7 +1291,36 @@ class SiftCPUFeatureMatcher : public FeatureMatcher {
                                                  cam_rays2.jacobians[i2],
                                                  E) > max_residual_double;
       };
+#endif
     } else if (use_fundamental_matrix) {
+#if defined(COLMAP_CACHE_CPU_GUIDED_GEOMETRY)
+      std::vector<Eigen::Vector3f> epipolar_lines1(image1.keypoints->size());
+      std::vector<Eigen::Vector3f> epipolar_lines2(image2.keypoints->size());
+      for (size_t i = 0; i < epipolar_lines1.size(); ++i) {
+        const auto& keypoint = (*image1.keypoints)[i];
+        epipolar_lines1[i] = F * Eigen::Vector3f(keypoint.x, keypoint.y, 1.0f);
+      }
+      for (size_t i = 0; i < epipolar_lines2.size(); ++i) {
+        const auto& keypoint = (*image2.keypoints)[i];
+        epipolar_lines2[i] =
+            F.transpose() * Eigen::Vector3f(keypoint.x, keypoint.y, 1.0f);
+      }
+      guided_filter = [&,
+                       epipolar_lines1 = std::move(epipolar_lines1),
+                       epipolar_lines2 = std::move(epipolar_lines2)](
+                          const Eigen::Index i1, const Eigen::Index i2) {
+        const auto& keypoint2 = (*image2.keypoints)[i2];
+        const Eigen::Vector3f p2(keypoint2.x, keypoint2.y, 1.0f);
+        const auto& epipolar_line1 = epipolar_lines1[i1];
+        const auto& epipolar_line2 = epipolar_lines2[i2];
+        const float nom = p2.transpose() * epipolar_line1;
+        const float denom_sq = epipolar_line1(0) * epipolar_line1(0) +
+                               epipolar_line1(1) * epipolar_line1(1) +
+                               epipolar_line2(0) * epipolar_line2(0) +
+                               epipolar_line2(1) * epipolar_line2(1);
+        return nom * nom > max_residual * denom_sq;
+      };
+#else
       guided_filter = [&](const Eigen::Index i1, const Eigen::Index i2) {
         const auto& keypoint1 = (*image1.keypoints)[i1];
         const auto& keypoint2 = (*image2.keypoints)[i2];
@@ -1243,7 +1335,24 @@ class SiftCPUFeatureMatcher : public FeatureMatcher {
                                epipolar_line2(1) * epipolar_line2(1);
         return nom * nom > max_residual * denom_sq;
       };
+#endif
     } else if (use_homography) {
+#if defined(COLMAP_CACHE_CPU_GUIDED_GEOMETRY)
+      std::vector<Eigen::Vector3f> homogeneous_points1(
+          image1.keypoints->size());
+      for (size_t i = 0; i < homogeneous_points1.size(); ++i) {
+        const auto& keypoint = (*image1.keypoints)[i];
+        homogeneous_points1[i] =
+            H * Eigen::Vector3f(keypoint.x, keypoint.y, 1.0f);
+      }
+      guided_filter = [&, homogeneous_points1 = std::move(homogeneous_points1)](
+                          const Eigen::Index i1, const Eigen::Index i2) {
+        const auto& keypoint2 = (*image2.keypoints)[i2];
+        const Eigen::Vector2f p2(keypoint2.x, keypoint2.y);
+        return (homogeneous_points1[i1].hnormalized() - p2).squaredNorm() >
+               max_residual;
+      };
+#else
       guided_filter = [&](const Eigen::Index i1, const Eigen::Index i2) {
         const auto& keypoint1 = (*image1.keypoints)[i1];
         const auto& keypoint2 = (*image2.keypoints)[i2];
@@ -1251,6 +1360,7 @@ class SiftCPUFeatureMatcher : public FeatureMatcher {
         const Eigen::Vector2f p2(keypoint2.x, keypoint2.y);
         return ((H * p1).hnormalized() - p2).squaredNorm() > max_residual;
       };
+#endif
     } else {
       return;
     }
