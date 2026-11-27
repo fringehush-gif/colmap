@@ -2,6 +2,8 @@
 
 #include "colmap/mvs/model.h"
 
+#include "colmap/geometry/triangulation.h"
+#include "colmap/math/math.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/testing.h"
 
@@ -136,6 +138,22 @@ TEST(Model, ComputeTriangulationAngles) {
   EXPECT_NEAR(angles[0].at(1), expected_angle, 1e-5f);
   // Angles should be symmetric.
   EXPECT_FLOAT_EQ(angles[0].at(1), angles[1].at(0));
+
+  // Repeated observations and both pair orientations retain every sample.
+  model.points = {{0.5f, 0, 10, {1, 0, 1}},
+                  {0.75f, 0.5f, 3, {0, 1}},
+                  {-0.25f, 0.25f, 2, {1, 0}}};
+  const auto angle = [&model](const size_t point_idx) {
+    const auto& point = model.points[point_idx];
+    return static_cast<float>(CalculateTriangulationAngle(
+        Eigen::Vector3d::Zero(),
+        Eigen::Vector3d::UnitX(),
+        Eigen::Vector3d(point.x, point.y, point.z)));
+  };
+  std::vector<float> samples = {angle(0), angle(0), angle(1), angle(2)};
+  const float p75 = Percentile(samples, 75);
+  EXPECT_EQ(model.ComputeTriangulationAngles(75),
+            (std::vector<std::map<int, float>>{{{1, p75}}, {{0, p75}}}));
 }
 
 TEST(Model, GetMaxOverlappingImages) {
