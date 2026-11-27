@@ -8,8 +8,11 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -198,6 +201,33 @@ TEST(Model, GetMaxOverlappingImages) {
   // Image 0 should have image 1 as top overlap.
   EXPECT_FALSE(overlapping[0].empty());
   EXPECT_EQ(overlapping[0][0], 1);
+}
+
+std::pair<float, float> SortedDepthRange(std::vector<float> depths) {
+  std::sort(depths.begin(), depths.end());
+  return {depths[static_cast<size_t>(depths.size() * 0.01f)] * 0.75f,
+          depths[static_cast<size_t>(depths.size() * 0.99f)] * 1.25f};
+}
+
+TEST(Model, ComputeDepthRangesRanksAndTies) {
+  const float K[9] = {100, 0, 50, 0, 100, 50, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const float T[3] = {0, 0, 0};
+  for (const int num_points : {1, 101}) {
+    Model model;
+    model.images.emplace_back("img.jpg", 100, 100, K, R, T);
+    std::vector<float> depths;
+    for (int i = 0; i < num_points; ++i) {
+      // Permute 0..100, then group adjacent values into tied depths.
+      const int bucket = ((i * 37) % 101) / 2;
+      const float depth = static_cast<float>(1 + bucket);
+      depths.push_back(depth);
+      model.points.push_back(Model::Point{0, 0, depth, {0}});
+    }
+    const auto ranges = model.ComputeDepthRanges();
+    ASSERT_EQ(ranges.size(), 1);
+    EXPECT_EQ(ranges[0], SortedDepthRange(depths));
+  }
 }
 
 }  // namespace
