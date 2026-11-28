@@ -546,6 +546,27 @@ TEST(Ply, ReadPlyMeshWithoutTexcoords) {
   EXPECT_TRUE(loaded.texture_file.empty());
 }
 
+TEST(Ply, ReadTextPlyMeshRequiresEachDeclaredFace) {
+  const auto test_file = CreateTestDir() / "mesh.ply";
+  const auto write_mesh = [&test_file](const int num_faces) {
+    std::ofstream file(test_file, std::ios::binary);
+    file << "ply\n"
+         << "format ascii 1.0\n"
+         << "element vertex 3\n"
+         << "property float x\n"
+         << "property float y\n"
+         << "property float z\n"
+         << "element face " << num_faces << "\n"
+         << "property list uchar int vertex_index\n"
+         << "end_header\n"
+         << "0 0 0\n1 0 0\n0 1 0\n3 0 1 2";
+  };
+  write_mesh(1);
+  EXPECT_EQ(ReadPlyMesh(test_file).mesh.faces.size(), 1);
+  write_mesh(2);
+  EXPECT_THROW(ReadPlyMesh(test_file), std::invalid_argument);
+}
+
 TEST(Ply, ReadTextPlyMeshWithVertexColors) {
   const auto test_file =
       WriteTextPlyMesh("mesh_colors.ply",

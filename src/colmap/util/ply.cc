@@ -768,7 +768,7 @@ PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
 
     // Read ASCII face data
     for (size_t i = 0; i < num_faces; ++i) {
-      std::getline(file, line);
+      THROW_CHECK(std::getline(file, line)) << "Missing ASCII face " << i;
       StringTrim(&line);
       std::stringstream line_stream(line);
       SetFullPrecTextStream(line_stream);
