@@ -829,7 +829,7 @@ TEST(Ply, ReadBinaryPlyMeshWithMixedColorTypes) {
 
 TEST(Ply, ReadBinaryPlyMeshUshortFaceIndices) {
   // Index 32768 does not fit into a signed 16-bit integer.
-  constexpr size_t kNumVertices = 40001;
+  static constexpr size_t kNumVertices = 40001;
   const std::vector<std::array<uint16_t, 3>> faces = {{0, 32768, 40000}};
   const auto path = WriteBinaryPlyMesh(
       "mesh_ushort_indices.ply",
