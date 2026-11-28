@@ -476,6 +476,58 @@ TEST(DatabaseCache, CreateFromCacheSkipsUndefinedGeometries) {
             0);
 }
 
+TEST(DatabaseCache, CreateFromCachePreservesOrderedMatches) {
+  const auto database = CreateTestDatabase();
+  const auto image_id1 = database->ReadImageWithName("image1")->ImageId();
+  const auto image_id3 = database->ReadImageWithName("image3")->ImageId();
+  const auto image_id4 = database->ReadImageWithName("image4")->ImageId();
+
+  TwoViewGeometry geometry;
+  geometry.config = TwoViewGeometry::CALIBRATED;
+  geometry.inlier_matches = {{4, 1}, {0, 2}, {0, 1}, {4, 0}};
+  database->WriteTwoViewGeometry(image_id1, image_id3, geometry);
+  database->WriteTwoViewGeometry(image_id1, image_id4, geometry);
+
+  const auto source = DatabaseCache::Create(*database, {});
+  auto& image = source->Image(image_id1);
+  const point2D_t new_point2D_idx = image.NumPoints2D();
+  image.SetPoints2D(std::vector<Eigen::Vector2d>(new_point2D_idx + 1,
+                                                 Eigen::Vector2d::Zero()));
+
+  const auto filtered = DatabaseCache::CreateFromCache(*source, {});
+  const auto& source_graph = *source->CorrespondenceGraph();
+  const auto& filtered_graph = *filtered->CorrespondenceGraph();
+  EXPECT_EQ(filtered->Image(image_id1).NumPoints2D(), new_point2D_idx + 1);
+  EXPECT_FALSE(filtered_graph.HasCorrespondences(image_id1, new_point2D_idx));
+
+  // Rebuild pair by pair to preserve the pairing order and both directions
+  // of each pair's ordered one-to-many matches.
+  CorrespondenceGraph expected_graph;
+  for (const auto& [image_id, image] : filtered->Images()) {
+    expected_graph.AddImage(image_id, image.NumPoints2D());
+  }
+  for (const auto pair_id : source_graph.ImagePairs()) {
+    const auto [first, second] = PairIdToImagePair(pair_id);
+    expected_graph.AddTwoViewGeometry(
+        first,
+        second,
+        source_graph.ExtractTwoViewGeometry(first, second, true));
+  }
+  expected_graph.Finalize();
+  EXPECT_EQ(filtered_graph.ImagePairs(), expected_graph.ImagePairs());
+  for (const auto& [image_id, image] : filtered->Images()) {
+    for (point2D_t idx = 0; idx < image.NumPoints2D(); ++idx) {
+      const auto expected = expected_graph.FindCorrespondences(image_id, idx);
+      const auto actual = filtered_graph.FindCorrespondences(image_id, idx);
+      ASSERT_EQ(actual.end - actual.beg, expected.end - expected.beg);
+      for (auto a = actual.beg, e = expected.beg; a < actual.end; ++a, ++e) {
+        EXPECT_EQ(a->image_id, e->image_id);
+        EXPECT_EQ(a->point2D_idx, e->point2D_idx);
+      }
+    }
+  }
+}
+
 TEST(DatabaseCache, CreateFromCacheWithRigImageNames) {
   auto database = CreateTestDatabase();
   const auto source = DatabaseCache::Create(*database, {});

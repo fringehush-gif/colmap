@@ -18,6 +18,11 @@ CorrespondenceGraph::NumMatchesBetweenAllImages() const {
   return num_matches_between_images;
 }
 
+size_t CorrespondenceGraph::NumPoints2DForImage(const image_t image_id) const {
+  const Image& image = images_.at(image_id);
+  return finalized_ ? image.flat_corr_begs.size() - 1 : image.corrs.size();
+}
+
 std::vector<image_pair_t> CorrespondenceGraph::ImagePairs() const {
   std::vector<image_pair_t> image_pairs;
   image_pairs.reserve(image_pairs_.size());
