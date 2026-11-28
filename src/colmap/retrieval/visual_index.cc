@@ -3,6 +3,7 @@
 #include "colmap/retrieval/visual_index.h"
 
 #include "colmap/retrieval/inverted_index.h"
+#include "colmap/retrieval/utils.h"
 #include "colmap/retrieval/vote_and_verify.h"
 #include "colmap/util/eigen_alignment.h"
 #include "colmap/util/file.h"
@@ -193,8 +194,8 @@ class FaissVisualIndex : public VisualIndex {
     }
 
     // Find matches for top-ranked images
-    using OrderedMatchListType = std::vector<
-        std::pair<float, std::pair<const EntryType*, const EntryType*>>>;
+    using OrderedMatchListType =
+        std::vector<internal::ScoredFeatureMatch<EntryType>>;
 
     // Reference our matches (with their lowest distance) for both
     // {query feature => db feature} and vice versa.
@@ -299,24 +300,18 @@ class FaissVisualIndex : public VisualIndex {
       NodeHashMap<int, typename FibonacciHeapType::handle_type> db_heap_handles;
 
       for (auto& match_data : query_matches) {
-        std::sort(
-            match_data.second.begin(),
-            match_data.second.end(),
-            std::greater<
-                std::pair<float,
-                          std::pair<const EntryType*, const EntryType*>>>());
+        std::sort(match_data.second.begin(),
+                  match_data.second.end(),
+                  internal::ScoredFeatureMatchGreater<EntryType>);
 
         query_heap_handles[match_data.first] = query_heap.push(std::make_pair(
             -static_cast<int>(match_data.second.size()), match_data.first));
       }
 
       for (auto& match_data : db_matches) {
-        std::sort(
-            match_data.second.begin(),
-            match_data.second.end(),
-            std::greater<
-                std::pair<float,
-                          std::pair<const EntryType*, const EntryType*>>>());
+        std::sort(match_data.second.begin(),
+                  match_data.second.end(),
+                  internal::ScoredFeatureMatchGreater<EntryType>);
 
         db_heap_handles[match_data.first] = db_heap.push(std::make_pair(
             -static_cast<int>(match_data.second.size()), match_data.first));

@@ -2,6 +2,10 @@
 
 #include "colmap/retrieval/utils.h"
 
+#include "colmap/retrieval/inverted_file_entry.h"
+
+#include <algorithm>
+#include <array>
 #include <cmath>
 
 #include <gtest/gtest.h>
@@ -9,6 +13,25 @@
 namespace colmap {
 namespace retrieval {
 namespace {
+
+TEST(ScoredFeatureMatchGreater, BreaksTiesByFeatureIndex) {
+  using Entry = InvertedFileEntry<16>;
+  using Match = internal::ScoredFeatureMatch<Entry>;
+  // The higher feature index has the lower address in this array.
+  std::array<Entry, 2> features;
+  features[0].feature_idx = 1;
+  features[1].feature_idx = 0;
+
+  const Match stronger{2.0f, {&features[1], &features[1]}};
+  const Match higher_query{1.0f, {&features[0], &features[1]}};
+  const Match higher_db{1.0f, {&features[1], &features[0]}};
+  const Match lower{1.0f, {&features[1], &features[1]}};
+  std::array matches{lower, higher_db, higher_query, stronger};
+  std::sort(matches.begin(),
+            matches.end(),
+            internal::ScoredFeatureMatchGreater<Entry>);
+  EXPECT_EQ(matches, (std::array{stronger, higher_query, higher_db, lower}));
+}
 
 TEST(HammingDistWeightFunctor, ZeroDistance) {
   HammingDistWeightFunctor<64> functor;

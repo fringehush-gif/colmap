@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cmath>
+#include <utility>
 
 namespace colmap {
 namespace retrieval {
@@ -12,6 +13,25 @@ struct ImageScore {
   int image_id = -1;
   float score = 0.0f;
 };
+
+namespace internal {
+
+template <typename Entry>
+using ScoredFeatureMatch =
+    std::pair<float, std::pair<const Entry*, const Entry*>>;
+
+// Use feature indices to order equal scores consistently.
+template <typename Entry>
+bool ScoredFeatureMatchGreater(const ScoredFeatureMatch<Entry>& a,
+                               const ScoredFeatureMatch<Entry>& b) {
+  if (a.first != b.first) {
+    return a.first > b.first;
+  }
+  return std::pair(a.second.first->feature_idx, a.second.second->feature_idx) >
+         std::pair(b.second.first->feature_idx, b.second.second->feature_idx);
+}
+
+}  // namespace internal
 
 // Implements the weighting function used to derive a voting weight from the
 // Hamming distance of two binary signatures. See Eqn. 4 in
