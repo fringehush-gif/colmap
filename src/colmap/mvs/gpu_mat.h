@@ -106,9 +106,6 @@ class GpuMat {
 
   void FillWithScalar(const T value);
   void FillWithVector(const T* values);
-  void FillWithRandomNumbers(const T min_value,
-                             const T max_value,
-                             const GpuMat<curandState>& random_state);
 
   void CopyToDevice(const T* data, const size_t pitch);
   void CopyToHost(T* data, const size_t pitch) const;
@@ -344,25 +341,6 @@ __global__ void FillWithVectorKernel(const T* values, GpuMatView<T> output) {
   }
 }
 
-template <typename T>
-__global__ void FillWithRandomNumbersKernel(
-    GpuMatView<T> output,
-    GpuMatView<curandState> random_state,
-    const T min_value,
-    const T max_value) {
-  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
-  if (row < output.GetHeight() && col < output.GetWidth()) {
-    curandState local_state = random_state.Get(row, col);
-    for (size_t slice = 0; slice < output.GetDepth(); ++slice) {
-      const T random_value =
-          curand_uniform(&local_state) * (max_value - min_value) + min_value;
-      output.Set(row, col, slice, random_value);
-    }
-    random_state.Set(row, col, local_state);
-  }
-}
-
 }  // namespace internal
 
 template <typename T>
@@ -381,15 +359,6 @@ void GpuMat<T>::FillWithVector(const T* values) {
       <<<gridSize_, blockSize_>>>(values_device, View());
   CUDA_SYNC_AND_CHECK();
   CUDA_SAFE_CALL(cudaFree(values_device));
-}
-
-template <typename T>
-void GpuMat<T>::FillWithRandomNumbers(const T min_value,
-                                      const T max_value,
-                                      const GpuMat<curandState>& random_state) {
-  internal::FillWithRandomNumbersKernel<T><<<gridSize_, blockSize_>>>(
-      View(), random_state.View(), min_value, max_value);
-  CUDA_SYNC_AND_CHECK();
 }
 
 template <typename T>

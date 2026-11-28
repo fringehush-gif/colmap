@@ -6,12 +6,24 @@
 
 #include "colmap/math/math.h"
 #include "colmap/mvs/gpu_mat.h"
-#include "colmap/mvs/gpu_mat_prng.h"
 
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace mvs {
+namespace {
+
+template <typename T>
+void FillWithTestPattern(GpuMat<T>* array) {
+  std::vector<T> values(array->GetWidth() * array->GetHeight() *
+                        array->GetDepth());
+  for (size_t i = 0; i < values.size(); ++i) {
+    values[i] = static_cast<T>((37 * i + 11) % 101);
+  }
+  array->CopyToDevice(values.data(), array->GetWidth() * sizeof(T));
+}
+
+}  // namespace
 
 TEST(GpuMat, FillWithVector) {
   GpuMat<float> array(100, 100, 2);
@@ -35,8 +47,7 @@ void TestTransposeImage(const size_t width,
                         const size_t depth) {
   GpuMat<T> array(width, height, depth);
 
-  GpuMatPRNG prng_array(width, height);
-  array.FillWithRandomNumbers(T(0.0), T(100.0), prng_array);
+  FillWithTestPattern(&array);
 
   GpuMat<T> array_transposed(height, width, depth);
   array.Transpose(&array_transposed);
@@ -80,8 +91,7 @@ void TestFlipHorizontalImage(const size_t width,
                              const size_t depth) {
   GpuMat<T> array(width, height, depth);
 
-  GpuMatPRNG prng_array(width, height);
-  array.FillWithRandomNumbers(T(0.0), T(100.0), prng_array);
+  FillWithTestPattern(&array);
 
   GpuMat<T> array_flipped(width, height, depth);
   array.FlipHorizontal(&array_flipped);
@@ -126,8 +136,7 @@ void TestRotateImage(const size_t width,
                      const size_t depth) {
   GpuMat<T> array(width, height, depth);
 
-  GpuMatPRNG prng_array(width, height);
-  array.FillWithRandomNumbers(T(0.0), T(100.0), prng_array);
+  FillWithTestPattern(&array);
 
   GpuMat<T> array_rotated(height, width, depth);
   array.Rotate(&array_rotated);
