@@ -455,6 +455,8 @@ struct PhotoConsistencyCostComputer {
   const float* normal = nullptr;
 
   __device__ inline void Read(const int row) {
+    // Finish all readers before reusing the shared tile for the next row.
+    __syncthreads();
     local_ref_image.Read(row);
     __syncthreads();
   }
