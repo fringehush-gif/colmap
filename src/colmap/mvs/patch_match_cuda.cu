@@ -9,6 +9,7 @@
 
 #define _USE_MATH_DEFINES
 
+#include "colmap/mvs/packed_consistency_mask.h"
 #include "colmap/mvs/patch_match_cuda.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/cudacc.h"
@@ -914,7 +915,7 @@ __global__ void SweepFromTopToBottom(
     GpuMatView<float> cost_map,
     GpuMatView<float> depth_map,
     GpuMatView<float> normal_map,
-    GpuMatView<uint8_t> consistency_mask,
+    PackedConsistencyMaskView consistency_mask,
     GpuMatView<float> sel_prob_map,
     const GpuMatView<float> prev_sel_prob_map,
     const cudaTextureObject_t ref_image_texture,
@@ -1338,29 +1339,8 @@ Mat<float> PatchMatchCuda::GetSelProbMap() const {
 }
 
 std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
-  const Mat<uint8_t> mask = consistency_mask_->CopyToMat();
-  std::vector<int> consistent_image_idxs;
-  std::vector<int> pixel_consistent_image_idxs;
-  pixel_consistent_image_idxs.reserve(mask.GetDepth());
-  for (size_t r = 0; r < mask.GetHeight(); ++r) {
-    for (size_t c = 0; c < mask.GetWidth(); ++c) {
-      pixel_consistent_image_idxs.clear();
-      for (size_t d = 0; d < mask.GetDepth(); ++d) {
-        if (mask.Get(r, c, d)) {
-          pixel_consistent_image_idxs.push_back(problem_.src_image_idxs[d]);
-        }
-      }
-      if (pixel_consistent_image_idxs.size() > 0) {
-        consistent_image_idxs.push_back(c);
-        consistent_image_idxs.push_back(r);
-        consistent_image_idxs.push_back(pixel_consistent_image_idxs.size());
-        consistent_image_idxs.insert(consistent_image_idxs.end(),
-                                     pixel_consistent_image_idxs.begin(),
-                                     pixel_consistent_image_idxs.end());
-      }
-    }
-  }
-  return consistent_image_idxs;
+  return DecodePackedConsistencyMask(consistency_mask_->CopyToMat(),
+                                     problem_.src_image_idxs);
 }
 
 template <int kWindowSize, int kWindowStep>
@@ -1425,37 +1405,37 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
       const bool last_sweep = iter == options_.num_iterations - 1 && sweep == 3;
 
-#define CALL_SWEEP_FUNC                                   \
-  SweepFromTopToBottom<kWindowSize,                       \
-                       kWindowStep,                       \
-                       kGeomConsistencyTerm,              \
-                       kFilterPhotoConsistency,           \
-                       kFilterGeomConsistency>            \
-      <<<sweep_grid_size_, sweep_block_size_>>>(          \
-          global_workspace_->View(),                      \
-          rand_state_map_->View(),                        \
-          cost_map_->View(),                              \
-          depth_map_->View(),                             \
-          normal_map_->View(),                            \
-          consistency_mask_->View(),                      \
-          sel_prob_map_->View(),                          \
-          prev_sel_prob_map_->View(),                     \
-          ref_image_texture_->GetObj(),                   \
-          ref_image_->sum_image->View(),                  \
-          ref_image_->squared_sum_image->View(),          \
-          src_images_texture_->GetObj(),                  \
-          src_depth_maps_texture_ == nullptr              \
-              ? 0                                         \
-              : src_depth_maps_texture_->GetObj(),        \
-          poses_texture_[rotation_in_half_pi_]->GetObj(), \
+#define CALL_SWEEP_FUNC                                         \
+  SweepFromTopToBottom<kWindowSize,                             \
+                       kWindowStep,                             \
+                       kGeomConsistencyTerm,                    \
+                       kFilterPhotoConsistency,                 \
+                       kFilterGeomConsistency>                  \
+      <<<sweep_grid_size_, sweep_block_size_>>>(                \
+          global_workspace_->View(),                            \
+          rand_state_map_->View(),                              \
+          cost_map_->View(),                                    \
+          depth_map_->View(),                                   \
+          normal_map_->View(),                                  \
+          PackedConsistencyMaskView{consistency_mask_->View()}, \
+          sel_prob_map_->View(),                                \
+          prev_sel_prob_map_->View(),                           \
+          ref_image_texture_->GetObj(),                         \
+          ref_image_->sum_image->View(),                        \
+          ref_image_->squared_sum_image->View(),                \
+          src_images_texture_->GetObj(),                        \
+          src_depth_maps_texture_ == nullptr                    \
+              ? 0                                               \
+              : src_depth_maps_texture_->GetObj(),              \
+          poses_texture_[rotation_in_half_pi_]->GetObj(),       \
           sweep_options);
 
       if (last_sweep) {
         if (options_.filter) {
-          consistency_mask_ =
-              std::make_unique<GpuMat<uint8_t>>(cost_map_->GetWidth(),
-                                                cost_map_->GetHeight(),
-                                                cost_map_->GetDepth());
+          consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(
+              cost_map_->GetWidth(),
+              cost_map_->GetHeight(),
+              PackedConsistencyMaskDepth(problem_.src_image_idxs.size()));
           consistency_mask_->FillWithScalar(0);
         }
         if (options_.geom_consistency) {
@@ -1504,7 +1484,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
         std::unique_ptr<GpuMat<uint8_t>> rot_consistency_mask_(
             new GpuMat<uint8_t>(cost_map_->GetWidth(),
                                 cost_map_->GetHeight(),
-                                cost_map_->GetDepth()));
+                                consistency_mask_->GetDepth()));
         consistency_mask_->Rotate(rot_consistency_mask_.get());
         consistency_mask_.swap(rot_consistency_mask_);
       }
