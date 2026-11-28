@@ -1699,23 +1699,26 @@ TEST(MaybeDecomposeRelativePoses, Nominal) {
 
   // Verify the two-view geometry exists but has no decomposed pose yet.
   const auto corr_graph = cache->CorrespondenceGraph();
-  TwoViewGeometry geometry_before = corr_graph->ExtractTwoViewGeometry(
-      1, 2, /*extract_inlier_matches=*/false);
-  EXPECT_FALSE(geometry_before.cam2_from_cam1.has_value());
+  TwoViewGeometry geometry_before =
+      corr_graph->ExtractTwoViewGeometry(1, 2, /*extract_inlier_matches=*/true);
+  ASSERT_FALSE(geometry_before.cam2_from_cam1.has_value());
+  ASSERT_FALSE(geometry_before.inlier_matches.empty());
 
   // Decompose poses - should update cache without throwing.
   MaybeDecomposeRelativePoses(cache.get());
 
   // Verify the geometry was updated with a decomposed pose.
-  TwoViewGeometry geometry_after = corr_graph->ExtractTwoViewGeometry(
-      1, 2, /*extract_inlier_matches=*/false);
-  EXPECT_TRUE(geometry_after.cam2_from_cam1.has_value());
+  TwoViewGeometry geometry_after =
+      corr_graph->ExtractTwoViewGeometry(1, 2, /*extract_inlier_matches=*/true);
+  ASSERT_TRUE(geometry_after.cam2_from_cam1.has_value());
+  EXPECT_EQ(geometry_after.inlier_matches, geometry_before.inlier_matches);
 
   // Calling again should skip already decomposed geometries.
   MaybeDecomposeRelativePoses(cache.get());
 
   TwoViewGeometry geometry_second = corr_graph->ExtractTwoViewGeometry(
       1, 2, /*extract_inlier_matches=*/false);
+  ASSERT_TRUE(geometry_second.cam2_from_cam1.has_value());
   EXPECT_EQ(geometry_after.cam2_from_cam1->rotation().coeffs(),
             geometry_second.cam2_from_cam1->rotation().coeffs());
   EXPECT_EQ(geometry_after.cam2_from_cam1->translation(),
