@@ -5,7 +5,6 @@
 #include "colmap/mvs/cuda_texture.h"
 #include "colmap/mvs/depth_map.h"
 #include "colmap/mvs/gpu_mat.h"
-#include "colmap/mvs/gpu_mat_prng.h"
 #include "colmap/mvs/gpu_mat_ref_image.h"
 #include "colmap/mvs/image.h"
 #include "colmap/mvs/normal_map.h"
@@ -98,7 +97,7 @@ class PatchMatchCuda {
   std::unique_ptr<GpuMat<float>> sel_prob_map_;
   std::unique_ptr<GpuMat<float>> prev_sel_prob_map_;
   std::unique_ptr<GpuMat<float>> cost_map_;
-  std::unique_ptr<GpuMatPRNG> rand_state_map_;
+  std::unique_ptr<GpuMat<curandState>> rand_state_map_;
   std::unique_ptr<GpuMat<uint8_t>> consistency_mask_;
 
   // Shared memory is too small to hold local state for each thread,

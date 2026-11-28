@@ -102,14 +102,20 @@ COLMAP_ADD_TEST(
     LINK_LIBS colmap_mvs
 )
 
+COLMAP_ADD_TEST(
+    NAME patch_match_rng_perimeter_test
+    SRCS patch_match_rng_perimeter_test.cc
+    LINK_LIBS colmap_util
+)
+
 if(CUDA_ENABLED)
     COLMAP_ADD_LIBRARY(
         NAME colmap_mvs_cuda
         SRCS
-            gpu_mat_prng.h gpu_mat_prng.cu
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu
+            patch_match_rng_perimeter.h
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
@@ -257,7 +263,7 @@ endif()
 # ROCm HIP support for MVS (patch_match_stereo on AMD GPUs).
 #
 # enable_language(HIP) and find_package(hip/hiprand/rocrand) are handled
-# centrally in cmake/FindDependencies.cmake. Here we just mark the three
+# centrally in cmake/FindDependencies.cmake. Here we just mark the two
 # .cu translation units as LANGUAGE HIP so CMake hands them to the HIP
 # toolchain (clang++ -x hip) instead of the CUDA one. The source itself
 # is unmodified; symbol remapping happens in src/colmap/util/cuda_to_hip.h.
@@ -265,10 +271,10 @@ if(HIP_ENABLED)
     COLMAP_ADD_LIBRARY(
         NAME colmap_mvs_cuda
         SRCS
-            gpu_mat_prng.h gpu_mat_prng.cu
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu
+            patch_match_rng_perimeter.h
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
@@ -277,7 +283,6 @@ if(HIP_ENABLED)
             roc::rocrand
     )
     set_source_files_properties(
-        gpu_mat_prng.cu
         gpu_mat_ref_image.cu
         patch_match_cuda.cu
         PROPERTIES LANGUAGE HIP
